@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>12</LangVersion>
+    <RootNamespace>SalesforceSync</RootNamespace>
+    <UserSecretsId>5f0b6f7e-3c1e-4a51-9a0e-7d2f6f1c9b31</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aspire.Confluent.Kafka" Version="9.5.0" />
+    <PackageReference Include="Aspire.Npgsql" Version="9.5.0" />
+    <PackageReference Include="Dapper" Version="2.1.35" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SalesforceSync.FakeSalesforce\SalesforceSync.FakeSalesforce.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Single source of truth for the inbox schema; applied at startup by InboxSchemaInitializer -->
+    <EmbeddedResource Include="..\..\sql\schema.sql" LogicalName="SalesforceSync.schema.sql" Link="Inbox\schema.sql" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SalesforceSync.Benchmarks" />
+  </ItemGroup>
+
+</Project>

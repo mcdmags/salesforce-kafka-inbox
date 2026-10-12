@@ -1,0 +1,56 @@
+using Aspire.Hosting;
+using Aspire.Hosting.ApplicationModel;
+using Dapper;
+
+namespace SalesforceSync.IntegrationTests;
+
+/// <summary>
+/// The same app, scaled out like a Kubernetes deployment: several worker processes ("pods"), each running
+/// several worker loops, all sharing one Postgres inbox and one Salesforce org.
+/// <para>
+/// The mock org's Sync_Version__c validation rule is turned OFF, so the version fence cannot hide a race:
+/// any out-of-order write lands and is counted as a version regression. The rate limiter is opened up and
+/// batches are kept small so workers contend for the same accounts as much as possible.
+/// </para>
+/// </summary>
+public sealed class MultiPodFixture : AppHostFixture
+{
+    public const int Pods = 3;
+    public const int WorkersPerPod = 8;
+
+    protected override void Configure(IDistributedApplicationTestingBuilder builder)
+    {
+        Project(builder, "salesforce-sync")
+            .WithReplicas(Pods)
+            .WithEnvironment("Sync__Workers", WorkersPerPod.ToString())
+            .WithEnvironment("Sync__MaxConcurrentRequests", (Pods * WorkersPerPod).ToString())
+            .WithEnvironment("Sync__BatchSize", "10")
+            .WithEnvironment("Sync__IdleDelay", "00:00:00.050");
+
+        Project(builder, "fake-salesforce")
+            .WithEnvironment("FakeSalesforce__EnforceVersionRule", "false")
+            .WithEnvironment("FakeSalesforce__Latency", "00:00:00.010");
+    }
+
+    protected override async Task OnStartedAsync()
+    {
+        await using var conn = await Db.OpenConnectionAsync();
+        await conn.ExecuteAsync(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "claim-audit.sql")));
+        // Measure ordering, not the throttle
+        await conn.ExecuteAsync("""
+            update sf_rate_limit
+            set tokens = 1e9, capacity = 1e9, base_refill_per_sec = 1e9, refill_per_sec = 1e9,
+                paused_until = null, updated_at = clock_timestamp()
+            where name = 'salesforce'
+            """);
+    }
+
+    private static IResourceBuilder<ProjectResource> Project(IDistributedApplicationTestingBuilder builder, string name)
+        => builder.CreateResourceBuilder(builder.Resources.OfType<ProjectResource>().Single(r => r.Name == name));
+}
+
+[CollectionDefinition(Name)]
+public sealed class MultiPodCollection : ICollectionFixture<MultiPodFixture>
+{
+    public const string Name = "MultiPod";
+}
