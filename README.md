@@ -325,7 +325,8 @@ The test is known to catch races: with the `FOR UPDATE SKIP LOCKED` / in-flight 
 `Pods_survive_their_Postgres_connections_being_dropped` repeats this while every worker and consumer connection
 is terminated (`pg_terminate_backend`) every 200 ms (the test's own sessions are spared by their
 `application_name`): every event still ends `done`, with no overlapping claims and
-no out-of-order writes.
+no out-of-order writes. The fixture allows 15 short Postgres retries (`Postgres:Retry`, at most about 12 s, inside
+the 20 s lease), so a unit of work outlasts the chaos instead of giving up and leaving its lease to expire.
 
 ## Benchmarks
 
