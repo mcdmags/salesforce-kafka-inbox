@@ -1,12 +1,14 @@
 # salesforce-kafka-inbox
 
-Kafka change events → Postgres inbox → Salesforce, with per-account ordering, Account + Profile
-atomicity, change-only updates and a shared, limit-aware rate limiter. Written in C# / .NET 8.
+Kafka change events → Postgres inbox → Salesforce, with per-entity ordering, atomic multi-record upserts,
+type-aware change-only updates and a shared, limit-aware rate limiter. One generic engine syncs every object;
+each object only defines its mapping and queries. Written in C# / .NET 8.
 
 ## The problem
 
-An upstream system publishes account changes to Kafka. Each change has to land in Salesforce as an
-update to an **Account** and its related **Profile** record. Several things make this harder than
+An upstream system publishes account changes and account-to-account relationships to Kafka. Each account
+change has to land in Salesforce as an update to an **Account** and its related **Profile**; each relationship
+as an **Account_Relationship__c** linking two Accounts, which may not be synced yet when the relationship arrives. Several things make this harder than
 "consume and PATCH":
 
 1. **Out-of-order writes across parallel batches.** The same account can change twice within a few
@@ -29,45 +31,98 @@ update to an **Account** and its related **Profile** record. Several things make
 
 | Problem | Solution |
 |---|---|
-| Durable, replayable intake | Kafka consumer writes each event to a Postgres **inbox** (`sf_inbox`) before committing the offset. `unique (account_ext_id, version)` makes redelivery harmless. |
-| Ordering across parallel batches | Workers claim **accounts, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each account's *oldest pending* row, only for accounts with nothing in flight. All pending events for a claimed account are then leased (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same account. |
-| Bursts of updates to one account | Pending events for an account are **coalesced** (merged in version order), so five updates in five seconds become one Salesforce write with the newest data. |
-| Late or replayed older events | **Sync watermark in Postgres**: `sf_sync_state` holds the newest version synced per account, advanced in the same transaction that completes the events and only while the worker still holds the lease. A claimed event at or below the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
-| Expired leases | The Salesforce call is cancelled at 80% of the lease, so a slow worker gives up before another worker can claim the account. |
-| Account + Profile atomicity | **Composite Graph API**: one graph per Account/Profile pair. A graph is all-or-nothing; other graphs in the same request are unaffected. New records use `@{acct.id}` references. |
-| Change-only updates | **Full diff against Salesforce**: the current Account/Profile are queried by external id with every field the coalesced inbox state sets, each field is compared (type-aware: numbers, dates, `""` vs `null`), and only fields that differ are sent. The comparison is with what is in Salesforce *now*, not with the previous event, so edits made directly in Salesforce are corrected. If nothing differs, nothing is written. |
-| Batching | Up to 75 graphs / 500 nodes per request (Salesforce limits); `PROCESSING_HALTED` graphs are retried. |
+| Durable, replayable intake | Kafka consumer writes each event to a Postgres **inbox** (`sf_inbox`) before committing the offset. Each topic is one entity type (`Kafka:Topics`); `unique (entity_type, entity_key, version)` makes redelivery harmless. |
+| Ordering across parallel batches | Workers claim **entities, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each entity's *oldest pending* row, only for entities with nothing in flight. All pending events for a claimed entity are then leased (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same entity. |
+| Bursts of updates to one entity | Pending events for an entity are **coalesced** (merged in version order; absent field = unchanged, `null` = clear), so five updates in five seconds become one Salesforce write with the newest data. |
+| Late or replayed older events | **Sync watermark in Postgres**: `sf_sync_state` holds the newest version synced per entity, advanced in the same transaction that completes the events and only while the worker still holds the lease. A claimed event at or below the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
+| Expired leases | The Salesforce call is cancelled at 80% of the lease, so a slow worker gives up before another worker can claim the entity. |
+| Records that must change together | **Composite Graph API**: one graph per unit (Account + Profile, or a relationship). A graph is all-or-nothing; other graphs in the same request are unaffected. New records are referenced with `@{ref.id}`; existing ones (e.g. a relationship's Accounts) by the Id read from Salesforce. |
+| Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field the coalesced inbox state sets. Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the millisecond, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event (a warning flags any field that still keeps differing). The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
+| Batching and API calls | **2 calls per batch** of up to 75 units: one Composite request with all reads (≤5 queries), one Composite Graph with all writes (≤75 graphs / 500 nodes). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
+| Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
+| Failures | Each graph's result decides per entity: **not attempted** (`PROCESSING_HALTED` after 14 failures, `ALL_OR_NONE_OPERATION_ROLLED_BACK`) → back to the inbox without spending a retry; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately. The code is stored in `sf_inbox.last_error_code`. |
+| Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through **`PostgresExecutionStrategy`**: a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new connection, new transaction) with backoff. Every unit is safe to run twice. |
 | Rate limits | Configured from Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, `api-bursts`, `per-app-api-usage`) and own usage slow everyone down at 80% and pause at 95%; 429/503 and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
-| Failures | Exponential backoff per account, dead-lettering after `MaxRetries`, retries are safe because each graph rolled back fully. |
 
 ```
-Kafka (keyed by account) ──► KafkaInboxConsumer ──► sf_inbox (Postgres)
-                                                       │  claim accounts: FOR UPDATE SKIP LOCKED on head row
-                                                       ▼
-                                       InboxWorker ×N (any number of pods)
-                                         coalesce → query + diff → Composite Graph (1 graph / pair)
-                                                       │  token bucket + concurrency slots (Postgres)
+Kafka (keyed by entity) ──► KafkaInboxConsumer ──► sf_inbox (Postgres, entity_type + entity_key)
+  account-changes                                      │  claim entities: FOR UPDATE SKIP LOCKED on head row
+  account-relationship-changes                         ▼
+                              InboxWorkerService ×N loops (any number of pods), round-robin over:
+                                AccountSyncService ─┐            (strategy: map + queries)
+                                AccountRelationshipSyncService ─┤
+                                                                ▼
+                              SalesforceBatchUpsertService.UpsertBatchAsync<TEvent>(strategy)
+                                claim → supersede stale → coalesce → map → SalesforceRecordUpserter
+                                (describe → normalize → 1 composite read → diff + lookups → 1 composite graph)
+                                → record outcomes            all Postgres work via PostgresExecutionStrategy
+                                                       │  token bucket + daily budget + concurrency slots
                                                        ▼
                                                   Salesforce  (standard + existing fields only)
 ```
+
+## Adding a Salesforce object
+
+The engine (`SalesforceBatchUpsertService.UpsertBatchAsync<TEvent>`) owns claiming, ordering, coalescing, rate
+limits, batching, normalization, diffing, lookups, retries and dead-lettering. An object only supplies an
+`UpsertStrategy<TEvent>` (or the same three things as delegates):
+
+```csharp
+public sealed class AccountRelationshipSyncService(SalesforceBatchUpsertService upsert) : ISalesforceEntitySync
+{
+    public static readonly UpsertStrategy<AccountRelationshipChangedEvent> Strategy = new("account-relationship", Map, Queries);
+
+    public string EntityType => "account-relationship";
+    public Task<int> SyncBatchAsync(CancellationToken ct) => upsert.UpsertBatchAsync(Strategy, ct);
+
+    // Inbox event -> the records to write together (one graph)
+    public static UpsertUnit Map(string key, AccountRelationshipChangedEvent e) => new(
+    [
+        new SObjectRecord("rel", "Account_Relationship__c", "External_Id__c", key, SObjectFields.From(e.Fields),
+        [
+            new SObjectLookup("Account__c", "Account", "External_Id__c", e.AccountExternalId!),
+            new SObjectLookup("Related_Account__c", "Account", "External_Id__c", e.RelatedAccountExternalId!)
+        ])
+    ]);
+
+    // What to read: the relationships themselves (to diff) and the Accounts they point at (for their Ids)
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units) =>
+    [
+        new SoqlQuery("Account_Relationship__c", "External_Id__c", SoqlQuery.ExternalIdsOf(units, "Account_Relationship__c")),
+        new SoqlQuery("Account", "External_Id__c", SoqlQuery.LookupIdsOf(units, "Account"))
+    ];
+}
+```
+
+Register it (`AddTransient<ISalesforceEntitySync, ...>()`) and map its Kafka topic to its entity type under
+`Kafka:Topics`. A lookup whose target isn't in Salesforce yet (`DEPENDENCY_NOT_SYNCED`) is retried with backoff,
+so related objects can arrive in any order.
+
+**Why `SemaphoreSlim` isn't used for parallel batches:** it limits concurrency within one process, while
+Salesforce's limits are org-wide. Parallelism comes from competing worker loops in every pod pulling from the
+shared inbox, capped globally by Postgres advisory-lock slots and a shared token bucket. (The Describe cache
+does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers don't all describe at once.)
 
 ## Repository layout
 
 ```
 src/
-  SalesforceSync/                 Worker: Kafka consumer, inbox workers, Salesforce client, rate limiting
-  SalesforceSync.FakeSalesforce/  In-memory Salesforce (query, composite graph, write history, Sforce-Limit-Info)
+  SalesforceSync/                 Worker: Kafka consumer, sync engine + strategies (Sync/), Salesforce client,
+                                  rate limiting, Postgres execution strategy (Data/)
+  SalesforceSync.FakeSalesforce/  In-memory Salesforce (describe, query, composite, composite graph, Salesforce-like
+                                  value storage, error injection, write history, Sforce-Limit-Info)
   SalesforceSync.FakeSalesforce.Server/  The in-memory org as an HTTP service (+ /__fake inspection API)
-  SalesforceSync.LoadGenerator/   Produces account change events (with bursts) to Kafka
+  SalesforceSync.LoadGenerator/   Produces account change (with bursts) and relationship events to Kafka
   SalesforceSync.AppHost/         Aspire: Postgres + pgAdmin, Kafka + Kafka UI, mock Salesforce, worker, generator, benchmarks
 tests/
-  SalesforceSync.Tests/           Unit tests: limit formulas, startup validation, limit errors, throttle decisions
+  SalesforceSync.Tests/           Unit tests: the Salesforce half of the engine with both strategies against the
+                                  in-memory org, type normalization, error classification, execution strategy, limits
   SalesforceSync.IntegrationTests/  End-to-end tests: Aspire app, Kafka in, assertions on the mock org + inbox
 benchmarks/
   SalesforceSync.Benchmarks/      BenchmarkDotNet: real Postgres inbox, fake Salesforce HTTP
 sql/
   schema.sql                      Inbox, sync watermark, rate-limit and API usage tables (embedded, applied at worker startup)
-  claim-audit.sql                 Test/benchmark-only trigger that records every account claim
+  claim-audit.sql                 Test/benchmark-only trigger that records every entity claim
 ```
 
 ## Run everything with Aspire
@@ -82,11 +137,14 @@ The dashboard shows:
 
 - **postgres / inboxdb / benchdb** (+ pgAdmin)
 - **kafka** (+ Kafka UI)
-- **fake-salesforce**: mock Salesforce org over HTTP (OAuth token, query, composite graph). Logs its
-  counters every 15s; inspect it at `/__fake/stats` and `/__fake/records/{Account|Profile__c}[/{externalId}]`
-- **salesforce-sync**: consumes `account-changes` into `sf_inbox` and syncs to `fake-salesforce`
-  through the real OAuth + REST client
-- **load-generator**: 20k events over 500 accounts at 200/s, including bursts to the same account
+- **fake-salesforce**: mock Salesforce org over HTTP (OAuth token, describe, query, composite, composite graph,
+  gzip). Logs its counters every 15s; inspect it at `/__fake/stats`, `/__fake/transport`,
+  `/__fake/records/{sobject}[/{externalId}]` and `/__fake/history/{sobject}/{externalId}`; inject errors with
+  `POST /__fake/faults`
+- **salesforce-sync**: consumes `account-changes` and `account-relationship-changes` into `sf_inbox` and syncs
+  to `fake-salesforce` through the real OAuth + REST client
+- **load-generator**: 20k account events over 500 accounts at 200/s, including bursts to the same account, plus
+  relationship events between accounts
 - **benchmarks**: explicit start (click ▶), runs the inbox drain benchmark against `benchdb`
 
 ## Integration tests
@@ -102,8 +160,11 @@ dotnet test tests/SalesforceSync.IntegrationTests
 Covered: create Account + linked Profile, partial update (only the differing field is sent), the diff
 being taken against the record in Salesforce (a direct edit in Salesforce is corrected by the next event),
 bursts coalesced to the newest state, stale versions superseded without a write, unchanged events skip the
-write, and the schema being reapplied on restart. Writes are checked with the mock's per-record write
-history (`/__fake/history/{sobject}/{externalId}`).
+write, exactly 2 API calls per batch, and the schema being reapplied on restart. Relationships
+(`RelationshipTests`): linked to two synced Accounts with only changed fields sent later; a relationship that
+arrives before its Accounts waits (`DEPENDENCY_NOT_SYNCED`, retried) and syncs once they exist; a malformed
+relationship event is dead-lettered alone. Writes are checked with the mock's per-record write history
+(`/__fake/history/{sobject}/{externalId}`).
 
 Rate limits (`RateLimitTests`):
 
@@ -114,9 +175,12 @@ Rate limits (`RateLimitTests`):
   them. The `ConcurrentPerOrgLongTxn` rejections cause a short pause (not the long daily one) and every event
   still syncs, with no retries spent.
 
-Unit tests (`dotnet test tests/SalesforceSync.Tests`) cover the allocation formula (including the documented
-Enterprise example of 115,000), the per-edition tables, org-type limits, startup validation, error classification
-and throttle decisions.
+Unit tests (`dotnet test tests/SalesforceSync.Tests`, no Docker) run the Salesforce half of the engine with both
+strategies against the in-memory org: 2 calls per batch, values written once instead of flapping, a bad value
+failing only its own unit before any call, validation / lock / halted outcomes, relinking, relationships and
+missing dependencies, gzip. Also: every normalization rule (including the documented 15 → 18-character id
+example), error classification, the Postgres execution strategy (retried, not retried, gives up), the allocation
+formula (including the documented Enterprise example of 115,000), startup validation and throttle decisions.
 
 ### Concurrency: many threads, many pods, same accounts
 
@@ -136,6 +200,10 @@ land in the org and show up in the mock's write history. The rate limiter is ope
 
 The test is known to catch races: with the `FOR UPDATE SKIP LOCKED` / in-flight check removed from
 `InboxSql.LockHeads`, it fails with over ten thousand overlapping claims.
+
+`Pods_survive_their_Postgres_connections_being_dropped` repeats this while every worker and consumer connection
+is terminated (`pg_terminate_backend`) every 200 ms: every event still ends `done`, with no overlapping claims and
+no out-of-order writes.
 
 ## Benchmarks
 
@@ -211,13 +279,16 @@ own calls over the last 24 hours and its budget.
 
 ## Using a real Salesforce org
 
-1. No fields need to be added for the sync itself. Account and `Profile__c` need their external id fields
-   (marked **Unique**) and the `Account__c` lookup on the Profile.
+1. No fields need to be added for the sync itself. Account, `Profile__c` and `Account_Relationship__c` need
+   their external id fields (marked **Unique**), the `Account__c` lookup on the Profile and the `Account__c` /
+   `Related_Account__c` lookups on the relationship.
 2. Set `Salesforce:UseFake=false` (the default outside Aspire) plus `InstanceUrl`, `TokenUrl`,
    `ClientId`, `ClientSecret` (OAuth client credentials).
 3. Describe the org in `SalesforceLimits` and choose this integration's `RateLimit:DailyBudgetShare`
    (see [Salesforce API limits](#salesforce-api-limits)).
-4. Adjust object/field names in `AccountProfileSync` and the event mapping in `InboxWorker.MapToSyncItem`.
+4. Adjust object and field names in the strategies (`AccountSyncService`, `AccountRelationshipSyncService`),
+   and tune `Salesforce:PermanentErrorCodes`, `Sync:RetryBaseDelay` / `MaxRetryDelay` / `MaxRetries` and
+   `Postgres:Retry` if needed.
 
 ## Status
 

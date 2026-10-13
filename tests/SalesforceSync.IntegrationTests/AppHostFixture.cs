@@ -19,6 +19,12 @@ namespace SalesforceSync.IntegrationTests;
 public class AppHostFixture : IAsyncLifetime
 {
     public const string Topic = "account-changes";
+    public const string RelationshipTopic = "account-relationship-changes";
+    public const string Accounts = "account";
+    public const string Relationships = "account-relationship";
+
+    /// <summary>The tests' own Postgres sessions, so chaos tests can drop everyone else's connections.</summary>
+    public const string TestsApplicationName = "integration-tests";
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromMinutes(5);
 
     private DistributedApplication? _app;
@@ -47,6 +53,8 @@ public class AppHostFixture : IAsyncLifetime
 
         var builder = await DistributedApplicationTestingBuilder.CreateAsync<Projects.SalesforceSync_AppHost>(
             ["--AppHost:TestMode=true"], ct);
+        // Fast retries, so tests that wait for a transient failure to clear don't wait 30 s
+        Project(builder, "salesforce-sync").WithEnvironment("Sync__RetryBaseDelay", "00:00:01");
         Configure(builder);
         _app = await builder.BuildAsync(ct);
         await _app.StartAsync(ct);
@@ -69,7 +77,7 @@ public class AppHostFixture : IAsyncLifetime
 
         var inbox = await _app.GetConnectionStringAsync("inboxdb", ct)
                     ?? throw new InvalidOperationException("No inboxdb connection string");
-        _db = NpgsqlDataSource.Create(inbox);
+        _db = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(inbox) { ApplicationName = TestsApplicationName }.ConnectionString);
 
         // "Running" only means the worker process started; wait until it has applied the inbox schema.
         await Eventually.ValueAsync(async () =>
@@ -118,7 +126,24 @@ public class AppHostFixture : IAsyncLifetime
         }.ToJsonString()
     };
 
+    /// <summary>Publishes an account-to-account relationship event, keyed by relationship id.</summary>
+    public async Task PublishRelationshipAsync(string relationshipKey, long version, string accountExtId,
+        string relatedAccountExtId, JsonObject fields)
+        => await _producer!.ProduceAsync(RelationshipTopic, new Message<string, string>
+        {
+            Key = relationshipKey,
+            Value = new JsonObject
+            {
+                ["version"] = version,
+                ["accountExternalId"] = accountExtId,
+                ["relatedAccountExternalId"] = relatedAccountExtId,
+                ["fields"] = fields
+            }.ToJsonString()
+        });
+
     public static string NewAccountId() => $"E2E-{Guid.NewGuid():N}";
+
+    public static string NewRelationshipId() => $"REL-{Guid.NewGuid():N}";
 
     public static string ProfileIdFor(string accountExtId) => accountExtId.Replace("E2E-", "PRF-");
 
@@ -139,13 +164,20 @@ public class AppHostFixture : IAsyncLifetime
 
     public async Task<JsonElement> GetStatsAsync() => await Salesforce.GetFromJsonAsync<JsonElement>("/__fake/stats");
 
-    /// <summary>(version, status) of every inbox row for the account, oldest first.</summary>
-    public async Task<IReadOnlyList<(long Version, string Status)>> GetInboxAsync(string accountExtId)
+    /// <summary>(version, status) of every inbox row for the entity, oldest first.</summary>
+    public async Task<IReadOnlyList<(long Version, string Status)>> GetInboxAsync(string key, string entityType = Accounts)
+        => (await GetInboxRowsAsync(key, entityType)).Select(r => (r.Version, r.Status)).ToList();
+
+    public async Task<IReadOnlyList<(long Version, string Status, int RetryCount, string? ErrorCode)>> GetInboxRowsAsync(
+        string key, string entityType = Accounts)
     {
         await using var conn = await _db!.OpenConnectionAsync();
-        var rows = await conn.QueryAsync<(long, string)>(
-            "select version, status from sf_inbox where account_ext_id = @accountExtId order by version",
-            new { accountExtId });
+        var rows = await conn.QueryAsync<(long, string, int, string?)>(
+            """
+            select version, status, retry_count, last_error_code from sf_inbox
+            where entity_type = @entityType and entity_key = @key order by version
+            """,
+            new { entityType, key });
         return rows.ToList();
     }
 
@@ -156,20 +188,25 @@ public class AppHostFixture : IAsyncLifetime
     }
 
     /// <summary>Polls until every expected inbox row exists and none is pending, then returns them.</summary>
-    public Task<IReadOnlyList<(long Version, string Status)>> WaitForInboxSettledAsync(string accountExtId, int expectedRows)
+    public Task<IReadOnlyList<(long Version, string Status)>> WaitForInboxSettledAsync(string key, int expectedRows,
+        string entityType = Accounts)
         => Eventually.ValueAsync(
-            () => GetInboxAsync(accountExtId),
+            () => GetInboxAsync(key, entityType),
             rows => rows.Count == expectedRows && rows.All(r => r.Status != "pending"),
-            $"inbox rows for {accountExtId} to settle");
+            $"inbox rows for {entityType} {key} to settle");
 
     private static async Task EnsureTopicAsync(string bootstrap)
     {
         using var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = bootstrap }).Build();
         try
         {
-            await admin.CreateTopicsAsync([new TopicSpecification { Name = Topic, NumPartitions = 6, ReplicationFactor = 1 }]);
+            await admin.CreateTopicsAsync(
+            [
+                new TopicSpecification { Name = Topic, NumPartitions = 6, ReplicationFactor = 1 },
+                new TopicSpecification { Name = RelationshipTopic, NumPartitions = 6, ReplicationFactor = 1 }
+            ]);
         }
-        catch (CreateTopicsException ex) when (ex.Results.All(r => r.Error.Code == ErrorCode.TopicAlreadyExists))
+        catch (CreateTopicsException ex) when (ex.Results.All(r => r.Error.Code is ErrorCode.TopicAlreadyExists or ErrorCode.NoError))
         {
             // the worker created it first
         }

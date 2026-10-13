@@ -169,8 +169,13 @@ public sealed class SyncEndToEndTests(AppHostFixture app)
     }
 
     [Fact]
-    public async Task Mock_org_reports_API_usage_for_the_traffic()
+    public async Task A_batch_costs_one_composite_read_and_one_graph_write()
     {
+        // Warm-up: the first batch after start also describes Account and Profile__c (then cached for 15 minutes)
+        var warm = AppHostFixture.NewAccountId();
+        await app.PublishAsync(warm, 1, new JsonObject { ["Name"] = "Warm" }, new JsonObject());
+        await app.WaitForInboxSettledAsync(warm, expectedRows: 1);
+
         var acct = AppHostFixture.NewAccountId();
         var before = await app.GetStatsAsync();
 
@@ -178,9 +183,15 @@ public sealed class SyncEndToEndTests(AppHostFixture app)
         await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
 
         var after = await app.GetStatsAsync();
-        Assert.True(after.GetProperty("apiCalls").GetInt64() >= before.GetProperty("apiCalls").GetInt64() + 3,
-            "expected at least 2 queries + 1 composite graph call");
-        Assert.True(after.GetProperty("graphsSucceeded").GetInt64() > before.GetProperty("graphsSucceeded").GetInt64());
+        long Delta(string counter) => after.GetProperty(counter).GetInt64() - before.GetProperty(counter).GetInt64();
+        Assert.Equal(2, Delta("apiCalls"));          // was 3 with separate queries
+        Assert.Equal(1, Delta("compositeRequests")); // Account + Profile__c queries in one call
+        Assert.Equal(1, Delta("graphRequests"));
+        Assert.Equal(0, Delta("describes"));
         Assert.Equal(0, after.GetProperty("graphsFailed").GetInt64());
+
+        // The worker accepts compressed responses
+        var transport = await app.Salesforce.GetFromJsonAsync<JsonObject>("/__fake/transport");
+        Assert.True((long)transport!["acceptGzip"]! > 0);
     }
 }

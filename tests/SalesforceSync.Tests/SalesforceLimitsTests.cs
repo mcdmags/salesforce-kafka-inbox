@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using SalesforceSync.Data;
 using SalesforceSync.Inbox;
 using SalesforceSync.RateLimiting;
 
@@ -173,6 +174,7 @@ public sealed class SalesforceLimitsTests
             .Validate(null, limits);
 
     private static SalesforceRateLimiter Limiter(RateLimitOptions rate, SalesforceLimitsOptions? limits = null)
-        => new(NpgsqlDataSource.Create("Host=unused"), Options.Create(rate),
+        => new(new PostgresExecutionStrategy(NpgsqlDataSource.Create("Host=unused"), Options.Create(new PostgresRetryOptions()),
+                NullLogger<PostgresExecutionStrategy>.Instance), Options.Create(rate),
             Options.Create(limits ?? new SalesforceLimitsOptions()), NullLogger<SalesforceRateLimiter>.Instance);
 }

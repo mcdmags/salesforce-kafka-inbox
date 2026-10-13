@@ -1,6 +1,6 @@
 using Dapper;
 using Microsoft.Extensions.Options;
-using Npgsql;
+using SalesforceSync.Data;
 
 namespace SalesforceSync.RateLimiting;
 
@@ -10,7 +10,7 @@ namespace SalesforceSync.RateLimiting;
 /// call is counted against this integration's share of the org's daily allocation over a rolling 24 hours.
 /// </summary>
 public sealed class SalesforceRateLimiter(
-    NpgsqlDataSource db,
+    PostgresExecutionStrategy pg,
     IOptions<RateLimitOptions> options,
     IOptions<SalesforceLimitsOptions> limits,
     ILogger<SalesforceRateLimiter> log)
@@ -32,13 +32,12 @@ public sealed class SalesforceRateLimiter(
     /// </summary>
     public async Task ApplyConfigurationAsync(CancellationToken ct)
     {
-        await using var conn = await db.OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(Sql.ApplyConfiguration, new
+        await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(Sql.ApplyConfiguration, new
         {
             rate = _opt.MaxRequestsPerSecond,
             capacity = _opt.BurstCapacity,
             budget = DailyBudget
-        }, cancellationToken: ct));
+        }, cancellationToken: t)), ct);
 
         log.LogInformation(
             "Salesforce limits: {OrgType} {Edition} org, {Allocation} calls/24h for the org, budget {Budget} calls/24h " +
@@ -53,17 +52,16 @@ public sealed class SalesforceRateLimiter(
         while (true)
         {
             (bool granted, double waitSeconds, double used24h, double? budget) r;
-            await using (var conn = await db.OpenConnectionAsync(ct))
-            await using (var tx = await conn.BeginTransactionAsync(ct))
+            // Lock first, in its own statement: the acquire statement's snapshot then includes every usage
+            // increment committed by whoever held the lock before (a single statement would read sf_api_usage
+            // from a snapshot taken before it waited for the lock). Retried as a whole on transient errors; a
+            // retry after an unknown commit can only over-count usage, the safe direction.
+            r = await pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
             {
-                // Lock first, in its own statement: the acquire statement's snapshot then includes every
-                // usage increment committed by whoever held the lock before (a single statement would read
-                // sf_api_usage from a snapshot taken before it waited for the lock).
-                await conn.ExecuteAsync(new CommandDefinition(Sql.Lock, transaction: tx, cancellationToken: ct));
-                r = await conn.QuerySingleAsync<(bool, double, double, double?)>(
-                    new CommandDefinition(Sql.Acquire, new { n = (double)permits }, tx, cancellationToken: ct));
-                await tx.CommitAsync(ct);
-            }
+                await conn.ExecuteAsync(new CommandDefinition(Sql.Lock, transaction: tx, cancellationToken: t));
+                return await conn.QuerySingleAsync<(bool, double, double, double?)>(
+                    new CommandDefinition(Sql.Acquire, new { n = (double)permits }, tx, cancellationToken: t));
+            }, ct);
             if (r.budget > 0) Volatile.Write(ref _ownDailyRatio, r.used24h / r.budget.Value);
             if (r.granted) return;
 
@@ -76,14 +74,14 @@ public sealed class SalesforceRateLimiter(
 
     public async Task<bool> IsPausedAsync(CancellationToken ct)
     {
-        await using var conn = await db.OpenConnectionAsync(ct);
-        return await conn.ExecuteScalarAsync<bool>(new CommandDefinition(Sql.IsPaused, cancellationToken: ct));
+        return await pg.ExecuteAsync((conn, t) =>
+            conn.ExecuteScalarAsync<bool>(new CommandDefinition(Sql.IsPaused, cancellationToken: t)), ct);
     }
 
     public async Task PauseAsync(TimeSpan duration, CancellationToken ct)
     {
-        await using var conn = await db.OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(Sql.Pause, new { duration }, cancellationToken: ct));
+        await pg.ExecuteAsync((conn, t) =>
+            conn.ExecuteAsync(new CommandDefinition(Sql.Pause, new { duration }, cancellationToken: t)), ct);
     }
 
     /// <summary>
@@ -107,8 +105,7 @@ public sealed class SalesforceRateLimiter(
             _lastReportUtc = now;
         }
 
-        await using var conn = await db.OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(Sql.ReportLimits, new
+        await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(Sql.ReportLimits, new
         {
             apiUsed = info.ApiUsage?.Used,
             apiMax = info.ApiUsage?.Max,
@@ -119,7 +116,7 @@ public sealed class SalesforceRateLimiter(
             appName = info.AppName,
             speed = decision.Speed,
             pauseSeconds = decision.Pause.TotalSeconds
-        }, cancellationToken: ct));
+        }, cancellationToken: t)), ct);
     }
 
     /// <param name="ownDailyRatio">This integration's rolling 24h calls / its daily budget.</param>

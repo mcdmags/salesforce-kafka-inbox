@@ -4,10 +4,11 @@ using BenchmarkDotNet.Attributes;
 using SalesforceSync.Inbox;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
+using SalesforceSync.Sync;
 
 namespace SalesforceSync.Benchmarks;
 
-/// <summary>CPU-only hot paths: header parsing, event coalescing, diffing.</summary>
+/// <summary>CPU-only hot paths: header parsing, event coalescing, type-aware normalize + compare.</summary>
 [MemoryDiagnoser]
 public class MicroBenchmarks
 {
@@ -16,13 +17,15 @@ public class MicroBenchmarks
     private List<InboxEvent> _tenEvents = default!;
     private JsonElement _number;
     private JsonElement _datetime;
+    private readonly SalesforceField _currency = new("AnnualRevenue", "currency", 0, 18, 2, true, true, true);
+    private readonly SalesforceField _stamp = new("Last_Contacted__c", "datetime", 0, 0, 0, true, true, true);
 
     [GlobalSetup]
     public void Setup()
     {
         _tenEvents = Enumerable.Range(1, 10).Select(v => new InboxEvent(
             Id: v,
-            AccountExtId: "ACC-000001",
+            Key: "ACC-000001",
             Version: v,
             Payload: new JsonObject
             {
@@ -41,11 +44,13 @@ public class MicroBenchmarks
     public SalesforceLimitInfo? ParseLimitHeader() => SalesforceLimitInfo.Parse(LimitHeader);
 
     [Benchmark]
-    public WorkUnit CoalesceTenEvents() => InboxWorker.Coalesce(_tenEvents);
+    public JsonObject CoalesceTenEvents() => SalesforceBatchUpsertService.Coalesce(_tenEvents);
 
     [Benchmark]
-    public bool DiffNumber() => AccountProfileSync.ValuesEqual(87.5m, _number);
+    public bool DiffNumber()
+        => FieldValues.TryNormalize(_currency, "87.499", out var v, out _) && FieldValues.AreEqual(_currency, v, _number);
 
     [Benchmark]
-    public bool DiffDateTime() => AccountProfileSync.ValuesEqual(new DateTimeOffset(2026, 10, 12, 1, 2, 3, TimeSpan.Zero), _datetime);
+    public bool DiffDateTime()
+        => FieldValues.TryNormalize(_stamp, "2026-10-12T01:02:03Z", out var v, out _) && FieldValues.AreEqual(_stamp, v, _datetime);
 }

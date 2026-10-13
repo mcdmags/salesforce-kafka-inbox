@@ -1,8 +1,12 @@
 using Microsoft.Extensions.Options;
+using SalesforceSync.Sync;
 
 namespace SalesforceSync.Inbox;
 
-/// <summary>Runs N parallel worker loops; each iteration gets a fresh scope (fresh typed HttpClient).</summary>
+/// <summary>
+/// Runs N parallel worker loops. Each iteration gets a fresh scope (fresh typed HttpClient) and runs one batch of
+/// every entity type (accounts, relationships, ...), starting at a different type per loop so none waits behind another.
+/// </summary>
 public sealed class InboxWorkerService(
     IServiceScopeFactory scopes,
     IOptions<SyncOptions> options,
@@ -17,14 +21,15 @@ public sealed class InboxWorkerService(
 
     private async Task RunLoopAsync(int loop, CancellationToken ct)
     {
-        while (!ct.IsCancellationRequested)
+        for (var iteration = 0; !ct.IsCancellationRequested; iteration++)
         {
             var processed = 0;
             try
             {
                 await using var scope = scopes.CreateAsyncScope();
-                var worker = scope.ServiceProvider.GetRequiredService<InboxWorker>();
-                processed = await worker.RunOnceAsync(ct);
+                var syncs = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().ToList();
+                for (var i = 0; i < syncs.Count; i++)
+                    processed += await syncs[(loop + iteration + i) % syncs.Count].SyncBatchAsync(ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {

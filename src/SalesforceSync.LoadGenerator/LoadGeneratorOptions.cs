@@ -6,6 +6,12 @@ public sealed class LoadGeneratorOptions
 
     public string Topic { get; set; } = "account-changes";
 
+    /// <summary>Account-to-account relationship events (Account_Relationship__c).</summary>
+    public string RelationshipTopic { get; set; } = "account-relationship-changes";
+
+    /// <summary>Chance that an account event is followed by a relationship event between it and another account.</summary>
+    public double RelationshipProbability { get; set; } = 0.15;
+
     /// <summary>Distinct accounts. Fewer accounts = more updates per account = more ordering pressure.</summary>
     public int Accounts { get; set; } = 500;
 

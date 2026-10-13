@@ -7,7 +7,8 @@ namespace SalesforceSync.LoadGenerator;
 
 /// <summary>
 /// Publishes account change events keyed by account external id (so Kafka keeps per-account order),
-/// including rapid bursts to the same account to exercise the ordering/coalescing logic.
+/// including rapid bursts to the same account to exercise the ordering/coalescing logic, and relationship
+/// events between accounts (keyed by relationship id), which can arrive before their accounts are synced.
 /// </summary>
 public sealed class AccountEventProducer(
     IProducer<string, string> producer,
@@ -16,11 +17,13 @@ public sealed class AccountEventProducer(
 {
     private static readonly string[] Ratings = ["Hot", "Warm", "Cold"];
     private static readonly string[] Tiers = ["Bronze", "Silver", "Gold", "Platinum"];
+    private static readonly string[] RelationshipTypes = ["Parent", "Subsidiary", "Partner", "Reseller"];
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var o = options.Value;
         var versions = new long[o.Accounts];
+        var relationshipVersions = new Dictionary<string, long>();
         var random = new Random(42);
         var interval = TimeSpan.FromSeconds(1.0 / Math.Max(1, o.EventsPerSecond));
         var sent = 0L;
@@ -45,6 +48,30 @@ public sealed class AccountEventProducer(
                     if (report.Error.IsError) log.LogWarning("Produce failed: {Reason}", report.Error.Reason);
                 });
                 sent++;
+
+                if (o.Accounts > 1 && random.NextDouble() < o.RelationshipProbability)
+                {
+                    var other = (account + 1 + random.Next(o.Accounts - 1)) % o.Accounts;
+                    var (a, b) = (Math.Min(account, other), Math.Max(account, other));
+                    var relKey = $"REL-{a:D6}-{b:D6}";
+                    var relVersion = relationshipVersions[relKey] = relationshipVersions.GetValueOrDefault(relKey) + 1;
+                    var relationship = new JsonObject
+                    {
+                        ["version"] = relVersion,
+                        ["accountExternalId"] = $"ACC-{a:D6}",
+                        ["relatedAccountExternalId"] = $"ACC-{b:D6}",
+                        ["fields"] = new JsonObject
+                        {
+                            ["Type__c"] = RelationshipTypes[random.Next(RelationshipTypes.Length)],
+                            ["Active__c"] = random.NextDouble() < 0.9
+                        }
+                    };
+                    producer.Produce(o.RelationshipTopic,
+                        new Message<string, string> { Key = relKey, Value = relationship.ToJsonString() }, report =>
+                        {
+                            if (report.Error.IsError) log.LogWarning("Produce failed: {Reason}", report.Error.Reason);
+                        });
+                }
             }
 
             // Simple pacing: keep the average rate at EventsPerSecond

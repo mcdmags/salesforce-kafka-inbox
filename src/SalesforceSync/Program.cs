@@ -1,8 +1,11 @@
+using System.Net;
 using Microsoft.Extensions.Options;
+using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
+using SalesforceSync.Sync;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -14,9 +17,11 @@ builder.Services.AddOptions<SalesforceLimitsOptions>()
     .ValidateOnStart();
 builder.Services.AddSingleton<IValidateOptions<SalesforceLimitsOptions>, SalesforceLimitsValidator>();
 builder.Services.Configure<FakeSalesforceOptions>(builder.Configuration.GetSection(FakeSalesforceOptions.Section));
+builder.Services.Configure<PostgresRetryOptions>(builder.Configuration.GetSection(PostgresRetryOptions.Section));
 
 // Postgres (ConnectionStrings:inboxdb, injected by Aspire or appsettings)
 builder.AddNpgsqlDataSource("inboxdb");
+builder.Services.AddSingleton<PostgresExecutionStrategy>(); // every unit of work retries transient Postgres errors
 builder.Services.AddHostedService<InboxSchemaInitializer>(); // must be registered before the workers
 
 // Rate limiting (shared through Postgres)
@@ -24,11 +29,20 @@ builder.Services.AddSingleton<SalesforceRateLimiter>();
 builder.Services.AddHostedService<RateLimitInitializer>(); // after the schema, before the workers
 builder.Services.AddSingleton(sp => new SalesforceConcurrencySlots(
     sp.GetRequiredService<Npgsql.NpgsqlDataSource>(),
-    sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests));
+    sp.GetRequiredService<PostgresExecutionStrategy>(),
+    sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests,
+    sp.GetRequiredService<ILogger<SalesforceConcurrencySlots>>()));
 builder.Services.AddTransient<SalesforceRateLimitHandler>();
 
-// Salesforce client: rate limiter is outermost so every attempt costs a token
-var salesforce = builder.Services.AddHttpClient<AccountProfileSync>((sp, c) =>
+// Salesforce client. Handler order: rate limiter (outermost, so every attempt costs a token) -> gzip -> auth.
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<SalesforceSchemaCache>();   // Describe results, shared by all workers in the process
+builder.Services.AddSingleton<WriteEchoTracker>();
+builder.Services.AddSingleton<SalesforceErrors>();
+builder.Services.AddTransient<GzipRequestHandler>();
+builder.Services.AddTransient<SalesforceRecordUpserter>();
+
+var salesforce = builder.Services.AddHttpClient<SalesforceRestClient>((sp, c) =>
     {
         var o = sp.GetRequiredService<IOptions<SalesforceOptions>>().Value;
         c.BaseAddress = new Uri(o.InstanceUrl);
@@ -36,7 +50,8 @@ var salesforce = builder.Services.AddHttpClient<AccountProfileSync>((sp, c) =>
         // Identifies the pod/process in Salesforce API logs (and in the mock org's per-client counters)
         c.DefaultRequestHeaders.UserAgent.ParseAdd($"SalesforceSync/1.0 ({Environment.MachineName}; pid {Environment.ProcessId})");
     })
-    .AddHttpMessageHandler<SalesforceRateLimitHandler>();
+    .AddHttpMessageHandler<SalesforceRateLimitHandler>()
+    .AddHttpMessageHandler<GzipRequestHandler>();
 
 if (builder.Configuration.GetValue<bool>("Salesforce:UseFake"))
 {
@@ -50,7 +65,15 @@ else
     builder.Services.AddHttpClient(SalesforceTokenProvider.HttpClientName);
     builder.Services.AddSingleton<SalesforceTokenProvider>();
     builder.Services.AddTransient<SalesforceAuthHandler>();
-    salesforce.AddHttpMessageHandler<SalesforceAuthHandler>();
+    salesforce.AddHttpMessageHandler<SalesforceAuthHandler>()
+        // Long-lived pooled connections (recycled so DNS changes are picked up) instead of handler rotation;
+        // responses are compressed by Salesforce when we accept it
+        .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AutomaticDecompression = DecompressionMethods.All,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+        })
+        .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 }
 
 // Kafka -> inbox (only when a Kafka connection string is configured)
@@ -60,8 +83,10 @@ if (!string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString("kafka"
     builder.Services.AddHostedService<KafkaInboxConsumer>();
 }
 
-// Inbox -> Salesforce
-builder.Services.AddTransient<InboxWorker>();
+// Inbox -> Salesforce: one engine, one strategy per synced object
+builder.Services.AddTransient<SalesforceBatchUpsertService>();
+builder.Services.AddTransient<ISalesforceEntitySync, AccountSyncService>();
+builder.Services.AddTransient<ISalesforceEntitySync, AccountRelationshipSyncService>();
 builder.Services.AddHostedService<InboxWorkerService>();
 
 builder.Build().Run();

@@ -26,6 +26,8 @@ public sealed class MultiPodFixture : AppHostFixture
             .WithEnvironment("Sync__MaxConcurrentRequests", (Pods * WorkersPerPod).ToString())
             .WithEnvironment("Sync__BatchSize", "10")
             .WithEnvironment("Sync__IdleDelay", "00:00:00.050")
+            // Short lease: a claim lost to a dropped connection (chaos test) is reclaimed quickly
+            .WithEnvironment("Sync__Lease", "00:00:20")
             // Measure ordering, not the throttle
             .WithEnvironment("RateLimit__MaxRequestsPerSecond", "1000000")
             .WithEnvironment("RateLimit__BurstCapacity", "1000000");

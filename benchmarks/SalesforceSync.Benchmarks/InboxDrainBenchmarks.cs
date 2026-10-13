@@ -9,16 +9,19 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;
+using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
+using SalesforceSync.Sync;
 
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// End-to-end: put N events into the real Postgres inbox and drain it with P "pods" x W parallel InboxWorkers
-/// through the real AccountProfileSync client and rate limiter. Only the Salesforce HTTP endpoint is fake.
+/// End-to-end: put N events into the real Postgres inbox and drain it with P "pods" x W parallel worker loops
+/// through the real engine (SalesforceBatchUpsertService with the Account strategy), Salesforce client and rate
+/// limiter. Only the Salesforce HTTP endpoint is fake.
 /// A pod is an independent service provider (own connection pool, rate limiter, HTTP client), like a separate
 /// process; all pods share the Postgres inbox and one Salesforce org.
 /// <para>
@@ -115,8 +118,8 @@ public abstract class DrainBenchmarkBase
     private async Task IngestAsync(CancellationToken ct)
     {
         const string sql = """
-            insert into sf_inbox (account_ext_id, version, payload)
-            select a, v, p::jsonb from unnest(@a::text[], @v::bigint[], @p::text[]) as t(a, v, p)
+            insert into sf_inbox (entity_type, entity_key, version, payload)
+            select 'account', a, v, p::jsonb from unnest(@a::text[], @v::bigint[], @p::text[]) as t(a, v, p)
             """;
 
         await using var conn = await _db.OpenConnectionAsync(ct);
@@ -140,8 +143,8 @@ public abstract class DrainBenchmarkBase
             int processed;
             await using (var scope = pod.CreateAsyncScope())
             {
-                var worker = scope.ServiceProvider.GetRequiredService<InboxWorker>();
-                processed = await worker.RunOnceAsync(ct);
+                var accounts = scope.ServiceProvider.GetRequiredService<AccountSyncService>();
+                processed = await accounts.SyncBatchAsync(ct);
             }
 
             if (processed > 0) continue;
@@ -166,6 +169,7 @@ public abstract class DrainBenchmarkBase
         var services = new ServiceCollection();
         services.AddLogging(); // no providers: silent
         services.AddSingleton(_ => NpgsqlDataSource.Create(BenchmarkDb.ConnectionString));
+        services.AddSingleton<PostgresExecutionStrategy>();
         services.AddSingleton(_store);
 
         services.Configure<SyncOptions>(o =>
@@ -180,14 +184,23 @@ public abstract class DrainBenchmarkBase
         services.AddSingleton<SalesforceRateLimiter>();
         services.AddSingleton(sp => new SalesforceConcurrencySlots(
             sp.GetRequiredService<NpgsqlDataSource>(),
+            sp.GetRequiredService<PostgresExecutionStrategy>(),
             sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests));
         services.AddTransient<SalesforceRateLimitHandler>();
 
-        services.AddHttpClient<AccountProfileSync>(c => c.BaseAddress = new Uri("https://fake.my.salesforce.com"))
+        services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<SalesforceSchemaCache>();
+        services.AddSingleton<WriteEchoTracker>();
+        services.AddSingleton<SalesforceErrors>();
+        services.AddTransient<GzipRequestHandler>();
+        services.AddTransient<SalesforceRecordUpserter>();
+        services.AddHttpClient<SalesforceRestClient>(c => c.BaseAddress = new Uri("https://fake.my.salesforce.com"))
             .AddHttpMessageHandler<SalesforceRateLimitHandler>()
+            .AddHttpMessageHandler<GzipRequestHandler>()
             .ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
 
-        services.AddTransient<InboxWorker>();
+        services.AddTransient<SalesforceBatchUpsertService>();
+        services.AddTransient<AccountSyncService>();
         return services.BuildServiceProvider();
     }
 
@@ -245,10 +258,11 @@ public abstract class DrainBenchmarkBase
     private async Task PreloadAsync(NpgsqlConnection conn)
     {
         await using var importer = await conn.BeginBinaryImportAsync(
-            "copy sf_inbox (account_ext_id, version, payload) from stdin (format binary)");
+            "copy sf_inbox (entity_type, entity_key, version, payload) from stdin (format binary)");
         foreach (var (account, version, payload) in _events)
         {
             await importer.StartRowAsync();
+            await importer.WriteAsync(AccountSyncService.Type, NpgsqlDbType.Text);
             await importer.WriteAsync(account, NpgsqlDbType.Text);
             await importer.WriteAsync(version, NpgsqlDbType.Bigint);
             await importer.WriteAsync(payload, NpgsqlDbType.Jsonb);

@@ -2,37 +2,41 @@ using System.Text.Json.Nodes;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
 using Dapper;
-using Npgsql;
+using SalesforceSync.Data;
 
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// Kafka -> Postgres inbox. Message key = account external id; value = raw JSON event
-/// ({ "version": 123, "profileExternalId": "...", "account": {...}, "profile": {...} }).
-/// The offset is committed only after the row is stored, and the unique (account, version)
-/// constraint makes redelivery harmless.
+/// Kafka -> Postgres inbox. Each topic carries one entity type (Kafka:Topics, e.g. account-changes -> account);
+/// message key = the entity's key (external id), value = the raw JSON event with a "version".
+/// The offset is committed only after the row is stored, and the unique (entity type, key, version)
+/// constraint makes redelivery (and a retried insert) harmless.
 /// </summary>
 public sealed class KafkaInboxConsumer(
     IConsumer<string, string> consumer,
-    NpgsqlDataSource db,
+    PostgresExecutionStrategy pg,
     IConfiguration config,
     ILogger<KafkaInboxConsumer> log) : BackgroundService
 {
-    private const string InsertSql = """
-        insert into sf_inbox (account_ext_id, version, payload)
-        values (@acct, @version, @payload::jsonb)
-        on conflict (account_ext_id, version) do nothing
-        """;
+    /// <summary>Topic -> inbox entity type, unless configured under Kafka:Topics.</summary>
+    public static readonly IReadOnlyDictionary<string, string> DefaultTopics = new Dictionary<string, string>
+    {
+        ["account-changes"] = "account",
+        ["account-relationship-changes"] = "account-relationship"
+    };
+
+    private Dictionary<string, string> _topics = new(StringComparer.Ordinal);
 
     // Consume() blocks, so run the loop off the host's startup path.
     protected override Task ExecuteAsync(CancellationToken stoppingToken) => Task.Run(() => RunAsync(stoppingToken), stoppingToken);
 
     private async Task RunAsync(CancellationToken ct)
     {
-        var topic = config["Kafka:Topic"] ?? "account-changes";
-        await EnsureTopicAsync(topic);
-        consumer.Subscribe(topic);
-        log.LogInformation("Consuming {Topic} into sf_inbox", topic);
+        var configured = config.GetSection("Kafka:Topics").Get<Dictionary<string, string>>();
+        _topics = new Dictionary<string, string>(configured is { Count: > 0 } ? configured : DefaultTopics, StringComparer.Ordinal);
+        foreach (var topic in _topics.Keys) await EnsureTopicAsync(topic);
+        consumer.Subscribe(_topics.Keys);
+        log.LogInformation("Consuming {Topics} into sf_inbox", string.Join(", ", _topics.Select(t => $"{t.Key} ({t.Value})")));
 
         try
         {
@@ -76,18 +80,18 @@ public sealed class KafkaInboxConsumer(
 
     private async Task StoreAsync(ConsumeResult<string, string> result, CancellationToken ct)
     {
+        var entityType = _topics[result.Topic];
         var json = JsonNode.Parse(result.Message.Value)?.AsObject()
                    ?? throw new InvalidOperationException("Event value is not a JSON object");
 
-        var acct = result.Message.Key ?? json["accountExternalId"]?.GetValue<string>()
-                   ?? throw new InvalidOperationException("Event has no account key");
+        var key = result.Message.Key ?? json["key"]?.GetValue<string>() ?? json["accountExternalId"]?.GetValue<string>()
+                  ?? throw new InvalidOperationException("Event has no entity key");
 
-        // Prefer the source system's version; fall back to the offset (only valid when keyed by account).
+        // Prefer the source system's version; fall back to the offset (only valid when keyed by entity).
         var version = json["version"] is JsonValue v ? v.GetValue<long>() : result.Offset.Value;
 
-        await using var conn = await db.OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(InsertSql,
-            new { acct, version, payload = result.Message.Value }, cancellationToken: ct));
+        await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(InboxSql.Insert,
+            new { entityType, key, version, payload = result.Message.Value }, cancellationToken: t)), ct);
     }
 
     private async Task EnsureTopicAsync(string topic)
