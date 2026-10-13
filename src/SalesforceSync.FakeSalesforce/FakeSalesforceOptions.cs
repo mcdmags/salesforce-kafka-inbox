@@ -13,6 +13,18 @@ public sealed class FakeSalesforceOptions
     /// <summary>When true, calls beyond <see cref="DailyApiLimit"/> fail with 403 REQUEST_LIMIT_EXCEEDED.</summary>
     public bool EnforceDailyLimit { get; set; } = true;
 
+    /// <summary>
+    /// Requests whose simulated <see cref="Latency"/> is at least this long count as long-running
+    /// (Salesforce: 20 seconds).
+    /// </summary>
+    public TimeSpan LongRunningThreshold { get; set; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// Max concurrent long-running requests; more fail with 403 REQUEST_LIMIT_EXCEEDED
+    /// (Salesforce: 25 for production and sandboxes, 5 for Developer Edition and trials).
+    /// </summary>
+    public int ConcurrentLongRunningLimit { get; set; } = 25;
+
     /// <summary>Salesforce stops processing remaining graphs after this many failures in one request.</summary>
     public int MaxGraphFailuresPerRequest { get; set; } = 14;
 }

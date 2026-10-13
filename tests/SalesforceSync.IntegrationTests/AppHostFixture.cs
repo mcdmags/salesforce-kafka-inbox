@@ -34,6 +34,9 @@ public class AppHostFixture : IAsyncLifetime
     {
     }
 
+    protected static IResourceBuilder<ProjectResource> Project(IDistributedApplicationTestingBuilder builder, string name)
+        => builder.CreateResourceBuilder(builder.Resources.OfType<ProjectResource>().Single(r => r.Name == name));
+
     /// <summary>Runs once the worker has created the inbox schema, before any test.</summary>
     protected virtual Task OnStartedAsync() => Task.CompletedTask;
 

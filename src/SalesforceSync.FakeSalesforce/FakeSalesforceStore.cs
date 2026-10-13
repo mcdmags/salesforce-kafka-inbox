@@ -18,7 +18,8 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
     private readonly Dictionary<string, List<JsonObject>> _history = new(StringComparer.Ordinal); // record Id -> writes
 
     private long _idCounter;
-    private long _apiCalls, _queries, _graphRequests, _graphsSucceeded, _graphsFailed, _creates, _updates;
+    private long _apiCalls, _queries, _graphRequests, _graphsSucceeded, _graphsFailed, _creates, _updates, _concurrencyRejections;
+    private int _longRunningInFlight;
 
     public FakeSalesforceOptions Options { get; } = options;
 
@@ -37,6 +38,26 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
 
     public long CountApiCall() => Interlocked.Increment(ref _apiCalls);
 
+    /// <summary>Takes one of the org's concurrent long-running request slots, or returns null when all are in use.</summary>
+    public IDisposable? TryStartLongRunning()
+    {
+        if (Interlocked.Increment(ref _longRunningInFlight) <= Options.ConcurrentLongRunningLimit)
+            return new LongRunningSlot(this);
+        Interlocked.Decrement(ref _longRunningInFlight);
+        Interlocked.Increment(ref _concurrencyRejections);
+        return null;
+    }
+
+    private sealed class LongRunningSlot(FakeSalesforceStore store) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0) Interlocked.Decrement(ref store._longRunningInFlight);
+        }
+    }
+
     public void Reset()
     {
         lock (_gate)
@@ -45,6 +66,7 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
             _history.Clear();
             _idCounter = 0;
             _apiCalls = _queries = _graphRequests = _graphsSucceeded = _graphsFailed = _creates = _updates = 0;
+            Interlocked.Exchange(ref _concurrencyRejections, 0);
         }
     }
 
@@ -54,7 +76,7 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
         {
             return new FakeSalesforceStats(
                 Interlocked.Read(ref _apiCalls), _queries, _graphRequests, _graphsSucceeded, _graphsFailed,
-                _creates, _updates, _tables.Values.Sum(t => t.Count));
+                _creates, _updates, Interlocked.Read(ref _concurrencyRejections), _tables.Values.Sum(t => t.Count));
         }
     }
 

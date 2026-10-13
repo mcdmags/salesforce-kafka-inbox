@@ -43,7 +43,8 @@ create table if not exists sf_rate_limit (
   app_used             bigint,      -- Sforce-Limit-Info: per-app-api-usage (connected app allocation)
   app_max              bigint,
   app_name             text,
-  usage_updated_at     timestamptz
+  usage_updated_at     timestamptz,
+  daily_budget         bigint       -- this integration's calls per rolling 24h (RateLimit:DailyBudgetShare)
 );
 
 -- Upgrade path for databases created from the earlier schema.
@@ -56,16 +57,28 @@ alter table sf_rate_limit add column if not exists burst_max  bigint;
 alter table sf_rate_limit add column if not exists app_used   bigint;
 alter table sf_rate_limit add column if not exists app_max    bigint;
 alter table sf_rate_limit add column if not exists app_name   text;
+alter table sf_rate_limit add column if not exists daily_budget bigint;  -- this integration's calls per rolling 24h
+
+-- This integration's own Salesforce calls in 10-minute buckets: the rolling 24-hour window that
+-- sf_rate_limit.daily_budget is enforced against (the org-wide total comes from Sforce-Limit-Info).
+create table if not exists sf_api_usage (
+  bucket  timestamptz primary key,
+  calls   bigint      not null
+);
 
 -- What Salesforce last reported (handy for dashboards / alerts)
 create or replace view sf_limit_status as
 select api_used, api_max, round(100.0 * api_used / nullif(api_max, 0), 1)     as api_pct,
        burst_used, burst_max, round(100.0 * burst_used / nullif(burst_max, 0), 1) as burst_pct,
        app_name, app_used, app_max, round(100.0 * app_used / nullif(app_max, 0), 1) as app_pct,
-       refill_per_sec, base_refill_per_sec, paused_until, usage_updated_at
+       refill_per_sec, base_refill_per_sec, paused_until, usage_updated_at,
+       (select coalesce(sum(calls), 0) from sf_api_usage
+        where bucket >= clock_timestamp() - interval '24 hours 10 minutes') as own_calls_24h,
+       daily_budget
 from sf_rate_limit
 where name = 'salesforce';
 
+-- Bucket size, refill rate and daily budget are set from configuration at worker startup (RateLimitInitializer)
 insert into sf_rate_limit (name, tokens, capacity, base_refill_per_sec, refill_per_sec)
 values ('salesforce', 5, 5, 2, 2)
 on conflict (name) do nothing;

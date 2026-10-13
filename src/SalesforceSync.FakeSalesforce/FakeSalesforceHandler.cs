@@ -14,13 +14,31 @@ public sealed class FakeSalesforceHandler(FakeSalesforceStore store) : HttpMessa
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
         var options = store.Options;
+        var longRunning = options.Latency > TimeSpan.Zero && options.Latency >= options.LongRunningThreshold
+                          && !IsTokenRequest(request); // OAuth is not an API request
+        if (!longRunning) return await HandleAsync(request, ct);
+
+        // Salesforce refuses new requests while the org already has the maximum of long-running ones in flight
+        using var slot = store.TryStartLongRunning();
+        if (slot is null)
+        {
+            store.CountApiCall();
+            return Json(request, HttpStatusCode.Forbidden, FakeSalesforceStore.Errors("REQUEST_LIMIT_EXCEEDED",
+                "ConcurrentPerOrgLongTxn Limit exceeded."));
+        }
+        return await HandleAsync(request, ct);
+    }
+
+    private async Task<HttpResponseMessage> HandleAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        var options = store.Options;
         if (options.Latency > TimeSpan.Zero) await Task.Delay(options.Latency, ct);
 
         var uri = request.RequestUri ?? throw new InvalidOperationException("Request has no URI");
         var path = uri.AbsolutePath;
 
         // OAuth token (does not count toward API limits)
-        if (path.EndsWith("/services/oauth2/token", StringComparison.OrdinalIgnoreCase))
+        if (IsTokenRequest(request))
         {
             return Json(request, HttpStatusCode.OK, new JsonObject
             {
@@ -70,6 +88,9 @@ public sealed class FakeSalesforceHandler(FakeSalesforceStore store) : HttpMessa
         res.Headers.TryAddWithoutValidation("Sforce-Limit-Info", $"api-usage={calls}/{options.DailyApiLimit}");
         return res;
     }
+
+    private static bool IsTokenRequest(HttpRequestMessage request)
+        => request.RequestUri?.AbsolutePath.EndsWith("/services/oauth2/token", StringComparison.OrdinalIgnoreCase) == true;
 
     private static HttpResponseMessage Json(HttpRequestMessage request, HttpStatusCode status, JsonNode body) => new(status)
     {

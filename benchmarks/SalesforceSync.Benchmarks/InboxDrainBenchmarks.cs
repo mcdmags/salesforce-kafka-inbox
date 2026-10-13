@@ -196,12 +196,12 @@ public abstract class DrainBenchmarkBase
         _store.Reset();
 
         await using var conn = await _db.OpenConnectionAsync();
-        await conn.ExecuteAsync("truncate sf_inbox restart identity; truncate sf_sync_state; truncate sf_claim_audit");
-        // Effectively unlimited bucket: measure the pipeline, not the throttle
+        await conn.ExecuteAsync("truncate sf_inbox restart identity; truncate sf_sync_state; truncate sf_api_usage; truncate sf_claim_audit");
+        // Effectively unlimited bucket and no daily budget: measure the pipeline, not the throttle
         await conn.ExecuteAsync("""
             update sf_rate_limit
             set tokens = 1e9, capacity = 1e9, base_refill_per_sec = 1e9, refill_per_sec = 1e9,
-                paused_until = null, updated_at = clock_timestamp()
+                daily_budget = null, paused_until = null, updated_at = clock_timestamp()
             where name = 'salesforce'
             """);
 

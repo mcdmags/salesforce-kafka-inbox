@@ -9,6 +9,10 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Services.Configure<SalesforceOptions>(builder.Configuration.GetSection(SalesforceOptions.Section));
 builder.Services.Configure<SyncOptions>(builder.Configuration.GetSection(SyncOptions.Section));
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection(RateLimitOptions.Section));
+builder.Services.AddOptions<SalesforceLimitsOptions>()
+    .Bind(builder.Configuration.GetSection(SalesforceLimitsOptions.Section))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<SalesforceLimitsOptions>, SalesforceLimitsValidator>();
 builder.Services.Configure<FakeSalesforceOptions>(builder.Configuration.GetSection(FakeSalesforceOptions.Section));
 
 // Postgres (ConnectionStrings:inboxdb, injected by Aspire or appsettings)
@@ -17,6 +21,7 @@ builder.Services.AddHostedService<InboxSchemaInitializer>(); // must be register
 
 // Rate limiting (shared through Postgres)
 builder.Services.AddSingleton<SalesforceRateLimiter>();
+builder.Services.AddHostedService<RateLimitInitializer>(); // after the schema, before the workers
 builder.Services.AddSingleton(sp => new SalesforceConcurrencySlots(
     sp.GetRequiredService<Npgsql.NpgsqlDataSource>(),
     sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests));
@@ -27,7 +32,7 @@ var salesforce = builder.Services.AddHttpClient<AccountProfileSync>((sp, c) =>
     {
         var o = sp.GetRequiredService<IOptions<SalesforceOptions>>().Value;
         c.BaseAddress = new Uri(o.InstanceUrl);
-        c.Timeout = TimeSpan.FromSeconds(90); // includes up to MaxWait in the rate limiter
+        c.Timeout = sp.GetRequiredService<IOptions<SalesforceLimitsOptions>>().Value.RequestTimeout; // includes MaxWait
         // Identifies the pod/process in Salesforce API logs (and in the mock org's per-client counters)
         c.DefaultRequestHeaders.UserAgent.ParseAdd($"SalesforceSync/1.0 ({Environment.MachineName}; pid {Environment.ProcessId})");
     })

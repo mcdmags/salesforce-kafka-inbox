@@ -37,7 +37,7 @@ update to an **Account** and its related **Profile** record. Several things make
 | Account + Profile atomicity | **Composite Graph API**: one graph per Account/Profile pair. A graph is all-or-nothing; other graphs in the same request are unaffected. New records use `@{acct.id}` references. |
 | Change-only updates | **Full diff against Salesforce**: the current Account/Profile are queried by external id with every field the coalesced inbox state sets, each field is compared (type-aware: numbers, dates, `""` vs `null`), and only fields that differ are sent. The comparison is with what is in Salesforce *now*, not with the previous event, so edits made directly in Salesforce are corrected. If nothing differs, nothing is written. |
 | Batching | Up to 75 graphs / 500 nodes per request (Salesforce limits); `PROCESSING_HALTED` graphs are retried. |
-| Rate limits | Postgres-backed **token bucket** shared by all processes; global **concurrency cap** via advisory locks; the `Sforce-Limit-Info` header (`api-usage`, `api-bursts`, `per-app-api-usage`) slows everyone down near 80% of the daily allocation and pauses at 95%; 429/503/`REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
+| Rate limits | Configured from Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, `api-bursts`, `per-app-api-usage`) and own usage slow everyone down at 80% and pause at 95%; 429/503 and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
 | Failures | Exponential backoff per account, dead-lettering after `MaxRetries`, retries are safe because each graph rolled back fully. |
 
 ```
@@ -61,11 +61,12 @@ src/
   SalesforceSync.LoadGenerator/   Produces account change events (with bursts) to Kafka
   SalesforceSync.AppHost/         Aspire: Postgres + pgAdmin, Kafka + Kafka UI, mock Salesforce, worker, generator, benchmarks
 tests/
+  SalesforceSync.Tests/           Unit tests: limit formulas, startup validation, limit errors, throttle decisions
   SalesforceSync.IntegrationTests/  End-to-end tests: Aspire app, Kafka in, assertions on the mock org + inbox
 benchmarks/
   SalesforceSync.Benchmarks/      BenchmarkDotNet: real Postgres inbox, fake Salesforce HTTP
 sql/
-  schema.sql                      Inbox, sync watermark and rate-limit tables (embedded and applied at worker startup)
+  schema.sql                      Inbox, sync watermark, rate-limit and API usage tables (embedded, applied at worker startup)
   claim-audit.sql                 Test/benchmark-only trigger that records every account claim
 ```
 
@@ -103,6 +104,19 @@ being taken against the record in Salesforce (a direct edit in Salesforce is cor
 bursts coalesced to the newest state, stale versions superseded without a write, unchanged events skip the
 write, and the schema being reapplied on restart. Writes are checked with the mock's per-record write
 history (`/__fake/history/{sobject}/{externalId}`).
+
+Rate limits (`RateLimitTests`):
+
+- **Daily budget across pods**: 3 replicas share a budget of 30 calls (`DailyApiAllocation=60`,
+  `DailyBudgetShare=0.5`). Exactly 30 calls reach the org, then nothing more; the remaining events are deferred
+  until the budget frees up, without spending retries or being dead-lettered.
+- **Concurrent long-running limit**: the mock org allows 2 concurrent long-running calls while 12 workers send
+  them. The `ConcurrentPerOrgLongTxn` rejections cause a short pause (not the long daily one) and every event
+  still syncs, with no retries spent.
+
+Unit tests (`dotnet test tests/SalesforceSync.Tests`) cover the allocation formula (including the documented
+Enterprise example of 115,000), the per-edition tables, org-type limits, startup validation, error classification
+and throttle decisions.
 
 ### Concurrency: many threads, many pods, same accounts
 
@@ -152,13 +166,58 @@ fake-org counters, claims, overlaps and regressions.
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*StreamingIngest*'
 ```
 
+## Salesforce API limits
+
+Configured from "API Request Limits and Allocations" in the
+[Salesforce Developer Limits and Allocations Quick Reference](https://developer.salesforce.com/docs/platform/salesforce-app-limits-cheatsheet/guide/salesforce-app-limits-platform-api.html).
+Describe the org and the limits are derived; the worker logs what it derived at startup and refuses to start on
+a configuration that can't work.
+
+```json
+"SalesforceLimits": {
+  "OrgType": "Production",          // Production | Sandbox | FullSandbox | DeveloperEdition | Trial
+  "Edition": "Enterprise",          // Enterprise | Professional | Unlimited | Performance
+  "Licenses": { "Salesforce": 15, "Partner Community": 200 },
+  "CallsPerLicense": {},            // add license types / override the built-in table
+  "PurchasedApiCalls": 0,           // API Call Add-Ons
+  "DailyApiAllocation": null,       // or copy the number from Setup (needed for template-based sandboxes)
+  "ConcurrentLongRunningLimit": null,
+  "LongRunningThreshold": "00:00:20",
+  "RequestTimeout": "00:01:30"
+},
+"RateLimit": {
+  "MaxRequestsPerSecond": 2,        // token bucket refill, all pods together
+  "BurstCapacity": 5,               // token bucket size
+  "DailyBudgetShare": 0.5,          // this integration's share of the org's daily allocation
+  "DailySoftRatio": 0.8, "DailySoftSpeed": 0.25,
+  "DailyHardRatio": 0.95, "DailyHardPause": "00:15:00",
+  "BurstSoftRatio": 0.8, "BurstSoftSpeed": 0.5, "BurstPause": "00:00:10",
+  "ConcurrentLimitPause": "00:00:30",
+  "MaxWait": "00:00:20"
+}
+```
+
+| Salesforce limit | How it's applied |
+|---|---|
+| **Total API requests per 24 hours**: Developer Edition 15,000; Full Sandbox 5,000,000; otherwise 100,000 + licenses × calls per license type (Enterprise/Professional: Salesforce 1,000, Platform 1,000, One App 200, Customer Community Plus 200, Partner Community 200, ...; Unlimited/Performance: Salesforce 5,000, Platform 5,000, ...) + purchased add-ons | Computed from `SalesforceLimits` (or `DailyApiAllocation`). The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling 24 hours. When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
+| **Org-wide usage** (also other integrations) | `Sforce-Limit-Info: api-usage` and `per-app-api-usage`: slow down at `DailySoftRatio`, pause at `DailyHardRatio`. A warning is logged if Salesforce reports a different allocation than configured. |
+| **Concurrent long-running requests** (20 s or longer): 25 for production and sandboxes, 5 for Developer Edition and trials | `Sync:MaxConcurrentRequests` (global advisory-lock slots) must not exceed it, or startup fails. Calls that take `LongRunningThreshold` or longer are logged. `REQUEST_LIMIT_EXCEEDED` with `ConcurrentPerOrgLongTxn` pauses all workers for `ConcurrentLimitPause`. |
+| **Total requests exceeded** (`REQUEST_LIMIT_EXCEEDED`, `TotalRequests`) | Pauses all workers for `DailyHardPause`. Salesforce may allow some overage on paid orgs, but it isn't relied on. |
+| **API timeout**: 10 minutes for REST calls, for a composite request as a whole | `RequestTimeout` (HTTP client timeout, including the token wait) must be at most 10 minutes, or startup fails. The worker also gives up at 80% of its lease. |
+
+Every pod applies the bucket size, rate and budget to the shared `sf_rate_limit` row at startup, so roll out
+configuration changes to all pods together. `sf_limit_status` shows the last reported usage, this integration's
+own calls over the last 24 hours and its budget.
+
 ## Using a real Salesforce org
 
 1. No fields need to be added for the sync itself. Account and `Profile__c` need their external id fields
    (marked **Unique**) and the `Account__c` lookup on the Profile.
 2. Set `Salesforce:UseFake=false` (the default outside Aspire) plus `InstanceUrl`, `TokenUrl`,
    `ClientId`, `ClientSecret` (OAuth client credentials).
-3. Adjust object/field names in `AccountProfileSync` and the event mapping in `InboxWorker.MapToSyncItem`.
+3. Describe the org in `SalesforceLimits` and choose this integration's `RateLimit:DailyBudgetShare`
+   (see [Salesforce API limits](#salesforce-api-limits)).
+4. Adjust object/field names in `AccountProfileSync` and the event mapping in `InboxWorker.MapToSyncItem`.
 
 ## Status
 

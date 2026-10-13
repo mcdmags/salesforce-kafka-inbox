@@ -25,7 +25,10 @@ public sealed class MultiPodFixture : AppHostFixture
             .WithEnvironment("Sync__Workers", WorkersPerPod.ToString())
             .WithEnvironment("Sync__MaxConcurrentRequests", (Pods * WorkersPerPod).ToString())
             .WithEnvironment("Sync__BatchSize", "10")
-            .WithEnvironment("Sync__IdleDelay", "00:00:00.050");
+            .WithEnvironment("Sync__IdleDelay", "00:00:00.050")
+            // Measure ordering, not the throttle
+            .WithEnvironment("RateLimit__MaxRequestsPerSecond", "1000000")
+            .WithEnvironment("RateLimit__BurstCapacity", "1000000");
 
         Project(builder, "fake-salesforce")
             .WithEnvironment("FakeSalesforce__Latency", "00:00:00.010");
@@ -35,17 +38,7 @@ public sealed class MultiPodFixture : AppHostFixture
     {
         await using var conn = await Db.OpenConnectionAsync();
         await conn.ExecuteAsync(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "claim-audit.sql")));
-        // Measure ordering, not the throttle
-        await conn.ExecuteAsync("""
-            update sf_rate_limit
-            set tokens = 1e9, capacity = 1e9, base_refill_per_sec = 1e9, refill_per_sec = 1e9,
-                paused_until = null, updated_at = clock_timestamp()
-            where name = 'salesforce'
-            """);
     }
-
-    private static IResourceBuilder<ProjectResource> Project(IDistributedApplicationTestingBuilder builder, string name)
-        => builder.CreateResourceBuilder(builder.Resources.OfType<ProjectResource>().Single(r => r.Name == name));
 }
 
 [CollectionDefinition(Name)]

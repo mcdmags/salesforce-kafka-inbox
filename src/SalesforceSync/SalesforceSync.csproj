@@ -28,6 +28,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="SalesforceSync.Benchmarks" />
+    <InternalsVisibleTo Include="SalesforceSync.Tests" />
   </ItemGroup>
 
 </Project>
