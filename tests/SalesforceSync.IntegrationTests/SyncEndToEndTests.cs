@@ -150,6 +150,33 @@ public sealed class SyncEndToEndTests(AppHostFixture app)
     }
 
     [Fact]
+    public async Task Redelivered_event_is_stored_once_and_an_event_without_a_time_offset_is_skipped()
+    {
+        var acct = AppHostFixture.NewAccountId();
+        var v1 = AppHostFixture.AccountEvent(acct, 1, new JsonObject { ["Name"] = "Acme", ["Rating"] = "Hot" }, new JsonObject());
+        var sameTime = AppHostFixture.AccountEvent(acct, 1, new JsonObject { ["Rating"] = "Warm" }, new JsonObject());
+        var noOffset = (JsonObject)v1.DeepClone();
+        noOffset["meta"]!["time"] = ((string)v1["meta"]!["time"]!).TrimEnd('Z');
+
+        await app.PublishRawAsync(acct, v1.ToJsonString());
+        await app.PublishRawAsync(acct, v1.ToJsonString());            // Kafka redelivery
+        await app.PublishRawAsync(acct, sameTime.ToJsonString());      // another event with the same time: kept
+        await app.PublishRawAsync(acct, noOffset.ToJsonString());      // logged and skipped
+        await app.PublishAsync(acct, 2, new JsonObject { ["Description"] = "v2" }, new JsonObject());
+
+        // Same partition, so by the time v2 is in the inbox every earlier message has been handled
+        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 3);
+        Assert.Equal([1L, 1L, 2L], inbox.Select(r => r.Version));
+        // The same-time event is done when merged with the first, superseded if the first had already synced
+        Assert.All(inbox.Take(2), r => Assert.Contains(r.Status, new[] { "done", "superseded" }));
+        Assert.Equal("done", inbox[2].Status);
+
+        var account = await app.GetRecordAsync("Account", acct);
+        Assert.NotNull(account);
+        Assert.Equal("v2", (string?)account["Description"]);
+    }
+
+    [Fact]
     public async Task Unchanged_event_completes_without_writing_to_Salesforce()
     {
         var acct = AppHostFixture.NewAccountId();

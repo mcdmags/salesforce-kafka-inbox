@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
@@ -152,7 +153,7 @@ public sealed class SalesforceRecordUpserterTests
         await Account("A2", new() { ["Name"] = "Two" }, new());
 
         // The same profile, now owned by A2
-        var result = (await Accounts(("A2", new AccountChangedEvent("P-A1", Json(new() { ["Name"] = "Two" }), null)))).Single();
+        var result = (await Accounts(("A2", Event(new() { ["Name"] = "Two" }, new(), profileId: "P-A1")))).Single();
 
         Assert.Equal(SyncOutcome.Saved, result.Outcome);
         Assert.Equal(IdOf("Account", "A2"), (string?)_org.FindByExternalId("Profile__c", "P-A1")!["Account__c"]);
@@ -218,24 +219,30 @@ public sealed class SalesforceRecordUpserterTests
         Assert.Equal(SyncOutcome.Unchanged, (await Relationship("R1", "A1", "A3", new() { ["Type__c"] = "Reseller", ["Active__c"] = true })).Outcome);
     }
 
-    [Fact]
-    public void Relationship_event_without_its_accounts_cannot_be_mapped()
-        => Assert.Throws<ArgumentException>(() => AccountRelationshipSyncService.Map("R1",
-            new AccountRelationshipChangedEvent("A1", null, null)));
-
     // ---------- Helpers ----------
 
     private async Task<UpsertResult> Account(string key, Dictionary<string, object?> account, Dictionary<string, object?> profile)
         => (await Accounts((key, Event(account, profile)))).Single();
 
     /// <summary>Profiles are keyed "P-{account}" unless the event says otherwise.</summary>
-    private Task<List<UpsertResult>> Accounts(params (string Key, AccountChangedEvent Event)[] items)
-        => Upsert(AccountSyncService.Strategy,
-            items.Select(i => (i.Key, i.Event with { ProfileExternalId = i.Event.ProfileExternalId ?? $"P-{i.Key}" })).ToArray());
+    private Task<List<UpsertResult>> Accounts(params (string Key, JsonObject Event)[] items)
+        => Upsert(AccountSyncService.Strategy, items.Select(i =>
+        {
+            var account = i.Event["account"]!.AsObject();
+            account["externalId"] = i.Key;
+            account["profile"]!["externalId"] ??= $"P-{i.Key}";
+            return (i.Key, Read<AccountEvent>(i.Event));
+        }).ToArray());
 
     private async Task<UpsertResult> Relationship(string key, string account, string related, Dictionary<string, object?> fields)
-        => (await Upsert(AccountRelationshipSyncService.Strategy,
-            (key, new AccountRelationshipChangedEvent(account, related, Json(fields))))).Single();
+    {
+        var rel = Body(fields);
+        rel["externalId"] = key;
+        rel["accountExternalId"] = account;
+        rel["relatedAccountExternalId"] = related;
+        return (await Upsert(AccountRelationshipSyncService.Strategy,
+            (key, Read<AccountRelationshipEvent>(new JsonObject { ["accountRelationship"] = rel })))).Single();
+    }
 
     /// <summary>What the engine does with a strategy, minus the inbox: map, query, upsert.</summary>
     private Task<List<UpsertResult>> Upsert<TEvent>(UpsertStrategy<TEvent> strategy, params (string Key, TEvent Event)[] items)
@@ -244,11 +251,20 @@ public sealed class SalesforceRecordUpserterTests
         return _upserter.UpsertAsync(units, strategy.Queries(units.Select(u => u.Item2).ToList()).ToList(), CancellationToken.None);
     }
 
-    private static AccountChangedEvent Event(Dictionary<string, object?> account, Dictionary<string, object?> profile)
-        => new(null, Json(account), Json(profile));
+    /// <summary>An account event envelope (externalId and the profile's default id are filled in by <see cref="Accounts"/>).</summary>
+    private static JsonObject Event(Dictionary<string, object?> account, Dictionary<string, object?> profile, string? profileId = null)
+    {
+        var body = Body(account);
+        body["profile"] = Body(profile);
+        if (profileId is not null) body["profile"]!["externalId"] = profileId;
+        return new JsonObject { ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z" }, ["account"] = body };
+    }
 
-    private static Dictionary<string, JsonElement> Json(Dictionary<string, object?> fields)
-        => fields.ToDictionary(f => f.Key, f => JsonSerializer.SerializeToElement(f.Value));
+    private static JsonObject Body(Dictionary<string, object?> fields)
+        => JsonSerializer.SerializeToNode(fields)!.AsObject();
+
+    /// <summary>The event as the engine reads it from the inbox.</summary>
+    private static TEvent Read<TEvent>(JsonObject json) => json.Deserialize<TEvent>(SalesforceBatchUpsertService.EventJson)!;
 
     private string? IdOf(string sobject, string externalId) => (string?)_org.FindByExternalId(sobject, externalId)?["Id"];
 }

@@ -26,10 +26,7 @@ public sealed class InboxWorkerService(
             var processed = 0;
             try
             {
-                await using var scope = scopes.CreateAsyncScope();
-                var syncs = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().ToList();
-                for (var i = 0; i < syncs.Count; i++)
-                    processed += await syncs[(loop + iteration + i) % syncs.Count].SyncBatchAsync(ct);
+                processed = await SyncOnceAsync(scopes, loop + iteration, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -47,5 +44,21 @@ public sealed class InboxWorkerService(
                 catch (OperationCanceledException) { break; }
             }
         }
+    }
+
+    /// <summary>
+    /// One pass: a batch of every registered entity type, in a fresh scope (fresh typed HttpClient), starting at
+    /// type <paramref name="rotation"/> mod N so loops don't all queue behind the same type. Also used by the
+    /// benchmarks, so they drive exactly what the worker runs.
+    /// </summary>
+    /// <returns>Inbox rows processed across all types (0 = nothing to do).</returns>
+    public static async Task<int> SyncOnceAsync(IServiceScopeFactory scopes, int rotation, CancellationToken ct)
+    {
+        await using var scope = scopes.CreateAsyncScope();
+        var syncs = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().ToList();
+        var processed = 0;
+        for (var i = 0; i < syncs.Count; i++)
+            processed += await syncs[(rotation + i) % syncs.Count].SyncBatchAsync(ct);
+        return processed;
     }
 }

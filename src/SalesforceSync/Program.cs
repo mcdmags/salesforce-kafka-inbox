@@ -1,10 +1,10 @@
 using System.Net;
 using Microsoft.Extensions.Options;
+using SalesforceSync;
 using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Sync;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -22,25 +22,10 @@ builder.Services.Configure<PostgresRetryOptions>(builder.Configuration.GetSectio
 
 // Postgres (ConnectionStrings:inboxdb, injected by Aspire or appsettings)
 builder.AddNpgsqlDataSource("inboxdb");
-builder.Services.AddSingleton<PostgresExecutionStrategy>(); // every unit of work retries transient Postgres errors
 builder.Services.AddHostedService<InboxSchemaInitializer>(); // must be registered before the workers
 
-// Salesforce client. Handler order: gzip -> auth.
-builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddSingleton<SalesforceSchemaCache>();   // Describe results, shared by all workers in the process
-builder.Services.AddSingleton<WriteEchoTracker>();
-builder.Services.AddSingleton<SalesforceErrors>();
-builder.Services.AddTransient<GzipRequestHandler>();
-builder.Services.AddTransient<SalesforceRecordUpserter>();
-
-var salesforce = builder.Services.AddHttpClient<SalesforceRestClient>((sp, c) =>
-    {
-        var o = sp.GetRequiredService<IOptions<SalesforceOptions>>().Value;
-        c.BaseAddress = new Uri(o.InstanceUrl);
-        // Identifies the pod/process in Salesforce API logs (and in the mock org's per-client counters)
-        c.DefaultRequestHeaders.UserAgent.ParseAdd($"SalesforceSync/1.0 ({Environment.MachineName}; pid {Environment.ProcessId})");
-    })
-    .AddHttpMessageHandler<GzipRequestHandler>();
+// Salesforce client (shared with the benchmarks). Handler order: gzip -> auth.
+var salesforce = builder.Services.AddSalesforceClient();
 
 if (builder.Configuration.GetValue<bool>("Salesforce:UseFake"))
 {
@@ -78,10 +63,8 @@ if (!string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString("kafka"
     builder.Services.AddHostedService<KafkaInboxConsumer>();
 }
 
-// Inbox -> Salesforce: one engine, one strategy per synced object
-builder.Services.AddTransient<SalesforceBatchUpsertService>();
-builder.Services.AddTransient<ISalesforceEntitySync, AccountSyncService>();
-builder.Services.AddTransient<ISalesforceEntitySync, AccountRelationshipSyncService>();
+// Inbox -> Salesforce: one engine, one strategy per synced object (shared with the benchmarks)
+builder.Services.AddInboxSync();
 builder.Services.AddHostedService<InboxWorkerService>();
 
 builder.Build().Run();

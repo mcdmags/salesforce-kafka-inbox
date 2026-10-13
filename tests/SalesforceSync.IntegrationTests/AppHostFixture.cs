@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -21,7 +22,13 @@ public class AppHostFixture : IAsyncLifetime
     public const string Topic = "account-changes";
     public const string RelationshipTopic = "account-relationship-changes";
     public const string Accounts = "account";
-    public const string Relationships = "account-relationship";
+    public const string Relationships = "accountRelationship";
+
+    /// <summary>
+    /// Tests think in versions (v1, v2, ...); an event's order is its meta.time, so version N is published as this
+    /// time + N ms, and read back from sf_event_version the same way.
+    /// </summary>
+    public static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
     /// <summary>The tests' own Postgres sessions, so chaos tests can drop everyone else's connections.</summary>
     public const string TestsApplicationName = "integration-tests";
@@ -100,6 +107,10 @@ public class AppHostFixture : IAsyncLifetime
     public async Task PublishAsync(string accountExtId, long version, JsonObject account, JsonObject profile)
         => await _producer!.ProduceAsync(Topic, Event(accountExtId, version, account, profile));
 
+    /// <summary>Publishes a raw message value as it is (for events the consumer must reject or deduplicate).</summary>
+    public async Task PublishRawAsync(string key, string value)
+        => await _producer!.ProduceAsync(Topic, new Message<string, string> { Key = key, Value = value });
+
     /// <summary>Fire-and-forget produce for bulk loads; call <see cref="Flush"/> afterwards.</summary>
     public void Publish(string accountExtId, long version, JsonObject account, JsonObject profile)
         => _producer!.Produce(Topic, Event(accountExtId, version, account, profile), report =>
@@ -116,30 +127,46 @@ public class AppHostFixture : IAsyncLifetime
     private static Message<string, string> Event(string accountExtId, long version, JsonObject account, JsonObject profile) => new()
     {
         Key = accountExtId,
-        Value = new JsonObject
-        {
-            ["accountExternalId"] = accountExtId,
-            ["profileExternalId"] = ProfileIdFor(accountExtId),
-            ["version"] = version,
-            ["account"] = account,
-            ["profile"] = profile
-        }.ToJsonString()
+        Value = AccountEvent(accountExtId, version, account, profile).ToJsonString()
     };
+
+    /// <summary>
+    /// The envelope of an account event: <c>{ "meta": { "time" }, "account": { "externalId", ...account, "profile":
+    /// { "externalId", ...profile } } }</c>. The caller's objects are copied, so they can be published again.
+    /// </summary>
+    public static JsonObject AccountEvent(string accountExtId, long version, JsonObject account, JsonObject profile)
+    {
+        var profileBody = Body(ProfileIdFor(accountExtId), profile);
+        var body = Body(accountExtId, account);
+        body["profile"] = profileBody;
+        return new JsonObject { ["meta"] = Meta(version), ["account"] = body };
+    }
 
     /// <summary>Publishes an account-to-account relationship event, keyed by relationship id.</summary>
     public async Task PublishRelationshipAsync(string relationshipKey, long version, string accountExtId,
         string relatedAccountExtId, JsonObject fields)
-        => await _producer!.ProduceAsync(RelationshipTopic, new Message<string, string>
+    {
+        var body = Body(relationshipKey, fields);
+        body["accountExternalId"] = accountExtId;
+        body["relatedAccountExternalId"] = relatedAccountExtId;
+        await _producer!.ProduceAsync(RelationshipTopic, new Message<string, string>
         {
             Key = relationshipKey,
-            Value = new JsonObject
-            {
-                ["version"] = version,
-                ["accountExternalId"] = accountExtId,
-                ["relatedAccountExternalId"] = relatedAccountExtId,
-                ["fields"] = fields
-            }.ToJsonString()
+            Value = new JsonObject { ["meta"] = Meta(version), ["accountRelationship"] = body }.ToJsonString()
         });
+    }
+
+    public static JsonObject Meta(long version) => new()
+    {
+        ["time"] = BaseTime.AddMilliseconds(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture)
+    };
+
+    private static JsonObject Body(string externalId, JsonObject fields)
+    {
+        var body = new JsonObject { ["externalId"] = externalId };
+        foreach (var (name, value) in fields) body[name] = value?.DeepClone();
+        return body;
+    }
 
     public static string NewAccountId() => $"E2E-{Guid.NewGuid():N}";
 
@@ -164,7 +191,7 @@ public class AppHostFixture : IAsyncLifetime
 
     public async Task<JsonElement> GetStatsAsync() => await Salesforce.GetFromJsonAsync<JsonElement>("/__fake/stats");
 
-    /// <summary>(version, status) of every inbox row for the entity, oldest first.</summary>
+    /// <summary>(version, status) of every inbox row for the entity, oldest first (version N = meta.time BaseTime + N ms).</summary>
     public async Task<IReadOnlyList<(long Version, string Status)>> GetInboxAsync(string key, string entityType = Accounts)
         => (await GetInboxRowsAsync(key, entityType)).Select(r => (r.Version, r.Status)).ToList();
 
@@ -174,10 +201,11 @@ public class AppHostFixture : IAsyncLifetime
         await using var conn = await _db!.OpenConnectionAsync();
         var rows = await conn.QueryAsync<(long, string, int, string?)>(
             """
-            select version, status, retry_count, last_error_code from sf_inbox
-            where entity_type = @entityType and entity_key = @key order by version
+            select (sf_event_version(payload) - @baseMicros) / 1000, status, retry_count, last_error_code from sf_inbox
+            where sf_event_type(payload) = @entityType and sf_event_key(payload) = @key
+            order by sf_event_version(payload), id
             """,
-            new { entityType, key });
+            new { entityType, key, baseMicros = (BaseTime - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond });
         return rows.ToList();
     }
 

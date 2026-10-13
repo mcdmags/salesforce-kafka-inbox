@@ -8,7 +8,10 @@ using SalesforceSync.Salesforce;
 
 namespace SalesforceSync.Sync;
 
-/// <summary>A pending inbox row as claimed.</summary>
+/// <summary>
+/// A pending inbox row as claimed: <paramref name="Key"/> and <paramref name="Version"/> are read from the raw
+/// <paramref name="Payload"/> by sf_event_key / sf_event_version (meta.time in microseconds since the epoch).
+/// </summary>
 public sealed record InboxEvent(long Id, string Key, long Version, string Payload, int RetryCount);
 
 /// <summary>
@@ -18,8 +21,8 @@ public sealed record InboxEvent(long Id, string Key, long Version, string Payloa
 /// <item>Claims up to <see cref="SyncOptions.BatchSize"/> entities of the strategy's type: per entity, the head row
 /// is locked with FOR UPDATE SKIP LOCKED and all its pending rows are leased, so no two workers in any pod ever
 /// process the same entity at once.</item>
-/// <item>Supersedes events at or below the entity's synced version (late or replayed), merges the rest in version
-/// order and maps them through the strategy; a payload that can't be mapped is dead-lettered on its own.</item>
+/// <item>Supersedes events at or below the entity's synced version (late or replayed), merges the rest in
+/// (version, id) order and maps them through the strategy; a payload that can't be mapped is dead-lettered on its own.</item>
 /// <item>Upserts the units through <see cref="SalesforceRecordUpserter"/> (2 API calls), giving up
 /// before the lease runs out.</item>
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
@@ -33,7 +36,8 @@ public sealed class SalesforceBatchUpsertService(
     IOptions<SyncOptions> options,
     ILogger<SalesforceBatchUpsertService> log)
 {
-    private static readonly JsonSerializerOptions EventJson = new(JsonSerializerDefaults.Web);
+    /// <summary>How inbox payloads (whole event envelopes) are deserialized into a strategy's event type.</summary>
+    public static readonly JsonSerializerOptions EventJson = new(JsonSerializerDefaults.Web);
 
     /// <summary>
     /// Share of the lease a batch may spend before its Salesforce call is cancelled; the rest is margin for a
@@ -151,7 +155,8 @@ public sealed class SalesforceBatchUpsertService(
         var invalid = new List<(long[] Ids, string Error)>();
         foreach (var group in current.GroupBy(e => e.Key, StringComparer.Ordinal))
         {
-            var ordered = group.OrderBy(e => e.Version).ToList();
+            // Two events of an entity with the same time are both kept; the one ingested later counts as newer
+            var ordered = group.OrderBy(e => e.Version).ThenBy(e => e.Id).ToList();
             var ids = ordered.Select(e => e.Id).ToArray();
             try
             {
@@ -221,8 +226,9 @@ public sealed class SalesforceBatchUpsertService(
             : Coalesce(ordered).Deserialize<TEvent>(EventJson);
 
     /// <summary>
-    /// Merges events in version order: later values win, nested objects are merged field by field, so a field an
-    /// event doesn't mention keeps the value of an earlier one (absent = unchanged, null = clear).
+    /// Merges whole events (envelopes) in (version, id) order: later values win, nested objects are merged field by
+    /// field, so a field an event doesn't mention keeps the value of an earlier one (absent = unchanged, null = clear).
+    /// meta.time ends up as the newest event's.
     /// </summary>
     public static JsonObject Coalesce(IReadOnlyList<InboxEvent> ordered)
     {

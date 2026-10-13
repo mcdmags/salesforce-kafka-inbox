@@ -183,7 +183,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<(string Status, long Count)>(
-            "select status, count(*) from sf_inbox where entity_key = any(@ids) group by status", new { ids });
+            "select status, count(*) from sf_inbox where sf_event_key(payload) = any(@ids) group by status", new { ids });
         return rows.ToDictionary(r => r.Status, r => r.Count);
     }
 }

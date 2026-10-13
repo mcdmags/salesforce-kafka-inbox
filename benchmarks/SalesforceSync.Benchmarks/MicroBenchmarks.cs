@@ -26,10 +26,14 @@ public class MicroBenchmarks
             Version: v,
             Payload: new JsonObject
             {
-                ["profileExternalId"] = "PRF-000001",
-                ["version"] = v,
-                ["account"] = new JsonObject { ["Name"] = "Acme", ["Description"] = $"v{v}" },
-                ["profile"] = new JsonObject { ["Score__c"] = v }
+                ["meta"] = new JsonObject { ["time"] = $"2026-10-14T01:02:03.{v:D3}Z" },
+                ["account"] = new JsonObject
+                {
+                    ["externalId"] = "ACC-000001",
+                    ["Name"] = "Acme",
+                    ["Description"] = $"v{v}",
+                    ["profile"] = new JsonObject { ["Score__c"] = v }
+                }
             }.ToJsonString(),
             RetryCount: 1)).ToList();
 

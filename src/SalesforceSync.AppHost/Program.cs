@@ -42,7 +42,7 @@ if (!testMode)
     var benchDb = postgres.AddDatabase("benchdb");
     builder.AddProject<Projects.SalesforceSync_Benchmarks>("benchmarks")
         .WithReference(benchDb).WaitFor(benchDb)
-        .WithArgs("--filter", "*InboxDrain*")
+        .WithArgs("--filter", "*InboxDrain*", "*StreamingIngest*")
         .WithExplicitStart();
 }
 
