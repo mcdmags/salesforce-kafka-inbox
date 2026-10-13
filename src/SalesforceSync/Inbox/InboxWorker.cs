@@ -10,9 +10,10 @@ namespace SalesforceSync.Inbox;
 
 public sealed record InboxEvent(long Id, string AccountExtId, long Version, string Payload, int RetryCount);
 
-public sealed record WorkUnit(SyncItem Item, long[] EventIds);
+/// <summary>Coalesced events of one account; <see cref="Version"/> is the newest of them.</summary>
+public sealed record WorkUnit(SyncItem Item, long Version, long[] EventIds);
 
-/// <summary>One iteration: claim accounts -> coalesce events -> Composite Graph -> record outcomes.</summary>
+/// <summary>One iteration: claim accounts -> drop stale events -> coalesce -> diff + Composite Graph -> record outcomes.</summary>
 public sealed class InboxWorker(
     NpgsqlDataSource db,
     AccountProfileSync sf,
@@ -36,17 +37,28 @@ public sealed class InboxWorker(
         var events = await ClaimAsync(conn, token, ct);
         if (events.Count == 0) return 0;
 
-        var work = events
+        // Events at or below the account's synced version arrived late (replay / out-of-order producer):
+        // Salesforce already holds newer data, so they are superseded without a write.
+        var synced = (await conn.QueryAsync<(string AccountExtId, long Version)>(InboxSql.SyncedVersions,
+                new { accts = events.Select(e => e.AccountExtId).Distinct().ToArray() }))
+            .ToDictionary(r => r.AccountExtId, r => r.Version);
+        var stale = events.Where(e => e.Version <= synced.GetValueOrDefault(e.AccountExtId, long.MinValue)).ToList();
+        var work = events.Except(stale)
             .GroupBy(e => e.AccountExtId)
             .Select(g => Coalesce(g.OrderBy(e => e.Version).ToList()))
             .ToList();
 
-        // 2. Salesforce (outside any transaction)
+        // 2. Salesforce (outside any transaction). Give up before the lease runs out, so another worker never
+        //    claims the account while this one can still write to it.
         Dictionary<string, SyncResult> results;
+        using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        leaseCts.CancelAfter(_opt.Lease * 0.8);
         try
         {
-            results = (await sf.SyncAsync(work.Select(w => w.Item).ToList(), ct))
-                .ToDictionary(r => r.AccountExternalId);
+            results = work.Count == 0
+                ? []
+                : (await sf.SyncAsync(work.Select(w => w.Item).ToList(), leaseCts.Token))
+                    .ToDictionary(r => r.AccountExternalId);
         }
         catch (RateLimitedException ex)
         {
@@ -54,7 +66,7 @@ public sealed class InboxWorker(
             await conn.ExecuteAsync(InboxSql.Defer, new { token, delay = ex.RetryAfter });
             return 0;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             log.LogError(ex, "Batch failed");
             await conn.ExecuteAsync(InboxSql.Fail, new
@@ -69,17 +81,20 @@ public sealed class InboxWorker(
 
         // 3. Record outcomes
         await using var tx = await conn.BeginTransactionAsync(ct);
+        if (stale.Count > 0)
+            await conn.ExecuteAsync(InboxSql.Complete,
+                new { ids = stale.Select(e => e.Id).ToArray(), token, status = "superseded" }, tx);
+
         foreach (var w in work)
         {
             var acct = w.Item.AccountExternalId;
             var r = results[acct];
-            var stale = r.Outcome == SyncOutcome.Superseded
-                        || r.Errors.Any(e => e.Contains("STALE_SYNC_VERSION", StringComparison.Ordinal));
 
-            if (r.Outcome != SyncOutcome.Failed || stale)
+            if (r.Outcome != SyncOutcome.Failed)
             {
-                await conn.ExecuteAsync(InboxSql.Complete,
-                    new { ids = w.EventIds, token, status = stale ? "superseded" : "done" }, tx);
+                // Watermark first: Complete releases the lease that MarkSynced checks
+                await conn.ExecuteAsync(InboxSql.MarkSynced, new { acct, version = w.Version, token }, tx);
+                await conn.ExecuteAsync(InboxSql.Complete, new { ids = w.EventIds, token, status = "done" }, tx);
             }
             else
             {
@@ -136,8 +151,8 @@ public sealed class InboxWorker(
         }
 
         var last = ordered[^1];
-        var item = MapToSyncItem(last.AccountExtId, last.Version, merged);
-        return new WorkUnit(item, ordered.Select(e => e.Id).ToArray());
+        var item = MapToSyncItem(last.AccountExtId, merged);
+        return new WorkUnit(item, last.Version, ordered.Select(e => e.Id).ToArray());
     }
 
     private static void MergeInto(JsonObject target, JsonObject src)
@@ -146,15 +161,14 @@ public sealed class InboxWorker(
     }
 
     /// <summary>Map raw event JSON to Salesforce API field names / CLR types. Adjust to your event schema.</summary>
-    private static SyncItem MapToSyncItem(string acctExtId, long version, JsonObject merged)
+    private static SyncItem MapToSyncItem(string acctExtId, JsonObject merged)
     {
         var profileExtId = merged["profileExternalId"]?.GetValue<string>() ?? acctExtId;
         return new SyncItem(
             acctExtId,
             ToFields(merged["account"] as JsonObject),
             profileExtId,
-            ToFields(merged["profile"] as JsonObject),
-            version);
+            ToFields(merged["profile"] as JsonObject));
     }
 
     private static Dictionary<string, object?> ToFields(JsonObject? obj)

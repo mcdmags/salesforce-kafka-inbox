@@ -17,6 +17,7 @@ update to an **Account** and its related **Profile** record. Several things make
    old Profile (or the reverse), but one bad pair must not roll back everyone else in the batch.
 3. **Only send what changed.** Blind updates fire triggers and flows, pollute field history and burn
    API calls. Each record is read, diffed and only the changed fields are sent; new records are created.
+   Nothing extra may be stored in Salesforce for the sync's own bookkeeping (no custom version field).
 4. **Batching.** Salesforce limits are per call, so updates have to be grouped efficiently.
 5. **Rate limits shared by every worker.** The org has a daily API allocation (also used by other
    integrations), a burst allowance and a cap on concurrent long-running requests. Many workers in
@@ -31,9 +32,10 @@ update to an **Account** and its related **Profile** record. Several things make
 | Durable, replayable intake | Kafka consumer writes each event to a Postgres **inbox** (`sf_inbox`) before committing the offset. `unique (account_ext_id, version)` makes redelivery harmless. |
 | Ordering across parallel batches | Workers claim **accounts, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each account's *oldest pending* row, only for accounts with nothing in flight. All pending events for a claimed account are then leased (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same account. |
 | Bursts of updates to one account | Pending events for an account are **coalesced** (merged in version order), so five updates in five seconds become one Salesforce write with the newest data. |
-| Stale writes that slip through (expired lease, replay) | **Version fence**: every write stamps `Sync_Version__c`; a Salesforce validation rule rejects any write older than what's stored (`STALE_SYNC_VERSION`), and those events are marked `superseded`. |
+| Late or replayed older events | **Sync watermark in Postgres**: `sf_sync_state` holds the newest version synced per account, advanced in the same transaction that completes the events and only while the worker still holds the lease. A claimed event at or below the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
+| Expired leases | The Salesforce call is cancelled at 80% of the lease, so a slow worker gives up before another worker can claim the account. |
 | Account + Profile atomicity | **Composite Graph API**: one graph per Account/Profile pair. A graph is all-or-nothing; other graphs in the same request are unaffected. New records use `@{acct.id}` references. |
-| Change-only updates | Current Account/Profile are queried by external id, diffed with type-aware comparison (numbers, dates, `""` vs `null`), and only changed fields are sent. |
+| Change-only updates | **Full diff against Salesforce**: the current Account/Profile are queried by external id with every field the coalesced inbox state sets, each field is compared (type-aware: numbers, dates, `""` vs `null`), and only fields that differ are sent. The comparison is with what is in Salesforce *now*, not with the previous event, so edits made directly in Salesforce are corrected. If nothing differs, nothing is written. |
 | Batching | Up to 75 graphs / 500 nodes per request (Salesforce limits); `PROCESSING_HALTED` graphs are retried. |
 | Rate limits | Postgres-backed **token bucket** shared by all processes; global **concurrency cap** via advisory locks; the `Sforce-Limit-Info` header (`api-usage`, `api-bursts`, `per-app-api-usage`) slows everyone down near 80% of the daily allocation and pauses at 95%; 429/503/`REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
 | Failures | Exponential backoff per account, dead-lettering after `MaxRetries`, retries are safe because each graph rolled back fully. |
@@ -46,7 +48,7 @@ Kafka (keyed by account) ──► KafkaInboxConsumer ──► sf_inbox (Postgr
                                          coalesce → query + diff → Composite Graph (1 graph / pair)
                                                        │  token bucket + concurrency slots (Postgres)
                                                        ▼
-                                                  Salesforce  ── Sync_Version__c validation rule
+                                                  Salesforce  (standard + existing fields only)
 ```
 
 ## Repository layout
@@ -54,7 +56,7 @@ Kafka (keyed by account) ──► KafkaInboxConsumer ──► sf_inbox (Postgr
 ```
 src/
   SalesforceSync/                 Worker: Kafka consumer, inbox workers, Salesforce client, rate limiting
-  SalesforceSync.FakeSalesforce/  In-memory Salesforce (query, composite graph, validation rule, Sforce-Limit-Info)
+  SalesforceSync.FakeSalesforce/  In-memory Salesforce (query, composite graph, write history, Sforce-Limit-Info)
   SalesforceSync.FakeSalesforce.Server/  The in-memory org as an HTTP service (+ /__fake inspection API)
   SalesforceSync.LoadGenerator/   Produces account change events (with bursts) to Kafka
   SalesforceSync.AppHost/         Aspire: Postgres + pgAdmin, Kafka + Kafka UI, mock Salesforce, worker, generator, benchmarks
@@ -63,8 +65,8 @@ tests/
 benchmarks/
   SalesforceSync.Benchmarks/      BenchmarkDotNet: real Postgres inbox, fake Salesforce HTTP
 sql/
-  schema.sql                      Inbox + rate-limit tables (embedded and applied at worker startup)
-  salesforce-validation-rule.txt  Sync_Version__c rule for the real org
+  schema.sql                      Inbox, sync watermark and rate-limit tables (embedded and applied at worker startup)
+  claim-audit.sql                 Test/benchmark-only trigger that records every account claim
 ```
 
 ## Run everything with Aspire
@@ -96,27 +98,30 @@ on the records in the mock org and the `sf_inbox` status. Requires Docker.
 dotnet test tests/SalesforceSync.IntegrationTests
 ```
 
-Covered: create Account + linked Profile, partial update (only changed fields), bursts coalesced to the
-newest state, stale versions superseded without overwriting, unchanged events skip the write, and the
-schema being reapplied on restart.
+Covered: create Account + linked Profile, partial update (only the differing field is sent), the diff
+being taken against the record in Salesforce (a direct edit in Salesforce is corrected by the next event),
+bursts coalesced to the newest state, stale versions superseded without a write, unchanged events skip the
+write, and the schema being reapplied on restart. Writes are checked with the mock's per-record write
+history (`/__fake/history/{sobject}/{externalId}`).
 
 ### Concurrency: many threads, many pods, same accounts
 
 `ConcurrencyTests` scales the worker like a Kubernetes deployment: **3 replicas x 8 worker loops**, all on one
 inbox and one org, while 60 accounts each receive 25 updates in waves (new events keep arriving while those
-accounts are being processed). To make sure a race cannot hide, the mock org's `Sync_Version__c` rule is
-**off** (a stale write would be applied and counted, not rejected), the rate limiter is opened up and batches
-are small (10 accounts) so workers contend for the same accounts. The test asserts:
+accounts are being processed). Salesforce has nothing that rejects an out-of-order write, so a race would
+land in the org and show up in the mock's write history. The rate limiter is opened up and batches are small
+(10 accounts) so workers contend for the same accounts. The test asserts:
 
 - **No overlapping claims**: `sql/claim-audit.sql` (test-only trigger) records every account claim from the
   moment a worker sets `lock_token` until that worker clears it, ordered by a sequence; no two claims on the
   same account may overlap.
-- No stale write was applied (`versionRegressions = 0`) and no event was superseded.
-- Every Account and Profile ends at version 25 with the newest field values.
+- No out-of-order write: in every record's write history, the version carried in the data (`Description`
+  `vN` on the Account, `Score__c` on the Profile) only moves forward. No event was superseded.
+- Every Account and Profile ends with the version 25 values.
 - Every account was claimed repeatedly (real contention) and all 3 pods wrote to Salesforce (`/__fake/clients`).
 
 The test is known to catch races: with the `FOR UPDATE SKIP LOCKED` / in-flight check removed from
-`InboxSql.LockHeads`, it fails with tens of thousands of overlapping claims and stale writes.
+`InboxSql.LockHeads`, it fails with over ten thousand overlapping claims.
 
 ## Benchmarks
 
@@ -131,11 +136,11 @@ dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter
 ```
 
 Both drain benchmarks run P **pods** (independent service providers: own connection pool, rate limiter and
-HTTP client, like separate processes) x W worker loops against one Postgres inbox and one org, with the fake
-org's version rule **off**. Each iteration **fails** if any account doesn't end at its newest version, any
-inbox row isn't `done` (a `superseded` row would mean an older event reached Salesforce after a newer one),
-any stale write was applied, or the claim audit shows two overlapping claims on the same account. Each
-iteration prints a `//` line with fake-org counters, claims and overlaps.
+HTTP client, like separate processes) x W worker loops against one Postgres inbox and one org. Each iteration
+**fails** if any account doesn't end at its newest version, any record's write history shows an older version
+after a newer one, any inbox row isn't `done` (events are ingested in order, so nothing should be superseded),
+or the claim audit shows two overlapping claims on the same account. Each iteration prints a `//` line with
+fake-org counters, claims, overlaps and regressions.
 
 - `InboxDrainBenchmarks`: the whole inbox is loaded, then drained. Params: `Pods` (1/3), `Workers` (1/4/8),
   `Accounts` (100/1000), `LatencyMs` (0/25), `Events` (5000).
@@ -149,8 +154,8 @@ dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter
 
 ## Using a real Salesforce org
 
-1. Add a `Sync_Version__c` Number(18,0) field and the validation rule in
-   `sql/salesforce-validation-rule.txt` to Account and `Profile__c`. Mark the external id fields **Unique**.
+1. No fields need to be added for the sync itself. Account and `Profile__c` need their external id fields
+   (marked **Unique**) and the `Account__c` lookup on the Profile.
 2. Set `Salesforce:UseFake=false` (the default outside Aspire) plus `InstanceUrl`, `TokenUrl`,
    `ClientId`, `ClientSecret` (OAuth client credentials).
 3. Adjust object/field names in `AccountProfileSync` and the event mapping in `InboxWorker.MapToSyncItem`.

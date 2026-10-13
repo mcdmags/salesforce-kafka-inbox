@@ -22,10 +22,11 @@ namespace SalesforceSync.Benchmarks;
 /// A pod is an independent service provider (own connection pool, rate limiter, HTTP client), like a separate
 /// process; all pods share the Postgres inbox and one Salesforce org.
 /// <para>
-/// Each iteration also verifies correctness, with the fake org's Sync_Version__c rule OFF so the version fence
-/// cannot mask a race: every account must end at its newest version, no stale write may have been applied,
-/// the claim audit (sql/claim-audit.sql) must show no two overlapping claims on the same account, and no event
-/// may be superseded (with the rule off that only happens if an older event reached Salesforce after a newer one).
+/// Each iteration also verifies correctness. Nothing in the org rejects an out-of-order write, so a race would
+/// land: every account must end at its newest version, the org's write history must show each account's
+/// versions only moving forward, the claim audit (sql/claim-audit.sql) must show no two overlapping claims on
+/// the same account, and no event may be superseded (events are ingested in order, so that would mean an
+/// account's sync watermark ran ahead of its events).
 /// </para>
 /// </summary>
 [Config(typeof(DrainConfig))]
@@ -82,8 +83,7 @@ public abstract class DrainBenchmarkBase
         _store = new FakeSalesforceStore(new FakeSalesforceOptions
         {
             Latency = TimeSpan.FromMilliseconds(LatencyMs),
-            EnforceDailyLimit = false,
-            EnforceVersionRule = false // stale writes are applied and counted instead of rejected
+            EnforceDailyLimit = false
         });
 
         _pods = Enumerable.Range(0, Pods).Select(_ => BuildPod()).ToList();
@@ -196,7 +196,7 @@ public abstract class DrainBenchmarkBase
         _store.Reset();
 
         await using var conn = await _db.OpenConnectionAsync();
-        await conn.ExecuteAsync("truncate sf_inbox restart identity; truncate sf_claim_audit");
+        await conn.ExecuteAsync("truncate sf_inbox restart identity; truncate sf_sync_state; truncate sf_claim_audit");
         // Effectively unlimited bucket: measure the pipeline, not the throttle
         await conn.ExecuteAsync("""
             update sf_rate_limit
@@ -261,15 +261,20 @@ public abstract class DrainBenchmarkBase
     private async Task VerifyAsync()
     {
         var wrong = new List<string>();
+        var regressions = 0;
         foreach (var (acct, expected) in _expected)
         {
-            var account = _store.FindByExternalId("Account", acct);
-            var profile = _store.FindByExternalId("Profile__c", acct.Replace("ACC-", "PRF-"));
-            var accountVersion = Number(account?[FakeSalesforceStore.SyncVersionField]);
-            var profileVersion = Number(profile?[FakeSalesforceStore.SyncVersionField]);
+            // Versions in the order the org received them: Description "vN" on the Account, Score__c = N on the Profile
+            var accountVersions = (_store.History("Account", acct) ?? [])
+                .Where(w => w.ContainsKey("Description"))
+                .Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+            var profileVersions = (_store.History("Profile__c", acct.Replace("ACC-", "PRF-")) ?? [])
+                .Where(w => w.ContainsKey("Score__c"))
+                .Select(w => Number(w["Score__c"])).ToList();
 
-            if (accountVersion != expected || profileVersion != expected)
-                wrong.Add($"{acct}: expected v{expected}, account v{accountVersion}, profile v{profileVersion}");
+            if (!IsIncreasing(accountVersions) || !IsIncreasing(profileVersions)) regressions++;
+            if (accountVersions.LastOrDefault() != expected || profileVersions.LastOrDefault() != expected)
+                wrong.Add($"{acct}: expected v{expected}, account v{accountVersions.LastOrDefault()}, profile v{profileVersions.LastOrDefault()}");
         }
 
         await using var conn = await _db.OpenConnectionAsync();
@@ -282,17 +287,19 @@ public abstract class DrainBenchmarkBase
         Console.WriteLine(
             $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms] " +
             $"events={Events} {stats} coalescing={(double)Events / Math.Max(1, stats.GraphsSucceeded):F1} events/graph " +
-            $"claims={claims} overlappingClaims={overlaps} notDone={notDone} wrong={wrong.Count}");
+            $"claims={claims} overlappingClaims={overlaps} notDone={notDone} wrong={wrong.Count} regressions={regressions}");
 
-        if (wrong.Count > 0 || rows != Events || notDone > 0 || overlaps > 0 || stats.VersionRegressions > 0)
+        if (wrong.Count > 0 || rows != Events || notDone > 0 || overlaps > 0 || regressions > 0)
             throw new InvalidOperationException(
                 $"Correctness check failed: {wrong.Count} accounts not at newest version, {notDone} of {rows}/{Events} " +
-                $"inbox rows not done, {overlaps} overlapping claims, {stats.VersionRegressions} stale writes applied. " +
-                string.Join("; ", wrong.Take(5)));
+                $"inbox rows not done, {overlaps} overlapping claims, {regressions} accounts received an older version " +
+                "after a newer one. " + string.Join("; ", wrong.Take(5)));
     }
 
-    private static long? Number(JsonNode? node) =>
-        node is null ? null : (long)decimal.Parse(node.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
+    private static bool IsIncreasing(List<long> versions) => versions.Zip(versions.Skip(1)).All(p => p.First < p.Second);
+
+    private static long Number(JsonNode? node) =>
+        (long)decimal.Parse(node!.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
 }
 
 /// <summary>Whole inbox loaded up front, then drained.</summary>

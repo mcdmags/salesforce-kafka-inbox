@@ -19,6 +19,14 @@ create index if not exists sf_inbox_pending_head on sf_inbox (account_ext_id, ve
 create index if not exists sf_inbox_ready        on sf_inbox (next_attempt_at)        where status = 'pending';
 create index if not exists sf_inbox_leased       on sf_inbox (account_ext_id)         where locked_until is not null;
 
+-- Newest event version synced to Salesforce per account. Lets a late or replayed older event be recognised as
+-- stale without storing anything in Salesforce. Only advanced by the worker holding the account's lease.
+create table if not exists sf_sync_state (
+  account_ext_id  text        primary key,
+  synced_version  bigint      not null,
+  synced_at       timestamptz not null default now()
+);
+
 -- Shared token bucket + daily budget guard
 create table if not exists sf_rate_limit (
   name                 text primary key,

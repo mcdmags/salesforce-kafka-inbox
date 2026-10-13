@@ -128,6 +128,12 @@ public class AppHostFixture : IAsyncLifetime
         return await res.Content.ReadFromJsonAsync<JsonObject>();
     }
 
+    /// <summary>Field values of every write the mock org applied to the record, oldest first (the create first).</summary>
+    public async Task<List<JsonObject>> GetHistoryAsync(string sobject, string externalId)
+        => await Salesforce.GetFromJsonAsync<List<JsonObject>>(
+               $"/__fake/history/{sobject}/{Uri.EscapeDataString(externalId)}")
+           ?? throw new InvalidOperationException("Empty history response");
+
     public async Task<JsonElement> GetStatsAsync() => await Salesforce.GetFromJsonAsync<JsonElement>("/__fake/stats");
 
     /// <summary>(version, status) of every inbox row for the account, oldest first.</summary>

@@ -32,6 +32,23 @@ internal static class InboxSql
         returning id, account_ext_id as AccountExtId, version, payload::text as Payload, retry_count as RetryCount
         """;
 
+    public const string SyncedVersions = """
+        select account_ext_id as AccountExtId, synced_version as Version
+        from sf_sync_state where account_ext_id = any(@accts)
+        """;
+
+    /// <summary>
+    /// Advances the account's watermark, but only while this worker still holds the lease on the account's rows,
+    /// so a worker whose lease expired cannot move it.
+    /// </summary>
+    public const string MarkSynced = """
+        insert into sf_sync_state (account_ext_id, synced_version)
+        select @acct, @version
+        where exists (select 1 from sf_inbox where account_ext_id = @acct and lock_token = @token)
+        on conflict (account_ext_id) do update
+        set synced_version = greatest(sf_sync_state.synced_version, excluded.synced_version), synced_at = now()
+        """;
+
     public const string Complete = """
         update sf_inbox
         set status = @status, locked_until = null, lock_token = null,

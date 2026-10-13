@@ -5,8 +5,9 @@ using System.Text.Json;
 namespace SalesforceSync.Salesforce;
 
 /// <summary>
-/// Reads Account + Profile__c by external id, diffs, and writes one Composite Graph per pair
-/// (each graph is all-or-nothing in Salesforce).
+/// Reads Account + Profile__c by external id, diffs every field of the inbox state against the record in
+/// Salesforce, and writes only the fields that differ: one Composite Graph per pair (each graph is all-or-nothing
+/// in Salesforce). A pair whose fields all match is not written at all.
 /// </summary>
 public sealed class AccountProfileSync(HttpClient http)
 {
@@ -15,7 +16,6 @@ public sealed class AccountProfileSync(HttpClient http)
     private const string ProfileObject = "Profile__c";
     private const string ProfileExtId = "External_Id__c";
     private const string ProfileAccountLookup = "Account__c";
-    private const string SyncVersionField = "Sync_Version__c";
 
     private const int MaxGraphsPerRequest = 75;
     private const int MaxNodesPerRequest = 500;
@@ -27,12 +27,12 @@ public sealed class AccountProfileSync(HttpClient http)
         var results = new List<SyncResult>();
         if (items.Count == 0) return results;
 
-        // 1. Read current state
+        // 1. Read the current value of every field the inbox state sets
         var accounts = await QueryByExternalIdAsync("Account", AccountExtId,
-            items.SelectMany(i => i.Account.Keys).Append(SyncVersionField),
+            items.SelectMany(i => i.Account.Keys),
             items.Select(i => i.AccountExternalId), ct);
         var profiles = await QueryByExternalIdAsync(ProfileObject, ProfileExtId,
-            items.SelectMany(i => i.Profile.Keys).Append(ProfileAccountLookup).Append(SyncVersionField),
+            items.SelectMany(i => i.Profile.Keys).Append(ProfileAccountLookup),
             items.Select(i => i.ProfileExternalId), ct);
 
         // 2. Diff + build graphs
@@ -42,13 +42,6 @@ public sealed class AccountProfileSync(HttpClient http)
             var item = items[i];
             var currentAccount = accounts.GetValueOrDefault(item.AccountExternalId);
             var currentProfile = profiles.GetValueOrDefault(item.ProfileExternalId);
-
-            // Cheap pre-check: Salesforce already holds a newer version
-            if (IsNewer(currentAccount, item.Version) || IsNewer(currentProfile, item.Version))
-            {
-                results.Add(new(item.AccountExternalId, SyncOutcome.Superseded, []));
-                continue;
-            }
 
             var graph = BuildGraph($"g{i}", item, currentAccount, currentProfile);
             if (graph is null) results.Add(new(item.AccountExternalId, SyncOutcome.Unchanged, []));
@@ -105,12 +98,6 @@ public sealed class AccountProfileSync(HttpClient http)
         return results;
     }
 
-    private static bool IsNewer(Dictionary<string, JsonElement>? current, long version)
-        => current is not null
-           && current.TryGetValue(SyncVersionField, out var v)
-           && v.ValueKind == JsonValueKind.Number
-           && v.GetDecimal() > version;
-
     private static PendingGraph? BuildGraph(string graphId, SyncItem item,
         Dictionary<string, JsonElement>? currentAccount, Dictionary<string, JsonElement>? currentProfile)
     {
@@ -122,18 +109,13 @@ public sealed class AccountProfileSync(HttpClient http)
         if (currentAccount is null)
         {
             acctChanges[AccountExtId] = item.AccountExternalId;
-            acctChanges[SyncVersionField] = item.Version;
             nodes.Add(Node("POST", "/sobjects/Account", "acct", acctChanges));
             accountIdOrRef = "@{acct.id}";
         }
         else
         {
             accountIdOrRef = currentAccount["Id"].GetString()!;
-            if (acctChanges.Count > 0)
-            {
-                acctChanges[SyncVersionField] = item.Version;
-                nodes.Add(Node("PATCH", $"/sobjects/Account/{accountIdOrRef}", "acct", acctChanges));
-            }
+            if (acctChanges.Count > 0) nodes.Add(Node("PATCH", $"/sobjects/Account/{accountIdOrRef}", "acct", acctChanges));
         }
 
         // Profile
@@ -142,14 +124,10 @@ public sealed class AccountProfileSync(HttpClient http)
         {
             profChanges[ProfileExtId] = item.ProfileExternalId;
             profChanges[ProfileAccountLookup] = accountIdOrRef;
-            profChanges[SyncVersionField] = item.Version;
             nodes.Add(Node("POST", $"/sobjects/{ProfileObject}", "prof", profChanges));
         }
         else if (profChanges.Count > 0)
-        {
-            profChanges[SyncVersionField] = item.Version;
             nodes.Add(Node("PATCH", $"/sobjects/{ProfileObject}/{currentProfile["Id"].GetString()}", "prof", profChanges));
-        }
 
         return nodes.Count == 0 ? null : new PendingGraph(graphId, item, nodes);
     }
@@ -192,6 +170,10 @@ public sealed class AccountProfileSync(HttpClient http)
 
     // ---------- Diff ----------
 
+    /// <summary>
+    /// Every field of the inbox state whose value differs from Salesforce (missing in Salesforce counts as different).
+    /// Fields the inbox does not set are left alone.
+    /// </summary>
     private static Dictionary<string, object?> Diff(
         IReadOnlyDictionary<string, object?> desired, Dictionary<string, JsonElement>? current)
     {

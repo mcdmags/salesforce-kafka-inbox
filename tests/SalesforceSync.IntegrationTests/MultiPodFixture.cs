@@ -8,9 +8,9 @@ namespace SalesforceSync.IntegrationTests;
 /// The same app, scaled out like a Kubernetes deployment: several worker processes ("pods"), each running
 /// several worker loops, all sharing one Postgres inbox and one Salesforce org.
 /// <para>
-/// The mock org's Sync_Version__c validation rule is turned OFF, so the version fence cannot hide a race:
-/// any out-of-order write lands and is counted as a version regression. The rate limiter is opened up and
-/// batches are kept small so workers contend for the same accounts as much as possible.
+/// Salesforce itself does nothing to stop an out-of-order write, so any race lands in the mock org's write
+/// history. The rate limiter is opened up and batches are kept small so workers contend for the same accounts
+/// as much as possible.
 /// </para>
 /// </summary>
 public sealed class MultiPodFixture : AppHostFixture
@@ -28,7 +28,6 @@ public sealed class MultiPodFixture : AppHostFixture
             .WithEnvironment("Sync__IdleDelay", "00:00:00.050");
 
         Project(builder, "fake-salesforce")
-            .WithEnvironment("FakeSalesforce__EnforceVersionRule", "false")
             .WithEnvironment("FakeSalesforce__Latency", "00:00:00.010");
     }
 

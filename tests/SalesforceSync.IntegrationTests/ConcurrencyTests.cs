@@ -70,20 +70,34 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         Assert.True(overlaps.Count == 0,
             $"{overlaps.Count} overlapping claims on the same account, e.g. {string.Join(" | ", overlaps.Take(3))}");
 
-        // 2. With the version rule off, any stale write would have been applied and counted
+        // 2. Nothing in Salesforce prevents an out-of-order write, so it would show up in the write history:
+        //    every account's Description and every profile's Score__c must only ever move forward
         var stats = await app.GetStatsAsync();
         output.WriteLine($"fake org: {stats}");
-        Assert.Equal(0, stats.GetProperty("versionRegressions").GetInt64());
         Assert.Equal(0, stats.GetProperty("graphsFailed").GetInt64());
+        var regressions = new List<string>();
+        foreach (var id in ids)
+        {
+            var accountVersions = (await app.GetHistoryAsync("Account", id))
+                .Where(w => w.ContainsKey("Description"))
+                .Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+            var profileVersions = (await app.GetHistoryAsync("Profile__c", AppHostFixture.ProfileIdFor(id)))
+                .Where(w => w.ContainsKey("Score__c"))
+                .Select(w => (long)w["Score__c"]!).ToList();
+            if (!IsIncreasing(accountVersions) || !IsIncreasing(profileVersions))
+                regressions.Add($"{id}: account writes v[{string.Join(",", accountVersions)}], profile writes v[{string.Join(",", profileVersions)}]");
+        }
+        Assert.True(regressions.Count == 0,
+            $"{regressions.Count} accounts received an older version after a newer one, e.g. {string.Join(" | ", regressions.Take(3))}");
 
-        // 3. Everything processed, nothing superseded (superseded would mean an older event reached
-        //    Salesforce after a newer one), every claim released, and real contention happened
+        // 3. Everything processed, nothing superseded (events arrive in order, so superseded would mean an
+        //    account's watermark ran ahead of its events), every claim released, and real contention happened
         Assert.Equal(new Dictionary<string, long> { ["done"] = Accounts * Versions }, statuses);
         Assert.Equal(0, audit.Unreleased);
         Assert.True(audit.ReclaimedAccounts > Accounts / 2,
             $"expected most accounts to be claimed repeatedly (real contention), got {audit.ReclaimedAccounts}/{Accounts}");
 
-        // 4. Every account and profile holds the newest version
+        // 4. Every account and profile holds the newest values
         foreach (var id in ids)
         {
             var account = await app.GetRecordAsync("Account", id);
@@ -91,9 +105,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             Assert.NotNull(account);
             Assert.NotNull(profile);
             Assert.Equal($"v{Versions}", (string?)account["Description"]);
-            Assert.Equal((decimal)Versions, (decimal?)account["Sync_Version__c"]);
             Assert.Equal((decimal)Versions, (decimal?)profile["Score__c"]);
-            Assert.Equal((decimal)Versions, (decimal?)profile["Sync_Version__c"]);
         }
 
         // 5. The work really was spread across pods
@@ -102,6 +114,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         foreach (var (client, requests) in clients) output.WriteLine($"{client}: {requests} graph requests");
         Assert.Equal(MultiPodFixture.Pods, clients.Count);
     }
+
+    private static bool IsIncreasing(List<long> versions) => versions.Zip(versions.Skip(1)).All(p => p.First < p.Second);
 
     private async Task<Dictionary<string, long>> InboxStatusesAsync(string[] ids)
     {

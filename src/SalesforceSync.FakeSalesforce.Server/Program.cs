@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.FakeSalesforce.Server;
@@ -22,6 +23,10 @@ fake.MapGet("/stats", (FakeSalesforceStore store) => store.GetStats());
 fake.MapGet("/records/{sobject}", (string sobject, FakeSalesforceStore store) => store.All(sobject));
 fake.MapGet("/records/{sobject}/{externalId}", (string sobject, string externalId, FakeSalesforceStore store) =>
     store.FindByExternalId(sobject, externalId) is { } record ? Results.Ok(record) : Results.NotFound());
+fake.MapPatch("/records/{sobject}/{externalId}", (string sobject, string externalId, JsonObject fields, FakeSalesforceStore store) =>
+    store.Edit(sobject, externalId, fields) ? Results.NoContent() : Results.NotFound());
+fake.MapGet("/history/{sobject}/{externalId}", (string sobject, string externalId, FakeSalesforceStore store) =>
+    store.History(sobject, externalId) is { } writes ? Results.Ok(writes) : Results.NotFound());
 fake.MapGet("/clients", (ClientLog clients) => clients.GraphRequests);
 fake.MapPost("/reset", (FakeSalesforceStore store, ClientLog clients) =>
 {

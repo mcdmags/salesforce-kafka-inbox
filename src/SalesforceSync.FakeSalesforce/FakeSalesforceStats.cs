@@ -6,11 +6,11 @@ public sealed record FakeSalesforceStats(
     long GraphRequests,
     long GraphsSucceeded,
     long GraphsFailed,
-    long StaleRejections,
-    long VersionRegressions,
+    long Creates,
+    long Updates,
     int Records)
 {
     public override string ToString() =>
         $"api={ApiCalls} queries={Queries} graphRequests={GraphRequests} graphsOk={GraphsSucceeded} " +
-        $"graphsFailed={GraphsFailed} staleRejected={StaleRejections} regressions={VersionRegressions} records={Records}";
+        $"graphsFailed={GraphsFailed} creates={Creates} updates={Updates} records={Records}";
 }

@@ -1,3 +1,4 @@
+using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 
 namespace SalesforceSync.IntegrationTests;
@@ -25,7 +26,7 @@ public sealed class SyncEndToEndTests(AppHostFixture app)
         Assert.NotNull(account);
         Assert.Equal("Acme", (string?)account["Name"]);
         Assert.Equal("Hot", (string?)account["Rating"]);
-        Assert.Equal(1m, (decimal?)account["Sync_Version__c"]);
+        Assert.False(account.ContainsKey("Sync_Version__c")); // nothing beyond the event's own fields is stored
 
         var profile = await app.GetRecordAsync("Profile__c", AppHostFixture.ProfileIdFor(acct));
         Assert.NotNull(profile);
@@ -55,13 +56,46 @@ public sealed class SyncEndToEndTests(AppHostFixture app)
         Assert.Equal("Warm", (string?)account["Rating"]);
         Assert.Equal("original", (string?)account["Description"]);
         Assert.Equal("Globex", (string?)account["Name"]);
-        Assert.Equal(2m, (decimal?)account["Sync_Version__c"]);
 
-        // Only the Account changed, so the Profile was not written and keeps its original version
+        // The second write carried only the field that differed from Salesforce
+        var accountWrites = await app.GetHistoryAsync("Account", acct);
+        Assert.Equal(2, accountWrites.Count);
+        Assert.Equal(["Rating"], accountWrites[1].Select(kv => kv.Key));
+
+        // Nothing changed on the Profile, so it was not written again
         var profile = await app.GetRecordAsync("Profile__c", AppHostFixture.ProfileIdFor(acct));
         Assert.NotNull(profile);
         Assert.Equal("Silver", (string?)profile["Tier__c"]);
-        Assert.Equal(1m, (decimal?)profile["Sync_Version__c"]);
+        Assert.Single(await app.GetHistoryAsync("Profile__c", AppHostFixture.ProfileIdFor(acct)));
+    }
+
+    [Fact]
+    public async Task Diff_is_against_the_record_in_Salesforce_not_the_previous_event()
+    {
+        var acct = AppHostFixture.NewAccountId();
+        var account = new JsonObject { ["Name"] = "Wayne", ["Rating"] = "Hot", ["Description"] = "synced" };
+
+        await app.PublishAsync(acct, 1, account, new JsonObject { ["Tier__c"] = "Gold" });
+        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+
+        // Someone edits the record directly in Salesforce
+        using (var edit = await app.Salesforce.PatchAsJsonAsync($"/__fake/records/Account/{acct}",
+                   new JsonObject { ["Rating"] = "Cold", ["Description"] = "edited in Salesforce" }))
+            edit.EnsureSuccessStatusCode();
+
+        // The next event carries the same account data as v1; Salesforce differs in two fields, so both are written back
+        await app.PublishAsync(acct, 2, (JsonObject)account.DeepClone(), new JsonObject { ["Tier__c"] = "Gold" });
+        await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
+
+        var stored = await app.GetRecordAsync("Account", acct);
+        Assert.NotNull(stored);
+        Assert.Equal("Hot", (string?)stored["Rating"]);
+        Assert.Equal("synced", (string?)stored["Description"]);
+
+        var writes = await app.GetHistoryAsync("Account", acct);
+        Assert.Equal(3, writes.Count); // create, the manual edit, the sync's correction
+        Assert.Equal(["Description", "Rating"], writes[2].Select(kv => kv.Key).Order());
+        Assert.Single(await app.GetHistoryAsync("Profile__c", AppHostFixture.ProfileIdFor(acct)));
     }
 
     [Fact]
@@ -76,7 +110,7 @@ public sealed class SyncEndToEndTests(AppHostFixture app)
         await app.PublishAsync(acct, 5, new JsonObject(), new JsonObject { ["Score__c"] = 99 });
 
         var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 5);
-        Assert.All(inbox, r => Assert.Contains(r.Status, new[] { "done", "superseded" }));
+        Assert.All(inbox, r => Assert.Equal("done", r.Status));
 
         var account = await app.GetRecordAsync("Account", acct);
         Assert.NotNull(account);
@@ -88,7 +122,6 @@ public sealed class SyncEndToEndTests(AppHostFixture app)
         Assert.NotNull(profile);
         Assert.Equal("Gold", (string?)profile["Tier__c"]);
         Assert.Equal(99m, (decimal?)profile["Score__c"]);
-        Assert.Equal(5m, (decimal?)profile["Sync_Version__c"]); // v5 only touched the Profile
     }
 
     [Fact]
@@ -104,14 +137,16 @@ public sealed class SyncEndToEndTests(AppHostFixture app)
         var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
         Assert.Equal(new[] { (3L, "superseded"), (5L, "done") }, inbox);
 
+        // sf_sync_state already holds v5 for the account, so v3 never reached Salesforce
         var account = await app.GetRecordAsync("Account", acct);
         Assert.NotNull(account);
         Assert.Equal("Hot", (string?)account["Rating"]);
-        Assert.Equal(5m, (decimal?)account["Sync_Version__c"]);
+        Assert.Single(await app.GetHistoryAsync("Account", acct));
 
         var profile = await app.GetRecordAsync("Profile__c", AppHostFixture.ProfileIdFor(acct));
         Assert.NotNull(profile);
         Assert.Equal("Platinum", (string?)profile["Tier__c"]);
+        Assert.Single(await app.GetHistoryAsync("Profile__c", AppHostFixture.ProfileIdFor(acct)));
     }
 
     [Fact]
@@ -124,17 +159,13 @@ public sealed class SyncEndToEndTests(AppHostFixture app)
         await app.PublishAsync(acct, 1, account, profile);
         await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
 
-        // Same data, newer version: diff is empty, so no PATCH and Sync_Version__c is not bumped
+        // Same data, newer version: every field matches Salesforce, so nothing is written
         await app.PublishAsync(acct, 2, (JsonObject)account.DeepClone(), (JsonObject)profile.DeepClone());
         var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
         Assert.All(inbox, r => Assert.Equal("done", r.Status));
 
-        var stored = await app.GetRecordAsync("Account", acct);
-        Assert.NotNull(stored);
-        Assert.Equal(1m, (decimal?)stored["Sync_Version__c"]);
-        var storedProfile = await app.GetRecordAsync("Profile__c", AppHostFixture.ProfileIdFor(acct));
-        Assert.NotNull(storedProfile);
-        Assert.Equal(1m, (decimal?)storedProfile["Sync_Version__c"]);
+        Assert.Single(await app.GetHistoryAsync("Account", acct));
+        Assert.Single(await app.GetHistoryAsync("Profile__c", AppHostFixture.ProfileIdFor(acct)));
     }
 
     [Fact]

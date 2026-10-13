@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -7,20 +6,19 @@ namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
 /// In-memory Salesforce org: sObject records, SOQL "WHERE field IN (...)" queries, and Composite Graph
-/// execution with per-graph rollback and the Sync_Version__c validation rule.
-/// Thread-safe (single lock), which also mimics Salesforce serializing writes to the same rows.
+/// execution with per-graph rollback. Every committed create/update is kept in a per-record write history, so
+/// tests can check the order in which data reached the org. Thread-safe (single lock), which also mimics Salesforce serializing writes to the same rows.
 /// </summary>
 public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
 {
-    public const string SyncVersionField = "Sync_Version__c";
     public const string ExternalIdField = "External_Id__c";
-    public const string StaleMessage = "STALE_SYNC_VERSION";
 
     private readonly object _gate = new();
     private readonly Dictionary<string, Dictionary<string, JsonObject>> _tables = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<JsonObject>> _history = new(StringComparer.Ordinal); // record Id -> writes
 
     private long _idCounter;
-    private long _apiCalls, _queries, _graphRequests, _graphsSucceeded, _graphsFailed, _staleRejections, _versionRegressions;
+    private long _apiCalls, _queries, _graphRequests, _graphsSucceeded, _graphsFailed, _creates, _updates;
 
     public FakeSalesforceOptions Options { get; } = options;
 
@@ -44,8 +42,9 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
         lock (_gate)
         {
             _tables.Clear();
+            _history.Clear();
             _idCounter = 0;
-            _apiCalls = _queries = _graphRequests = _graphsSucceeded = _graphsFailed = _staleRejections = _versionRegressions = 0;
+            _apiCalls = _queries = _graphRequests = _graphsSucceeded = _graphsFailed = _creates = _updates = 0;
         }
     }
 
@@ -55,7 +54,7 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
         {
             return new FakeSalesforceStats(
                 Interlocked.Read(ref _apiCalls), _queries, _graphRequests, _graphsSucceeded, _graphsFailed,
-                _staleRejections, _versionRegressions, _tables.Values.Sum(t => t.Count));
+                _creates, _updates, _tables.Values.Sum(t => t.Count));
         }
     }
 
@@ -67,6 +66,32 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
             return Table(sobject).Values
                 .FirstOrDefault(r => Str(r[extField]) == externalId)
                 ?.DeepClone().AsObject();
+        }
+    }
+
+    /// <summary>
+    /// Field values of every committed create/update of the record, oldest first (rolled-back graphs excluded),
+    /// or null if the record does not exist.
+    /// </summary>
+    public IReadOnlyList<JsonObject>? History(string sobject, string externalId, string extField = ExternalIdField)
+    {
+        lock (_gate)
+        {
+            var id = Table(sobject).Values.FirstOrDefault(r => Str(r[extField]) == externalId)?["Id"];
+            return id is null ? null : _history[id.GetValue<string>()].Select(w => w.DeepClone().AsObject()).ToList();
+        }
+    }
+
+    /// <summary>Changes a record outside the sync (a user editing it in Salesforce). Returns false if it does not exist.</summary>
+    public bool Edit(string sobject, string externalId, JsonObject fields, string extField = ExternalIdField)
+    {
+        lock (_gate)
+        {
+            var record = Table(sobject).Values.FirstOrDefault(r => Str(r[extField]) == externalId);
+            if (record is null) return false;
+            foreach (var (k, v) in fields) record[k] = v?.DeepClone();
+            _history[record["Id"]!.GetValue<string>()].Add(fields.DeepClone().AsObject());
+            return true;
         }
     }
 
@@ -237,7 +262,14 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
         var id = NewId(sobject);
         body["Id"] = id;
         table[id] = body;
-        undo.Add(() => table.Remove(id));
+        _history[id] = [body.DeepClone().AsObject()];
+        _creates++;
+        undo.Add(() =>
+        {
+            table.Remove(id);
+            _history.Remove(id);
+            _creates--;
+        });
 
         return (201, new JsonObject { ["id"] = id, ["success"] = true, ["errors"] = new JsonArray() });
     }
@@ -250,21 +282,17 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
 
         body.Remove("Id");
 
-        var newVersion = Num(body[SyncVersionField]);
-        var oldVersion = Num(existing[SyncVersionField]);
-        if (newVersion is not null && oldVersion is not null && newVersion < oldVersion)
-        {
-            if (Options.EnforceVersionRule)
-            {
-                _staleRejections++;
-                return (400, Errors("FIELD_CUSTOM_VALIDATION_EXCEPTION", StaleMessage));
-            }
-            _versionRegressions++;
-        }
-
         var before = existing.DeepClone().AsObject();
         foreach (var (k, v) in body) existing[k] = v?.DeepClone();
-        undo.Add(() => table[id] = before);
+        var history = _history[id];
+        history.Add(body.DeepClone().AsObject());
+        _updates++;
+        undo.Add(() =>
+        {
+            table[id] = before;
+            history.RemoveAt(history.Count - 1);
+            _updates--;
+        });
 
         return (204, null);
     }
@@ -297,9 +325,4 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
 
     internal static string? Str(JsonNode? node) =>
         node is JsonValue v && v.GetValueKind() == JsonValueKind.String ? v.GetValue<string>() : null;
-
-    internal static decimal? Num(JsonNode? node) =>
-        node is JsonValue v && v.GetValueKind() == JsonValueKind.Number
-            ? decimal.Parse(v.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture)
-            : null;
 }

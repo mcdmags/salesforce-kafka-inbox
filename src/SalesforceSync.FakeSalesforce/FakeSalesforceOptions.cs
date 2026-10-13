@@ -13,12 +13,6 @@ public sealed class FakeSalesforceOptions
     /// <summary>When true, calls beyond <see cref="DailyApiLimit"/> fail with 403 REQUEST_LIMIT_EXCEEDED.</summary>
     public bool EnforceDailyLimit { get; set; } = true;
 
-    /// <summary>
-    /// Emulates the Sync_Version__c validation rule. Turn off to count how many stale writes
-    /// would have overwritten newer data (<see cref="FakeSalesforceStats.VersionRegressions"/>).
-    /// </summary>
-    public bool EnforceVersionRule { get; set; } = true;
-
     /// <summary>Salesforce stops processing remaining graphs after this many failures in one request.</summary>
     public int MaxGraphFailuresPerRequest { get; set; } = 14;
 }

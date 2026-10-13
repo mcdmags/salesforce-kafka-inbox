@@ -1,9 +1,0 @@
-Add Number(18,0) field Sync_Version__c to Account and Profile__c, then this validation rule on each.
-Error message: STALE_SYNC_VERSION
-
-AND(
-  NOT(ISNEW()),
-  ISCHANGED(Sync_Version__c),
-  NOT(ISBLANK(PRIORVALUE(Sync_Version__c))),
-  Sync_Version__c < PRIORVALUE(Sync_Version__c)
-)
