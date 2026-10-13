@@ -1,6 +1,7 @@
 var builder = DistributedApplication.CreateBuilder(args);
 
-// Integration tests pass --AppHost:TestMode=true: no persistent volume, admin UIs, load generator or benchmarks.
+// --AppHost:TestMode=true runs a minimal app: no persistent volume, admin UIs, load generator or benchmarks.
+// (The integration tests don't use Aspire; they run on Testcontainers.)
 var testMode = bool.TryParse(builder.Configuration["AppHost:TestMode"], out var t) && t;
 
 // Infrastructure

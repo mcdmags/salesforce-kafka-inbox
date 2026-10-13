@@ -6,7 +6,7 @@ using Xunit.Abstractions;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Proves per-account ordering under real concurrency: <see cref="MultiPodFixture.Pods"/> worker processes
+/// Proves per-account ordering under real concurrency: <see cref="MultiPodFixture.PodCount"/> worker pods
 /// x <see cref="MultiPodFixture.WorkersPerPod"/> loops each, while the same accounts keep receiving updates.
 /// </summary>
 [Collection(MultiPodCollection.Name)]
@@ -18,7 +18,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
     [Fact]
     public async Task Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version()
     {
-        var ids = Enumerable.Range(0, Accounts).Select(_ => AppHostFixture.NewAccountId()).ToArray();
+        var ids = Enumerable.Range(0, Accounts).Select(_ => SyncFixture.NewAccountId()).ToArray();
 
         // Waves of updates to every account, so accounts get new events while workers are already processing them.
         // Every version changes every record, so each one must be written and the newest must win.
@@ -67,52 +67,51 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             from sf_claim_audit where entity_key = any(@ids)
             """, new { ids });
         output.WriteLine($"claims={audit.Claims} unreleased={audit.Unreleased} accountsClaimedMoreThanOnce={audit.ReclaimedAccounts} overlaps={overlaps.Count}");
-        Assert.True(overlaps.Count == 0,
-            $"{overlaps.Count} overlapping claims on the same account, e.g. {string.Join(" | ", overlaps.Take(3))}");
+        overlaps.Should().BeEmpty("no two claims on the same account may overlap, e.g. {0}", string.Join(" | ", overlaps.Take(3)));
 
         // 2. Nothing in Salesforce prevents an out-of-order write, so it would show up in the write history:
         //    every account's Description and every profile's Score__c must only ever move forward
         var stats = await app.GetStatsAsync();
         output.WriteLine($"fake org: {stats}");
-        Assert.Equal(0, stats.GetProperty("graphsFailed").GetInt64());
+        stats.GetProperty("graphsFailed").GetInt64().Should().Be(0);
         var regressions = new List<string>();
         foreach (var id in ids)
         {
             var accountVersions = (await app.GetHistoryAsync("Account", id))
                 .Where(w => w.ContainsKey("Description"))
                 .Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
-            var profileVersions = (await app.GetHistoryAsync("Profile__c", AppHostFixture.ProfileIdFor(id)))
+            var profileVersions = (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(id)))
                 .Where(w => w.ContainsKey("Score__c"))
                 .Select(w => (long)w["Score__c"]!).ToList();
             if (!IsIncreasing(accountVersions) || !IsIncreasing(profileVersions))
                 regressions.Add($"{id}: account writes v[{string.Join(",", accountVersions)}], profile writes v[{string.Join(",", profileVersions)}]");
         }
-        Assert.True(regressions.Count == 0,
-            $"{regressions.Count} accounts received an older version after a newer one, e.g. {string.Join(" | ", regressions.Take(3))}");
+        regressions.Should().BeEmpty("no account may receive an older version after a newer one, e.g. {0}",
+            string.Join(" | ", regressions.Take(3)));
 
         // 3. Everything processed, nothing superseded (events arrive in order, so superseded would mean an
         //    account's watermark ran ahead of its events), every claim released, and real contention happened
-        Assert.Equal(new Dictionary<string, long> { ["done"] = Accounts * Versions }, statuses);
-        Assert.Equal(0, audit.Unreleased);
-        Assert.True(audit.ReclaimedAccounts > Accounts / 2,
-            $"expected most accounts to be claimed repeatedly (real contention), got {audit.ReclaimedAccounts}/{Accounts}");
+        statuses.Should().Equal(new Dictionary<string, long> { ["done"] = Accounts * Versions });
+        audit.Unreleased.Should().Be(0, "every claim must be released");
+        audit.ReclaimedAccounts.Should().BeGreaterThan(Accounts / 2,
+            "most of the {0} accounts should be claimed repeatedly (real contention)", Accounts);
 
         // 4. Every account and profile holds the newest values
         foreach (var id in ids)
         {
             var account = await app.GetRecordAsync("Account", id);
-            var profile = await app.GetRecordAsync("Profile__c", AppHostFixture.ProfileIdFor(id));
-            Assert.NotNull(account);
-            Assert.NotNull(profile);
-            Assert.Equal($"v{Versions}", (string?)account["Description"]);
-            Assert.Equal((decimal)Versions, (decimal?)profile["Score__c"]);
+            var profile = await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(id));
+            account.Should().NotBeNull();
+            profile.Should().NotBeNull();
+            ((string?)account!["Description"]).Should().Be($"v{Versions}");
+            ((decimal?)profile!["Score__c"]).Should().Be(Versions);
         }
 
         // 5. The work really was spread across pods
         var clients = await app.Salesforce.GetFromJsonAsync<Dictionary<string, long>>("/__fake/clients");
-        Assert.NotNull(clients);
-        foreach (var (client, requests) in clients) output.WriteLine($"{client}: {requests} graph requests");
-        Assert.Equal(MultiPodFixture.Pods, clients.Count);
+        clients.Should().NotBeNull();
+        foreach (var (client, requests) in clients!) output.WriteLine($"{client}: {requests} graph requests");
+        clients.Should().HaveCount(MultiPodFixture.PodCount, "every pod should have written to Salesforce");
     }
 
     private static bool IsIncreasing(List<long> versions) => versions.Zip(versions.Skip(1)).All(p => p.First < p.Second);
@@ -120,7 +119,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
     [Fact]
     public async Task Pods_survive_their_Postgres_connections_being_dropped()
     {
-        var ids = Enumerable.Range(0, 20).Select(_ => AppHostFixture.NewAccountId()).ToArray();
+        var ids = Enumerable.Range(0, 20).Select(_ => SyncFixture.NewAccountId()).ToArray();
         const int versions = 8;
 
         // Drop every worker and consumer connection (not the tests') every 200 ms while the events flow
@@ -136,7 +135,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
                         from pg_stat_activity
                         where datname = current_database() and pid <> pg_backend_pid()
                           and backend_type = 'client backend' and application_name <> @me
-                        """, new { me = AppHostFixture.TestsApplicationName });
+                        """, new { me = SyncFixture.TestsApplicationName });
                 try { await Task.Delay(200, chaos.Token); } catch (OperationCanceledException) { }
             }
         });
@@ -163,19 +162,20 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         }
 
         output.WriteLine($"terminated {killed} worker connections");
-        Assert.True(killed > 0, "expected the chaos loop to drop connections");
-        Assert.Equal(new Dictionary<string, long> { ["done"] = ids.Length * versions }, await InboxStatusesAsync(ids));
+        killed.Should().BePositive("the chaos loop should have dropped connections");
+        (await InboxStatusesAsync(ids)).Should().Equal(new Dictionary<string, long> { ["done"] = ids.Length * versions });
 
         await using var db = await app.Db.OpenConnectionAsync();
-        Assert.Equal(0, await db.ExecuteScalarAsync<long>(
-            "select count(*) from sf_claim_overlaps where entity_key = any(@ids)", new { ids }));
+        (await db.ExecuteScalarAsync<long>("select count(*) from sf_claim_overlaps where entity_key = any(@ids)", new { ids }))
+            .Should().Be(0, "no two claims on the same account may overlap");
         foreach (var id in ids)
         {
             var account = await app.GetRecordAsync("Account", id);
-            Assert.Equal($"v{versions}", (string?)account?["Description"]);
+            ((string?)account?["Description"]).Should().Be($"v{versions}");
             var written = (await app.GetHistoryAsync("Account", id))
                 .Where(w => w.ContainsKey("Description")).Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
-            Assert.True(IsIncreasing(written), $"{id} received an older version after a newer one: v[{string.Join(",", written)}]");
+            written.Should().BeInAscendingOrder().And.OnlyHaveUniqueItems(
+                "{0} must never receive an older version after a newer one", id);
         }
     }
 

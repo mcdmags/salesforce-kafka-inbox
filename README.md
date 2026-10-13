@@ -194,7 +194,8 @@ src/
 tests/
   SalesforceSync.Tests/           Unit tests: the Salesforce half of the engine with both strategies against the
                                   in-memory org, type normalization, error classification, execution strategy
-  SalesforceSync.IntegrationTests/  End-to-end tests: Aspire app, Kafka in, assertions on the mock org + inbox
+  SalesforceSync.IntegrationTests/  End-to-end tests: Postgres + Kafka in Testcontainers, worker pods and the mock org
+                                  in-process; Kafka in, assertions on the mock org + inbox
 benchmarks/
   SalesforceSync.Benchmarks/      BenchmarkDotNet: real Postgres inbox, fake Salesforce HTTP
 sql/
@@ -224,15 +225,44 @@ The dashboard shows:
   relationship events between accounts
 - **benchmarks**: explicit start (click ▶), runs the inbox drain benchmark against `benchdb`
 
-## Integration tests
+## Tests
 
-End-to-end tests start the Aspire app (`--AppHost:TestMode=true`: throwaway Postgres + Kafka, the worker
-and the mock Salesforce; no load generator, admin UIs or data volume), publish events to Kafka and assert
-on the records in the mock org and the `sf_inbox` status. Requires Docker.
+Requires the .NET 8 SDK; the integration tests also need **Docker** (Docker Desktop, OrbStack or Colima), nothing
+else: no Aspire, no local Postgres or Kafka, no ports to free up. Images are pulled on first run (`postgres:17`,
+`apache/kafka:3.9.1`).
 
 ```bash
+dotnet test                                      # everything
+dotnet test tests/SalesforceSync.Tests           # unit tests only (no Docker, under a second)
 dotnet test tests/SalesforceSync.IntegrationTests
 ```
+
+Libraries: **xUnit** (2.x), **FluentAssertions** (pinned to 7.x, `[7.2.2]`: version 8 needs a commercial license),
+**AutoFixture** (+ `AutoFixture.Xunit2` for `[AutoData]`) for values that only need to exist or be unique (keys,
+names, numbers that are written and read back; documented examples such as the 15 → 18-character id stay
+literal), and **Testcontainers** (`Testcontainers.PostgreSql`, `Testcontainers.Kafka`) for the integration tests.
+
+### Integration tests
+
+Each xUnit collection fixture (`SyncFixture`, `MultiPodFixture`) starts its own environment once, shared by the
+tests in that collection:
+
+- **Postgres** (`postgres:17`) and **Kafka** (KRaft) in containers, removed when the collection finishes. Both
+  topics are created up front with 6 partitions, like production.
+- **The mock Salesforce org**: the `SalesforceSync.FakeSalesforce.Server` app itself (`FakeSalesforceServer.Build`,
+  the same code its `Program.cs` runs) on Kestrel at a random loopback port, so the worker goes through real HTTP:
+  OAuth token, gzip, the REST client.
+- **Worker pods**: each pod is its own in-process `IHost` built with `AddSalesforceSyncWorker()`, the exact
+  registrations `Program.cs` uses (options and validation, Npgsql, the Salesforce client with the auth handler and
+  token provider, `KafkaInboxConsumer`, `InboxSchemaInitializer`, `InboxWorkerService`). A pod has its own
+  connection pool, Kafka consumer (all pods share the consumer group), token cache, HTTP stack and worker loops, so
+  several pods behave like replicas. Pods read the worker's `appsettings.json` plus the fixture's settings, never
+  the environment. Each pod sets `Salesforce:UserAgentInstance` so the mock org can tell them apart.
+
+A fixture shapes the deployment in its constructor: the pod count, `WorkerSettings` that every pod gets (e.g.
+`Sync:Workers`, `Sync:BatchSize`, `Sync:Lease`, `Sync:RetryBaseDelay`) and `FakeOrgSettings` for the org (`FakeSalesforce:Latency`, ...). Waits poll with `Eventually`; no test
+sleeps for a fixed time to wait for a result. Tests publish to Kafka and assert on the records in the mock org and
+the `sf_inbox` status.
 
 Covered: create Account + linked Profile, partial update (only the differing field is sent), the diff
 being taken against the record in Salesforce (a direct edit in Salesforce is corrected by the next event),
@@ -245,6 +275,8 @@ arrives before its Accounts waits (`DEPENDENCY_NOT_SYNCED`, retried) and syncs o
 relationship event is dead-lettered alone. Writes are checked with the mock's per-record write history
 (`/__fake/history/{sobject}/{externalId}`).
 
+### Unit tests
+
 Unit tests (`dotnet test tests/SalesforceSync.Tests`, no Docker) run the Salesforce half of the engine with both
 strategies against the in-memory org: 2 calls per batch, values written once instead of flapping, a bad value
 failing only its own unit before any call, validation / lock / halted outcomes, relinking, relationships and
@@ -254,7 +286,7 @@ example), error classification and the Postgres execution strategy (retried, not
 
 ### Concurrency: many threads, many pods, same accounts
 
-`ConcurrencyTests` scales the worker like a Kubernetes deployment: **3 replicas x 8 worker loops**, all on one
+`ConcurrencyTests` (`MultiPodFixture`) scales the worker like a Kubernetes deployment: **3 pods x 8 worker loops**, all on one
 inbox and one org, while 60 accounts each receive 25 updates in waves (new events keep arriving while those
 accounts are being processed). Salesforce has nothing that rejects an out-of-order write, so a race would
 land in the org and show up in the mock's write history. Batches are small (10 accounts) so workers contend for
@@ -266,13 +298,15 @@ the same accounts. The test asserts:
 - No out-of-order write: in every record's write history, the version carried in the data (`Description`
   `vN` on the Account, `Score__c` on the Profile) only moves forward. No event was superseded.
 - Every Account and Profile ends with the version 25 values.
-- Every account was claimed repeatedly (real contention) and all 3 pods wrote to Salesforce (`/__fake/clients`).
+- Every account was claimed repeatedly (real contention) and all 3 pods wrote to Salesforce (`/__fake/clients`, per
+  User-Agent).
 
 The test is known to catch races: with the `FOR UPDATE SKIP LOCKED` / in-flight check removed from
 `InboxSql.LockHeads`, it fails with over ten thousand overlapping claims.
 
 `Pods_survive_their_Postgres_connections_being_dropped` repeats this while every worker and consumer connection
-is terminated (`pg_terminate_backend`) every 200 ms: every event still ends `done`, with no overlapping claims and
+is terminated (`pg_terminate_backend`) every 200 ms (the test's own sessions are spared by their
+`application_name`): every event still ends `done`, with no overlapping claims and
 no out-of-order writes.
 
 ## Benchmarks

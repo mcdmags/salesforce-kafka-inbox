@@ -15,6 +15,7 @@ namespace SalesforceSync.Tests;
 public sealed class SalesforceRecordUpserterTests
 {
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
+    private readonly Fixture _any = new();
     private readonly SalesforceRecordUpserter _upserter;
 
     public SalesforceRecordUpserterTests()
@@ -33,28 +34,31 @@ public sealed class SalesforceRecordUpserterTests
     [Fact]
     public async Task Creates_Account_and_linked_Profile()
     {
-        var result = await Account("A1", new() { ["Name"] = "Acme" }, new() { ["Tier__c"] = "Gold" });
+        var name = _any.Create<string>();
 
-        Assert.Equal(SyncOutcome.Saved, result.Outcome);
-        Assert.Equal("Acme", (string?)_org.FindByExternalId("Account", "A1")!["Name"]);
-        Assert.Equal(IdOf("Account", "A1"), (string?)_org.FindByExternalId("Profile__c", "P-A1")!["Account__c"]);
+        var result = await Account("A1", new() { ["Name"] = name }, new() { ["Tier__c"] = "Gold" });
+
+        result.Outcome.Should().Be(SyncOutcome.Saved);
+        ((string?)_org.FindByExternalId("Account", "A1")!["Name"]).Should().Be(name);
+        ((string?)_org.FindByExternalId("Profile__c", "P-A1")!["Account__c"]).Should().Be(IdOf("Account", "A1"),
+            "the Profile is linked to the Account created in the same graph");
     }
 
     [Fact]
     public async Task A_batch_costs_one_composite_read_and_one_graph_write()
     {
-        await Account("A1", new() { ["Name"] = "Acme" }, new());  // warms the describe cache
+        await Account("A1", new() { ["Name"] = _any.Create<string>() }, new());  // warms the describe cache
         var before = _org.GetStats();
 
         await Accounts(
-            ("A2", Event(new() { ["Name"] = "Two" }, new() { ["Tier__c"] = "Gold" })),
-            ("A3", Event(new() { ["Name"] = "Three" }, new() { ["Tier__c"] = "Silver" })));
+            ("A2", Event(new() { ["Name"] = _any.Create<string>() }, new() { ["Tier__c"] = "Gold" })),
+            ("A3", Event(new() { ["Name"] = _any.Create<string>() }, new() { ["Tier__c"] = "Silver" })));
 
         var after = _org.GetStats();
-        Assert.Equal(2, after.ApiCalls - before.ApiCalls);
-        Assert.Equal(1, after.CompositeRequests - before.CompositeRequests);
-        Assert.Equal(1, after.GraphRequests - before.GraphRequests);
-        Assert.Equal(0, after.Describes - before.Describes); // cached
+        (after.ApiCalls - before.ApiCalls).Should().Be(2);
+        (after.CompositeRequests - before.CompositeRequests).Should().Be(1, "every read goes in one composite request");
+        (after.GraphRequests - before.GraphRequests).Should().Be(1, "every write goes in one composite graph request");
+        (after.Describes - before.Describes).Should().Be(0, "Describe results are cached");
     }
 
     [Fact]
@@ -70,21 +74,23 @@ public sealed class SalesforceRecordUpserterTests
         };
         var profile = new Dictionary<string, object?> { ["Score__c"] = "42", ["Discount__c"] = 12.345m };
 
-        Assert.Equal(SyncOutcome.Saved, (await Account("A1", account, profile)).Outcome);
-        Assert.Equal(SyncOutcome.Unchanged, (await Account("A1", account, profile)).Outcome);
+        (await Account("A1", account, profile)).Outcome.Should().Be(SyncOutcome.Saved);
+        (await Account("A1", account, profile)).Outcome.Should().Be(SyncOutcome.Unchanged,
+            "the normalized values equal what Salesforce stored");
 
-        Assert.Single(_org.History("Account", "A1")!);
-        Assert.Single(_org.History("Profile__c", "P-A1")!);
+        _org.History("Account", "A1").Should().ContainSingle();
+        _org.History("Profile__c", "P-A1").Should().ContainSingle();
     }
 
     [Fact]
     public async Task Only_differing_fields_are_sent()
     {
-        await Account("A1", new() { ["Name"] = "Acme", ["Rating"] = "Hot", ["Description"] = "x" }, new());
+        var (name, description) = (_any.Create<string>(), _any.Create<string>());
+        await Account("A1", new() { ["Name"] = name, ["Rating"] = "Hot", ["Description"] = description }, new());
 
-        await Account("A1", new() { ["Name"] = "Acme", ["Rating"] = "Cold", ["Description"] = "x" }, new());
+        await Account("A1", new() { ["Name"] = name, ["Rating"] = "Cold", ["Description"] = description }, new());
 
-        Assert.Equal(["Rating"], _org.History("Account", "A1")![^1].Select(kv => kv.Key));
+        _org.History("Account", "A1")![^1].Select(kv => kv.Key).Should().Equal("Rating");
     }
 
     [Theory]
@@ -101,12 +107,12 @@ public sealed class SalesforceRecordUpserterTests
             ("BAD", Event(new() { ["Name"] = "Bad", [field] = value }, new())),
             ("GOOD", Event(new() { ["Name"] = "Good" }, new())));
 
-        var bad = results.Single(r => r.Key == "BAD");
-        Assert.Equal(SyncOutcome.PermanentFailure, bad.Outcome);
-        Assert.Equal(code, bad.PrimaryError?.Code);
-        Assert.Equal(SyncOutcome.Saved, results.Single(r => r.Key == "GOOD").Outcome);
-        Assert.Null(_org.FindByExternalId("Account", "BAD"));
-        Assert.Equal(2, _org.GetStats().ApiCalls - before.ApiCalls); // the bad unit didn't break the query
+        var bad = results.Should().ContainSingle(r => r.Key == "BAD").Subject;
+        bad.Outcome.Should().Be(SyncOutcome.PermanentFailure);
+        (bad.PrimaryError?.Code).Should().Be(code);
+        results.Should().ContainSingle(r => r.Key == "GOOD").Which.Outcome.Should().Be(SyncOutcome.Saved);
+        _org.FindByExternalId("Account", "BAD").Should().BeNull();
+        (_org.GetStats().ApiCalls - before.ApiCalls).Should().Be(2, "the bad unit didn't break the query");
     }
 
     [Fact]
@@ -116,11 +122,11 @@ public sealed class SalesforceRecordUpserterTests
 
         var results = await Accounts(("A1", Event(new() { ["Name"] = "One" }, new())), ("A2", Event(new() { ["Name"] = "Two" }, new())));
 
-        var failed = results.Single(r => r.Key == "A1");
-        Assert.Equal(SyncOutcome.PermanentFailure, failed.Outcome);
-        Assert.Equal("FIELD_CUSTOM_VALIDATION_EXCEPTION", failed.PrimaryError?.Code);
-        Assert.Equal(SyncOutcome.Saved, results.Single(r => r.Key == "A2").Outcome);
-        Assert.Null(_org.FindByExternalId("Profile__c", "P-A1")); // the graph rolled back as a whole
+        var failed = results.Should().ContainSingle(r => r.Key == "A1").Subject;
+        failed.Outcome.Should().Be(SyncOutcome.PermanentFailure);
+        (failed.PrimaryError?.Code).Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION");
+        results.Should().ContainSingle(r => r.Key == "A2").Which.Outcome.Should().Be(SyncOutcome.Saved);
+        _org.FindByExternalId("Profile__c", "P-A1").Should().BeNull("the graph rolled back as a whole");
     }
 
     [Fact]
@@ -128,8 +134,10 @@ public sealed class SalesforceRecordUpserterTests
     {
         _org.InjectFault("Account", "A1", "UNABLE_TO_LOCK_ROW", "unable to obtain exclusive access", 1);
 
-        Assert.Equal(SyncOutcome.TransientFailure, (await Account("A1", new() { ["Name"] = "One" }, new())).Outcome);
-        Assert.Equal(SyncOutcome.Saved, (await Account("A1", new() { ["Name"] = "One" }, new())).Outcome);
+        var name = _any.Create<string>();
+
+        (await Account("A1", new() { ["Name"] = name }, new())).Outcome.Should().Be(SyncOutcome.TransientFailure);
+        (await Account("A1", new() { ["Name"] = name }, new())).Outcome.Should().Be(SyncOutcome.Saved, "the lock was released");
     }
 
     [Fact]
@@ -141,9 +149,10 @@ public sealed class SalesforceRecordUpserterTests
 
         var results = (await Accounts(items)).ToDictionary(r => r.Key);
 
-        Assert.All(items.Take(15), i => Assert.Equal(SyncOutcome.PermanentFailure, results[i.Item1].Outcome));
-        Assert.All(items.Skip(15), i => Assert.Equal(SyncOutcome.NotAttempted, results[i.Item1].Outcome));
-        Assert.Equal(10, _org.GetStats().GraphsHalted);
+        items.Take(15).Select(i => results[i.Item1].Outcome).Should().AllBeEquivalentTo(SyncOutcome.PermanentFailure);
+        items.Skip(15).Select(i => results[i.Item1].Outcome).Should().AllBeEquivalentTo(SyncOutcome.NotAttempted,
+            "Salesforce stops processing after 14 failed graphs");
+        _org.GetStats().GraphsHalted.Should().Be(10);
     }
 
     [Fact]
@@ -155,8 +164,8 @@ public sealed class SalesforceRecordUpserterTests
         // The same profile, now owned by A2
         var result = (await Accounts(("A2", Event(new() { ["Name"] = "Two" }, new(), profileId: "P-A1")))).Single();
 
-        Assert.Equal(SyncOutcome.Saved, result.Outcome);
-        Assert.Equal(IdOf("Account", "A2"), (string?)_org.FindByExternalId("Profile__c", "P-A1")!["Account__c"]);
+        result.Outcome.Should().Be(SyncOutcome.Saved);
+        ((string?)_org.FindByExternalId("Profile__c", "P-A1")!["Account__c"]).Should().Be(IdOf("Account", "A2"));
     }
 
     [Fact]
@@ -166,7 +175,8 @@ public sealed class SalesforceRecordUpserterTests
             .Select(i => ($"A{i:D2}", Event(new() { ["Name"] = $"Account number {i}", ["Description"] = new string('x', 200) }, new())))
             .ToArray();
 
-        Assert.All(await Accounts(items), r => Assert.Equal(SyncOutcome.Saved, r.Outcome)); // the org decompressed and applied them
+        (await Accounts(items)).Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved,
+            "the org decompressed and applied them");
     }
 
     // ---------- Account relationships: the same engine, another strategy ----------
@@ -178,11 +188,11 @@ public sealed class SalesforceRecordUpserterTests
 
         var result = await Relationship("R1", "A1", "A2", new() { ["Type__c"] = "Parent", ["Active__c"] = true });
 
-        Assert.Equal(SyncOutcome.Saved, result.Outcome);
+        result.Outcome.Should().Be(SyncOutcome.Saved);
         var rel = _org.FindByExternalId("Account_Relationship__c", "R1")!;
-        Assert.Equal(IdOf("Account", "A1"), (string?)rel["Account__c"]);
-        Assert.Equal(IdOf("Account", "A2"), (string?)rel["Related_Account__c"]);
-        Assert.Equal("Parent", (string?)rel["Type__c"]);
+        ((string?)rel["Account__c"]).Should().Be(IdOf("Account", "A1"));
+        ((string?)rel["Related_Account__c"]).Should().Be(IdOf("Account", "A2"));
+        ((string?)rel["Type__c"]).Should().Be("Parent");
     }
 
     [Fact]
@@ -193,13 +203,13 @@ public sealed class SalesforceRecordUpserterTests
 
         var early = await Relationship("R1", "A1", "A2", new() { ["Type__c"] = "Parent" });
 
-        Assert.Equal(SyncOutcome.TransientFailure, early.Outcome);
-        Assert.Equal(SalesforceErrors.DependencyNotSynced, early.PrimaryError?.Code);
-        Assert.Contains("A2", early.PrimaryError?.Message);
-        Assert.Equal(graphsBefore, _org.GetStats().GraphRequests); // nothing was written
+        early.Outcome.Should().Be(SyncOutcome.TransientFailure);
+        (early.PrimaryError?.Code).Should().Be(SalesforceErrors.DependencyNotSynced);
+        (early.PrimaryError?.Message).Should().Contain("A2");
+        _org.GetStats().GraphRequests.Should().Be(graphsBefore, "nothing was written");
 
-        await Account("A2", new() { ["Name"] = "Child" }, new());
-        Assert.Equal(SyncOutcome.Saved, (await Relationship("R1", "A1", "A2", new() { ["Type__c"] = "Parent" })).Outcome);
+        await Account("A2", new() { ["Name"] = _any.Create<string>() }, new());
+        (await Relationship("R1", "A1", "A2", new() { ["Type__c"] = "Parent" })).Outcome.Should().Be(SyncOutcome.Saved);
     }
 
     [Fact]
@@ -210,13 +220,14 @@ public sealed class SalesforceRecordUpserterTests
         await Relationship("R1", "A1", "A2", new() { ["Type__c"] = "Partner", ["Active__c"] = true });
 
         await Relationship("R1", "A1", "A2", new() { ["Type__c"] = "Reseller", ["Active__c"] = true });
-        Assert.Equal(["Type__c"], _org.History("Account_Relationship__c", "R1")![^1].Select(kv => kv.Key));
+        _org.History("Account_Relationship__c", "R1")![^1].Select(kv => kv.Key).Should().Equal("Type__c");
 
         await Relationship("R1", "A1", "A3", new() { ["Type__c"] = "Reseller", ["Active__c"] = true });
-        Assert.Equal(["Related_Account__c"], _org.History("Account_Relationship__c", "R1")![^1].Select(kv => kv.Key));
-        Assert.Equal(IdOf("Account", "A3"), (string?)_org.FindByExternalId("Account_Relationship__c", "R1")!["Related_Account__c"]);
+        _org.History("Account_Relationship__c", "R1")![^1].Select(kv => kv.Key).Should().Equal("Related_Account__c");
+        ((string?)_org.FindByExternalId("Account_Relationship__c", "R1")!["Related_Account__c"]).Should().Be(IdOf("Account", "A3"));
 
-        Assert.Equal(SyncOutcome.Unchanged, (await Relationship("R1", "A1", "A3", new() { ["Type__c"] = "Reseller", ["Active__c"] = true })).Outcome);
+        (await Relationship("R1", "A1", "A3", new() { ["Type__c"] = "Reseller", ["Active__c"] = true })).Outcome
+            .Should().Be(SyncOutcome.Unchanged);
     }
 
     // ---------- Helpers ----------

@@ -2,8 +2,8 @@ using Dapper;
 
 namespace SalesforceSync.IntegrationTests;
 
-[Collection(AppHostCollection.Name)]
-public sealed class SchemaTests(AppHostFixture app)
+[Collection(SyncCollection.Name)]
+public sealed class SchemaTests(SyncFixture app)
 {
     [Fact]
     public async Task Schema_can_be_reapplied_to_an_existing_database()
@@ -11,7 +11,9 @@ public sealed class SchemaTests(AppHostFixture app)
         // The worker already applied it at startup; a restart against a persisted volume applies it again.
         var sql = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "schema.sql"));
 
-        await app.ExecuteSqlAsync(sql);
+        var reapply = () => app.ExecuteSqlAsync(sql);
+
+        await reapply.Should().NotThrowAsync();
     }
 
     [Fact]
@@ -35,20 +37,20 @@ public sealed class SchemaTests(AppHostFixture app)
         await conn.ExecuteAsync(sql, transaction: tx);
         await conn.ExecuteAsync(sql, transaction: tx); // still idempotent after the upgrade
 
-        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
-            "select count(*) from sf_inbox_legacy where entity_key = 'ACC-1' and version = 7", transaction: tx));
-        Assert.Equal(
-            ["sf_inbox_event_unique", "sf_inbox_leased_key", "sf_inbox_pending_key", "sf_inbox_pkey", "sf_inbox_ready"],
-            await conn.QueryAsync<string>(
+        (await conn.ExecuteScalarAsync<long>(
+                "select count(*) from sf_inbox_legacy where entity_key = 'ACC-1' and version = 7", transaction: tx))
+            .Should().Be(1, "the old rows are kept aside for inspection");
+        (await conn.QueryAsync<string>(
                 "select indexname from pg_indexes where schemaname = current_schema() and tablename = 'sf_inbox' order by 1",
-                transaction: tx));
+                transaction: tx))
+            .Should().Equal("sf_inbox_event_unique", "sf_inbox_leased_key", "sf_inbox_pending_key", "sf_inbox_pkey", "sf_inbox_ready");
         var inserted = await conn.ExecuteAsync("""
             insert into sf_inbox (payload)
             values ('{"meta": {"time": "2026-10-14T01:02:03Z"}, "account": {"externalId": "ACC-1"}}'),
                    ('{"account": {"externalId": "ACC-1"}, "meta": {"time": "2026-10-14T01:02:03Z"}}')
             on conflict do nothing
             """, transaction: tx);
-        Assert.Equal(1, inserted); // the same event twice (key order doesn't matter in jsonb)
+        inserted.Should().Be(1, "it is the same event twice (key order doesn't matter in jsonb)");
 
         await tx.RollbackAsync();
     }

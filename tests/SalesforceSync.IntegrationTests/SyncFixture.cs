@@ -2,22 +2,25 @@ using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Aspire.Hosting;
-using Aspire.Hosting.ApplicationModel;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
 using Dapper;
-using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
+using SalesforceSync.IntegrationTests.Hosting;
+using Testcontainers.Kafka;
+using Testcontainers.PostgreSql;
 
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Starts the whole Aspire app once for all tests: Postgres + Kafka containers, the sync worker and the
-/// mock Salesforce service. Tests produce to Kafka and assert on the mock org and the Postgres inbox.
-/// Subclasses can reshape the app (replicas, settings) in <see cref="Configure"/>.
+/// The whole sync, started once per xUnit collection: Postgres and Kafka in containers (Testcontainers), the mock
+/// Salesforce org on Kestrel in this process, and <see cref="Pods"/> worker pods, each an in-process
+/// <see cref="Microsoft.Extensions.Hosting.IHost"/> wired by the worker's own registrations. Tests produce to Kafka
+/// and assert on the mock org and the Postgres inbox. Subclasses reshape the deployment (pods, per-pod settings, the
+/// org's behavior) in their constructor through <see cref="WorkerSettings"/> and <see cref="FakeOrgSettings"/>.
+/// Requires only Docker.
 /// </summary>
-public class AppHostFixture : IAsyncLifetime
+public class SyncFixture : IAsyncLifetime
 {
     public const string Topic = "account-changes";
     public const string RelationshipTopic = "account-relationship-changes";
@@ -32,25 +35,68 @@ public class AppHostFixture : IAsyncLifetime
 
     /// <summary>The tests' own Postgres sessions, so chaos tests can drop everyone else's connections.</summary>
     public const string TestsApplicationName = "integration-tests";
+
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromMinutes(5);
 
-    private DistributedApplication? _app;
+    private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17")
+        .WithDatabase("inboxdb")
+        .WithUsername("postgres")
+        .WithPassword("postgres")
+        // Room for several pods' pools plus the tests' own connections
+        .WithCommand("-c", "max_connections=300")
+        .Build();
+
+    private readonly KafkaContainer _kafka = new KafkaBuilder("apache/kafka:3.9.1").Build();
+
+    private readonly List<WorkerPod> _pods = [];
+    private FakeOrgHost? _org;
     private IProducer<string, string>? _producer;
     private NpgsqlDataSource? _db;
+
+    /// <param name="pods">Worker pods (replicas) sharing the inbox, the Kafka consumer group and the org.</param>
+    protected SyncFixture(int pods)
+    {
+        Pods = pods;
+    }
+
+    public SyncFixture() : this(pods: 1)
+    {
+    }
+
+    public int Pods { get; }
+
+    /// <summary>
+    /// Configuration every pod gets on top of the worker's appsettings.json (like the environment variables of a
+    /// Kubernetes deployment). Connection strings and the org's URL are added at startup.
+    /// </summary>
+    protected Dictionary<string, string?> WorkerSettings { get; } = new()
+    {
+        ["Salesforce:UseFake"] = "false", // the real OAuth + REST client, over HTTP to the mock org
+        ["Salesforce:ClientId"] = "fake-client",
+        ["Salesforce:ClientSecret"] = "fake-secret",
+        ["Sync:Workers"] = "4",
+        // Fast retries, so tests that wait for a transient failure to clear don't wait 30 s
+        ["Sync:RetryBaseDelay"] = "00:00:01",
+        ["Logging:LogLevel:Default"] = "Warning"
+    };
+
+    /// <summary>The mock org's configuration (<c>FakeSalesforce:*</c>).</summary>
+    protected Dictionary<string, string?> FakeOrgSettings { get; } = new()
+    {
+        ["FakeSalesforce:Latency"] = "00:00:00",
+        // Daily API allocation of an Enterprise org with 15 Salesforce licenses (100,000 + 15 x 1,000)
+        ["FakeSalesforce:DailyApiLimit"] = "115000",
+        ["Logging:LogLevel:Default"] = "Warning"
+    };
 
     public HttpClient Salesforce { get; private set; } = null!;
 
     public NpgsqlDataSource Db => _db ?? throw new InvalidOperationException("Fixture not started");
 
-    /// <summary>Adjust the app model before it starts.</summary>
-    protected virtual void Configure(IDistributedApplicationTestingBuilder builder)
-    {
-    }
+    /// <summary>The running pods, in start order.</summary>
+    public IReadOnlyList<WorkerPod> RunningPods => _pods;
 
-    protected static IResourceBuilder<ProjectResource> Project(IDistributedApplicationTestingBuilder builder, string name)
-        => builder.CreateResourceBuilder(builder.Resources.OfType<ProjectResource>().Single(r => r.Name == name));
-
-    /// <summary>Runs once the worker has created the inbox schema, before any test.</summary>
+    /// <summary>Runs once the inbox schema exists, before any test.</summary>
     protected virtual Task OnStartedAsync() => Task.CompletedTask;
 
     public async Task InitializeAsync()
@@ -58,23 +104,13 @@ public class AppHostFixture : IAsyncLifetime
         using var cts = new CancellationTokenSource(StartupTimeout);
         var ct = cts.Token;
 
-        var builder = await DistributedApplicationTestingBuilder.CreateAsync<Projects.SalesforceSync_AppHost>(
-            ["--AppHost:TestMode=true"], ct);
-        // Fast retries, so tests that wait for a transient failure to clear don't wait 30 s
-        Project(builder, "salesforce-sync").WithEnvironment("Sync__RetryBaseDelay", "00:00:01");
-        Configure(builder);
-        _app = await builder.BuildAsync(ct);
-        await _app.StartAsync(ct);
+        var org = FakeOrgHost.StartAsync(FakeOrgSettings, ct);
+        await Task.WhenAll(_postgres.StartAsync(ct), _kafka.StartAsync(ct), org);
+        _org = await org;
+        Salesforce = new HttpClient { BaseAddress = _org.Url };
 
-        var notifications = _app.Services.GetRequiredService<ResourceNotificationService>();
-        await notifications.WaitForResourceHealthyAsync("fake-salesforce", ct);
-        await notifications.WaitForResourceAsync("salesforce-sync", KnownResourceStates.Running, ct);
-
-        Salesforce = _app.CreateHttpClient("fake-salesforce");
-
-        var kafka = await _app.GetConnectionStringAsync("kafka", ct)
-                    ?? throw new InvalidOperationException("No Kafka connection string");
-        await EnsureTopicAsync(kafka);
+        var kafka = BootstrapServers(_kafka.GetBootstrapAddress());
+        await EnsureTopicsAsync(kafka);
         _producer = new ProducerBuilder<string, string>(new ProducerConfig
         {
             BootstrapServers = kafka,
@@ -82,25 +118,38 @@ public class AppHostFixture : IAsyncLifetime
             EnableIdempotence = true
         }).Build();
 
-        var inbox = await _app.GetConnectionStringAsync("inboxdb", ct)
-                    ?? throw new InvalidOperationException("No inboxdb connection string");
+        var inbox = _postgres.GetConnectionString();
         _db = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(inbox) { ApplicationName = TestsApplicationName }.ConnectionString);
 
-        // "Running" only means the worker process started; wait until it has applied the inbox schema.
-        await Eventually.ValueAsync(async () =>
+        var instanceUrl = _org.Url.GetLeftPart(UriPartial.Authority);
+        for (var i = 0; i < Pods; i++)
         {
-            await using var conn = await _db.OpenConnectionAsync(ct);
-            return await conn.ExecuteScalarAsync<bool>("select to_regclass('sf_inbox') is not null");
-        }, ready => ready, "the worker to create sf_inbox", StartupTimeout);
+            var name = $"pod-{i}";
+            var settings = new Dictionary<string, string?>(WorkerSettings)
+            {
+                ["ConnectionStrings:inboxdb"] = inbox,
+                ["ConnectionStrings:kafka"] = kafka,
+                ["Salesforce:InstanceUrl"] = instanceUrl,
+                ["Salesforce:TokenUrl"] = $"{instanceUrl}/services/oauth2/token",
+                // Pods share a process here, so name them apart (the mock org counts graph requests per User-Agent)
+                ["Salesforce:UserAgentInstance"] = name
+            };
+            // Started one at a time: StartAsync returns once the schema is applied, so later pods find it in place
+            _pods.Add(await WorkerPod.StartAsync(name, settings, ct));
+        }
 
         await OnStartedAsync();
     }
 
     public async Task DisposeAsync()
     {
+        // Pods first, so nothing is still talking to the containers when they go
+        await Task.WhenAll(_pods.Select(p => p.DisposeAsync().AsTask()));
         _producer?.Dispose();
+        Salesforce?.Dispose();
         if (_db is not null) await _db.DisposeAsync();
-        if (_app is not null) await _app.DisposeAsync();
+        if (_org is not null) await _org.DisposeAsync();
+        await Task.WhenAll(_kafka.DisposeAsync().AsTask(), _postgres.DisposeAsync().AsTask());
     }
 
     /// <summary>Publishes an account change event, keyed by account like the real upstream.</summary>
@@ -168,9 +217,10 @@ public class AppHostFixture : IAsyncLifetime
         return body;
     }
 
-    public static string NewAccountId() => $"E2E-{Guid.NewGuid():N}";
+    /// <summary>A fresh account external id, so tests don't interfere through shared state.</summary>
+    public static string NewAccountId() => Any.String("E2E-");
 
-    public static string NewRelationshipId() => $"REL-{Guid.NewGuid():N}";
+    public static string NewRelationshipId() => Any.String("REL-");
 
     public static string ProfileIdFor(string accountExtId) => accountExtId.Replace("E2E-", "PRF-");
 
@@ -198,7 +248,7 @@ public class AppHostFixture : IAsyncLifetime
     public async Task<IReadOnlyList<(long Version, string Status, int RetryCount, string? ErrorCode)>> GetInboxRowsAsync(
         string key, string entityType = Accounts)
     {
-        await using var conn = await _db!.OpenConnectionAsync();
+        await using var conn = await Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<(long, string, int, string?)>(
             """
             select (sf_event_version(payload) - @baseMicros) / 1000, status, retry_count, last_error_code from sf_inbox
@@ -211,7 +261,7 @@ public class AppHostFixture : IAsyncLifetime
 
     public async Task ExecuteSqlAsync(string sql)
     {
-        await using var conn = await _db!.OpenConnectionAsync();
+        await using var conn = await Db.OpenConnectionAsync();
         await conn.ExecuteAsync(sql);
     }
 
@@ -223,7 +273,12 @@ public class AppHostFixture : IAsyncLifetime
             rows => rows.Count == expectedRows && rows.All(r => r.Status != "pending"),
             $"inbox rows for {entityType} {key} to settle");
 
-    private static async Task EnsureTopicAsync(string bootstrap)
+    /// <summary>librdkafka wants host:port; Testcontainers reports a URI (PLAINTEXT://host:port/).</summary>
+    private static string BootstrapServers(string address)
+        => Uri.TryCreate(address, UriKind.Absolute, out var uri) ? $"{uri.Host}:{uri.Port}" : address;
+
+    /// <summary>Creates both topics up front (6 partitions, like production), so pods never race to auto-create them.</summary>
+    private static async Task EnsureTopicsAsync(string bootstrap)
     {
         using var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = bootstrap }).Build();
         try
@@ -236,13 +291,13 @@ public class AppHostFixture : IAsyncLifetime
         }
         catch (CreateTopicsException ex) when (ex.Results.All(r => r.Error.Code is ErrorCode.TopicAlreadyExists or ErrorCode.NoError))
         {
-            // the worker created it first
+            // already there
         }
     }
 }
 
 [CollectionDefinition(Name)]
-public sealed class AppHostCollection : ICollectionFixture<AppHostFixture>
+public sealed class SyncCollection : ICollectionFixture<SyncFixture>
 {
-    public const string Name = "AppHost";
+    public const string Name = "Sync";
 }

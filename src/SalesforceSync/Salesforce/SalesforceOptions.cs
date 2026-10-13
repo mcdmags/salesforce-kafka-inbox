@@ -9,6 +9,12 @@ public sealed class SalesforceOptions
     public string ClientId { get; set; } = "";
     public string ClientSecret { get; set; } = "";
 
+    /// <summary>
+    /// How this process names itself in the User-Agent, which Salesforce API logs (and the mock org's per-client
+    /// counters) show. Unset = machine name (the pod name in Kubernetes) and process id.
+    /// </summary>
+    public string? UserAgentInstance { get; set; }
+
     /// <summary>Salesforce does not return expires_in for client credentials; refresh proactively.</summary>
     public TimeSpan TokenLifetime { get; set; } = TimeSpan.FromMinutes(30);
 
