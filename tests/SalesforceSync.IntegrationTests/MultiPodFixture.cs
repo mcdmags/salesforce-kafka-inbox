@@ -9,8 +9,7 @@ namespace SalesforceSync.IntegrationTests;
 /// several worker loops, all sharing one Postgres inbox and one Salesforce org.
 /// <para>
 /// Salesforce itself does nothing to stop an out-of-order write, so any race lands in the mock org's write
-/// history. The rate limiter is opened up and batches are kept small so workers contend for the same accounts
-/// as much as possible.
+/// history. Batches are kept small so workers contend for the same accounts as much as possible.
 /// </para>
 /// </summary>
 public sealed class MultiPodFixture : AppHostFixture
@@ -23,14 +22,10 @@ public sealed class MultiPodFixture : AppHostFixture
         Project(builder, "salesforce-sync")
             .WithReplicas(Pods)
             .WithEnvironment("Sync__Workers", WorkersPerPod.ToString())
-            .WithEnvironment("Sync__MaxConcurrentRequests", (Pods * WorkersPerPod).ToString())
             .WithEnvironment("Sync__BatchSize", "10")
             .WithEnvironment("Sync__IdleDelay", "00:00:00.050")
             // Short lease: a claim lost to a dropped connection (chaos test) is reclaimed quickly
-            .WithEnvironment("Sync__Lease", "00:00:20")
-            // Measure ordering, not the throttle
-            .WithEnvironment("RateLimit__MaxRequestsPerSecond", "1000000")
-            .WithEnvironment("RateLimit__BurstCapacity", "1000000");
+            .WithEnvironment("Sync__Lease", "00:00:20");
 
         Project(builder, "fake-salesforce")
             .WithEnvironment("FakeSalesforce__Latency", "00:00:00.010");

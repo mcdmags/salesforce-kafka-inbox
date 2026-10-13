@@ -78,12 +78,13 @@ public sealed class SalesforceRecordUpserter(
 
         // 5. Write: one Composite Graph call; each graph reports its own outcome
         var graphResults = await api.SendGraphsAsync(graphs.Values.Select(g => g.Graph).ToList(), ct);
+        var written = new List<WriteEcho>();
         foreach (var r in graphResults)
         {
             if (!graphs.Remove(r.GraphId, out var sent)) continue;
             if (r.IsSuccessful)
             {
-                echoTracker.Record(sent.Echoes);
+                written.AddRange(sent.Echoes);
                 results.Add(new(sent.Unit.Key, SyncOutcome.Saved, []));
             }
             else
@@ -93,6 +94,7 @@ public sealed class SalesforceRecordUpserter(
                 results.Add(new(sent.Unit.Key, errors.Classify(ordered), ordered));
             }
         }
+        echoTracker.Record(written);
 
         // A graph missing from the response was never processed
         foreach (var (_, unit, _) in graphs.Values)
@@ -199,9 +201,12 @@ public sealed class SalesforceRecordUpserter(
         public CurrentRecords(IEnumerable<(string SObject, Dictionary<string, JsonElement> Row)> rows)
         {
             foreach (var (sobject, row) in rows)
+            {
+                var sobjectKey = sobject.ToLowerInvariant();
                 foreach (var (field, value) in row)
                     if (value.ValueKind == JsonValueKind.String)
-                        _index.TryAdd((sobject.ToLowerInvariant(), field.ToLowerInvariant(), value.GetString()!), row);
+                        _index.TryAdd((sobjectKey, field.ToLowerInvariant(), value.GetString()!), row);
+            }
         }
 
         public Dictionary<string, JsonElement>? Find(string sobject, string field, string value)

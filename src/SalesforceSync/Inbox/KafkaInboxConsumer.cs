@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
@@ -9,8 +10,8 @@ namespace SalesforceSync.Inbox;
 /// <summary>
 /// Kafka -> Postgres inbox. Each topic carries one entity type (Kafka:Topics, e.g. account-changes -> account);
 /// message key = the entity's key (external id), value = the raw JSON event with a "version".
-/// The offset is committed only after the row is stored, and the unique (entity type, key, version)
-/// constraint makes redelivery (and a retried insert) harmless.
+/// The offset is stored for commit only after the row is in the inbox, and the unique (entity type, key, version)
+/// constraint makes redelivery (and a retried insert) harmless. A message that can't be parsed is logged and skipped.
 /// </summary>
 public sealed class KafkaInboxConsumer(
     IConsumer<string, string> consumer,
@@ -24,6 +25,8 @@ public sealed class KafkaInboxConsumer(
         ["account-changes"] = "account",
         ["account-relationship-changes"] = "account-relationship"
     };
+
+    private static readonly TimeSpan StoreRetryDelay = TimeSpan.FromSeconds(2);
 
     private Dictionary<string, string> _topics = new(StringComparer.Ordinal);
 
@@ -51,7 +54,7 @@ public sealed class KafkaInboxConsumer(
                 {
                     break;
                 }
-                catch (ConsumeException ex)
+                catch (ConsumeException ex) when (!ex.Error.IsFatal)
                 {
                     log.LogWarning(ex, "Kafka consume error");
                     continue;
@@ -59,17 +62,30 @@ public sealed class KafkaInboxConsumer(
 
                 if (result?.Message?.Value is null) continue;
 
+                if (!TryReadEvent(result, out var row, out var problem))
+                {
+                    // Retrying can't fix it, and retrying would block every later event on the partition: log where
+                    // it is (to fix or replay at the source) and move on.
+                    log.LogError("Skipping malformed event at {Offset} (key {Key}): {Problem}",
+                        result.TopicPartitionOffset, result.Message.Key, problem);
+                    StoreOffset(result);
+                    continue;
+                }
+
                 try
                 {
-                    await StoreAsync(result, ct);
-                    consumer.Commit(result);
+                    await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(InboxSql.Insert,
+                        new { entityType = row.EntityType, key = row.Key, version = row.Version, payload = row.Payload },
+                        cancellationToken: t)), ct);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     log.LogError(ex, "Failed to store {Offset}; will retry", result.TopicPartitionOffset);
-                    consumer.Seek(result.TopicPartitionOffset);
-                    await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                    Rewind(result);
+                    await Task.Delay(StoreRetryDelay, ct);
+                    continue;
                 }
+                StoreOffset(result);
             }
         }
         finally
@@ -78,21 +94,73 @@ public sealed class KafkaInboxConsumer(
         }
     }
 
-    private async Task StoreAsync(ConsumeResult<string, string> result, CancellationToken ct)
+    /// <summary>
+    /// Marks the message as handled; the client commits stored offsets in the background (EnableAutoOffsetStore=false
+    /// + auto commit, see Program.cs). If a rebalance revoked the partition since the message was consumed, the store
+    /// fails: harmless, its new owner re-reads from the last commit and the duplicate insert is ignored.
+    /// </summary>
+    private void StoreOffset(ConsumeResult<string, string> result)
     {
-        var entityType = _topics[result.Topic];
-        var json = JsonNode.Parse(result.Message.Value)?.AsObject()
-                   ?? throw new InvalidOperationException("Event value is not a JSON object");
-
-        var key = result.Message.Key ?? json["key"]?.GetValue<string>() ?? json["accountExternalId"]?.GetValue<string>()
-                  ?? throw new InvalidOperationException("Event has no entity key");
-
-        // Prefer the source system's version; fall back to the offset (only valid when keyed by entity).
-        var version = json["version"] is JsonValue v ? v.GetValue<long>() : result.Offset.Value;
-
-        await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(InboxSql.Insert,
-            new { entityType, key, version, payload = result.Message.Value }, cancellationToken: t)), ct);
+        try
+        {
+            consumer.StoreOffset(result);
+        }
+        catch (KafkaException ex)
+        {
+            log.LogInformation("Offset {Offset} not stored ({Reason}); the partition was likely reassigned",
+                result.TopicPartitionOffset, ex.Error.Reason);
+        }
     }
+
+    /// <summary>Consumes the message again next. Not possible if the partition was reassigned, and not needed then.</summary>
+    private void Rewind(ConsumeResult<string, string> result)
+    {
+        try
+        {
+            consumer.Seek(result.TopicPartitionOffset);
+        }
+        catch (KafkaException ex)
+        {
+            log.LogInformation("Can't rewind to {Offset} ({Reason}); the partition was likely reassigned",
+                result.TopicPartitionOffset, ex.Error.Reason);
+        }
+    }
+
+    /// <summary>The inbox row for a message, or why the message can never become one.</summary>
+    private bool TryReadEvent(ConsumeResult<string, string> result, out InboxRow row, out string? problem)
+    {
+        row = default!;
+        try
+        {
+            if (JsonNode.Parse(result.Message.Value) is not JsonObject json)
+            {
+                problem = "Event value is not a JSON object";
+                return false;
+            }
+
+            var key = result.Message.Key ?? json["key"]?.GetValue<string>() ?? json["accountExternalId"]?.GetValue<string>();
+            if (string.IsNullOrEmpty(key))
+            {
+                problem = "Event has no entity key";
+                return false;
+            }
+
+            // Prefer the source system's version; fall back to the offset (only valid when keyed by entity).
+            var version = json["version"] is JsonValue v ? v.GetValue<long>() : result.Offset.Value;
+
+            row = new InboxRow(_topics[result.Topic], key, version, result.Message.Value);
+            problem = null;
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+        {
+            // Not JSON, or "key" / "version" of the wrong JSON type
+            problem = ex.Message;
+            return false;
+        }
+    }
+
+    private sealed record InboxRow(string EntityType, string Key, long Version, string Payload);
 
     private async Task EnsureTopicAsync(string topic)
     {

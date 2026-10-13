@@ -49,7 +49,7 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
 
 /// <summary>
 /// What varies per synced object: how an inbox event becomes Salesforce records, and what to read from Salesforce
-/// to diff them and resolve their lookups. Everything else (claiming, ordering, coalescing, rate limits, batching,
+/// to diff them and resolve their lookups. Everything else (claiming, ordering, coalescing, batching,
 /// retries, dead-lettering) is <see cref="SalesforceBatchUpsertService"/>'s.
 /// </summary>
 /// <typeparam name="TEvent">The inbox payload, deserialized after the entity's pending events are merged.</typeparam>

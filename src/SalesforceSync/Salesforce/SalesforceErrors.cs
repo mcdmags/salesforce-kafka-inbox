@@ -9,7 +9,7 @@ public sealed record SalesforceError(string? ReferenceId, string Code, string? M
     public override string ToString() => ReferenceId is null ? $"{Code} {Message}" : $"{ReferenceId}: {Code} {Message}";
 }
 
-/// <summary>Decides what a failed graph's errors mean for the account: retry now, retry later, or give up.</summary>
+/// <summary>Decides what a failed graph's errors mean for the entity: retry now, retry later, or give up.</summary>
 public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 {
     /// <summary>

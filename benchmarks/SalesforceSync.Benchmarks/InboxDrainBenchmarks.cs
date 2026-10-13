@@ -6,13 +6,11 @@ using BenchmarkDotNet.Engines;
 using BenchmarkDotNet.Jobs;
 using Dapper;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;
 using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
-using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 
@@ -20,9 +18,9 @@ namespace SalesforceSync.Benchmarks;
 
 /// <summary>
 /// End-to-end: put N events into the real Postgres inbox and drain it with P "pods" x W parallel worker loops
-/// through the real engine (SalesforceBatchUpsertService with the Account strategy), Salesforce client and rate
-/// limiter. Only the Salesforce HTTP endpoint is fake.
-/// A pod is an independent service provider (own connection pool, rate limiter, HTTP client), like a separate
+/// through the real engine (SalesforceBatchUpsertService with the Account strategy) and Salesforce client.
+/// Only the Salesforce HTTP endpoint is fake.
+/// A pod is an independent service provider (own connection pool, HTTP client), like a separate
 /// process; all pods share the Postgres inbox and one Salesforce org.
 /// <para>
 /// Each iteration also verifies correctness. Nothing in the org rejects an out-of-order write, so a race would
@@ -163,7 +161,7 @@ public abstract class DrainBenchmarkBase
 
     // ---------- Setup ----------
 
-    /// <summary>One "pod": its own connection pool, limiter and HTTP stack; shares Postgres and the org.</summary>
+    /// <summary>One "pod": its own connection pool and HTTP stack; shares Postgres and the org.</summary>
     private ServiceProvider BuildPod()
     {
         var services = new ServiceCollection();
@@ -175,18 +173,9 @@ public abstract class DrainBenchmarkBase
         services.Configure<SyncOptions>(o =>
         {
             o.Workers = Workers;
-            o.MaxConcurrentRequests = Workers * Pods; // global cap across all pods
             o.BatchSize = StreamIngest ? 10 : 75;     // streaming: small batches, so accounts are claimed again and again
             o.Lease = TimeSpan.FromMinutes(5);
         });
-        services.Configure<RateLimitOptions>(_ => { });
-
-        services.AddSingleton<SalesforceRateLimiter>();
-        services.AddSingleton(sp => new SalesforceConcurrencySlots(
-            sp.GetRequiredService<NpgsqlDataSource>(),
-            sp.GetRequiredService<PostgresExecutionStrategy>(),
-            sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests));
-        services.AddTransient<SalesforceRateLimitHandler>();
 
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<SalesforceSchemaCache>();
@@ -195,7 +184,6 @@ public abstract class DrainBenchmarkBase
         services.AddTransient<GzipRequestHandler>();
         services.AddTransient<SalesforceRecordUpserter>();
         services.AddHttpClient<SalesforceRestClient>(c => c.BaseAddress = new Uri("https://fake.my.salesforce.com"))
-            .AddHttpMessageHandler<SalesforceRateLimitHandler>()
             .AddHttpMessageHandler<GzipRequestHandler>()
             .ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
 
@@ -209,14 +197,7 @@ public abstract class DrainBenchmarkBase
         _store.Reset();
 
         await using var conn = await _db.OpenConnectionAsync();
-        await conn.ExecuteAsync("truncate sf_inbox restart identity; truncate sf_sync_state; truncate sf_api_usage; truncate sf_claim_audit");
-        // Effectively unlimited bucket and no daily budget: measure the pipeline, not the throttle
-        await conn.ExecuteAsync("""
-            update sf_rate_limit
-            set tokens = 1e9, capacity = 1e9, base_refill_per_sec = 1e9, refill_per_sec = 1e9,
-                daily_budget = null, paused_until = null, updated_at = clock_timestamp()
-            where name = 'salesforce'
-            """);
+        await conn.ExecuteAsync("truncate sf_inbox restart identity; truncate sf_sync_state; truncate sf_claim_audit");
 
         (_events, _expected) = Generate();
         if (!StreamIngest) await PreloadAsync(conn);
