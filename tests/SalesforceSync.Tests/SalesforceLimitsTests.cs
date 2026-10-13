@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -16,7 +17,7 @@ public sealed class SalesforceLimitsTests
         // The worked example from the Salesforce documentation
         var limits = new SalesforceLimitsOptions { Edition = SalesforceEdition.Enterprise, Licenses = { ["Salesforce"] = 15 } };
 
-        Assert.Equal(115_000, limits.EffectiveDailyApiAllocation);
+        limits.EffectiveDailyApiAllocation.Should().Be(115_000);
     }
 
     [Fact]
@@ -29,8 +30,7 @@ public sealed class SalesforceLimitsTests
             PurchasedApiCalls = 50_000
         };
 
-        // 100,000 + 10 x 5,000 + 20 x 200 + 500 x 0 + 50,000
-        Assert.Equal(204_000, limits.EffectiveDailyApiAllocation);
+        limits.EffectiveDailyApiAllocation.Should().Be(204_000, "it is 100,000 + 10 x 5,000 + 20 x 200 + 500 x 0 + 50,000");
     }
 
     [Theory]
@@ -39,7 +39,7 @@ public sealed class SalesforceLimitsTests
     [InlineData(SalesforceEdition.Unlimited, 5_000)]
     [InlineData(SalesforceEdition.Performance, 5_000)]
     public void Calls_per_Salesforce_license_depend_on_the_edition(SalesforceEdition edition, int calls)
-        => Assert.Equal(calls, new SalesforceLimitsOptions { Edition = edition }.CallsPerLicenseFor("salesforce"));
+        => new SalesforceLimitsOptions { Edition = edition }.CallsPerLicenseFor("salesforce").Should().Be(calls);
 
     [Theory]
     [InlineData(SalesforceOrgType.DeveloperEdition, 15_000)]
@@ -48,27 +48,27 @@ public sealed class SalesforceLimitsTests
     {
         var limits = new SalesforceLimitsOptions { OrgType = type, Licenses = { ["Salesforce"] = 100 } };
 
-        Assert.Equal(allocation, limits.EffectiveDailyApiAllocation);
+        limits.EffectiveDailyApiAllocation.Should().Be(allocation, "the licenses don't matter for this org type");
     }
 
-    [Fact]
-    public void Allocation_from_Setup_overrides_the_formula()
+    [Theory, AutoData]
+    public void Allocation_from_Setup_overrides_the_formula(long fromSetup)
     {
-        var limits = new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 }, DailyApiAllocation = 250_000 };
+        var limits = new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 }, DailyApiAllocation = fromSetup };
 
-        Assert.Equal(250_000, limits.EffectiveDailyApiAllocation);
+        limits.EffectiveDailyApiAllocation.Should().Be(fromSetup);
     }
 
-    [Fact]
-    public void Custom_license_types_can_be_added()
+    [Theory, AutoData]
+    public void Custom_license_types_can_be_added(string customLicense)
     {
         var limits = new SalesforceLimitsOptions
         {
-            Licenses = { ["Salesforce"] = 1, ["My Custom License"] = 4 },
-            CallsPerLicense = { ["My Custom License"] = 250 }
+            Licenses = { ["Salesforce"] = 1, [customLicense] = 4 },
+            CallsPerLicense = { [customLicense] = 250 }
         };
 
-        Assert.Equal(102_000, limits.EffectiveDailyApiAllocation);
+        limits.EffectiveDailyApiAllocation.Should().Be(102_000, "it is 100,000 + 1 x 1,000 + 4 x 250");
     }
 
     [Theory]
@@ -78,13 +78,13 @@ public sealed class SalesforceLimitsTests
     [InlineData(SalesforceOrgType.DeveloperEdition, 5)]
     [InlineData(SalesforceOrgType.Trial, 5)]
     public void Concurrent_long_running_limit_depends_on_the_org_type(SalesforceOrgType type, int limit)
-        => Assert.Equal(limit, new SalesforceLimitsOptions { OrgType = type }.EffectiveConcurrentLongRunningLimit);
+        => new SalesforceLimitsOptions { OrgType = type }.EffectiveConcurrentLongRunningLimit.Should().Be(limit);
 
     // ---------- Startup validation ----------
 
     [Fact]
     public void Defaults_are_valid()
-        => Assert.True(Validate(new SalesforceLimitsOptions()).Succeeded);
+        => Validate(new SalesforceLimitsOptions()).Succeeded.Should().BeTrue();
 
     [Fact]
     public void More_concurrent_requests_than_the_org_allows_fails_startup()
@@ -92,8 +92,8 @@ public sealed class SalesforceLimitsTests
         var result = Validate(new SalesforceLimitsOptions { OrgType = SalesforceOrgType.DeveloperEdition },
             new SyncOptions { MaxConcurrentRequests = 6 });
 
-        Assert.True(result.Failed);
-        Assert.Contains("MaxConcurrentRequests (6) exceeds the org's limit of 5", result.FailureMessage);
+        result.Failed.Should().BeTrue();
+        result.FailureMessage.Should().Contain("MaxConcurrentRequests (6) exceeds the org's limit of 5");
     }
 
     [Fact]
@@ -101,52 +101,55 @@ public sealed class SalesforceLimitsTests
     {
         var result = Validate(new SalesforceLimitsOptions { RequestTimeout = TimeSpan.FromMinutes(11) });
 
-        Assert.True(result.Failed);
-        Assert.Contains("API timeout", result.FailureMessage);
+        result.Failed.Should().BeTrue();
+        result.FailureMessage.Should().Contain("API timeout");
     }
 
-    [Fact]
-    public void Unknown_license_type_fails_startup()
+    [Theory, AutoData]
+    public void Unknown_license_type_fails_startup(string unknownLicense)
     {
-        var result = Validate(new SalesforceLimitsOptions { Licenses = { ["Salesforce Platinum"] = 1 } });
+        var result = Validate(new SalesforceLimitsOptions { Licenses = { [unknownLicense] = 1 } });
 
-        Assert.True(result.Failed);
-        Assert.Contains("Unknown Salesforce license type 'Salesforce Platinum'", result.FailureMessage);
+        result.Failed.Should().BeTrue();
+        result.FailureMessage.Should().Contain($"Unknown Salesforce license type '{unknownLicense}'");
     }
 
     [Theory]
     [InlineData(0)]
     [InlineData(1.5)]
     public void Daily_budget_share_must_be_a_fraction(double share)
-        => Assert.True(Validate(new SalesforceLimitsOptions(), rate: new RateLimitOptions { DailyBudgetShare = share }).Failed);
+        => Validate(new SalesforceLimitsOptions(), rate: new RateLimitOptions { DailyBudgetShare = share }).Failed.Should().BeTrue();
 
     // ---------- REQUEST_LIMIT_EXCEEDED ----------
 
     [Fact]
     public void Concurrent_long_running_limit_error_is_recognised()
-        => Assert.Equal(SalesforceRateLimitHandler.LimitExceeded.ConcurrentLongRunning, SalesforceRateLimitHandler.Classify(
-            """[{"message":"ConcurrentPerOrgLongTxn Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]"""));
+        => SalesforceRateLimitHandler.Classify(
+                """[{"message":"ConcurrentPerOrgLongTxn Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")
+            .Should().Be(SalesforceRateLimitHandler.LimitExceeded.ConcurrentLongRunning);
 
     [Fact]
     public void Total_requests_limit_error_is_recognised()
-        => Assert.Equal(SalesforceRateLimitHandler.LimitExceeded.TotalRequests, SalesforceRateLimitHandler.Classify(
-            """[{"message":"TotalRequests Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]"""));
+        => SalesforceRateLimitHandler.Classify(
+                """[{"message":"TotalRequests Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")
+            .Should().Be(SalesforceRateLimitHandler.LimitExceeded.TotalRequests);
 
-    [Fact]
-    public void Unknown_limit_error_is_treated_as_the_daily_limit()
-        => Assert.Equal(SalesforceRateLimitHandler.LimitExceeded.TotalRequests, SalesforceRateLimitHandler.Classify(
-            """[{"message":"Something new","errorCode":"REQUEST_LIMIT_EXCEEDED"}]"""));
+    [Theory, AutoData]
+    public void Unknown_limit_error_is_treated_as_the_daily_limit(string message)
+        => SalesforceRateLimitHandler.Classify(
+                new JsonArray(new JsonObject { ["message"] = message, ["errorCode"] = "REQUEST_LIMIT_EXCEEDED" }).ToJsonString())
+            .Should().Be(SalesforceRateLimitHandler.LimitExceeded.TotalRequests, "the safer assumption for an unknown variant");
 
     [Fact]
     public void Other_403s_are_not_limit_errors()
-        => Assert.Null(SalesforceRateLimitHandler.Classify("""[{"errorCode":"INSUFFICIENT_ACCESS"}]"""));
+        => SalesforceRateLimitHandler.Classify("""[{"errorCode":"INSUFFICIENT_ACCESS"}]""").Should().BeNull();
 
     // ---------- Throttle decisions ----------
 
     [Fact]
     public void Daily_budget_is_the_share_of_the_org_allocation()
-        => Assert.Equal(57_500, Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 },
-            new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 } }).DailyBudget);
+        => Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 }, new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 } })
+            .DailyBudget.Should().Be(57_500, "it is half of 115,000");
 
     [Fact]
     public void Own_usage_of_the_budget_slows_down_even_when_the_org_has_room()
@@ -154,9 +157,9 @@ public sealed class SalesforceLimitsTests
         var limiter = Limiter(new RateLimitOptions());
         var orgAt10Percent = new SalesforceLimitInfo(new LimitCounter(10_000, 100_000), null, null, null);
 
-        Assert.Equal(1.0, limiter.Decide(orgAt10Percent, ownDailyRatio: 0.5).Speed);
-        Assert.Equal(0.25, limiter.Decide(orgAt10Percent, ownDailyRatio: 0.85).Speed);
-        Assert.Equal(TimeSpan.FromMinutes(15), limiter.Decide(orgAt10Percent, ownDailyRatio: 0.96).Pause);
+        limiter.Decide(orgAt10Percent, ownDailyRatio: 0.5).Speed.Should().Be(1.0);
+        limiter.Decide(orgAt10Percent, ownDailyRatio: 0.85).Speed.Should().Be(0.25, "own usage is past DailySoftRatio");
+        limiter.Decide(orgAt10Percent, ownDailyRatio: 0.96).Pause.Should().Be(TimeSpan.FromMinutes(15), "own usage is past DailyHardRatio");
     }
 
     [Fact]
@@ -165,7 +168,7 @@ public sealed class SalesforceLimitsTests
         var limiter = Limiter(new RateLimitOptions());
         var orgAt85Percent = new SalesforceLimitInfo(new LimitCounter(85_000, 100_000), null, null, null);
 
-        Assert.Equal(0.25, limiter.Decide(orgAt85Percent, ownDailyRatio: 0.1).Speed);
+        limiter.Decide(orgAt85Percent, ownDailyRatio: 0.1).Speed.Should().Be(0.25, "the org is past DailySoftRatio");
     }
 
     private static ValidateOptionsResult Validate(SalesforceLimitsOptions limits, SyncOptions? sync = null,

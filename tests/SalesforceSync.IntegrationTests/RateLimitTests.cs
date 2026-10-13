@@ -42,23 +42,24 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
     {
         var ids = Enumerable.Range(0, 30).Select(_ => SyncFixture.NewAccountId()).ToArray();
         foreach (var id in ids)
-            app.Publish(id, 1, new JsonObject { ["Name"] = $"Budget {id}" }, new JsonObject { ["Tier__c"] = "Gold" });
+            app.Publish(id, 1, new JsonObject { ["Name"] = Any.String("Budget ") }, new JsonObject { ["Tier__c"] = "Gold" });
         app.Flush();
 
         // The budget is used up...
         await Eventually.ValueAsync(OwnCallsAsync, used => used >= DailyBudgetFixture.Budget,
             "the daily budget to be used up", TimeSpan.FromMinutes(1));
 
-        // ...and stays used up: no pod makes another call
+        // ...and stays used up: no pod makes another call. Proving that nothing happens needs a fixed wait; the pods
+        // poll every 50 ms (Sync:IdleDelay), so 3 s gives each of them dozens of chances to overspend.
         var stats = await app.GetStatsAsync();
         await Task.Delay(TimeSpan.FromSeconds(3));
         var later = await app.GetStatsAsync();
         output.WriteLine($"fake org: {later}");
 
         var apiCalls = later.GetProperty("apiCalls").GetInt64();
-        Assert.Equal(DailyBudgetFixture.Budget, await OwnCallsAsync());
-        Assert.Equal(DailyBudgetFixture.Budget, apiCalls);
-        Assert.Equal(stats.GetProperty("apiCalls").GetInt64(), apiCalls);
+        (await OwnCallsAsync()).Should().Be(DailyBudgetFixture.Budget, "sf_api_usage counts exactly the budget");
+        apiCalls.Should().Be(DailyBudgetFixture.Budget, "all pods together make exactly the budgeted calls");
+        apiCalls.Should().Be(stats.GetProperty("apiCalls").GetInt64(), "no call is made once the budget is used up");
 
         // Work that didn't fit is deferred, not failed: still pending, retries not spent, nothing dead-lettered
         await using var conn = await app.Db.OpenConnectionAsync();
@@ -67,11 +68,11 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
             new { ids })).ToList();
         var pending = rows.Where(r => r.Status == "pending").ToList();
         output.WriteLine($"done={rows.Count(r => r.Status == "done")} pending={pending.Count}");
-        Assert.NotEmpty(pending);
-        Assert.DoesNotContain(rows, r => r.Status == "dead");
-        Assert.All(pending, r => Assert.Equal(0, r.RetryCount));
-        Assert.All(pending, r => Assert.True(r.NextAttempt > DateTime.UtcNow.AddSeconds(30),
-            $"expected the event to be deferred until the budget frees up, next attempt {r.NextAttempt:O}"));
+        pending.Should().NotBeEmpty("the budget can't cover every event");
+        rows.Should().NotContain(r => r.Status == "dead", "work that didn't fit is deferred, not dead-lettered");
+        pending.Should().OnlyContain(r => r.RetryCount == 0, "a deferred event doesn't spend a retry");
+        pending.Select(r => r.NextAttempt).Should().OnlyContain(next => next > DateTime.UtcNow.AddSeconds(30),
+            "events are deferred until the budget frees up");
     }
 
     private async Task<long> OwnCallsAsync()
@@ -118,7 +119,7 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
     {
         var ids = Enumerable.Range(0, 40).Select(_ => SyncFixture.NewAccountId()).ToArray();
         foreach (var id in ids)
-            app.Publish(id, 1, new JsonObject { ["Name"] = $"Concurrent {id}" }, new JsonObject { ["Tier__c"] = "Gold" });
+            app.Publish(id, 1, new JsonObject { ["Name"] = Any.String("Concurrent ") }, new JsonObject { ["Tier__c"] = "Gold" });
         app.Flush();
 
         // Short pause per rejection (ConcurrentPerOrgLongTxn), not the 30-minute daily pause, so everything lands
@@ -127,15 +128,15 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
 
         var stats = await app.GetStatsAsync();
         output.WriteLine($"fake org: {stats}");
-        Assert.True(stats.GetProperty("concurrencyRejections").GetInt64() > 0,
-            "expected Salesforce to reject some requests for exceeding the concurrent long-running limit");
-        Assert.Equal(0, stats.GetProperty("graphsFailed").GetInt64());
+        stats.GetProperty("concurrencyRejections").GetInt64().Should().BePositive(
+            "Salesforce should reject some requests for exceeding the concurrent long-running limit");
+        stats.GetProperty("graphsFailed").GetInt64().Should().Be(0);
 
         // Rate-limited attempts are handed back without spending a retry
         await using var conn = await app.Db.OpenConnectionAsync();
         var maxRetry = await conn.ExecuteScalarAsync<int>(
             "select max(retry_count) from sf_inbox where sf_event_key(payload) = any(@ids)", new { ids });
-        Assert.Equal(1, maxRetry);
+        maxRetry.Should().Be(1, "rate-limited attempts are handed back without spending a retry");
 
         async Task<long> DoneAsync()
         {
