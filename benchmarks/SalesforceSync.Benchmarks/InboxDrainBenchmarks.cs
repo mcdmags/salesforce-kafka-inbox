@@ -9,6 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;
+using SalesforceSync;
 using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
@@ -19,17 +20,18 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// End-to-end: put N events into the real Postgres inbox and drain it with P "pods" x W parallel worker loops
-/// through the real engine (SalesforceBatchUpsertService with the Account strategy), Salesforce client and rate
-/// limiter. Only the Salesforce HTTP endpoint is fake.
-/// A pod is an independent service provider (own connection pool, rate limiter, HTTP client), like a separate
+/// End-to-end: put N events (Account changes, and Account_Relationship__c changes between those accounts) into the
+/// real Postgres inbox and drain it with P "pods" x W parallel worker loops. A pod is wired exactly like the worker
+/// (<see cref="SyncServiceCollectionExtensions"/>, rate limiter included) and its loops run the worker's own pass
+/// (<see cref="InboxWorkerService.SyncOnceAsync"/>) over every registered entity type. Only the Salesforce HTTP
+/// endpoint is fake. A pod is an independent service provider (own connection pool, rate limiter, HTTP client), like a separate
 /// process; all pods share the Postgres inbox and one Salesforce org.
 /// <para>
 /// Each iteration also verifies correctness. Nothing in the org rejects an out-of-order write, so a race would
 /// land: every account must end at its newest version, the org's write history must show each account's
-/// versions only moving forward, the claim audit (sql/claim-audit.sql) must show no two overlapping claims on
-/// the same account, and no event may be superseded (events are ingested in order, so that would mean an
-/// account's sync watermark ran ahead of its events).
+/// versions only moving forward, every relationship must end at its newest version linked to the right two
+/// Accounts, the claim audit (sql/claim-audit.sql) must show no two overlapping claims on the same entity, and
+/// every inbox row must end done.
 /// </para>
 /// </summary>
 [Config(typeof(DrainConfig))]
@@ -69,11 +71,26 @@ public abstract class DrainBenchmarkBase
 
     private const int IngestChunk = 20;
 
+    /// <summary>Share of events that change a relationship between two already-seen accounts (like the load generator).</summary>
+    private const double RelationshipShare = 0.15;
+
     private NpgsqlDataSource _db = default!;
     private FakeSalesforceStore _store = default!;
     private List<ServiceProvider> _pods = [];
-    private List<(string Account, long Version, string Payload)> _events = [];
-    private Dictionary<string, long> _expected = new();
+    private List<InboxRow> _events = [];
+    private Dictionary<(string Type, string Key), long> _expected = new();
+    private Dictionary<string, (string Account, string Related)> _relationships = new();
+
+    /// <summary>An event: its entity type and the raw payload the inbox stores.</summary>
+    private sealed record InboxRow(string Type, string Payload);
+
+    /// <summary>meta.time of version N of an entity: base time + N ms, so per-entity time order = version order.</summary>
+    private static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+    private static JsonObject Meta(long version) => new()
+    {
+        ["time"] = BaseTime.AddMilliseconds(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture)
+    };
 
     [GlobalSetup]
     public void GlobalSetup()
@@ -110,42 +127,31 @@ public abstract class DrainBenchmarkBase
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         var ingest = StreamIngest ? Task.Run(() => IngestAsync(cts.Token)) : Task.CompletedTask;
         var loops = _pods.SelectMany(pod => Enumerable.Range(0, Workers)
-            .Select(_ => Task.Run(() => WorkerLoopAsync(pod, ingest, cts.Token))));
+            .Select(loop => Task.Run(() => WorkerLoopAsync(pod, loop, ingest, cts.Token))));
         await Task.WhenAll(loops.Append(ingest));
     }
 
     /// <summary>Inserts the events in small chunks, in per-account version order, as fast as possible (like the Kafka consumer).</summary>
     private async Task IngestAsync(CancellationToken ct)
     {
-        const string sql = """
-            insert into sf_inbox (entity_type, entity_key, version, payload)
-            select 'account', a, v, p::jsonb from unnest(@a::text[], @v::bigint[], @p::text[]) as t(a, v, p)
-            """;
+        const string sql = "insert into sf_inbox (payload) select p::jsonb from unnest(@p::text[]) as u(p)";
 
         await using var conn = await _db.OpenConnectionAsync(ct);
         foreach (var chunk in _events.Chunk(IngestChunk))
         {
-            await conn.ExecuteAsync(new CommandDefinition(sql, new
-            {
-                a = chunk.Select(e => e.Account).ToArray(),
-                v = chunk.Select(e => e.Version).ToArray(),
-                p = chunk.Select(e => e.Payload).ToArray()
-            }, cancellationToken: ct));
+            await conn.ExecuteAsync(new CommandDefinition(sql, new { p = chunk.Select(e => e.Payload).ToArray() }, cancellationToken: ct));
         }
     }
 
-    private async Task WorkerLoopAsync(ServiceProvider pod, Task ingest, CancellationToken ct)
+    private async Task WorkerLoopAsync(ServiceProvider pod, int loop, Task ingest, CancellationToken ct)
     {
-        while (true)
+        var scopes = pod.GetRequiredService<IServiceScopeFactory>();
+        for (var iteration = 0; ; iteration++)
         {
             ct.ThrowIfCancellationRequested();
 
-            int processed;
-            await using (var scope = pod.CreateAsyncScope())
-            {
-                var accounts = scope.ServiceProvider.GetRequiredService<AccountSyncService>();
-                processed = await accounts.SyncBatchAsync(ct);
-            }
+            // The worker's own pass: one batch of every registered entity type (accounts, relationships)
+            var processed = await InboxWorkerService.SyncOnceAsync(scopes, loop + iteration, ct);
 
             if (processed > 0) continue;
             if (ingest.IsFaulted) return;
@@ -163,44 +169,36 @@ public abstract class DrainBenchmarkBase
 
     // ---------- Setup ----------
 
-    /// <summary>One "pod": its own connection pool, limiter and HTTP stack; shares Postgres and the org.</summary>
+    /// <summary>
+    /// One "pod": its own connection pool, limiter and HTTP stack; shares Postgres and the org. Wired with the worker's
+    /// registrations; only options, the data source and the primary HTTP handler (the mock org) differ.
+    /// </summary>
     private ServiceProvider BuildPod()
     {
         var services = new ServiceCollection();
         services.AddLogging(); // no providers: silent
         services.AddSingleton(_ => NpgsqlDataSource.Create(BenchmarkDb.ConnectionString));
-        services.AddSingleton<PostgresExecutionStrategy>();
         services.AddSingleton(_store);
 
+        services.Configure<SalesforceOptions>(o => o.InstanceUrl = "https://fake.my.salesforce.com");
         services.Configure<SyncOptions>(o =>
         {
             o.Workers = Workers;
             o.MaxConcurrentRequests = Workers * Pods; // global cap across all pods
-            o.BatchSize = StreamIngest ? 10 : 75;     // streaming: small batches, so accounts are claimed again and again
+            o.BatchSize = StreamIngest ? 10 : 75;     // streaming: small batches, so entities are claimed again and again
             o.Lease = TimeSpan.FromMinutes(5);
+            // A relationship can be claimed before its Accounts are in the org (DEPENDENCY_NOT_SYNCED): retry it
+            // within milliseconds rather than the production 30 s, so the benchmark measures the pipeline
+            o.RetryBaseDelay = TimeSpan.FromMilliseconds(10);
+            o.MaxRetryDelay = TimeSpan.FromMilliseconds(500);
+            o.MaxRetries = 50;
         });
         services.Configure<RateLimitOptions>(_ => { });
 
-        services.AddSingleton<SalesforceRateLimiter>();
-        services.AddSingleton(sp => new SalesforceConcurrencySlots(
-            sp.GetRequiredService<NpgsqlDataSource>(),
-            sp.GetRequiredService<PostgresExecutionStrategy>(),
-            sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests));
-        services.AddTransient<SalesforceRateLimitHandler>();
-
-        services.AddSingleton(TimeProvider.System);
-        services.AddSingleton<SalesforceSchemaCache>();
-        services.AddSingleton<WriteEchoTracker>();
-        services.AddSingleton<SalesforceErrors>();
-        services.AddTransient<GzipRequestHandler>();
-        services.AddTransient<SalesforceRecordUpserter>();
-        services.AddHttpClient<SalesforceRestClient>(c => c.BaseAddress = new Uri("https://fake.my.salesforce.com"))
-            .AddHttpMessageHandler<SalesforceRateLimitHandler>()
-            .AddHttpMessageHandler<GzipRequestHandler>()
+        services.AddSalesforceClient()
+            .AddSalesforceRateLimiting() // the bucket is opened up per iteration (SetupAsync)
             .ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
-
-        services.AddTransient<SalesforceBatchUpsertService>();
-        services.AddTransient<AccountSyncService>();
+        services.AddInboxSync();
         return services.BuildServiceProvider();
     }
 
@@ -222,33 +220,67 @@ public abstract class DrainBenchmarkBase
         if (!StreamIngest) await PreloadAsync(conn);
     }
 
-    /// <summary>Random account per event with occasional bursts, versions increasing per account.</summary>
-    private (List<(string, long, string)> Events, Dictionary<string, long> Newest) Generate()
+    /// <summary>
+    /// Random account per event with occasional bursts, versions increasing per entity. About 15% of events change
+    /// a relationship between two accounts that already have an event (as in Kafka, the account event comes first,
+    /// but a worker may still claim the relationship before the account has synced).
+    /// </summary>
+    private (List<InboxRow> Events, Dictionary<(string, string), long> Newest) Generate()
     {
         var random = new Random(42);
-        var versions = new Dictionary<string, long>(StringComparer.Ordinal);
-        var events = new List<(string, long, string)>(Events);
+        var versions = new Dictionary<(string, string), long>();
+        var seen = new List<string>();
+        var events = new List<InboxRow>(Events);
+        _relationships = new Dictionary<string, (string, string)>(StringComparer.Ordinal);
 
         while (events.Count < Events)
         {
+            if (seen.Count > 1 && random.NextDouble() < RelationshipShare)
+            {
+                var a = seen[random.Next(seen.Count)];
+                var b = seen[random.Next(seen.Count)];
+                if (a == b) continue;
+                var relKey = $"REL-{a[4..]}-{b[4..]}";
+                _relationships[relKey] = (a, b);
+                var relVersion = versions[(AccountRelationshipSyncService.Type, relKey)] =
+                    versions.GetValueOrDefault((AccountRelationshipSyncService.Type, relKey)) + 1;
+                var relPayload = new JsonObject
+                {
+                    ["meta"] = Meta(relVersion),
+                    [AccountRelationshipSyncService.Type] = new JsonObject
+                    {
+                        ["externalId"] = relKey,
+                        ["accountExternalId"] = a,
+                        ["relatedAccountExternalId"] = b,
+                        ["Name"] = $"v{relVersion}",
+                        ["Type__c"] = "Partner",
+                        ["Active__c"] = true
+                    }
+                };
+                events.Add(new InboxRow(AccountRelationshipSyncService.Type, relPayload.ToJsonString()));
+                continue;
+            }
+
             var key = $"ACC-{random.Next(Accounts):D6}";
             var burst = random.NextDouble() < 0.1 ? random.Next(2, 6) : 1;
 
             for (var i = 0; i < burst && events.Count < Events; i++)
             {
-                var version = versions[key] = versions.GetValueOrDefault(key) + 1;
+                var version = versions[(AccountSyncService.Type, key)] = versions.GetValueOrDefault((AccountSyncService.Type, key)) + 1;
+                if (version == 1) seen.Add(key);
+                // No profile.externalId: the Profile__c takes the account's
                 var payload = new JsonObject
                 {
-                    ["profileExternalId"] = key.Replace("ACC-", "PRF-"),
-                    ["version"] = version,
-                    ["account"] = new JsonObject
+                    ["meta"] = Meta(version),
+                    [AccountSyncService.Type] = new JsonObject
                     {
+                        ["externalId"] = key,
                         ["Name"] = $"Account {key}",
-                        ["Description"] = $"v{version}"
-                    },
-                    ["profile"] = new JsonObject { ["Score__c"] = version }
+                        ["Description"] = $"v{version}",
+                        ["profile"] = new JsonObject { ["Score__c"] = version }
+                    }
                 };
-                events.Add((key, version, payload.ToJsonString()));
+                events.Add(new InboxRow(AccountSyncService.Type, payload.ToJsonString()));
             }
         }
 
@@ -258,14 +290,11 @@ public abstract class DrainBenchmarkBase
     private async Task PreloadAsync(NpgsqlConnection conn)
     {
         await using var importer = await conn.BeginBinaryImportAsync(
-            "copy sf_inbox (entity_type, entity_key, version, payload) from stdin (format binary)");
-        foreach (var (account, version, payload) in _events)
+            "copy sf_inbox (payload) from stdin (format binary)");
+        foreach (var e in _events)
         {
             await importer.StartRowAsync();
-            await importer.WriteAsync(AccountSyncService.Type, NpgsqlDbType.Text);
-            await importer.WriteAsync(account, NpgsqlDbType.Text);
-            await importer.WriteAsync(version, NpgsqlDbType.Bigint);
-            await importer.WriteAsync(payload, NpgsqlDbType.Jsonb);
+            await importer.WriteAsync(e.Payload, NpgsqlDbType.Jsonb);
         }
         await importer.CompleteAsync();
     }
@@ -276,13 +305,19 @@ public abstract class DrainBenchmarkBase
     {
         var wrong = new List<string>();
         var regressions = 0;
-        foreach (var (acct, expected) in _expected)
+        foreach (var ((type, acct), expected) in _expected)
         {
+            if (type == AccountRelationshipSyncService.Type)
+            {
+                if (!VerifyRelationship(acct, expected, ref regressions, out var problem)) wrong.Add(problem);
+                continue;
+            }
+
             // Versions in the order the org received them: Description "vN" on the Account, Score__c = N on the Profile
             var accountVersions = (_store.History("Account", acct) ?? [])
                 .Where(w => w.ContainsKey("Description"))
                 .Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
-            var profileVersions = (_store.History("Profile__c", acct.Replace("ACC-", "PRF-")) ?? [])
+            var profileVersions = (_store.History("Profile__c", acct) ?? [])
                 .Where(w => w.ContainsKey("Score__c"))
                 .Select(w => Number(w["Score__c"])).ToList();
 
@@ -296,18 +331,44 @@ public abstract class DrainBenchmarkBase
         var notDone = await conn.ExecuteScalarAsync<long>("select count(*) from sf_inbox where status <> 'done'");
         var claims = await conn.ExecuteScalarAsync<long>("select count(*) from sf_claim_audit");
         var overlaps = await conn.ExecuteScalarAsync<long>("select count(*) from sf_claim_overlaps");
+        // retry_count counts attempts (bumped at claim), so retries = attempts beyond the first. Mostly relationships
+        // claimed before their Accounts were in the org (DEPENDENCY_NOT_SYNCED).
+        var retries = await conn.ExecuteScalarAsync<long>("select coalesce(sum(greatest(retry_count - 1, 0)), 0) from sf_inbox");
+        var relationshipEvents = _events.Count(e => e.Type == AccountRelationshipSyncService.Type);
 
         var stats = _store.GetStats();
         Console.WriteLine(
             $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms] " +
-            $"events={Events} {stats} coalescing={(double)Events / Math.Max(1, stats.GraphsSucceeded):F1} events/graph " +
-            $"claims={claims} overlappingClaims={overlaps} notDone={notDone} wrong={wrong.Count} regressions={regressions}");
+            $"events={Events} relationshipEvents={relationshipEvents} {stats} coalescing={(double)Events / Math.Max(1, stats.GraphsSucceeded):F1} events/graph " +
+            $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} wrong={wrong.Count} regressions={regressions}");
 
         if (wrong.Count > 0 || rows != Events || notDone > 0 || overlaps > 0 || regressions > 0)
             throw new InvalidOperationException(
-                $"Correctness check failed: {wrong.Count} accounts not at newest version, {notDone} of {rows}/{Events} " +
-                $"inbox rows not done, {overlaps} overlapping claims, {regressions} accounts received an older version " +
+                $"Correctness check failed: {wrong.Count} entities not at newest version, {notDone} of {rows}/{Events} " +
+                $"inbox rows not done, {overlaps} overlapping claims, {regressions} entities received an older version " +
                 "after a newer one. " + string.Join("; ", wrong.Take(5)));
+    }
+
+    /// <summary>Newest version (Name "vN"), only moving forward, and linked to the right two Accounts.</summary>
+    private bool VerifyRelationship(string key, long expected, ref int regressions, out string problem)
+    {
+        problem = "";
+        var versions = (_store.History(AccountRelationshipSyncService.RelationshipObject, key) ?? [])
+            .Where(w => w.ContainsKey("Name"))
+            .Select(w => long.Parse(((string)w["Name"]!)[1..])).ToList();
+        if (!IsIncreasing(versions)) regressions++;
+
+        var (account, related) = _relationships[key];
+        var record = _store.FindByExternalId(AccountRelationshipSyncService.RelationshipObject, key);
+        var accountId = (string?)_store.FindByExternalId(AccountSyncService.AccountObject, account)?["Id"];
+        var relatedId = (string?)_store.FindByExternalId(AccountSyncService.AccountObject, related)?["Id"];
+        if (versions.LastOrDefault() == expected && record is not null && accountId is not null &&
+            (string?)record["Account__c"] == accountId && (string?)record["Related_Account__c"] == relatedId)
+            return true;
+
+        problem = $"{key}: expected v{expected} linking {account}->{related}, got v{versions.LastOrDefault()} " +
+                  $"linking {record?["Account__c"]}->{record?["Related_Account__c"]}";
+        return false;
     }
 
     private static bool IsIncreasing(List<long> versions) => versions.Zip(versions.Skip(1)).All(p => p.First < p.Second);

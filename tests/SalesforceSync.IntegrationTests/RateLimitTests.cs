@@ -1,5 +1,4 @@
 using System.Text.Json.Nodes;
-using Aspire.Hosting;
 using Dapper;
 using Xunit.Abstractions;
 
@@ -9,25 +8,23 @@ namespace SalesforceSync.IntegrationTests;
 /// A tiny daily allocation shared by 3 pods: SalesforceLimits:DailyApiAllocation = 60 and
 /// RateLimit:DailyBudgetShare = 0.5 give this integration 30 calls per rolling 24 hours.
 /// </summary>
-public sealed class DailyBudgetFixture : AppHostFixture
+public sealed class DailyBudgetFixture : SyncFixture
 {
-    public const int Pods = 3;
+    public const int PodCount = 3;
     public const int Budget = 30;
 
-    protected override void Configure(IDistributedApplicationTestingBuilder builder)
+    public DailyBudgetFixture() : base(PodCount)
     {
-        Project(builder, "salesforce-sync")
-            .WithReplicas(Pods)
-            .WithEnvironment("SalesforceLimits__DailyApiAllocation", "60")
-            .WithEnvironment("RateLimit__DailyBudgetShare", "0.5")
-            // Normally pods slow down at 80% and stop at 95% of the budget (unit-tested); turned off here to
-            // test the hard cap itself
-            .WithEnvironment("RateLimit__DailySoftRatio", "2")
-            .WithEnvironment("RateLimit__DailyHardRatio", "2")
-            .WithEnvironment("RateLimit__MaxRequestsPerSecond", "1000")
-            .WithEnvironment("RateLimit__BurstCapacity", "1000")
-            .WithEnvironment("Sync__BatchSize", "1") // 3 calls per account, so the budget runs out mid-way
-            .WithEnvironment("Sync__IdleDelay", "00:00:00.050");
+        WorkerSettings["SalesforceLimits:DailyApiAllocation"] = "60";
+        WorkerSettings["RateLimit:DailyBudgetShare"] = "0.5";
+        // Normally pods slow down at 80% and stop at 95% of the budget (unit-tested); turned off here to
+        // test the hard cap itself
+        WorkerSettings["RateLimit:DailySoftRatio"] = "2";
+        WorkerSettings["RateLimit:DailyHardRatio"] = "2";
+        WorkerSettings["RateLimit:MaxRequestsPerSecond"] = "1000";
+        WorkerSettings["RateLimit:BurstCapacity"] = "1000";
+        WorkerSettings["Sync:BatchSize"] = "1"; // 3 calls per account, so the budget runs out mid-way
+        WorkerSettings["Sync:IdleDelay"] = "00:00:00.050";
     }
 }
 
@@ -43,7 +40,7 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
     [Fact]
     public async Task All_pods_together_stop_at_the_integrations_share_of_the_daily_allocation()
     {
-        var ids = Enumerable.Range(0, 30).Select(_ => AppHostFixture.NewAccountId()).ToArray();
+        var ids = Enumerable.Range(0, 30).Select(_ => SyncFixture.NewAccountId()).ToArray();
         foreach (var id in ids)
             app.Publish(id, 1, new JsonObject { ["Name"] = $"Budget {id}" }, new JsonObject { ["Tier__c"] = "Gold" });
         app.Flush();
@@ -66,7 +63,7 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
         // Work that didn't fit is deferred, not failed: still pending, retries not spent, nothing dead-lettered
         await using var conn = await app.Db.OpenConnectionAsync();
         var rows = (await conn.QueryAsync<(string Status, int RetryCount, DateTime NextAttempt)>(
-            "select status, retry_count, next_attempt_at from sf_inbox where entity_key = any(@ids)",
+            "select status, retry_count, next_attempt_at from sf_inbox where sf_event_key(payload) = any(@ids)",
             new { ids })).ToList();
         var pending = rows.Where(r => r.Status == "pending").ToList();
         output.WriteLine($"done={rows.Count(r => r.Status == "done")} pending={pending.Count}");
@@ -88,25 +85,22 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
 /// The mock org allows only 2 concurrent long-running requests (calls of 200 ms+ count as long-running here,
 /// 20 s in Salesforce) while 3 pods x 4 workers send 250 ms calls.
 /// </summary>
-public sealed class ConcurrentLimitFixture : AppHostFixture
+public sealed class ConcurrentLimitFixture : SyncFixture
 {
-    protected override void Configure(IDistributedApplicationTestingBuilder builder)
+    public ConcurrentLimitFixture() : base(pods: 3)
     {
-        Project(builder, "salesforce-sync")
-            .WithReplicas(3)
-            .WithEnvironment("Sync__Workers", "4")
-            .WithEnvironment("Sync__MaxConcurrentRequests", "12")
-            .WithEnvironment("Sync__BatchSize", "2")
-            .WithEnvironment("Sync__IdleDelay", "00:00:00.050")
-            .WithEnvironment("RateLimit__MaxRequestsPerSecond", "1000")
-            .WithEnvironment("RateLimit__BurstCapacity", "1000")
-            .WithEnvironment("RateLimit__ConcurrentLimitPause", "00:00:00.500")
-            .WithEnvironment("RateLimit__DailyHardPause", "00:30:00"); // would stall the test if misclassified
+        WorkerSettings["Sync:Workers"] = "4";
+        WorkerSettings["Sync:MaxConcurrentRequests"] = "12";
+        WorkerSettings["Sync:BatchSize"] = "2";
+        WorkerSettings["Sync:IdleDelay"] = "00:00:00.050";
+        WorkerSettings["RateLimit:MaxRequestsPerSecond"] = "1000";
+        WorkerSettings["RateLimit:BurstCapacity"] = "1000";
+        WorkerSettings["RateLimit:ConcurrentLimitPause"] = "00:00:00.500";
+        WorkerSettings["RateLimit:DailyHardPause"] = "00:30:00"; // would stall the test if misclassified
 
-        Project(builder, "fake-salesforce")
-            .WithEnvironment("FakeSalesforce__Latency", "00:00:00.250")
-            .WithEnvironment("FakeSalesforce__LongRunningThreshold", "00:00:00.200")
-            .WithEnvironment("FakeSalesforce__ConcurrentLongRunningLimit", "2");
+        FakeOrgSettings["FakeSalesforce:Latency"] = "00:00:00.250";
+        FakeOrgSettings["FakeSalesforce:LongRunningThreshold"] = "00:00:00.200";
+        FakeOrgSettings["FakeSalesforce:ConcurrentLongRunningLimit"] = "2";
     }
 }
 
@@ -122,7 +116,7 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
     [Fact]
     public async Task Concurrent_long_running_limit_pauses_briefly_and_everything_still_syncs()
     {
-        var ids = Enumerable.Range(0, 40).Select(_ => AppHostFixture.NewAccountId()).ToArray();
+        var ids = Enumerable.Range(0, 40).Select(_ => SyncFixture.NewAccountId()).ToArray();
         foreach (var id in ids)
             app.Publish(id, 1, new JsonObject { ["Name"] = $"Concurrent {id}" }, new JsonObject { ["Tier__c"] = "Gold" });
         app.Flush();
@@ -140,14 +134,14 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
         // Rate-limited attempts are handed back without spending a retry
         await using var conn = await app.Db.OpenConnectionAsync();
         var maxRetry = await conn.ExecuteScalarAsync<int>(
-            "select max(retry_count) from sf_inbox where entity_key = any(@ids)", new { ids });
+            "select max(retry_count) from sf_inbox where sf_event_key(payload) = any(@ids)", new { ids });
         Assert.Equal(1, maxRetry);
 
         async Task<long> DoneAsync()
         {
             await using var c = await app.Db.OpenConnectionAsync();
             return await c.ExecuteScalarAsync<long>(
-                "select count(*) from sf_inbox where status = 'done' and entity_key = any(@ids)", new { ids });
+                "select count(*) from sf_inbox where status = 'done' and sf_event_key(payload) = any(@ids)", new { ids });
         }
     }
 }

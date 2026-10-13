@@ -2,16 +2,16 @@
 -- same entity (e.g. the same account) can be detected after the fact. Not part of schema.sql; do not install in production.
 --
 -- A claim starts when a worker sets lock_token (InboxSql.ClaimKeys) and ends when that worker clears
--- the token (Complete / Fail / Defer). Ordering uses a sequence, not the clock: wall-clock time can step
--- backwards (NTP / VM time sync), while a claim that can only happen after another worker's release commits
--- always draws a higher sequence number than that release.
+-- the token (Complete / Fail / Dead / Release / Defer). Ordering uses a sequence, not the clock: wall-clock
+-- time can step backwards (NTP / VM time sync), while a claim that can only happen after another worker's
+-- release commits always draws a higher sequence number than that release.
 
 create sequence if not exists sf_claim_audit_seq;
 
 drop view if exists sf_claim_overlaps;
 drop table if exists sf_claim_audit;  -- recreated: its shape follows the inbox key
 create table sf_claim_audit (
-  entity_type    text        not null,
+  entity_type    text        not null,   -- sf_event_type / sf_event_key of the claimed rows' payload
   entity_key     text        not null,
   lock_token     uuid        not null,
   claim_seq      bigint      not null,
@@ -23,17 +23,21 @@ create table sf_claim_audit (
 );
 
 create or replace function sf_claim_audit_fn() returns trigger language plpgsql as $$
+declare
+  -- The payload never changes, so old and new give the same entity
+  t text := sf_event_type(new.payload);
+  k text := sf_event_key(new.payload);
 begin
   -- Released only when the holder clears its token. If another worker overwrites a token that is still
   -- set, the first claim stays open, so the takeover shows up in sf_claim_overlaps.
   if old.lock_token is not null and new.lock_token is null then
     update sf_claim_audit set release_seq = nextval('sf_claim_audit_seq'), released_at = clock_timestamp()
-    where entity_type = old.entity_type and entity_key = old.entity_key and lock_token = old.lock_token and release_seq is null;
+    where entity_type = t and entity_key = k and lock_token = old.lock_token and release_seq is null;
   end if;
   if new.lock_token is not null and new.lock_token is distinct from old.lock_token then
     insert into sf_claim_audit (entity_type, entity_key, lock_token, claim_seq, claimed_at, versions)
-    values (new.entity_type, new.entity_key, new.lock_token, nextval('sf_claim_audit_seq'), clock_timestamp(), array[new.version])
-    on conflict (entity_type, entity_key, lock_token) do update set versions = sf_claim_audit.versions || new.version;
+    values (t, k, new.lock_token, nextval('sf_claim_audit_seq'), clock_timestamp(), array[sf_event_version(new.payload)])
+    on conflict (entity_type, entity_key, lock_token) do update set versions = sf_claim_audit.versions || excluded.versions;
   end if;
   return new;
 end $$;
