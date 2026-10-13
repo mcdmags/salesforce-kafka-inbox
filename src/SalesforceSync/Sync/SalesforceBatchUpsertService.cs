@@ -4,6 +4,7 @@ using Dapper;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Inbox;
+using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 
 namespace SalesforceSync.Sync;
@@ -15,12 +16,13 @@ public sealed record InboxEvent(long Id, string Key, long Version, string Payloa
 /// The one sync engine for every Salesforce object. <see cref="UpsertBatchAsync{TEvent}(UpsertStrategy{TEvent}, CancellationToken)"/>
 /// runs one batch end to end; the strategy only says how an inbox event maps to Salesforce records and what to read.
 /// <list type="number">
+/// <item>Takes a global concurrency slot and respects a shared pause (rate limits, all pods).</item>
 /// <item>Claims up to <see cref="SyncOptions.BatchSize"/> entities of the strategy's type: per entity, the head row
 /// is locked with FOR UPDATE SKIP LOCKED and all its pending rows are leased, so no two workers in any pod ever
 /// process the same entity at once.</item>
 /// <item>Supersedes events at or below the entity's synced version (late or replayed), merges the rest in version
 /// order and maps them through the strategy; a payload that can't be mapped is dead-lettered on its own.</item>
-/// <item>Upserts the units through <see cref="SalesforceRecordUpserter"/> (2 API calls), giving up
+/// <item>Upserts the units through <see cref="SalesforceRecordUpserter"/> (2 API calls, rate limited), giving up
 /// before the lease runs out.</item>
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
 /// next claim, retried with backoff, or dead-lettered.</item>
@@ -30,6 +32,8 @@ public sealed record InboxEvent(long Id, string Key, long Version, string Payloa
 public sealed class SalesforceBatchUpsertService(
     PostgresExecutionStrategy pg,
     SalesforceRecordUpserter salesforce,
+    SalesforceRateLimiter limiter,
+    SalesforceConcurrencySlots slots,
     IOptions<SyncOptions> options,
     ILogger<SalesforceBatchUpsertService> log)
 {
@@ -52,9 +56,12 @@ public sealed class SalesforceBatchUpsertService(
         => UpsertBatchAsync(new UpsertStrategy<TEvent>(entityType, map, queries), ct);
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
-    /// <returns>Inbox rows processed (0 = nothing to do).</returns>
+    /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
     public async Task<int> UpsertBatchAsync<TEvent>(UpsertStrategy<TEvent> strategy, CancellationToken ct)
     {
+        await using var slot = await slots.TryAcquireAsync(ct);
+        if (slot is null || await limiter.IsPausedAsync(ct)) return 0;
+
         // Give up on Salesforce before the lease runs out, so another worker never claims an entity while this one
         // can still write to it. Started before the claim, so the margin is measured from when the lease began.
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -76,6 +83,13 @@ public sealed class SalesforceBatchUpsertService(
                 : (await salesforce.UpsertAsync(batch.Work.Select(w => (w.Key, w.Unit)).ToList(),
                     strategy.Queries(batch.Work.Select(w => w.Unit).ToList()).ToList(), leaseCts.Token))
                     .ToDictionary(r => r.Key);
+        }
+        catch (RateLimitedException ex)
+        {
+            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}", claim.Events.Count, strategy.EntityType, ex.RetryAfter);
+            await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(InboxSql.Defer,
+                new { ids = claim.EventIds, token = claim.Token, delay = ex.RetryAfter }, cancellationToken: t)), ct);
+            return 0;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {

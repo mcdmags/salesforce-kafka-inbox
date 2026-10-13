@@ -10,6 +10,9 @@ public sealed class SyncOptions
     /// <summary>Parallel worker loops in this process.</summary>
     public int Workers { get; set; } = 4;
 
+    /// <summary>Max in-flight Salesforce batches across ALL processes.</summary>
+    public int MaxConcurrentRequests { get; set; } = 6;
+
     /// <summary>Entities per batch (= graphs per Composite Graph request, max 75).</summary>
     public int BatchSize { get; set; } = 75;
 
@@ -26,7 +29,7 @@ public sealed class SyncOptions
 }
 
 /// <summary>
-/// Fails startup on values that would make the workers silently do nothing (no loops) or exceed what
+/// Fails startup on values that would make the workers silently do nothing (no slots, no loops) or exceed what
 /// one Composite Graph request can carry.
 /// </summary>
 public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
@@ -35,6 +38,7 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
     {
         var errors = new List<string>();
         if (o.Workers < 1) errors.Add($"{SyncOptions.Section}:Workers must be at least 1.");
+        if (o.MaxConcurrentRequests < 1) errors.Add($"{SyncOptions.Section}:MaxConcurrentRequests must be at least 1.");
         if (o.BatchSize is < 1 or > SalesforceRestClient.MaxGraphsPerRequest)
             errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {SalesforceRestClient.MaxGraphsPerRequest} " +
                        "(one Composite Graph per entity).");

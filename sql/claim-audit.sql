@@ -2,7 +2,7 @@
 -- same entity (e.g. the same account) can be detected after the fact. Not part of schema.sql; do not install in production.
 --
 -- A claim starts when a worker sets lock_token (InboxSql.ClaimKeys) and ends when that worker clears
--- the token (Complete / Fail / Dead / Release). Ordering uses a sequence, not the clock: wall-clock time can step
+-- the token (Complete / Fail / Defer). Ordering uses a sequence, not the clock: wall-clock time can step
 -- backwards (NTP / VM time sync), while a claim that can only happen after another worker's release commits
 -- always draws a higher sequence number than that release.
 
