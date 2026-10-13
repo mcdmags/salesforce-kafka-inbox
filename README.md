@@ -277,6 +277,63 @@ Every pod applies the bucket size, rate and budget to the shared `sf_rate_limit`
 configuration changes to all pods together. `sf_limit_status` shows the last reported usage, this integration's
 own calls over the last 24 hours and its budget.
 
+### Concurrency slots: Postgres advisory locks
+
+`SalesforceConcurrencySlots` caps how many batches are calling Salesforce at once **across all pods**, so the
+integration stays under the org's concurrent long-running limit (25, or 5 on Developer Edition).
+
+**How it works.** There is no table for it. `pg_try_advisory_lock(key)` is a built-in Postgres function that
+locks an application-chosen number, held in Postgres's lock manager (in memory). There are
+`Sync:MaxConcurrentRequests` slots, keys `0x53460000 + 0 … N-1`. Before calling Salesforce, a worker opens a
+connection and tries the keys in random order:
+
+- it gets `true` → it holds that slot for the batch, then calls `pg_advisory_unlock(key)`;
+- `false` comes back immediately if another session holds that key, so there is no waiting;
+- all `false` → every slot is busy, so the worker skips this round and claims nothing.
+
+If a pod crashes or its connection drops, Postgres ends the session and releases its locks. A slot can't leak,
+so there is no expiry, heartbeat or cleanup job. (`pg_advisory_xact_lock` in `InboxSchema` does the same for
+schema setup: it lets one pod at a time apply `schema.sql`, released at commit.)
+
+**Why this rather than the alternatives**
+
+| Option | Why not (here) |
+| --- | --- |
+| `SemaphoreSlim` per pod | Only limits one process. Splitting the limit statically (`25 / pods`) breaks when pods scale up or down and wastes slots when some pods are idle. |
+| Slot rows in a table with a lease (`locked_until`) | Works, but a crashed holder keeps the slot until the lease expires, needs heartbeats for long calls, and every acquire/release is a write (WAL, vacuum). |
+| Redis semaphore / Redlock | Another piece of infrastructure to run, and it's also TTL-based, with the same expiry trade-offs. |
+| Counting in-flight rows in `sf_inbox` | Needs a lock or `serializable` isolation to count and claim atomically, and is easy to get subtly wrong. |
+| **Advisory locks** | Postgres is already the coordinator. Acquiring is one non-blocking statement, a crashed holder is released automatically, and nothing is written to disk. |
+
+**Is it best practice?** Yes, for a distributed semaphore or mutex when Postgres is already shared state.
+It's the documented use of advisory locks ("locks with application-defined meanings"), and established
+Postgres-backed job systems use them for the same purpose (e.g. Que and GoodJob for job locking, and Flyway
+for its migration lock on Postgres). It's the wrong tool if no shared Postgres exists, or if slots must
+outlive a connection.
+
+**Trade-offs and how they're handled**
+
+- **Session-level locks need a stable session.** Use direct connections or PgBouncer in *session* mode. In
+  *transaction* mode the unlock can run on a different server connection, so the lock would stay held.
+- **A held slot keeps a connection open** for the whole batch, in addition to the short claim/outcome
+  connections. Size `Maximum Pool Size` per pod above `Workers` (one slot connection per worker plus headroom),
+  and Postgres `max_connections` for all pods together.
+- **Pooled connections:** a slot is always unlocked explicitly before its connection goes back to the pool.
+  As a backstop, Npgsql resets a pooled connection with `DISCARD ALL` (which also drops advisory locks) when
+  it's next used, and a broken connection is discarded, which ends the session.
+- **Acquire cost** is at most N quick round trips when all slots are busy. That's negligible for N ≤ 25. The
+  random order spreads pods across keys so they don't all contend for slot 0.
+- **Key namespace:** keys are `0x5346xxxx` ("SF"). Advisory locks are per database, so other applications in
+  the same database must not use the same range.
+
+To see the slots held right now:
+
+```sql
+select pid, objid::bigint - 1397112832 as slot, application_name, client_addr, state
+from pg_locks join pg_stat_activity using (pid)
+where locktype = 'advisory' and classid = 0 and objid::bigint between 1397112832 and 1397112832 + 100;
+```
+
 ## Using a real Salesforce org
 
 1. No fields need to be added for the sync itself. Account, `Profile__c` and `Account_Relationship__c` need
