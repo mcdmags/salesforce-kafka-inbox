@@ -97,7 +97,8 @@ create table if not exists sf_rate_limit (
   app_max              bigint,
   app_name             text,
   usage_updated_at     timestamptz,
-  daily_budget         bigint       -- this integration's calls per rolling 24h (RateLimit:DailyBudgetShare)
+  daily_budget         bigint       -- this integration's calls per rolling 24h: RateLimit:DailyBudgetShare x the lower of
+                                    -- the configured allocation and api_max
 );
 
 -- Upgrade path for databases created from the earlier schema.
@@ -131,7 +132,8 @@ select api_used, api_max, round(100.0 * api_used / nullif(api_max, 0), 1)     as
 from sf_rate_limit
 where name = 'salesforce';
 
--- Bucket size, refill rate and daily budget are set from configuration at worker startup (RateLimitInitializer)
+-- Bucket size, refill rate and daily budget are set from configuration at worker startup (RateLimitInitializer); the
+-- budget is lowered when Salesforce reports a lower allocation in Sforce-Limit-Info
 insert into sf_rate_limit (name, tokens, capacity, base_refill_per_sec, refill_per_sec)
 values ('salesforce', 5, 5, 2, 2)
 on conflict (name) do nothing;

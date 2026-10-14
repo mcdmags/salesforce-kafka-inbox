@@ -7,7 +7,9 @@ namespace SalesforceSync.RateLimiting;
 /// <summary>
 /// Token bucket + limit guard stored in Postgres, shared by every worker in every process.
 /// The bucket's speed is adjusted from the Sforce-Limit-Info header Salesforce returns on each call, and every
-/// call is counted against this integration's share of the org's daily allocation over a rolling 24 hours.
+/// call is counted against this integration's share of the org's daily allocation over a rolling 24 hours. The
+/// allocation is the lower of the configured one (<see cref="SalesforceLimitsOptions"/>, the maximum) and the limit
+/// Salesforce reports in that header (<c>api-usage=25/5000</c>: 5,000).
 /// </summary>
 public sealed class SalesforceRateLimiter(
     PostgresExecutionStrategy pg,
@@ -21,14 +23,29 @@ public sealed class SalesforceRateLimiter(
     private DateTime _lastReportUtc = DateTime.MinValue;
     private ThrottleDecision _lastDecision = ThrottleDecision.Normal;
     private double _ownDailyRatio;
-    private int _allocationMismatchLogged;
+    private long _loggedAllocation;
 
-    /// <summary>This integration's calls per rolling 24 hours.</summary>
-    public long DailyBudget => (long)Math.Floor(_limits.EffectiveDailyApiAllocation * _opt.DailyBudgetShare);
+    /// <summary>This integration's calls per rolling 24 hours under the configured allocation alone: the maximum.</summary>
+    public long DailyBudget => BudgetFor(null);
+
+    /// <summary>
+    /// This integration's calls per rolling 24 hours: <see cref="RateLimitOptions.DailyBudgetShare"/> of the lower of
+    /// the configured allocation and <paramref name="reportedAllocation"/> (Sforce-Limit-Info api-usage's limit).
+    /// </summary>
+    public long BudgetFor(long? reportedAllocation)
+    {
+        var allocation = _limits.EffectiveDailyApiAllocation;
+        if (reportedAllocation is > 0 and var reported && reported < allocation)
+        {
+            allocation = reported;
+        }
+        return (long)Math.Floor(allocation * _opt.DailyBudgetShare);
+    }
 
     /// <summary>
     /// Writes the configured bucket size, rate and daily budget to the shared row (every process applies the same
-    /// configuration at startup). The current throttle factor and stored tokens are kept.
+    /// configuration at startup), the budget capped by the allocation Salesforce last reported. The current throttle
+    /// factor and stored tokens are kept.
     /// </summary>
     public async Task ApplyConfigurationAsync(CancellationToken ct)
     {
@@ -36,11 +53,12 @@ public sealed class SalesforceRateLimiter(
         {
             rate = _opt.MaxRequestsPerSecond,
             capacity = _opt.BurstCapacity,
-            budget = DailyBudget
+            budget = DailyBudget,
+            share = _opt.DailyBudgetShare
         }, ct);
 
         log.LogInformation(
-            "Salesforce limits: {OrgType} {Edition} org, {Allocation} calls/24h for the org, budget {Budget} calls/24h " +
+            "Salesforce limits: {OrgType} {Edition} org, at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls/24h " +
             "for this integration ({Share:P0}), {Rate} calls/s, burst {Burst}, max {Concurrent} concurrent long-running requests",
             _limits.OrgType, _limits.Edition, _limits.EffectiveDailyApiAllocation, DailyBudget, _opt.DailyBudgetShare,
             _opt.MaxRequestsPerSecond, _opt.BurstCapacity, _limits.EffectiveConcurrentLongRunningLimit);
@@ -81,7 +99,7 @@ public sealed class SalesforceRateLimiter(
     /// </summary>
     public async Task ReportLimitsAsync(SalesforceLimitInfo info, CancellationToken ct)
     {
-        WarnOnAllocationMismatch(info);
+        LogAllocation(info);
         var decision = Decide(info, Volatile.Read(ref _ownDailyRatio));
 
         // Throttle writes: every response carries the header, but Postgres only needs it occasionally,
@@ -105,6 +123,7 @@ public sealed class SalesforceRateLimiter(
             appUsed = info.PerAppUsage?.Used,
             appMax = info.PerAppUsage?.Max,
             appName = info.AppName,
+            budget = info.ApiUsage is { Max: > 0 } usage ? BudgetFor(usage.Max) : (long?)null,
             speed = decision.Speed,
             pauseSeconds = decision.Pause.TotalSeconds
         }, ct);
@@ -125,15 +144,23 @@ public sealed class SalesforceRateLimiter(
         return ThrottleDecision.Normal;
     }
 
-    /// <summary>The configured allocation drives the budget; say so once if Salesforce reports a different one.</summary>
-    private void WarnOnAllocationMismatch(SalesforceLimitInfo info)
+    /// <summary>Logs which allocation the budget follows, once per process and again whenever Salesforce's changes.</summary>
+    private void LogAllocation(SalesforceLimitInfo info)
     {
-        if (info.ApiUsage is not { Max: > 0 } usage || usage.Max == _limits.EffectiveDailyApiAllocation) return;
-        if (Interlocked.Exchange(ref _allocationMismatchLogged, 1) == 1) return;
-        log.LogWarning(
-            "Salesforce reports a daily API allocation of {Reported}, but {Section} describes {Configured}. " +
-            "The budget is based on the configured value; update {Section} (or set DailyApiAllocation).",
-            usage.Max, SalesforceLimitsOptions.Section, _limits.EffectiveDailyApiAllocation, SalesforceLimitsOptions.Section);
+        if (info.ApiUsage is not { Max: > 0 } usage)
+        {
+            return;
+        }
+        if (Interlocked.Exchange(ref _loggedAllocation, usage.Max) == usage.Max)
+        {
+            return;
+        }
+        var configured = _limits.EffectiveDailyApiAllocation;
+        log.LogInformation(
+            "Salesforce reports a daily API allocation of {Reported} calls, {Section} allows at most {Configured}: " +
+            "the budget is {Budget} calls/24h ({Share:P0} of {Allocation})",
+            usage.Max, SalesforceLimitsOptions.Section, configured, BudgetFor(usage.Max), _opt.DailyBudgetShare,
+            Math.Min(usage.Max, configured));
     }
 
     private void LogTransition(ThrottleDecision from, ThrottleDecision to, SalesforceLimitInfo info)

@@ -14,8 +14,9 @@ public sealed class RateLimitOptions
     public double BurstCapacity { get; set; } = 5;
 
     /// <summary>
-    /// Fraction of the org's daily API allocation (<see cref="SalesforceLimitsOptions.EffectiveDailyApiAllocation"/>)
-    /// this integration may use per rolling 24 hours. The allocation is shared by every integration and user of the
+    /// Fraction of the org's daily API allocation this integration may use per rolling 24 hours. The allocation is
+    /// <see cref="SalesforceLimitsOptions.EffectiveDailyApiAllocation"/>, or the limit Salesforce reports in
+    /// <c>Sforce-Limit-Info: api-usage=used/limit</c> when that is lower. The allocation is shared by every integration and user of the
     /// org, so leave room for them. Enforced as a hard cap across all processes.
     /// </summary>
     public double DailyBudgetShare { get; set; } = 0.5;
