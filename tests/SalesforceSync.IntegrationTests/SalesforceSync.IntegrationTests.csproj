@@ -13,7 +13,6 @@
   <ItemGroup>
     <PackageReference Include="AutoFixture" Version="4.18.1" />
     <PackageReference Include="Confluent.Kafka" Version="2.11.1" />
-    <PackageReference Include="Dapper" Version="2.1.35" />
     <!-- 7.x only: FluentAssertions 8 and later need a commercial license -->
     <PackageReference Include="FluentAssertions" Version="[7.2.2]" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />

@@ -1,292 +1,312 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
-using Dapper;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Inbox;
+using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
+using SalesforceSync.Sync.Upsert;
 
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// A pending inbox row as claimed: <paramref name="Key"/> and <paramref name="Version"/> are read from the raw
-/// <paramref name="Payload"/> by sf_event_key / sf_event_version (meta.time in microseconds since the epoch).
-/// </summary>
-public sealed record InboxEvent(long Id, string Key, long Version, string Payload, int RetryCount);
-
-/// <summary>
-/// The one sync engine for every Salesforce object. <see cref="UpsertBatchAsync{TEvent}(UpsertStrategy{TEvent}, CancellationToken)"/>
-/// runs one batch end to end; the strategy only says how an inbox event maps to Salesforce records and what to read.
+/// The one sync engine for every Salesforce object. <see cref="UpsertBatchAsync{TEvent, TRow}"/>
+/// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds the events, and the
+/// strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
-/// <item>Claims up to <see cref="SyncOptions.BatchSize"/> entities of the strategy's type: per entity, the head row
-/// is locked with FOR UPDATE SKIP LOCKED and all its pending rows are leased, so no two workers in any pod ever
-/// process the same entity at once.</item>
-/// <item>Supersedes events at or below the entity's synced version (late or replayed), merges the rest in
-/// (version, id) order and maps them through the strategy; a payload that can't be mapped is dead-lettered on its own.</item>
-/// <item>Upserts the units through <see cref="SalesforceRecordUpserter"/> (2 API calls), giving up
-/// before the lease runs out.</item>
+/// <item>Takes a global concurrency slot and respects a shared pause (rate limits, all pods).</item>
+/// <item>Claims up to <see cref="SyncOptions.BatchSize"/> entities from the inbox table: per entity, the head
+/// row is locked with FOR UPDATE SKIP LOCKED and its oldest pending rows are leased, so no two workers in any pod
+/// ever process the same entity at once.</item>
+/// <item>Per entity, reads the claimed events and keeps the one with the newest event time (events carry the full
+/// record); the others are superseded, and so is the newest if it is not newer than what was already synced. Arrival
+/// order plays no part, so events may come out of order, over any partitions. An event that can't be read or
+/// mapped is dead-lettered on its own.</item>
+/// <item>Writes the units to Salesforce in 2 API calls (<see cref="WriteToSalesforceAsync"/>), giving up before the
+/// lease runs out: one Composite request reads the current records, one writes what differs with sObject Collections.</item>
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
-/// next claim, retried with backoff, or dead-lettered.</item>
+/// next claim, retried with backoff, dead-lettered, or held because the write's outcome is unknown.</item>
 /// </list>
-/// Every Postgres unit of work runs through <see cref="PostgresExecutionStrategy"/>.
+/// This class is the flow. The rules it applies are small classes without I/O (<see cref="BatchPreparer"/> and the
+/// ones in <c>Sync/Upsert</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
+/// through <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
 /// </summary>
 public sealed class SalesforceBatchUpsertService(
-    PostgresExecutionStrategy pg,
-    SalesforceRecordUpserter salesforce,
+    ISalesforceBatchGate gate,
+    SalesforceRestClient salesforce,
+    SalesforceSchemaCache schemaCache,
+    SalesforceErrors errors,
+    IOptions<SalesforceOptions> salesforceOptions,
     IOptions<SyncOptions> options,
     ILogger<SalesforceBatchUpsertService> log)
 {
-    /// <summary>How inbox payloads (whole event envelopes) are deserialized into a strategy's event type.</summary>
+    /// <summary>
+    /// How inbox payloads (whole event envelopes) are deserialized into a strategy's event type: camelCase JSON,
+    /// matched to the PascalCase CLR properties without regard to case.
+    /// </summary>
     public static readonly JsonSerializerOptions EventJson = new(JsonSerializerDefaults.Web);
 
     /// <summary>
-    /// Share of the lease a batch may spend before its Salesforce call is cancelled; the rest is margin for a
-    /// cancelled request still finishing in Salesforce and for recording the outcome.
+    /// Share of the lease a batch may spend before its Salesforce call is cancelled; the rest is margin for recording
+    /// the outcome. A write cancelled this way has an unknown outcome and puts its entities on hold.
     /// </summary>
     private const double LeaseUsableFraction = 0.8;
 
-    private readonly SyncOptions _opt = options.Value;
+    /// <summary>Recording a hold must not be cut short by the cancellation that caused it (shutdown), but may not hang it either.</summary>
+    private static readonly TimeSpan HoldRecordingTimeout = TimeSpan.FromSeconds(10);
 
-    /// <summary>Same as the strategy overload, with the strategy's parts passed as delegates.</summary>
-    public Task<int> UpsertBatchAsync<TEvent>(
-        string entityType,
-        Func<string, TEvent, UpsertUnit> map,
-        Func<IReadOnlyCollection<UpsertUnit>, IEnumerable<SoqlQuery>> queries,
-        CancellationToken ct)
-        => UpsertBatchAsync(new UpsertStrategy<TEvent>(entityType, map, queries), ct);
+    private readonly SyncOptions _opt = options.Value;
+    private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
+    private readonly WriteResultInterpreter _interpreter = new(errors);
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
-    /// <returns>Inbox rows processed (0 = nothing to do).</returns>
-    public async Task<int> UpsertBatchAsync<TEvent>(UpsertStrategy<TEvent> strategy, CancellationToken ct)
+    /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
+    public async Task<int> UpsertBatchAsync<TEvent, TRow>(UpsertStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
+        where TRow : InboxRow, new()
     {
+        await using var admission = await gate.TryEnterAsync(ct);
+        if (admission is null)
+        {
+            return 0;
+        }
+
         // Give up on Salesforce before the lease runs out, so another worker never claims an entity while this one
         // can still write to it. Started before the claim, so the margin is measured from when the lease began.
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
 
-        // 1. Claim (short transaction)
-        var claim = await ClaimAsync(strategy.EntityType, ct);
-        if (claim.Events.Count == 0) return 0;
+        // 1. Claim events from the inbox table (short transaction)
+        var claim = await inbox.ClaimAsync(strategy.EntityType, ct);
+        if (claim.Events.Count == 0)
+        {
+            return 0;
+        }
 
-        // 2. Supersede stale events, merge the rest per entity, map to Salesforce records
-        var batch = Prepare(strategy, claim);
+        // 2. Per entity: keep the newest event, drop it if it isn't newer than what is synced, map it to records
+        var batch = BatchPreparer.Prepare(strategy, claim.Events, claim.SyncedTimes);
 
-        // 3. Salesforce (outside any transaction)
+        // 3. Salesforce (outside any transaction): read, decide, send, interpret
         Dictionary<string, UpsertResult> results;
         try
         {
             results = batch.Work.Count == 0
                 ? []
-                : (await salesforce.UpsertAsync(batch.Work.Select(w => (w.Key, w.Unit)).ToList(),
-                    strategy.Queries(batch.Work.Select(w => w.Unit).ToList()).ToList(), leaseCts.Token))
-                    .ToDictionary(r => r.Key);
+                : (await WriteToSalesforceAsync(batch.Units, [.. strategy.Queries([.. batch.Work.Select(w => w.Unit)])],
+                    leaseCts.Token)).ToDictionary(r => r.Key);
+        }
+        catch (UnknownOutcomeException ex)
+        {
+            // Salesforce may still apply the write. Caught on shutdown too: an entity released now could be written
+            // by another worker before the lost write lands. If the hold can't be recorded (or the process is killed
+            // first), the lease is what still protects the entities.
+            log.LogWarning(ex, "{Type} batch: holding {Count} events for {Hold}", strategy.EntityType, claim.Events.Count, _opt.UnknownOutcomeHold);
+            using var recording = new CancellationTokenSource(HoldRecordingTimeout);
+            await inbox.HoldAsync(claim, ex.Message, recording.Token);
+            ct.ThrowIfCancellationRequested();
+            return claim.Events.Count;
+        }
+        catch (RateLimitedException ex)
+        {
+            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}", claim.Events.Count, strategy.EntityType, ex.RetryAfter);
+            await inbox.DeferAsync(claim, ex.RetryAfter, ct);
+            return 0;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // The request as a whole failed (network, 5xx, timeout, lease margin reached): every entity may succeed
-            // on retry. Shutdown (ct) is not caught: the lease is left to expire, because a cancelled request may
-            // still be running in Salesforce.
+            // The request failed before anything was written (describe, the read, or a write Salesforce provably did
+            // not apply): every entity may succeed on retry. Shutdown (ct) is not caught: nothing was written, and
+            // the lease simply expires.
             log.LogError(ex, "{Type} batch failed", strategy.EntityType);
-            var all = new FailedRows();
-            all.Add(claim.EventIds, ex.Message, ex is SalesforceQueryException q ? q.Errors.FirstOrDefault()?.Code : null);
-            await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(InboxSql.Fail,
-                FailArgs(all, claim.Token), cancellationToken: t)), ct);
+            await inbox.FailAllAsync(claim, ex.Message, ex is SalesforceQueryException q ? q.Errors.FirstOrDefault()?.Code : null, ct);
             return claim.Events.Count;
         }
 
-        // 4. Record outcomes
-        await RecordOutcomesAsync(strategy.EntityType, claim.Token, batch, results, ct);
-
-        foreach (var (ids, error) in batch.Invalid)
-            log.LogWarning("Dead-lettered {Count} events ({Code}): {Error}", ids.Length, SalesforceErrors.InvalidEvent, error);
-        foreach (var r in results.Values.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure))
-            log.LogWarning("{Type} {Key}: {Outcome} ({Code}) {Errors}", strategy.EntityType, r.Key, r.Outcome,
-                r.PrimaryError?.Code, string.Join("; ", r.Errors));
+        // 4. Record every entity's outcome in the inbox
+        var outcomes = batch.Outcomes(results);
+        LogFailures(strategy.EntityType, batch, results.Values);
+        if (outcomes.Held.Count == 0)
+        {
+            await inbox.RecordAsync(claim, outcomes, ct);
+        }
+        else
+        {
+            // Some entities are held (a later write's outcome is unknown): like a whole-claim hold, that must be
+            // recorded even on shutdown
+            using var recording = new CancellationTokenSource(HoldRecordingTimeout);
+            await inbox.RecordAsync(claim, outcomes, recording.Token);
+            ct.ThrowIfCancellationRequested();
+        }
 
         return claim.Events.Count;
     }
 
     /// <summary>
-    /// Locks and leases a batch, and reads the claimed entities' watermarks in the same transaction. A fresh token per
-    /// attempt: if a commit's outcome is unknown and the claim is retried, rows leased by the lost attempt are not
-    /// mistaken for this one's. The retry releases them first, so they don't wait for their lease to expire (and a
-    /// lease nobody works on is never taken over).
+    /// The Salesforce half of a batch, for any sObjects, in two API calls: one Composite request reads the current
+    /// records, one writes what differs with sObject Collections (more than 5 collections are split over further
+    /// requests). Returns one outcome per unit. Nothing here touches the inbox.
     /// </summary>
-    private Task<Claim> ClaimAsync(string entityType, CancellationToken ct)
+    /// <param name="units">At most <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
+    /// <param name="queries">The strategy's reads: the units' records and the records their lookups point at.</param>
+    /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
+    internal async Task<List<UpsertResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
+        IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
     {
-        var attempted = new List<Guid>();
-        return pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
+        if (units.Count > ReadQueryBuilder.MaxEntitiesPerBatch)
         {
-            if (attempted.Count > 0)
-                await conn.ExecuteAsync(new CommandDefinition(InboxSql.ReleaseLostClaims,
-                    new { entityType, tokens = attempted.ToArray() }, tx, cancellationToken: t));
-
-            var token = Guid.NewGuid();
-            attempted.Add(token);
-            var keys = (await conn.QueryAsync<string>(new CommandDefinition(InboxSql.LockHeads,
-                new { entityType, batchSize = Math.Min(_opt.BatchSize, SalesforceRestClient.MaxGraphsPerRequest) }, tx,
-                cancellationToken: t))).ToArray();
-            if (keys.Length == 0) return new Claim(token, [], new Dictionary<string, long>());
-
-            var events = (await conn.QueryAsync<InboxEvent>(new CommandDefinition(InboxSql.ClaimKeys,
-                new { entityType, keys, token, lease = _opt.Lease }, tx, cancellationToken: t))).ToList();
-            var synced = (await conn.QueryAsync<(string Key, long Version)>(new CommandDefinition(InboxSql.SyncedVersions,
-                    new { entityType, keys }, tx, cancellationToken: t)))
-                .ToDictionary(r => r.Key, r => r.Version, StringComparer.Ordinal);
-            return new Claim(token, events, synced);
-        }, ct);
-    }
-
-    /// <summary>
-    /// Splits the claimed events into stale ones (at or below the entity's watermark), entities whose merged payload
-    /// maps to a unit, and entities whose payload can't be read or mapped (dead-lettered on their own).
-    /// </summary>
-    private static PreparedBatch Prepare<TEvent>(UpsertStrategy<TEvent> strategy, Claim claim)
-    {
-        var stale = new List<long>();
-        var current = new List<InboxEvent>(claim.Events.Count);
-        foreach (var e in claim.Events)
-        {
-            if (claim.Synced.TryGetValue(e.Key, out var synced) && e.Version <= synced) stale.Add(e.Id);
-            else current.Add(e);
+            throw new ArgumentOutOfRangeException(nameof(units), $"At most {ReadQueryBuilder.MaxEntitiesPerBatch} units per call");
         }
 
-        var work = new List<Work>();
-        var invalid = new List<(long[] Ids, string Error)>();
-        foreach (var group in current.GroupBy(e => e.Key, StringComparer.Ordinal))
+        var results = new List<UpsertResult>(units.Count);
+        if (units.Count == 0)
         {
-            // Two events of an entity with the same time are both kept; the one ingested later counts as newer
-            var ordered = group.OrderBy(e => e.Version).ThenBy(e => e.Id).ToList();
-            var ids = ordered.Select(e => e.Id).ToArray();
+            return results;
+        }
+
+        // 1. Field metadata of every object involved (cached per process, revalidated with If-Modified-Since)
+        var schemas = await DescribeAsync(units, queries, ct);
+
+        // 2. Normalize; a unit Salesforce would reject fails on its own without reaching the query
+        var (normalized, rejected) = RecordNormalizer.Normalize(units, schemas);
+        results.AddRange(rejected);
+        if (normalized.Count == 0)
+        {
+            return results;
+        }
+
+        // 3. Read: one Composite call with the strategy's queries
+        var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas), schemas.Keys, ct);
+
+        // 4. Decide per record: unchanged, create or update (by what the read found), and how each lookup is linked;
+        // the writes are grouped into collections and Composite requests
+        var plan = WritePlanner.Plan(normalized, current);
+        results.AddRange(plan.NotSent);
+
+        // 5. Send: normally one Composite call. 6. Per-record results -> one outcome per unit.
+        for (var i = 0; i < plan.Requests.Count; i++)
+        {
+            var request = plan.Requests[i];
             try
             {
-                var payload = ReadPayload<TEvent>(ordered) ?? throw new JsonException("Payload is null");
-                work.Add(new Work(group.Key, strategy.Map(group.Key, payload), ordered[^1].Version, ids));
+                var answers = await SendAsync(request, ct);
+                results.AddRange(_interpreter.Interpret(request, answers));
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // A failed first call fails the batch (the caller fails, holds or defers the whole claim): nothing of it
+            // was written. A later call's failure costs only its own entities: the earlier calls' records are final.
+            catch (Exception ex) when (i > 0)
             {
-                invalid.Add((ids, $"{strategy.EntityType} {group.Key}: {ex.Message}"));
-            }
-        }
-        return new PreparedBatch(stale.ToArray(), work, invalid);
-    }
-
-    /// <summary>
-    /// Records every entity's outcome in one transaction, one statement per kind of outcome (not per entity).
-    /// Safe to repeat: every statement is conditional on the lease token.
-    /// </summary>
-    private Task RecordOutcomesAsync(string entityType, Guid token, PreparedBatch batch,
-        IReadOnlyDictionary<string, UpsertResult> results, CancellationToken ct)
-    {
-        var done = new List<Work>();
-        var released = new List<long>();
-        var dead = new FailedRows();
-        var failed = new FailedRows();
-        foreach (var (ids, error) in batch.Invalid) dead.Add(ids, error, SalesforceErrors.InvalidEvent);
-        foreach (var w in batch.Work)
-        {
-            var r = results[w.Key];
-            switch (r.Outcome)
-            {
-                case SyncOutcome.Saved or SyncOutcome.Unchanged: done.Add(w); break;
-                case SyncOutcome.NotAttempted: released.AddRange(w.EventIds); break;
-                case SyncOutcome.PermanentFailure: dead.Add(w.EventIds, string.Join("; ", r.Errors), r.PrimaryError?.Code); break;
-                default: failed.Add(w.EventIds, string.Join("; ", r.Errors), r.PrimaryError?.Code); break;
-            }
-        }
-
-        return pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
-        {
-            Task Run(string sql, object args) => conn.ExecuteAsync(new CommandDefinition(sql, args, tx, cancellationToken: t));
-
-            if (done.Count > 0)
-            {
-                // Watermarks first: Complete releases the lease that MarkSynced checks
-                await Run(InboxSql.MarkSynced, new
+                var stop = LaterCallFailed(ex, request, plan.Requests.Skip(i + 1), results);
+                if (stop)
                 {
-                    entityType, token, keys = done.Select(w => w.Key).ToArray(), versions = done.Select(w => w.Version).ToArray()
-                });
-                await Run(InboxSql.Complete, new { ids = done.SelectMany(w => w.EventIds).ToArray(), token, status = "done" });
+                    break;
+                }
             }
-            if (batch.StaleIds.Length > 0)
-                await Run(InboxSql.Complete, new { ids = batch.StaleIds, token, status = "superseded" });
-            if (released.Count > 0)
-                await Run(InboxSql.Release, new { ids = released.ToArray(), token });
-            if (dead.Count > 0)
-                await Run(InboxSql.Dead, new { ids = dead.Ids.ToArray(), errs = dead.Errors.ToArray(), codes = dead.Codes.ToArray(), token });
-            if (failed.Count > 0)
-                await Run(InboxSql.Fail, FailArgs(failed, token));
-        }, ct);
-    }
+        }
 
-    /// <summary>The entity's events merged into one payload. A single event (the common case) needs no JSON DOM.</summary>
-    private static TEvent? ReadPayload<TEvent>(IReadOnlyList<InboxEvent> ordered)
-        => ordered.Count == 1
-            ? JsonSerializer.Deserialize<TEvent>(ordered[0].Payload, EventJson)
-            : Coalesce(ordered).Deserialize<TEvent>(EventJson);
+        return results;
+    }
 
     /// <summary>
-    /// Merges whole events (envelopes) in (version, id) order: later values win, nested objects are merged field by
-    /// field, so a field an event doesn't mention keeps the value of an earlier one (absent = unchanged, null = clear).
-    /// meta.time ends up as the newest event's.
+    /// The outcomes of a write call after the first that threw: its entities are held if its outcome is unknown,
+    /// deferred if it was rate limited (and so are the calls after it), otherwise retried with backoff.
     /// </summary>
-    public static JsonObject Coalesce(IReadOnlyList<InboxEvent> ordered)
+    /// <returns>True if no further call may be sent.</returns>
+    private static bool LaterCallFailed(Exception ex, CompositeWrite failed, IEnumerable<CompositeWrite> notSent, List<UpsertResult> results)
     {
-        var merged = new JsonObject();
-        foreach (var e in ordered)
+        IEnumerable<UpsertResult> For(CompositeWrite request, SyncOutcome outcome, IReadOnlyList<SalesforceError> errors, TimeSpan? retryAfter = null)
         {
-            var obj = JsonNode.Parse(e.Payload)?.AsObject()
-                      ?? throw new JsonException($"Inbox event {e.Id} has an empty payload");
-            Merge(merged, obj);
+            return request.Units.Select(u => new UpsertResult(u.Key, outcome, errors, retryAfter));
         }
-        return merged;
+
+        switch (ex)
+        {
+            case UnknownOutcomeException:
+                // Stop: nothing more is sent while Salesforce may still be applying this call
+                results.AddRange(For(failed, SyncOutcome.OutcomeUnknown, [new SalesforceError(null, UnknownOutcomeException.Code, ex.Message)]));
+                results.AddRange(notSent.SelectMany(r => For(r, SyncOutcome.NotAttempted, [])));
+                return true;
+            case RateLimitedException limited:
+                results.AddRange(new[] { failed }.Concat(notSent).SelectMany(r => For(r, SyncOutcome.RateLimited, [], limited.RetryAfter)));
+                return true;
+            default:
+                // Salesforce provably did not apply it
+                results.AddRange(For(failed, SyncOutcome.TransientFailure, [new SalesforceError(null, "UNKNOWN_ERROR", ex.Message)]));
+                return false;
+        }
     }
 
-    private static void Merge(JsonObject target, JsonObject source)
+    private async Task<Dictionary<string, SObjectSchema>> DescribeAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
+        IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
     {
-        foreach (var (key, value) in source)
+        var sobjects = units.SelectMany(u => u.Unit.Records)
+            .SelectMany(r => (r.Lookups ?? []).Select(l => l.SObject).Append(r.SObject))
+            .Concat(queries.Select(q => q.SObject))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        var schemas = new Dictionary<string, SObjectSchema>(StringComparer.OrdinalIgnoreCase);
+        foreach (var sobject in sobjects)
         {
-            if (value is JsonObject src && target[key] is JsonObject existing) Merge(existing, src);
-            else target[key] = value?.DeepClone();
+            schemas[sobject] = await schemaCache.GetAsync(sobject, _salesforceOpt.SchemaRefreshInterval,
+                (since, token) => salesforce.DescribeAsync(sobject, since, token), ct);
         }
+
+        return schemas;
     }
 
-    private object FailArgs(FailedRows rows, Guid token) => new
+    private async Task<CurrentRecords> ReadCurrentAsync(IReadOnlyList<ReadQuery> queries, IEnumerable<string> describedSObjects,
+        CancellationToken ct)
     {
-        ids = rows.Ids.ToArray(),
-        errs = rows.Errors.ToArray(),
-        codes = rows.Codes.ToArray(),
-        token,
-        maxRetries = _opt.MaxRetries,
-        baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
-        maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
-    };
-
-    /// <summary>Inbox rows with the error to store on each, as the parallel arrays InboxSql.Fail / Dead take.</summary>
-    private sealed class FailedRows
-    {
-        public List<long> Ids { get; } = [];
-        public List<string> Errors { get; } = [];
-        public List<string?> Codes { get; } = [];
-        public int Count => Ids.Count;
-
-        public void Add(IEnumerable<long> ids, string error, string? code)
+        if (queries.Count == 0)
         {
-            foreach (var id in ids)
+            return CurrentRecords.None;
+        }
+
+        try
+        {
+            var rows = await salesforce.QueryAsync([.. queries.Select(q => q.Query)], ct);
+            return CurrentRecords.From(rows, queries);
+        }
+        catch (SalesforceQueryException ex) when (ex.Errors.Any(e => e.Code == "INVALID_FIELD"))
+        {
+            // The cached describe is out of date (a field was removed or renamed): describe again next time
+            foreach (var sobject in describedSObjects)
             {
-                Ids.Add(id);
-                Errors.Add(error);
-                Codes.Add(code);
+                schemaCache.Invalidate(sobject);
             }
+
+            throw;
         }
     }
 
-    private sealed record Claim(Guid Token, List<InboxEvent> Events, Dictionary<string, long> Synced)
+    private async Task<IReadOnlyList<CollectionResult>> SendAsync(CompositeWrite request, CancellationToken ct)
     {
-        public long[] EventIds => Events.Select(e => e.Id).ToArray();
+        try
+        {
+            return await salesforce.SendCollectionsAsync(request.BuildRequests(), ct);
+        }
+        catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
+        {
+            // Everything before this point only read from Salesforce, so its failures are safe to retry. From here
+            // on Salesforce may have the write, and may still apply it after we stop waiting.
+            throw new UnknownOutcomeException(ex);
+        }
     }
 
-    private sealed record Work(string Key, UpsertUnit Unit, long Version, long[] EventIds);
+    private void LogFailures(string entityType, PreparedBatch batch, IEnumerable<UpsertResult> results)
+    {
+        foreach (var (id, error) in batch.Invalid)
+        {
+            log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", id, SalesforceErrors.InvalidEvent, error);
+        }
 
-    private sealed record PreparedBatch(long[] StaleIds, List<Work> Work, List<(long[] Ids, string Error)> Invalid);
+        foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure or SyncOutcome.OutcomeUnknown))
+        {
+            log.LogWarning("{Type} {Key}: {Outcome} ({Code}) {Errors}", entityType, r.Key, r.Outcome,
+                r.PrimaryError?.Code, string.Join("; ", r.Errors));
+        }
+
+        if (results.FirstOrDefault(r => r.Outcome == SyncOutcome.RateLimited) is { } limited)
+        {
+            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}",
+                results.Count(r => r.Outcome == SyncOutcome.RateLimited), entityType, limited.RetryAfter);
+        }
+    }
 }

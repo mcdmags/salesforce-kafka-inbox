@@ -1,0 +1,434 @@
+# Benchmarks
+
+Measurements of the Postgres inbox (claim and outcome SQL) and of the whole sync path (Postgres inbox, workers,
+Salesforce client and rate limiter real; only the Salesforce HTTP endpoint mocked). How to run them is in the
+[main README](../../README.md#benchmarks).
+
+These numbers come from the claim and outcome tuning merged in PR #13 and re-measured after the move to EF Core
+(PR #12). Later changes (PR #14 formatting, PR #15 simplification of the write path) do not touch the inbox SQL;
+they can change the API call counts of the drain benchmarks, so re-run them before comparing call counts.
+
+## Environment
+
+| | |
+|---|---|
+| BenchmarkDotNet | v0.14.0 |
+| OS | macOS 26.6.2 (25G83), Darwin 25.6.0 |
+| CPU | Apple M4, 10 cores |
+| .NET | SDK 10.0.100, runtime .NET 8.0.17 Arm64 (Release) |
+| PostgreSQL | 17.11 in Docker (4 CPUs, 6 GB VM), `shared_buffers` 512MB, `max_connections` 300 |
+
+The machine ran other workloads throughout (load average 6 to 54). Absolute times are therefore noisy, by up to
+2x between two runs of the same code; the work counts (API calls, claims, retries) are not, and they are what shows
+whether two runs did the same thing.
+
+## What was measured
+
+1. **SQL statements in isolation** (`EXPLAIN ANALYZE` in a rolled-back transaction, exactly the SQL the worker
+   sends, with the plan pins it sends). 108 scenarios: inbox of 5,000 or 100,000 pending rows; 100, 5,000 or
+   one-row-per-entity entities; event times equal or distinct; no, some or most (90%) entities leased by another
+   worker; and three statistics states:
+   - **fresh**: never analyzed after the load (the planner's defaults),
+   - **analyzed**: `ANALYZE` after the load,
+   - **stale**: analyzed while every row was finished, then the backlog loaded (what autoanalyze leaves behind
+     after a quiet period followed by a burst).
+2. **Truth checks**: for the same scenarios and two batch sizes, the rows each statement touches are compared with
+   a plain reference query. All matched, before and after.
+3. **Drain benchmarks** (BenchmarkDotNet, `InboxDrainBenchmarks`, `StreamingIngestBenchmarks`): P pods x W
+   worker loops drain 5,000 events. Every iteration checks that each account ends at its newest version, no
+   record's write history goes backwards, every inbox row is `done` or `superseded`, and the claim audit shows no
+   two overlapping claims of one entity.
+4. **Micro benchmarks** (no database).
+
+## Correctness
+
+Every drain and streaming run: 196 iterations (warm-up included), 0 failures: 0 overlapping claims, 0 accounts not
+at their newest version, 0 wrong values, 0 write-history regressions. Truth checks: all scenarios matched, before
+and after the SQL changes.
+
+Mutation check of the claim (integration tests, real pods): removing the lease conditions, the claim lock, the
+lease re-check and the head's due check made `ConcurrencyTests` fail with 10,119 overlapping claims. With only the
+due check kept, the multi-pod test passed but the hand-interleaved race test failed: the race needs a row committed out of id
+order, which the hand-interleaved test produces and a load test rarely does. Removing only `SKIP LOCKED` passed
+both (workers then block on each other and Postgres re-checks the locked row; slower, still correct).
+
+Integration tests, two consecutive runs on the EF Core version: `Passed! - Failed: 0, Passed: 44, Skipped: 0,
+Total: 44` (57 s and 56 s). Unit tests: 276 passed.
+
+## SQL statements
+
+What changed, and why:
+
+- **Plan pins.** The claim and outcome transactions start with `InboxSql.PinPlans`: `SET LOCAL` disables bitmap
+  scans, sorts, sequential scans and JIT. With stale statistics the planner chose bitmap or ready-index plans that
+  read every pending row per entity (seconds per statement); with the pins every statement got the same plan in
+  all 108 scenarios.
+- **`CASE` for conditions a partial index also matches.** A plain `status = 'pending'` in LockHeads' head
+  re-check, in ClaimEntities and in ReleaseLostClaims let the planner pick the ready/pending partial index and
+  re-read it per entity (ClaimEntities went quadratic with stale statistics). Written as `CASE`, the condition is
+  only a filter.
+- **Fail and Dead** bind the error list once (`(select @errors::jsonb)`, an InitPlan) instead of a CTE the
+  planner copied per row.
+- **ReleaseLostClaims** finds the claim's rows by `entity_id = any(@entityIds)` on the leased index instead of
+  scanning the ready index.
+- **MarkSynced** probes one lease per entity (`order by l.entity_id, l.locked_until limit 1`).
+- **Autovacuum** on the inbox tables: `autovacuum_vacuum_scale_factor` 0.02, threshold 1000. On 200,000 rows the
+  first claim after 150,000 rows finished took 187 ms before vacuum, 5 to 7 ms once vacuum ran (2 ms fully
+  vacuumed).
+- **No index changes.** Every lease and outcome updates an indexed column, so updates are never HOT and each one
+  adds an entry to all four indexes; a lower fillfactor does not help that. The cost is per row leased (below).
+- **Claim lock** (correctness, not speed): `pg_try_advisory_xact_lock(hashtext('{inbox}'), hashtext(entity_id))`
+  in LockHeads, plus ClaimEntities leasing nothing of an entity another token holds a live lease on. See the main
+  README's claim section. It needs READ COMMITTED (each statement's snapshot is taken after the lock).
+
+### Every statement over the 108 scenarios
+
+Median of the per-scenario medians, the slowest single run, and how many different plans the statement got.
+
+| Statement | Before: median | Before: slowest | Before: plans | After: median | After: slowest | After: plans |
+|---|--:|--:|--:|--:|--:|--:|
+| LockHeads | 3.1 | 14,515 | 4 | 2.1 | 21.5 | 1 |
+| ClaimEntities | 37.1 | 6,964 | 3 | 25.4 | 244 | 1 |
+| SyncedTimes | 0.3 | 1.2 | 2 | 0.3 | 1.6 | 1 |
+| MarkSynced | 1.2 | 11.5 | 2 | 1.2 | 5.2 | 1 |
+| Complete | 9.8 | 77.5 | 2 | 9.6 | 60.4 | 1 |
+| Fail | 25.6 | 126 | 3 | 22.1 | 319 | 1 |
+| Dead | 13.0 | 152 | 3 | 11.7 | 131 | 1 |
+| Release | 19.3 | 94.0 | 2 | 19.3 | 203 | 1 |
+| Defer | 21.3 | 107 | 2 | 21.6 | 324 | 1 |
+| Hold | 24.1 | 133 | 2 | 24.1 | 192 | 1 |
+| ReleaseLostClaims | 21.3 | 179 | 6 | 18.6 | 162 | 1 |
+| Insert | 0.2 | 4.1 | 1 | 0.2 | 1.4 | 1 |
+
+### Statistics: fresh, analyzed, stale
+
+Slowest median per statistics state, over all shapes, times and lease mixes (ms).
+
+| Statement | Stats | Before | After |
+|---|---|--:|--:|
+| LockHeads | fresh | 5.6 | 4.0 |
+| LockHeads | analyzed | 5.1 | 4.1 |
+| LockHeads | stale | 12,380 | 9.5 |
+| ClaimEntities | fresh | 156 | 86.6 |
+| ClaimEntities | analyzed | 52.7 | 57.5 |
+| ClaimEntities | stale | 4,020 | 75.2 |
+| MarkSynced | fresh | 6.3 | 3.0 |
+| MarkSynced | analyzed | 4.0 | 5.2 |
+| MarkSynced | stale | 11.5 | 4.9 |
+| Fail | fresh | 75.8 | 242 |
+| Fail | analyzed | 80.2 | 47.1 |
+| Fail | stale | 122 | 103 |
+| ReleaseLostClaims | fresh | 88.2 | 116 |
+| ReleaseLostClaims | analyzed | 51.9 | 113 |
+| ReleaseLostClaims | stale | 76.1 | 65.8 |
+
+### The claim per scenario
+
+LockHeads (75 entities) and ClaimEntities: median of 5 and 3 runs, slowest run in brackets, ms. Rows: rows leased by the claim (75 entities x up to 20 events).
+
+| Scenario | Entities | Rows | LockHeads before | LockHeads after | ClaimEntities before | ClaimEntities after |
+|---|--:|--:|--:|--:|--:|--:|
+| 5k/100 same none fresh | 75 | 1500 | 3.3 (6.4) | 1.5 (5.5) | 34.8 (36.4) | 30.3 (33.4) |
+| 5k/100 same none analyzed | 75 | 1500 | 1.7 (2.0) | 1.5 (2.2) | 33.1 (41.0) | 27.6 (30.4) |
+| 5k/100 same none stale | 75 | 1500 | 64.6 (72.5) | 2.1 (2.8) | 121 (121) | 28.3 (28.4) |
+| 5k/100 same some fresh | 75 | 1500 | 3.0 (4.0) | 1.5 (2.6) | 28.3 (28.9) | 30.3 (31.5) |
+| 5k/100 same some analyzed | 75 | 1500 | 1.8 (2.3) | 2.5 (3.0) | 28.6 (29.1) | 28.4 (36.0) |
+| 5k/100 same some stale | 75 | 1500 | 77.5 (86.8) | 1.8 (3.4) | 102 (159) | 31.1 (47.6) |
+| 5k/100 same heavy fresh | 17 | 340 | 5.6 (6.7) | 2.9 (4.2) | 6.8 (7.0) | 7.5 (12.1) |
+| 5k/100 same heavy analyzed | 17 | 340 | 3.5 (5.7) | 2.7 (4.8) | 9.3 (9.8) | 7.4 (8.1) |
+| 5k/100 same heavy stale | 20 | 400 | 353 (484) | 3.0 (3.7) | 42.2 (43.3) | 9.4 (12.1) |
+| 5k/100 distinct none fresh | 75 | 1500 | 3.4 (4.4) | 2.2 (3.1) | 44.9 (50.4) | 37.9 (47.7) |
+| 5k/100 distinct none analyzed | 75 | 1500 | 1.9 (2.9) | 1.7 (2.7) | 31.9 (32.3) | 31.3 (32.4) |
+| 5k/100 distinct none stale | 75 | 1500 | 65.7 (72.3) | 1.9 (2.6) | 122 (126) | 30.9 (34.0) |
+| 5k/100 distinct some fresh | 75 | 1500 | 3.0 (3.5) | 2.4 (3.3) | 30.8 (35.2) | 30.9 (32.3) |
+| 5k/100 distinct some analyzed | 75 | 1500 | 1.4 (1.8) | 1.8 (2.2) | 26.1 (31.0) | 26.7 (29.5) |
+| 5k/100 distinct some stale | 75 | 1500 | 62.2 (71.5) | 2.4 (3.0) | 74.5 (77.6) | 28.6 (29.6) |
+| 5k/100 distinct heavy fresh | 17 | 340 | 3.3 (3.9) | 2.6 (5.1) | 5.0 (5.3) | 6.3 (6.4) |
+| 5k/100 distinct heavy analyzed | 17 | 340 | 2.1 (2.6) | 2.2 (3.3) | 5.0 (5.2) | 5.7 (7.0) |
+| 5k/100 distinct heavy stale | 20 | 400 | 216 (229) | 1.7 (2.3) | 18.8 (21.5) | 5.6 (6.3) |
+| 5k/1000 same none fresh | 75 | 375 | 3.0 (3.6) | 1.3 (1.9) | 5.4 (7.2) | 6.1 (7.2) |
+| 5k/1000 same none analyzed | 75 | 375 | 1.7 (2.3) | 1.8 (3.7) | 7.8 (8.6) | 7.1 (7.2) |
+| 5k/1000 same none stale | 75 | 375 | 46.6 (46.6) | 1.4 (2.3) | 49.8 (54.3) | 7.8 (8.1) |
+| 5k/1000 same some fresh | 75 | 374 | 2.8 (3.3) | 2.0 (3.2) | 5.6 (6.0) | 8.1 (8.6) |
+| 5k/1000 same some analyzed | 75 | 374 | 1.4 (1.6) | 3.1 (4.1) | 6.1 (8.0) | 10.9 (13.9) |
+| 5k/1000 same some stale | 75 | 374 | 51.2 (54.4) | 2.0 (3.7) | 53.2 (56.7) | 8.5 (10.7) |
+| 5k/1000 same heavy fresh | 75 | 374 | 2.8 (3.8) | 1.8 (3.2) | 6.3 (7.0) | 8.2 (8.7) |
+| 5k/1000 same heavy analyzed | 75 | 374 | 1.3 (1.9) | 1.7 (2.8) | 6.0 (6.3) | 6.6 (6.8) |
+| 5k/1000 same heavy stale | 75 | 375 | 85.3 (96.6) | 2.1 (2.4) | 89.5 (91.0) | 9.6 (9.8) |
+| 5k/1000 distinct none fresh | 75 | 375 | 2.1 (3.0) | 1.5 (2.2) | 4.8 (5.4) | 7.3 (7.4) |
+| 5k/1000 distinct none analyzed | 75 | 375 | 1.0 (1.2) | 1.4 (2.2) | 5.0 (5.5) | 7.7 (8.2) |
+| 5k/1000 distinct none stale | 75 | 375 | 47.0 (54.9) | 2.3 (3.1) | 65.6 (72.2) | 17.3 (71.6) |
+| 5k/1000 distinct some fresh | 75 | 374 | 2.5 (3.2) | 1.7 (2.5) | 5.7 (6.9) | 9.5 (9.7) |
+| 5k/1000 distinct some analyzed | 75 | 374 | 1.3 (1.8) | 2.3 (4.0) | 6.2 (7.2) | 8.6 (11.0) |
+| 5k/1000 distinct some stale | 75 | 374 | 51.9 (53.2) | 2.5 (2.9) | 56.9 (66.3) | 13.7 (14.5) |
+| 5k/1000 distinct heavy fresh | 75 | 374 | 2.6 (3.4) | 3.2 (5.3) | 5.7 (6.5) | 8.7 (11.3) |
+| 5k/1000 distinct heavy analyzed | 75 | 374 | 1.7 (2.1) | 1.8 (2.8) | 6.2 (6.3) | 8.8 (11.7) |
+| 5k/1000 distinct heavy stale | 75 | 375 | 82.2 (87.9) | 2.3 (4.8) | 89.3 (90.4) | 10.9 (11.5) |
+| 5k/5000 same none fresh | 75 | 75 | 3.4 (3.8) | 1.4 (2.2) | 1.6 (1.6) | 2.0 (2.1) |
+| 5k/5000 same none analyzed | 75 | 75 | 1.3 (1.5) | 1.3 (2.4) | 1.5 (1.7) | 2.1 (2.5) |
+| 5k/5000 same none stale | 75 | 75 | 45.6 (47.3) | 1.5 (2.3) | 40.4 (40.5) | 1.9 (2.3) |
+| 5k/5000 same some fresh | 75 | 75 | 2.6 (3.4) | 1.7 (2.8) | 1.7 (1.9) | 2.1 (2.2) |
+| 5k/5000 same some analyzed | 75 | 75 | 2.1 (2.2) | 1.6 (2.7) | 1.7 (3.0) | 2.3 (3.1) |
+| 5k/5000 same some stale | 75 | 75 | 51.7 (55.8) | 2.1 (3.9) | 48.6 (51.0) | 2.1 (2.3) |
+| 5k/5000 same heavy fresh | 75 | 75 | 3.1 (3.8) | 1.8 (3.1) | 1.5 (1.7) | 2.6 (2.7) |
+| 5k/5000 same heavy analyzed | 75 | 75 | 1.5 (2.5) | 4.1 (4.6) | 1.6 (1.7) | 2.2 (2.7) |
+| 5k/5000 same heavy stale | 75 | 75 | 96.3 (137) | 2.0 (3.1) | 87.2 (122) | 3.3 (3.6) |
+| 5k/5000 distinct none fresh | 75 | 75 | 3.2 (4.1) | 2.1 (3.0) | 1.6 (2.7) | 2.7 (2.9) |
+| 5k/5000 distinct none analyzed | 75 | 75 | 1.2 (1.3) | 2.4 (2.7) | 1.4 (1.6) | 3.2 (3.3) |
+| 5k/5000 distinct none stale | 75 | 75 | 46.8 (49.2) | 2.5 (3.3) | 40.6 (41.0) | 3.2 (3.4) |
+| 5k/5000 distinct some fresh | 75 | 75 | 2.6 (3.7) | 2.5 (3.7) | 1.7 (2.0) | 3.4 (3.7) |
+| 5k/5000 distinct some analyzed | 75 | 75 | 1.5 (2.0) | 2.6 (3.9) | 1.7 (1.7) | 3.7 (3.7) |
+| 5k/5000 distinct some stale | 75 | 75 | 53.2 (67.0) | 2.7 (3.9) | 46.8 (48.1) | 2.9 (4.4) |
+| 5k/5000 distinct heavy fresh | 75 | 75 | 3.4 (4.5) | 3.2 (5.0) | 1.6 (1.7) | 3.4 (4.2) |
+| 5k/5000 distinct heavy analyzed | 75 | 75 | 1.6 (2.2) | 3.1 (7.1) | 1.5 (1.7) | 3.6 (8.1) |
+| 5k/5000 distinct heavy stale | 75 | 75 | 135 (145) | 2.2 (5.3) | 86.5 (115) | 2.8 (3.8) |
+| 100k/100 same none fresh | 75 | 1500 | 1.7 (2.3) | 2.7 (5.8) | 82.5 (94.3) | 34.6 (38.3) |
+| 100k/100 same none analyzed | 75 | 1500 | 1.2 (1.5) | 1.9 (2.7) | 23.5 (29.2) | 40.0 (40.4) |
+| 100k/100 same none stale | 75 | 1500 | 1,685 (2,002) | 1.3 (2.2) | 1,576 (2,034) | 25.9 (26.1) |
+| 100k/100 same some fresh | 75 | 1500 | 1.4 (1.8) | 1.4 (2.3) | 100 (109) | 23.3 (24.9) |
+| 100k/100 same some analyzed | 75 | 1500 | 1.5 (1.8) | 1.4 (2.1) | 21.7 (21.8) | 23.2 (23.7) |
+| 100k/100 same some stale | 75 | 1500 | 1,871 (1,910) | 1.5 (2.7) | 1,820 (2,256) | 24.8 (24.9) |
+| 100k/100 same heavy fresh | 17 | 340 | 4.7 (6.4) | 2.1 (3.2) | 21.5 (23.7) | 4.8 (4.9) |
+| 100k/100 same heavy analyzed | 17 | 340 | 2.2 (3.2) | 2.7 (5.1) | 5.2 (5.2) | 4.4 (4.9) |
+| 100k/100 same heavy stale | 20 | 400 | 7,371 (8,297) | 2.1 (3.0) | 467 (467) | 7.0 (8.2) |
+| 100k/100 distinct none fresh | 75 | 1500 | 1.3 (1.9) | 1.3 (2.3) | 91.2 (118) | 27.0 (28.3) |
+| 100k/100 distinct none analyzed | 75 | 1500 | 1.3 (1.5) | 2.0 (2.8) | 21.9 (22.1) | 28.6 (29.4) |
+| 100k/100 distinct none stale | 75 | 1500 | 2,197 (2,253) | 1.7 (3.0) | 1,644 (1,744) | 60.7 (89.9) |
+| 100k/100 distinct some fresh | 75 | 1500 | 2.5 (3.1) | 2.6 (3.1) | 156 (238) | 38.8 (44.1) |
+| 100k/100 distinct some analyzed | 75 | 1500 | 2.5 (3.0) | 1.5 (2.5) | 38.5 (39.3) | 32.0 (32.5) |
+| 100k/100 distinct some stale | 75 | 1500 | 3,626 (6,150) | 1.4 (2.2) | 4,020 (6,964) | 25.7 (29.4) |
+| 100k/100 distinct heavy fresh | 17 | 340 | 4.2 (6.1) | 2.4 (3.2) | 34.9 (38.8) | 5.0 (5.5) |
+| 100k/100 distinct heavy analyzed | 17 | 340 | 5.1 (8.9) | 1.9 (2.7) | 7.9 (8.9) | 4.5 (4.7) |
+| 100k/100 distinct heavy stale | 20 | 400 | 8,387 (9,637) | 4.4 (6.5) | 632 (801) | 12.2 (16.7) |
+| 100k/1000 same none fresh | 75 | 1500 | 2.7 (5.5) | 2.0 (7.1) | 40.0 (50.4) | 42.6 (82.1) |
+| 100k/1000 same none analyzed | 75 | 1500 | 2.1 (2.2) | 1.6 (2.3) | 31.7 (31.8) | 29.4 (29.8) |
+| 100k/1000 same none stale | 75 | 1500 | 2,563 (2,983) | 1.6 (5.5) | 2,342 (3,138) | 40.8 (49.1) |
+| 100k/1000 same some fresh | 75 | 1500 | 4.0 (4.7) | 4.0 (7.2) | 50.0 (51.8) | 37.6 (40.1) |
+| 100k/1000 same some analyzed | 75 | 1500 | 2.5 (6.6) | 2.9 (3.4) | 41.3 (48.9) | 31.4 (35.9) |
+| 100k/1000 same some stale | 75 | 1500 | 2,619 (4,104) | 2.5 (4.5) | 2,445 (2,608) | 48.5 (49.8) |
+| 100k/1000 same heavy fresh | 75 | 1500 | 4.2 (5.6) | 1.7 (3.6) | 63.4 (69.8) | 27.6 (44.5) |
+| 100k/1000 same heavy analyzed | 75 | 1500 | 3.3 (6.7) | 1.7 (3.5) | 41.3 (45.4) | 25.1 (29.2) |
+| 100k/1000 same heavy stale | 75 | 1500 | 11,546 (12,637) | 9.5 (17.2) | 3,102 (4,028) | 46.4 (51.6) |
+| 100k/1000 distinct none fresh | 75 | 1500 | 3.2 (7.9) | 2.4 (4.1) | 70.4 (99.3) | 33.4 (34.5) |
+| 100k/1000 distinct none analyzed | 75 | 1500 | 2.3 (2.6) | 1.4 (2.1) | 34.3 (36.7) | 26.6 (30.4) |
+| 100k/1000 distinct none stale | 75 | 1500 | 2,125 (2,380) | 3.0 (5.9) | 2,025 (2,392) | 75.2 (84.0) |
+| 100k/1000 distinct some fresh | 75 | 1500 | 2.8 (3.7) | 2.4 (5.5) | 41.2 (46.4) | 42.5 (77.5) |
+| 100k/1000 distinct some analyzed | 75 | 1500 | 3.1 (4.0) | 1.9 (2.7) | 43.3 (49.3) | 49.6 (93.1) |
+| 100k/1000 distinct some stale | 75 | 1500 | 2,616 (2,739) | 3.0 (5.8) | 2,223 (2,323) | 44.5 (47.7) |
+| 100k/1000 distinct heavy fresh | 75 | 1500 | 3.6 (4.1) | 3.0 (5.5) | 52.4 (56.6) | 37.8 (44.5) |
+| 100k/1000 distinct heavy analyzed | 75 | 1500 | 2.1 (4.0) | 1.9 (3.6) | 39.7 (43.7) | 30.8 (31.3) |
+| 100k/1000 distinct heavy stale | 75 | 1500 | 9,498 (9,962) | 4.8 (7.4) | 1,760 (1,882) | 27.7 (29.3) |
+| 100k/5000 same none fresh | 75 | 1500 | 1.6 (2.0) | 1.4 (2.6) | 23.3 (24.2) | 24.4 (25.2) |
+| 100k/5000 same none analyzed | 75 | 1500 | 1.3 (1.9) | 1.4 (2.0) | 23.9 (24.0) | 24.2 (27.9) |
+| 100k/5000 same none stale | 75 | 1500 | 1,498 (1,605) | 1.9 (3.2) | 1,389 (1,572) | 28.1 (34.4) |
+| 100k/5000 same some fresh | 75 | 1500 | 1.5 (3.0) | 2.9 (4.4) | 30.4 (32.3) | 38.3 (42.3) |
+| 100k/5000 same some analyzed | 75 | 1500 | 2.3 (3.1) | 2.8 (5.3) | 29.6 (34.6) | 40.9 (103) |
+| 100k/5000 same some stale | 75 | 1499 | 2,269 (2,436) | 2.4 (7.6) | 1,526 (1,606) | 33.3 (36.1) |
+| 100k/5000 same heavy fresh | 75 | 1500 | 2.7 (5.1) | 2.4 (5.4) | 41.3 (50.5) | 30.4 (44.6) |
+| 100k/5000 same heavy analyzed | 75 | 1500 | 1.7 (4.2) | 4.1 (11.6) | 31.5 (41.8) | 57.5 (73.9) |
+| 100k/5000 same heavy stale | 75 | 1499 | 6,970 (8,138) | 7.9 (11.5) | 1,690 (1,749) | 56.0 (62.8) |
+| 100k/5000 distinct none fresh | 75 | 1500 | 1.3 (1.9) | 3.3 (4.6) | 26.1 (27.2) | 37.0 (38.4) |
+| 100k/5000 distinct none analyzed | 75 | 1500 | 1.1 (1.6) | 3.6 (4.7) | 21.3 (23.2) | 46.4 (55.2) |
+| 100k/5000 distinct none stale | 75 | 1500 | 1,814 (2,220) | 2.7 (4.6) | 1,478 (1,687) | 72.6 (244) |
+| 100k/5000 distinct some fresh | 75 | 1500 | 1.5 (2.2) | 2.9 (7.3) | 35.8 (40.2) | 86.6 (104) |
+| 100k/5000 distinct some analyzed | 75 | 1500 | 1.6 (2.3) | 3.0 (4.9) | 30.3 (33.9) | 39.6 (47.1) |
+| 100k/5000 distinct some stale | 75 | 1500 | 2,012 (3,412) | 3.3 (10.6) | 1,810 (2,210) | 44.4 (57.0) |
+| 100k/5000 distinct heavy fresh | 75 | 1500 | 2.8 (6.9) | 4.0 (9.0) | 40.4 (42.9) | 40.3 (50.0) |
+| 100k/5000 distinct heavy analyzed | 75 | 1500 | 3.7 (10.6) | 3.7 (10.5) | 52.7 (56.5) | 51.1 (60.7) |
+| 100k/5000 distinct heavy stale | 75 | 1500 | 12,380 (14,515) | 7.8 (21.5) | 2,112 (2,354) | 70.8 (149) |
+
+### Outcome statements by number of ids
+
+100,000-row tables (100 or 5,000 entities, no other leases or 90% leased), fresh / analyzed / stale statistics. Slowest median over those 12 tables, ms, and the scans that drove the plans.
+
+| Statement | Ids | Before | Before: driven by | After | After: driven by |
+|---|--:|--:|---|--:|---|
+| MarkSynced | 75 | 11.8 | Index Scan leased (7), Bitmap Heap Scan (5) | 4.7 | Index Scan leased (12) |
+| MarkSynced | 1,000 | 917 | Index Scan leased (7), Bitmap Heap Scan (5) | 26.2 | Index Scan leased (12) |
+| MarkSynced | 5,000 | 463 | Index Scan leased (7), Bitmap Heap Scan (5) | 103 | Index Scan leased (12) |
+| Complete | 75 | 2.6 | Index Scan pkey (7), Bitmap Heap Scan (5) | 1.5 | Index Scan pkey (12) |
+| Complete | 1,000 | 112 | Index Scan pkey (7), Bitmap Heap Scan (5) | 30.1 | Index Scan pkey (12) |
+| Complete | 5,000 | 309 | Index Scan pkey (7), Bitmap Heap Scan (5) | 93.8 | Index Scan pkey (12) |
+| Fail | 75 | 7.2 | Index Scan pkey (7), Bitmap Heap Scan (5) | 3.1 | Index Scan pkey (12) |
+| Fail | 1,000 | 168 | Index Scan pkey (7), Bitmap Heap Scan (5) | 58.0 | Index Scan pkey (12) |
+| Fail | 5,000 | 832 | Index Scan pkey (7), Bitmap Heap Scan (5) | 246 | Index Scan pkey (12) |
+| Dead | 75 | 1.8 | Index Scan pkey (7), Bitmap Heap Scan (5) | 1.9 | Index Scan pkey (12) |
+| Dead | 1,000 | 128 | Index Scan pkey (7), Bitmap Heap Scan (5) | 34.5 | Index Scan pkey (12) |
+| Dead | 5,000 | 998 | Index Scan pkey (7), Bitmap Heap Scan (5) | 141 | Index Scan pkey (12) |
+| Release | 75 | 3.8 | Index Scan pkey (7), Bitmap Heap Scan (5) | 9.0 | Index Scan pkey (12) |
+| Release | 1,000 | 166 | Index Scan pkey (7), Bitmap Heap Scan (5) | 66.7 | Index Scan pkey (12) |
+| Release | 5,000 | 712 | Index Scan pkey (7), Bitmap Heap Scan (5) | 207 | Index Scan pkey (12) |
+| Defer | 75 | 3.0 | Index Scan pkey (7), Bitmap Heap Scan (5) | 2.2 | Index Scan pkey (12) |
+| Defer | 1,000 | 249 | Index Scan pkey (7), Bitmap Heap Scan (5) | 55.5 | Index Scan pkey (12) |
+| Defer | 5,000 | 757 | Index Scan pkey (7), Bitmap Heap Scan (5) | 420 | Index Scan pkey (12) |
+| Hold | 75 | 3.0 | Index Scan pkey (7), Bitmap Heap Scan (5) | 5.2 | Index Scan pkey (12) |
+| Hold | 1,000 | 119 | Index Scan pkey (7), Bitmap Heap Scan (5) | 74.7 | Index Scan pkey (12) |
+| Hold | 5,000 | 960 | Index Scan pkey (7), Bitmap Heap Scan (5) | 335 | Index Scan pkey (12) |
+| ReleaseLostClaims | 75 | 53.8 | Bitmap Heap Scan (5), Index Scan ready (4), Index Scan leased (2), Seq Scan (1) | 5.0 | Index Scan leased (12) |
+| ReleaseLostClaims | 1,000 | 128 | Bitmap Heap Scan (5), Index Scan ready (4), Index Scan leased (2), Seq Scan (1) | 91.1 | Index Scan leased (12) |
+| ReleaseLostClaims | 5,000 | 1,521 | Bitmap Heap Scan (5), Index Scan ready (4), Index Scan leased (2), Seq Scan (1) | 501 | Index Scan leased (12) |
+
+### Leasing cost by rows leased
+
+Deep backlog (100 entities x 1,000 pending rows, analyzed), 75 entities per claim, `Sync:MaxEventsPerEntity` 1 to
+40; median of 5 runs, measured under load (load average about 25). On a quiet machine leasing costs about 11 µs
+per row.
+
+| Events per entity | Rows leased | ClaimEntities median ms | slowest | µs per row |
+|--:|--:|--:|--:|--:|
+| 1 | 75 | 4.2 | 5.5 | 55.4 |
+| 5 | 375 | 12.4 | 16.6 | 33.0 |
+| 10 | 750 | 32.7 | 51.2 | 43.6 |
+| 20 | 1500 | 53.7 | 76.3 | 35.8 |
+| 40 | 3000 | 86.8 | 103.8 | 28.9 |
+
+A claim of 75 entities locks them (LockHeads) in about 2 ms (median over the 108 scenarios); the slowest scenario
+median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest single run 21.5 ms, under load. Leasing
+dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. Lower
+`Sync:MaxEventsPerEntity` to make those claims cheaper, at the price of more Salesforce calls per event. A
+claim-wide row budget was not added: it would split deep backlogs into more, smaller writes.
+
+## Drain benchmarks
+
+### Current (EF Core) before and after the SQL changes
+
+"Before" is the EF Core version with the original claim and outcome SQL (plus the claim race fix), "after" the
+tuned SQL; same benchmark code, run one after the other. Times are BenchmarkDotNet's; the work columns are medians of
+the per-iteration counters (API calls, write requests, records written, entity syncs, events per entity sync,
+claims, relationship retries).
+
+After run: 196 iterations (warm-up included), 0 with a failed check. Before run: the same.
+
+| Mode | W | P | Accounts | Lat | Mean | Median | Min–Max | Allocated | API calls | Write req | Records ok | Entity syncs | Coalescing | Claims | Retries | Before mean | Before median |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| preloaded | 1 | 1 | 100 | 0 | 1,590.0 ms | 1.330 s | 0.872 s–2.674 s | 106.57 MB | 26 | 13 | 1138 | 878 | 5.69 | 928 | 50 | 1,763.9 ms | 1.527 s |
+| preloaded | 1 | 1 | 100 | 25 | 2,087.9 ms | 1.986 s | 1.859 s–2.406 s | 106.62 MB | 26 | 13 | 1138 | 878 | 5.69 | 928 | 50 | 2,817.8 ms | 2.866 s |
+| preloaded | 1 | 1 | 1000 | 0 | 3,726.7 ms | 3.366 s | 2.842 s–4.828 s | 434 MB | 58 | 29 | 2592 | 1618 | 3.09 | 2114 | 496 | 2,078.0 ms | 1.917 s |
+| preloaded | 1 | 1 | 1000 | 25 | 4,605.9 ms | 4.685 s | 3.467 s–5.585 s | 433.75 MB | 58 | 29 | 2592 | 1618 | 3.09 | 2114 | 496 | 5,441.1 ms | 5.966 s |
+| preloaded | 1 | 3 | 100 | 0 | 458.0 ms | 440.893 ms | 415.212 ms–558.804 ms | 109.92 MB | 35 | 17 | 1138 | 878 | 5.69 | 953 | 75 | 727.7 ms | 649.383 ms |
+| preloaded | 1 | 3 | 100 | 25 | 711.1 ms | 702.821 ms | 672.488 ms–778.615 ms | 110.83 MB | 35 | 17 | 1138 | 878 | 5.69 | 953 | 75 | 903.9 ms | 922.593 ms |
+| preloaded | 1 | 3 | 1000 | 0 | 1,724.9 ms | 1.087 s | 0.992 s–4.381 s | 436.67 MB | 56 | 28 | 2592 | 1618 | 3.09 | 2099 | 481 | 1,572.5 ms | 1.791 s |
+| preloaded | 1 | 3 | 1000 | 25 | 2,597.8 ms | 2.728 s | 1.503 s–3.609 s | 435.37 MB | 56 | 28 | 2592 | 1618 | 3.09 | 2099 | 481 | 2,273.9 ms | 2.434 s |
+| preloaded | 4 | 1 | 100 | 0 | 1,178.8 ms | 0.989 s | 0.758 s–2.005 s | 114.34 MB | 34 | 16 | 1138 | 878 | 5.69 | 1028 | 150 | 2,738.7 ms | 2.724 s |
+| preloaded | 4 | 1 | 100 | 25 | 2,000.1 ms | 2.101 s | 1.768 s–2.233 s | 117.1 MB | 34 | 16 | 1138 | 878 | 5.69 | 1028 | 150 | 2,329.3 ms | 1.714 s |
+| preloaded | 4 | 1 | 1000 | 0 | 1,989.7 ms | 2.084 s | 1.528 s–2.505 s | 439.76 MB | 56 | 27 | 2592 | 1618 | 3.09 | 2138 | 520 | 1,351.5 ms | 1.205 s |
+| preloaded | 4 | 1 | 1000 | 25 | 1,906.2 ms | 1.725 s | 1.507 s–2.710 s | 439 MB | 56 | 27 | 2592 | 1618 | 3.09 | 2156 | 538 | 1,237.5 ms | 1.252 s |
+| preloaded | 4 | 3 | 100 | 0 | 1,130.5 ms | 1.134 s | 0.991 s–1.233 s | 152.87 MB | 48 | 21 | 1138 | 878 | 5.69 | 1496 | 618 | 5,321.4 ms | 5.887 s |
+| preloaded | 4 | 3 | 100 | 25 | 2,163.7 ms | 2.093 s | 1.483 s–2.930 s | 149.02 MB | 45 | 18 | 1138 | 878 | 5.69 | 1569 | 691 | 1,924.5 ms | 1.396 s |
+| preloaded | 4 | 3 | 1000 | 0 | 1,502.9 ms | 1.409 s | 1.310 s–1.834 s | 453.67 MB | 62 | 28 | 2592 | 1618 | 3.09 | 2196 | 578 | 1,152.5 ms | 1.176 s |
+| preloaded | 4 | 3 | 1000 | 25 | 1,440.0 ms | 1.325 s | 1.247 s–1.786 s | 456.02 MB | 64 | 29 | 2592 | 1618 | 3.09 | 2243 | 625 | 1,331.0 ms | 1.333 s |
+| preloaded | 8 | 1 | 100 | 0 | 837.2 ms | 842.810 ms | 802.307 ms–853.310 ms | 135.61 MB | 40 | 17 | 1138 | 878 | 5.69 | 1328 | 450 | 3,877.1 ms | 4.195 s |
+| preloaded | 8 | 1 | 100 | 25 | 1,045.6 ms | 1.100 s | 0.819 s–1.138 s | 137.92 MB | 40 | 17 | 1138 | 878 | 5.69 | 1328 | 450 | 4,514.9 ms | 3.776 s |
+| preloaded | 8 | 1 | 1000 | 0 | 1,934.9 ms | 2.015 s | 1.243 s–3.032 s | 447.64 MB | 60 | 28 | 2592 | 1618 | 3.09 | 2181 | 563 | 9,392.5 ms | 3.752 s |
+| preloaded | 8 | 1 | 1000 | 25 | 2,157.4 ms | 1.678 s | 1.095 s–3.882 s | 455.21 MB | 60 | 28 | 2592 | 1618 | 3.09 | 2190 | 572 | 5,972.0 ms | 4.715 s |
+| preloaded | 8 | 3 | 100 | 0 | 1,750.5 ms | 1.821 s | 1.489 s–1.915 s | 176.62 MB | 56 | 22 | 1138 | 878 | 5.69 | 1625 | 747 | 21,879.8 ms | 16.137 s |
+| preloaded | 8 | 3 | 100 | 25 | 1,972.7 ms | 1.862 s | 1.800 s–2.207 s | 195.35 MB | 55 | 22 | 1138 | 878 | 5.69 | 1708 | 830 | 6,712.2 ms | 5.498 s |
+| preloaded | 8 | 3 | 1000 | 0 | 2,138.4 ms | 2.121 s | 1.848 s–2.466 s | 519.18 MB | 76 | 34 | 2592 | 1618 | 3.09 | 2707 | 1089 | 4,952.8 ms | 5.014 s |
+| preloaded | 8 | 3 | 1000 | 25 | 1,648.5 ms | 1.617 s | 1.556 s–1.846 s | 482.45 MB | 71 | 31 | 2592 | 1618 | 3.09 | 2673 | 1055 | 16,877.9 ms | 8.031 s |
+| streaming | 4 | 1 | 50 | 5 | 1.497 s | 1.461 s | 1.357 s–1.638 s | 142.33 MB | 205 | 102 | 1402 | 998 | 5.01 | 1011 | 23 | 2.917 s | 2.436 s |
+| streaming | 4 | 3 | 50 | 5 | 3.432 s | 4.046 s | 1.739 s–4.855 s | 179.51 MB | 287 | 142 | 1744 | 1185 | 4.22 | 1223 | 35 | 3.356 s | 3.442 s |
+| streaming | 8 | 1 | 50 | 5 | 2.777 s | 2.896 s | 1.546 s–3.380 s | 176.29 MB | 278 | 138 | 1961 | 1294 | 3.86 | 1322 | 24 | 3.499 s | 3.522 s |
+| streaming | 8 | 3 | 50 | 5 | 2.948 s | 2.716 s | 2.451 s–3.561 s | 207.52 MB | 315 | 151 | 1381 | 1004 | 4.98 | 1094 | 102 | 5.067 s | 4.738 s |
+
+Same work on both sides (identical API calls, claims and retries per case); the differences in time are mostly
+machine load (load average 15 to 35 during these runs). The before side's long runs (8 workers x 3 pods, 16 s and
+8 s medians) look like the stale-statistics effect described below.
+
+### Earlier run (Dapper version, quieter machine)
+
+The same comparison on the Dapper version (before: untuned SQL; after: tuned), preloaded cases only:
+
+| W | P | Accounts | Lat | Median | API calls | Claims | Retries | Before median |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 0 | 783.833 ms | 26 | 928 | 50 | 1.123 s |
+| 1 | 1 | 100 | 25 | 1.443 s | 26 | 928 | 50 | 1.824 s |
+| 1 | 1 | 1000 | 0 | 1.877 s | 58 | 2114 | 496 | 2.557 s |
+| 1 | 1 | 1000 | 25 | 3.217 s | 58 | 2114 | 496 | 3.696 s |
+| 1 | 3 | 100 | 0 | 564.262 ms | 37 | 1022 | 144 | 606.330 ms |
+| 1 | 3 | 100 | 25 | 791.986 ms | 37 | 1016 | 138 | 932.375 ms |
+| 1 | 3 | 1000 | 0 | 793.299 ms | 56 | 2093 | 475 | 1.005 s |
+| 1 | 3 | 1000 | 25 | 1.277 s | 56 | 2099 | 481 | 1.375 s |
+| 4 | 1 | 100 | 0 | 521.478 ms | 37 | 1096 | 218 | 551.635 ms |
+| 4 | 1 | 100 | 25 | 758.144 ms | 37 | 1096 | 218 | 799.665 ms |
+| 4 | 1 | 1000 | 0 | 780.743 ms | 56 | 2128 | 510 | 907.149 ms |
+| 4 | 1 | 1000 | 25 | 0.952 s | 56 | 2156 | 538 | 1.084 s |
+| 4 | 3 | 100 | 0 | 859.884 ms | 51 | 1571 | 693 | 845.496 ms |
+| 4 | 3 | 100 | 25 | 867.654 ms | 46 | 1565 | 687 | 0.968 s |
+| 4 | 3 | 1000 | 0 | 852.864 ms | 62 | 2211 | 593 | 8.319 s |
+| 4 | 3 | 1000 | 25 | 885.883 ms | 60 | 2239 | 621 | 0.857 s |
+| 8 | 1 | 100 | 0 | 658.402 ms | 43 | 1328 | 450 | 653.485 ms |
+| 8 | 1 | 100 | 25 | 879.461 ms | 42 | 1397 | 519 | 798.892 ms |
+| 8 | 1 | 1000 | 0 | 806.941 ms | 60 | 2133 | 515 | 775.099 ms |
+| 8 | 1 | 1000 | 25 | 827.352 ms | 60 | 2150 | 532 | 903.088 ms |
+| 8 | 3 | 100 | 0 | 1.561 s | 64 | 1768 | 890 | 1.412 s |
+| 8 | 3 | 100 | 25 | 1.779 s | 69 | 1774 | 896 | 1.463 s |
+| 8 | 3 | 1000 | 0 | 1.236 s | 76 | 2622 | 1004 | 1.122 s |
+| 8 | 3 | 1000 | 25 | 1.113 s | 73 | 2558 | 940 | 1.143 s |
+
+The before side had 8 to 10 s iterations (4 workers x 3 pods x 1,000 accounts: median 8.3 s, 0.97 to 9.9 s;
+the 25 ms case up to 10.2 s). They coincide with autoanalyze running between iterations (21 autoanalyzes in the
+run) and leaving statistics that describe a finished inbox while the next iteration loads a backlog: the stale
+case above, where the claim took seconds. With the pins they are gone (0.85 s and 0.98 s).
+
+### Streaming
+
+Four alternating after/before runs (A to C on the Dapper version, D on EF Core), median per case:
+
+| Run | W | P | After median | Before median |
+|---|--:|--:|--:|--:|
+| A | 4 | 1 | 1.526 s | 1.117 s |
+| A | 4 | 3 | 2.055 s | 1.332 s |
+| A | 8 | 1 | 1.454 s | 1.250 s |
+| A | 8 | 3 | 2.756 s | 3.986 s |
+| B | 4 | 1 | 1.941 s | 1.509 s |
+| B | 4 | 3 | 1.751 s | 1.601 s |
+| B | 8 | 1 | 1.266 s | 1.351 s |
+| B | 8 | 3 | 2.010 s | 2.121 s |
+| C | 4 | 1 | 1.391 s | 1.346 s |
+| C | 4 | 3 | 1.802 s | 1.889 s |
+| C | 8 | 1 | 1.281 s | 2.666 s |
+| C | 8 | 3 | 2.068 s | 3.858 s |
+| D (EF) | 4 | 1 | 1.461 s | 2.436 s |
+| D (EF) | 4 | 3 | 4.046 s | 3.442 s |
+| D (EF) | 8 | 1 | 2.896 s | 3.522 s |
+| D (EF) | 8 | 3 | 2.716 s | 4.738 s |
+
+Within noise: streaming keeps the inbox small, so the claim is cheap either way.
+
+### Observations
+
+- More workers on 100 accounts is slower, not faster: Profiles wait for their related Accounts
+  (`DEPENDENCY_NOT_SYNCED`, 450 to 990 retries with 8 workers) and idle workers poll every 2 ms. A property of
+  the benchmark's data (100 accounts, many relationships), not of the claim.
+- Allocation grows with retries and claims, not with pods.
+
+## Micro benchmarks
+
+| Method               | Mean         | Error        | StdDev       | Gen0   | Gen1   | Allocated |
+|---|---|---|---|---|---|---|
+| ParseLimitHeader     |  1,341.70 ns |    26.347 ns |    38.619 ns | 0.3376 | 0.0019 |    2832 B |
+| CoalesceTenEvents    |     46.64 ns |     2.159 ns |     6.090 ns |      - |      - |         - |
+| PrepareTenEvents     | 36,475.42 ns | 1,810.361 ns | 5,135.692 ns | 2.4414 | 0.0916 |   20480 B |
+| ReadAndValidateEvent |  3,156.44 ns |   110.016 ns |   317.421 ns | 0.1945 |      - |    1632 B |
+| MapAccountEvent      |  5,065.07 ns |   333.269 ns |   961.557 ns | 0.4272 |      - |    3624 B |
+| MapPayloadToSObject  |     55.37 ns |     2.642 ns |     7.708 ns | 0.0238 |      - |     200 B |
+| MapSObjectToRecord   |    609.29 ns |    13.783 ns |    37.731 ns | 0.1059 |      - |     888 B |
+| DiffNumber           |    309.02 ns |     6.753 ns |    19.267 ns | 0.0038 |      - |      32 B |
+| DiffDateTime         |    625.71 ns |    16.431 ns |    48.188 ns | 0.0229 |      - |     192 B |
+
+## Remaining risks
+
+- **Deep backlogs**: a claim that leases 1,500 rows costs 20 to 40 ms (more under load); the ≤ 10 ms target
+  holds up to about 375 rows. `Sync:MaxEventsPerEntity` is the knob.
+- **Statistics**: the pins remove the plan choice for the measured statements; a new inbox statement must be
+  measured with stale statistics too, or it can reintroduce a seconds-long plan.
+- **Isolation**: the claim lock relies on READ COMMITTED. Running the claim under REPEATABLE READ would take the
+  snapshot before the lock and reopen the race.
+- **Advisory lock keys** are `hashtext` of the inbox and entity id: two entities that hash alike are claimed one
+  after the other, never together. Harmless, but not zero.
+- **Round trips**: with EF Core the pins are a separate statement, one extra round trip per claim and per outcome
+  transaction.
+- **Lock table**: each claimed entity holds an advisory lock until commit; very large batch sizes need
+  `max_locks_per_transaction` headroom.
+- **Noise**: the drain numbers above were measured on a busy machine; compare work counts first and times only
+  across alternating runs.

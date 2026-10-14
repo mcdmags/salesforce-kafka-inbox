@@ -1,91 +1,77 @@
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
-using Dapper;
-using SalesforceSync.Data;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// Kafka -> Postgres inbox. The message value is stored unchanged as sf_inbox.payload; the entity type, key and
-/// order are read from it (<see cref="InboxEventEnvelope"/>), so any subscribed topic (Kafka:Topics) may carry any
-/// entity type, and the message key is not used. The offset is stored for commit only after the row is in the inbox,
-/// and the unique (type, key, version, md5) index makes redelivery (and a retried insert) harmless. A message that
-/// can never be synced (not a valid event, or a type nothing syncs) is logged and skipped.
+/// Kafka -> Postgres inbox. Each topic carries one entity type (<see cref="ISalesforceEntitySync.Topic"/>, or
+/// <c>Kafka:Topics:&lt;EntityType&gt;</c>). A message is read with that type's typed event, and its value is stored
+/// unchanged in the type's inbox table together with the entity's id taken from the event. The Kafka message key and
+/// the order of arrival are not used: an entity's events are ordered by their own time when they are processed, so
+/// they may come over any partition, in any order. The offset is stored for commit only after the row is in the
+/// inbox; a redelivery (or a retried insert) just stores the event again, which ends superseded. A message that can
+/// never be synced (not a valid event of its topic's type) is logged with its offset and skipped.
 /// </summary>
 public sealed class KafkaInboxConsumer(
     IConsumer<string, string> consumer,
-    PostgresExecutionStrategy pg,
     IServiceScopeFactory scopes,
     IConfiguration config,
     ILogger<KafkaInboxConsumer> log) : BackgroundService
 {
-    /// <summary>Topics to subscribe to, unless configured under Kafka:Topics.</summary>
-    public static readonly IReadOnlyList<string> DefaultTopics = ["account-changes", "account-relationship-changes"];
-
     private static readonly TimeSpan StoreRetryDelay = TimeSpan.FromSeconds(2);
 
-    private HashSet<string> _entityTypes = new(StringComparer.Ordinal);
-
     // Consume() blocks, so run the loop off the host's startup path.
-    protected override Task ExecuteAsync(CancellationToken stoppingToken) => Task.Run(() => RunAsync(stoppingToken), stoppingToken);
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        return Task.Run(() => RunAsync(stoppingToken), stoppingToken);
+    }
+
+    /// <summary>Topic -> the entity type whose events it carries. Two types can't share a topic: a message says nothing but its topic about its type.</summary>
+    public static IReadOnlyDictionary<string, ISalesforceEntitySync> TopicsOf(IEnumerable<ISalesforceEntitySync> syncs, IConfiguration config)
+    {
+        var byTopic = new Dictionary<string, ISalesforceEntitySync>(StringComparer.Ordinal);
+        foreach (var sync in syncs)
+        {
+            var topic = config[$"Kafka:Topics:{sync.EntityType}"] is { Length: > 0 } configured ? configured : sync.Topic;
+            if (!byTopic.TryAdd(topic, sync))
+            {
+                throw new InvalidOperationException(
+                    $"Topic '{topic}' is configured for both '{byTopic[topic].EntityType}' and '{sync.EntityType}'; each entity type needs its own topic.");
+            }
+        }
+        return byTopic;
+    }
 
     private async Task RunAsync(CancellationToken ct)
     {
-        // Only events some sync handles are stored: anything else would sit in the inbox forever
-        using (var scope = scopes.CreateScope())
-            _entityTypes = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().Select(s => s.EntityType).ToHashSet(StringComparer.Ordinal);
+        // The syncs are only asked to read events here; the scope lives as long as the consumer uses them
+        using var scope = scopes.CreateScope();
+        var byTopic = TopicsOf(scope.ServiceProvider.GetServices<ISalesforceEntitySync>(), config);
 
-        var configured = config.GetSection("Kafka:Topics").Get<string[]>();
-        var topics = configured is { Length: > 0 } ? configured : DefaultTopics;
-        foreach (var topic in topics) await EnsureTopicAsync(topic);
-        consumer.Subscribe(topics);
-        log.LogInformation("Consuming {Topics} into sf_inbox (entity types {Types})", string.Join(", ", topics), string.Join(", ", _entityTypes));
+        foreach (var topic in byTopic.Keys)
+        {
+            await EnsureTopicAsync(topic);
+        }
+
+        consumer.Subscribe(byTopic.Keys);
+        log.LogInformation("Consuming {Topics}", string.Join(", ", byTopic.Select(t => $"{t.Key} -> {t.Value.EntityType}")));
 
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                ConsumeResult<string, string>? result;
-                try
-                {
-                    result = consumer.Consume(ct);
-                }
-                catch (OperationCanceledException)
+                if (!TryConsume(ct, out var message))
                 {
                     break;
                 }
-                catch (ConsumeException ex) when (!ex.Error.IsFatal)
+
+                if (message?.Message?.Value is null)
                 {
-                    log.LogWarning(ex, "Kafka consume error");
                     continue;
                 }
 
-                if (result?.Message?.Value is null) continue;
-
-                if (!InboxEventEnvelope.TryRead(result.Message.Value, _entityTypes, out _, out var problem))
-                {
-                    // Retrying can't fix it, and retrying would block every later event on the partition: log where
-                    // it is (to fix or replay at the source) and move on.
-                    log.LogError("Skipping malformed event at {Offset} (key {Key}): {Problem}",
-                        result.TopicPartitionOffset, result.Message.Key, problem);
-                    StoreOffset(result);
-                    continue;
-                }
-
-                try
-                {
-                    await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(InboxSql.Insert,
-                        new { payload = result.Message.Value }, cancellationToken: t)), ct);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    log.LogError(ex, "Failed to store {Offset}; will retry", result.TopicPartitionOffset);
-                    Rewind(result);
-                    await Task.Delay(StoreRetryDelay, ct);
-                    continue;
-                }
-                StoreOffset(result);
+                await IngestAsync(message, byTopic[message.Topic], ct);
             }
         }
         finally
@@ -94,10 +80,56 @@ public sealed class KafkaInboxConsumer(
         }
     }
 
+    /// <returns>False when the consumer is shutting down. True with a null message after a consume error that isn't fatal.</returns>
+    private bool TryConsume(CancellationToken ct, out ConsumeResult<string, string>? message)
+    {
+        message = null;
+        try
+        {
+            message = consumer.Consume(ct);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (ConsumeException ex) when (!ex.Error.IsFatal)
+        {
+            log.LogWarning(ex, "Kafka consume error");
+            return true;
+        }
+    }
+
+    /// <summary>Stores a valid event in its type's inbox, then its offset; skips a message that can never be synced.</summary>
+    private async Task IngestAsync(ConsumeResult<string, string> message, ISalesforceEntitySync sync, CancellationToken ct)
+    {
+        if (!sync.TryReadEvent(message.Message.Value, out var entityId, out var problem))
+        {
+            // Retrying can't fix it, and retrying would block every later event on the partition: log where
+            // it is (to fix or replay at the source) and move on.
+            log.LogError("Skipping malformed {Type} event at {Offset}: {Problem}", sync.EntityType, message.TopicPartitionOffset, problem);
+            StoreOffset(message);
+            return;
+        }
+
+        try
+        {
+            await sync.StoreEventAsync(entityId!, message.Message.Value, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogError(ex, "Failed to store {Offset}; will retry", message.TopicPartitionOffset);
+            Rewind(message);
+            await Task.Delay(StoreRetryDelay, ct);
+            return;
+        }
+        StoreOffset(message);
+    }
+
     /// <summary>
     /// Marks the message as handled; the client commits stored offsets in the background (EnableAutoOffsetStore=false
     /// + auto commit, see Program.cs). If a rebalance revoked the partition since the message was consumed, the store
-    /// fails: harmless, its new owner re-reads from the last commit and the duplicate insert is ignored.
+    /// fails: harmless, its new owner re-reads from the last commit and the event stored twice ends superseded.
     /// </summary>
     private void StoreOffset(ConsumeResult<string, string> result)
     {
@@ -129,7 +161,10 @@ public sealed class KafkaInboxConsumer(
     private async Task EnsureTopicAsync(string topic)
     {
         var bootstrap = config.GetConnectionString("kafka");
-        if (string.IsNullOrWhiteSpace(bootstrap)) return;
+        if (string.IsNullOrWhiteSpace(bootstrap))
+        {
+            return;
+        }
 
         using var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = bootstrap }).Build();
         try

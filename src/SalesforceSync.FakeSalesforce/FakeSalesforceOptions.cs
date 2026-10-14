@@ -24,7 +24,4 @@ public sealed class FakeSalesforceOptions
     /// (Salesforce: 25 for production and sandboxes, 5 for Developer Edition and trials).
     /// </summary>
     public int ConcurrentLongRunningLimit { get; set; } = 25;
-
-    /// <summary>Salesforce stops processing remaining graphs after this many failures in one request.</summary>
-    public int MaxGraphFailuresPerRequest { get; set; } = 14;
 }

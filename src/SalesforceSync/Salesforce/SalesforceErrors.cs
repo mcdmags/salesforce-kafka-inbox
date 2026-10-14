@@ -3,13 +3,7 @@ using SalesforceSync.Sync;
 
 namespace SalesforceSync.Salesforce;
 
-/// <summary>An error Salesforce reported for one record operation (a Composite Graph node).</summary>
-public sealed record SalesforceError(string? ReferenceId, string Code, string? Message)
-{
-    public override string ToString() => ReferenceId is null ? $"{Code} {Message}" : $"{ReferenceId}: {Code} {Message}";
-}
-
-/// <summary>Decides what a failed graph's errors mean for the entity: retry now, retry later, or give up.</summary>
+/// <summary>Decides what a failed record's errors mean: retry now, retry later, or give up.</summary>
 public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 {
     /// <summary>
@@ -21,12 +15,11 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     /// <summary>Our own code: the inbox event can't be mapped to records (malformed payload). Permanent.</summary>
     public const string InvalidEvent = "INVALID_EVENT";
 
-    /// <summary>The graph itself was fine but never ran, because of other graphs in the request.</summary>
-    public static readonly IReadOnlySet<string> NotAttemptedCodes = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "PROCESSING_HALTED",                  // more than 14 graphs in the request failed
-        "ALL_OR_NONE_OPERATION_ROLLED_BACK"   // rolled back because another operation failed
-    };
+    /// <summary>
+    /// A subrequest skipped because an earlier one it refers to failed: the record itself was fine but was not saved,
+    /// because of another record in the request.
+    /// </summary>
+    public const string ProcessingHalted = "PROCESSING_HALTED";
 
     /// <summary>Errors in the data or the org's configuration: retrying the same data fails the same way.</summary>
     public static readonly IReadOnlyList<string> DefaultPermanentCodes =
@@ -53,13 +46,17 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     private readonly HashSet<string> _permanent = new(
         options.Value.PermanentErrorCodes ?? DefaultPermanentCodes, StringComparer.Ordinal);
 
-    public bool IsPermanent(string code) => _permanent.Contains(code);
+    public bool IsPermanent(string code)
+    {
+        return _permanent.Contains(code);
+    }
 
-    /// <summary>Classifies the errors of one failed graph.</summary>
+    /// <summary>Classifies the errors of one failed record.</summary>
     public SyncOutcome Classify(IReadOnlyCollection<SalesforceError> errors)
     {
-        var real = errors.Where(e => !NotAttemptedCodes.Contains(e.Code)).ToList();
-        if (real.Count == 0) return SyncOutcome.NotAttempted;
-        return real.Any(e => IsPermanent(e.Code)) ? SyncOutcome.PermanentFailure : SyncOutcome.TransientFailure;
+        var real = errors.Where(e => e.Code != ProcessingHalted).ToList();
+        return real.Count == 0
+            ? SyncOutcome.NotAttempted
+            : real.Any(e => IsPermanent(e.Code)) ? SyncOutcome.PermanentFailure : SyncOutcome.TransientFailure;
     }
 }

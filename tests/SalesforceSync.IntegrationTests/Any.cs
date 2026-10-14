@@ -14,17 +14,26 @@ public static class Any
 
     public static T Create<T>()
     {
-        lock (Gate) return Fixture.Create<T>();
+        lock (Gate)
+        {
+            return Fixture.Create<T>();
+        }
     }
 
     /// <summary>A unique string starting with <paramref name="prefix"/> (followed by an AutoFixture string, a GUID).</summary>
     public static string String(string prefix)
     {
-        lock (Gate) return prefix + Fixture.Create<string>();
+        lock (Gate)
+        {
+            return prefix + Fixture.Create<string>();
+        }
     }
 
     public static string[] Strings(string prefix, int count)
     {
-        lock (Gate) return Enumerable.Range(0, count).Select(_ => prefix + Fixture.Create<string>()).ToArray();
+        lock (Gate)
+        {
+            return [.. Enumerable.Range(0, count).Select(_ => prefix + Fixture.Create<string>())];
+        }
     }
 }

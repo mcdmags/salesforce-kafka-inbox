@@ -6,16 +6,23 @@ var testMode = bool.TryParse(builder.Configuration["AppHost:TestMode"], out var 
 
 // Infrastructure
 var postgres = builder.AddPostgres("postgres");
-if (!testMode) postgres.WithDataVolume().WithPgAdmin();
+if (!testMode)
+{
+    postgres.WithDataVolume().WithPgAdmin();
+}
+
 var inboxDb = postgres.AddDatabase("inboxdb");
 
 var kafka = builder.AddKafka("kafka");
-if (!testMode) kafka.WithKafkaUI();
+if (!testMode)
+{
+    kafka.WithKafkaUI();
+}
 
 // Mock Salesforce org (HTTP service; inspect it at /__fake/stats and /__fake/records/{sobject})
 var salesforce = builder.AddProject<Projects.SalesforceSync_FakeSalesforce_Server>("fake-salesforce")
     .WithEnvironment("FakeSalesforce__Latency", testMode ? "00:00:00" : "00:00:00.050")
-    // Daily API allocation of an Enterprise org with 15 Salesforce licenses (100,000 + 15 x 1,000)
+    // Matches the worker's SalesforceLimits:DailyApiAllocation
     .WithEnvironment("FakeSalesforce__DailyApiLimit", "115000")
     .WithHttpHealthCheck("/health");
 var salesforceUrl = salesforce.GetEndpoint("http");
