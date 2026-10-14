@@ -11,14 +11,10 @@ namespace SalesforceSync.Tests;
 /// <summary>Limits from "API Request Limits and Allocations" (Salesforce Developer Limits Quick Reference).</summary>
 public sealed class SalesforceLimitsTests
 {
-    [Theory]
-    [InlineData(SalesforceOrgType.Production, 25)]
-    [InlineData(SalesforceOrgType.Sandbox, 25)]
-    [InlineData(SalesforceOrgType.DeveloperEdition, 5)]
-    [InlineData(SalesforceOrgType.Trial, 5)]
-    public void Concurrent_long_running_limit_depends_on_the_org_type(SalesforceOrgType type, int limit)
+    [Fact]
+    public void Concurrent_long_running_limit_defaults_to_that_of_a_production_org()
     {
-        new SalesforceLimitsOptions { OrgType = type }.EffectiveConcurrentLongRunningLimit.Should().Be(limit);
+        new SalesforceLimitsOptions().ConcurrentLongRunningLimit.Should().Be(25);
     }
 
     // ---------- Startup validation ----------
@@ -43,10 +39,21 @@ public sealed class SalesforceLimitsTests
     [Fact]
     public void More_concurrent_requests_than_the_org_allows_fails_startup()
     {
-        var result = Validate(Limits(SalesforceOrgType.DeveloperEdition), new SyncOptions { MaxConcurrentRequests = 6 });
+        var result = Validate(Limits(concurrentLongRunningLimit: 5), new SyncOptions { MaxConcurrentRequests = 6 });
 
         result.Failed.Should().BeTrue();
         result.FailureMessage.Should().Contain("MaxConcurrentRequests (6) exceeds the org's limit of 5");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void A_non_positive_concurrent_long_running_limit_fails_startup(int limit)
+    {
+        var result = Validate(Limits(concurrentLongRunningLimit: limit));
+
+        result.Failed.Should().BeTrue();
+        result.FailureMessage.Should().Contain("SalesforceLimits:ConcurrentLongRunningLimit");
     }
 
     [Fact]
@@ -206,9 +213,9 @@ public sealed class SalesforceLimitsTests
     }
 
     /// <summary>The worker's default allocation (appsettings.json).</summary>
-    private static SalesforceLimitsOptions Limits(SalesforceOrgType orgType = SalesforceOrgType.Production)
+    private static SalesforceLimitsOptions Limits(int concurrentLongRunningLimit = 25)
     {
-        return new() { OrgType = orgType, DailyApiAllocation = 115_000 };
+        return new() { DailyApiAllocation = 115_000, ConcurrentLongRunningLimit = concurrentLongRunningLimit };
     }
 
     private static ValidateOptionsResult Validate(SalesforceLimitsOptions limits, SyncOptions? sync = null,

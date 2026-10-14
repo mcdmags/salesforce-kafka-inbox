@@ -17,16 +17,4 @@ public sealed record BatchOutcomes(
     IReadOnlyList<long> Superseded,
     IReadOnlyList<long> Released,
     IReadOnlyList<FailedEvent> Dead,
-    IReadOnlyList<FailedEvent> Failed)
-{
-    /// <summary>
-    /// Sent in a write whose answer never came: held for <see cref="SyncOptions.UnknownOutcomeHold"/>, no retry spent.
-    /// Only a later write of a batch is held this way; when the first fails, the whole claim is held.
-    /// </summary>
-    public IReadOnlyList<FailedEvent> Held { get; init; } = [];
-
-    /// <summary>Not sent because of a rate limit: handed back for <see cref="DeferFor"/>, no retry spent.</summary>
-    public IReadOnlyList<long> Deferred { get; init; } = [];
-
-    public TimeSpan DeferFor { get; init; }
-}
+    IReadOnlyList<FailedEvent> Failed);

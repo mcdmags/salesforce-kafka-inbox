@@ -117,45 +117,54 @@ public sealed class EngineFlowTests
     // ---------- A batch written in more than one call ----------
 
     [Fact]
-    public async Task A_later_call_that_provably_failed_costs_only_its_own_entities_a_retry()
+    public async Task A_later_call_that_provably_failed_retries_the_whole_batch_and_marks_nothing_done()
     {
         await CreateOldAsync();
         _http.FailWrite = (2, new HttpRequestException(HttpRequestError.ConnectionError, "refused"));
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim account", "record");
-        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
-        _inbox.Recorded.Failed.Should().ContainSingle().Which.Should().Be(new FailedEvent(2, "UNKNOWN_ERROR refused", "UNKNOWN_ERROR"));
-        _inbox.Recorded.Held.Should().BeEmpty();
+        _inbox.Calls.Should().Equal(["claim account", "fail all: refused ()"],
+            "every event is retried and none is marked done, not even NEW's, whose call succeeded");
     }
 
     [Fact]
-    public async Task A_later_call_whose_answer_is_lost_holds_only_its_own_entities()
+    public async Task The_retry_of_a_batch_whose_later_call_failed_finds_what_the_earlier_call_saved()
+    {
+        await CreateOldAsync();
+        _http.FailWrite = (2, new HttpRequestException(HttpRequestError.ConnectionError, "refused"));
+        await TwoCallBatchAsync();
+        _inbox.Calls.Clear();
+        _http.FailWrite = null;
+        _http.Writes = 0;
+
+        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
+
+        _http.Writes.Should().Be(1, "NEW is unchanged now: only OLD's change is written");
+        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().BeEquivalentTo(["NEW", "OLD"]);
+        _org.History("Account", "NEW").Should().ContainSingle("NEW was written once, not twice");
+    }
+
+    [Fact]
+    public async Task A_later_call_whose_answer_is_lost_holds_the_whole_batch()
     {
         await CreateOldAsync();
         _org.LoseResponsesFor("Account", "OLD", 1);
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim account", "record");
-        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
-        _inbox.Recorded.Held.Should().ContainSingle().Which.Should().Match<FailedEvent>(h => h.EventId == 2 && h.Code == UnknownOutcomeException.Code);
-        _inbox.Recorded.Failed.Should().BeEmpty();
+        _inbox.Calls.Should().Equal("claim account", "hold");
     }
 
     [Fact]
-    public async Task A_later_call_that_is_rate_limited_defers_only_the_entities_not_sent()
+    public async Task A_later_call_that_is_rate_limited_defers_the_whole_batch()
     {
         await CreateOldAsync();
         _http.FailWrite = (2, new RateLimitedException(TimeSpan.FromSeconds(7)));
 
-        await TwoCallBatchAsync();
+        await TwoCallBatchAsync(processed: 0);
 
-        _inbox.Calls.Should().Equal("claim account", "record");
-        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
-        _inbox.Recorded.Deferred.Should().Equal(2L);
-        _inbox.Recorded.DeferFor.Should().Be(TimeSpan.FromSeconds(7));
+        _inbox.Calls.Should().Equal("claim account", "defer 00:00:07");
     }
 
     // ---------- Failures of the read ----------
@@ -232,7 +241,7 @@ public sealed class EngineFlowTests
     /// three others (updates), so the two together take two Composite write calls (5 collections each at most).
     /// </summary>
     private static readonly UpsertStrategy<AccountEvent> ThreeObjects = new("account",
-        e => e.Account?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
+        e => e.Account?.ExternalId, e => e.Meta,
         (key, e) => new UpsertUnit(
         [
             new SObjectRecord("acct", "Account", "External_Id__c", key, new Dictionary<string, object?> { ["Name"] = e.Account!.Name }),
@@ -260,12 +269,13 @@ public sealed class EngineFlowTests
     }
 
     /// <summary>NEW (row 1, first call) and a change of OLD (row 2, second call).</summary>
-    private async Task TwoCallBatchAsync()
+    /// <param name="processed">What the engine returns: 0 when the batch is deferred (no progress).</param>
+    private async Task TwoCallBatchAsync(int processed = 2)
     {
         _inbox.Rows.AddRange([Row(1, "NEW", "2026-10-14T02:00:00Z", "Gold"), Row(2, "OLD", "2026-10-14T02:00:00Z", "Silver")]);
         var before = _org.GetStats().WriteRequests;
 
-        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(processed);
 
         _http.Writes.Should().Be(2, "the batch takes two write calls");
         _org.FindByExternalId("Account", "NEW").Should().NotBeNull("the first call's records are in Salesforce");

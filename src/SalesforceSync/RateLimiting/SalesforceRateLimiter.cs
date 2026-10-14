@@ -56,10 +56,10 @@ public sealed class SalesforceRateLimiter(
             Param("budget", DailyBudget), Param("share", _opt.DailyBudgetShare)), ct);
 
         log.LogInformation(
-            "Salesforce limits: {OrgType} org, at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls/24h " +
+            "Salesforce limits: at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls/24h " +
             "for this integration ({Share:P0}), {Rate} calls/s, burst {Burst}, max {Concurrent} concurrent long-running requests",
-            _limits.OrgType, _limits.DailyApiAllocation, DailyBudget, _opt.DailyBudgetShare,
-            _opt.MaxRequestsPerSecond, _opt.BurstCapacity, _limits.EffectiveConcurrentLongRunningLimit);
+            _limits.DailyApiAllocation, DailyBudget, _opt.DailyBudgetShare,
+            _opt.MaxRequestsPerSecond, _opt.BurstCapacity, _limits.ConcurrentLongRunningLimit);
     }
 
     public async Task AcquireAsync(int permits, CancellationToken ct)
