@@ -32,12 +32,12 @@ public sealed class SalesforceRateLimiter(
     /// </summary>
     public async Task ApplyConfigurationAsync(CancellationToken ct)
     {
-        await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(Sql.ApplyConfiguration, new
+        await pg.ExecuteAsync(RateLimitSql.ApplyConfiguration, new
         {
             rate = _opt.MaxRequestsPerSecond,
             capacity = _opt.BurstCapacity,
             budget = DailyBudget
-        }, cancellationToken: t)), ct);
+        }, ct);
 
         log.LogInformation(
             "Salesforce limits: {OrgType} {Edition} org, {Allocation} calls/24h for the org, budget {Budget} calls/24h " +
@@ -51,16 +51,15 @@ public sealed class SalesforceRateLimiter(
         var deadline = DateTime.UtcNow + _opt.MaxWait;
         while (true)
         {
-            (bool granted, double waitSeconds, double used24h, double? budget) r;
             // Lock first, in its own statement: the acquire statement's snapshot then includes every usage
             // increment committed by whoever held the lock before (a single statement would read sf_api_usage
             // from a snapshot taken before it waited for the lock). Retried as a whole on transient errors; a
             // retry after an unknown commit can only over-count usage, the safe direction.
-            r = await pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
+            (bool granted, double waitSeconds, double used24h, double? budget) r = await pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
             {
-                await conn.ExecuteAsync(new CommandDefinition(Sql.Lock, transaction: tx, cancellationToken: t));
+                await conn.ExecuteAsync(new CommandDefinition(RateLimitSql.Lock, transaction: tx, cancellationToken: t));
                 return await conn.QuerySingleAsync<(bool, double, double, double?)>(
-                    new CommandDefinition(Sql.Acquire, new { n = (double)permits }, tx, cancellationToken: t));
+                    new CommandDefinition(RateLimitSql.Acquire, new { n = (double)permits }, tx, cancellationToken: t));
             }, ct);
             if (r.budget > 0) Volatile.Write(ref _ownDailyRatio, r.used24h / r.budget.Value);
             if (r.granted) return;
@@ -72,17 +71,9 @@ public sealed class SalesforceRateLimiter(
         }
     }
 
-    public async Task<bool> IsPausedAsync(CancellationToken ct)
-    {
-        return await pg.ExecuteAsync((conn, t) =>
-            conn.ExecuteScalarAsync<bool>(new CommandDefinition(Sql.IsPaused, cancellationToken: t)), ct);
-    }
+    public Task<bool> IsPausedAsync(CancellationToken ct) => pg.ExecuteScalarAsync<bool>(RateLimitSql.IsPaused, null, ct);
 
-    public async Task PauseAsync(TimeSpan duration, CancellationToken ct)
-    {
-        await pg.ExecuteAsync((conn, t) =>
-            conn.ExecuteAsync(new CommandDefinition(Sql.Pause, new { duration }, cancellationToken: t)), ct);
-    }
+    public Task PauseAsync(TimeSpan duration, CancellationToken ct) => pg.ExecuteAsync(RateLimitSql.Pause, new { duration }, ct);
 
     /// <summary>
     /// Records the limits Salesforce reported and adjusts the shared bucket:
@@ -105,7 +96,7 @@ public sealed class SalesforceRateLimiter(
             _lastReportUtc = now;
         }
 
-        await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(Sql.ReportLimits, new
+        await pg.ExecuteAsync(RateLimitSql.ReportLimits, new
         {
             apiUsed = info.ApiUsage?.Used,
             apiMax = info.ApiUsage?.Max,
@@ -116,7 +107,7 @@ public sealed class SalesforceRateLimiter(
             appName = info.AppName,
             speed = decision.Speed,
             pauseSeconds = decision.Pause.TotalSeconds
-        }, cancellationToken: t)), ct);
+        }, ct);
     }
 
     /// <param name="ownDailyRatio">This integration's rolling 24h calls / its daily budget.</param>
@@ -173,96 +164,5 @@ public sealed class SalesforceRateLimiter(
     internal readonly record struct ThrottleDecision(ThrottleLevel Level, double Speed, TimeSpan Pause)
     {
         public static ThrottleDecision Normal => new(ThrottleLevel.Normal, 1.0, TimeSpan.Zero);
-    }
-
-    private static class Sql
-    {
-        public const string Lock = "select 1 from sf_rate_limit where name = 'salesforce' for update";
-
-        // Runs after Lock in the same transaction: the row lock serializes every acquire in every process, so the
-        // budget check and the usage increment are exact. The window includes the whole 10-minute bucket that straddles "24 hours ago",
-        // so usage is over- rather than under-counted.
-        public const string Acquire = """
-            with s as (
-              select name, refill_per_sec, paused_until, daily_budget,
-                     least(capacity, tokens + extract(epoch from clock_timestamp() - updated_at)::float8 * refill_per_sec) as available
-              from sf_rate_limit
-              where name = 'salesforce'
-              for update
-            ), w as (
-              select coalesce(sum(calls), 0)::float8 as used, min(bucket) as oldest
-              from sf_api_usage
-              where bucket >= clock_timestamp() - interval '24 hours 10 minutes'
-            ), u as (
-              update sf_rate_limit r
-              set tokens = s.available - @n, updated_at = clock_timestamp()
-              from s, w
-              where r.name = s.name
-                and (s.paused_until is null or s.paused_until <= clock_timestamp())
-                and s.available >= @n
-                and (s.daily_budget is null or w.used + @n <= s.daily_budget)
-              returning 1
-            ), counted as (
-              insert into sf_api_usage (bucket, calls)
-              select to_timestamp(floor(extract(epoch from clock_timestamp()) / 600) * 600), @n
-              where exists (select 1 from u)
-              on conflict (bucket) do update set calls = sf_api_usage.calls + excluded.calls
-            )
-            select exists (select 1 from u) as granted,
-                   (case when s.paused_until > clock_timestamp()
-                         then extract(epoch from s.paused_until - clock_timestamp())
-                         when s.daily_budget is not null and w.used + @n > s.daily_budget
-                         then greatest(60, extract(epoch from w.oldest + interval '24 hours 10 minutes' - clock_timestamp()))
-                         else greatest(0, (@n - s.available) / s.refill_per_sec) end)::float8 as wait_seconds,
-                   w.used + (case when exists (select 1 from u) then @n else 0 end) as used_24h,
-                   s.daily_budget::float8 as daily_budget
-            from s, w
-            """;
-
-        // Keeps the current throttle factor (refill_per_sec / base_refill_per_sec) under the new base rate.
-        public const string ApplyConfiguration = """
-            update sf_rate_limit
-            set tokens              = least(@capacity, tokens + extract(epoch from clock_timestamp() - updated_at)::float8 * refill_per_sec),
-                updated_at          = clock_timestamp(),
-                capacity            = @capacity,
-                refill_per_sec      = @rate * coalesce(refill_per_sec / nullif(base_refill_per_sec, 0), 1),
-                base_refill_per_sec = @rate,
-                daily_budget        = @budget
-            where name = 'salesforce';
-            delete from sf_api_usage where bucket < clock_timestamp() - interval '25 hours';
-            """;
-
-        public const string IsPaused = """
-            select coalesce(paused_until > clock_timestamp(), false)
-            from sf_rate_limit where name = 'salesforce'
-            """;
-
-        public const string Pause = """
-            update sf_rate_limit
-            set paused_until = greatest(coalesce(paused_until, clock_timestamp()), clock_timestamp() + @duration)
-            where name = 'salesforce'
-            """;
-
-        // Refill tokens accrued at the old rate before changing the rate, so the switch is exact.
-        public const string ReportLimits = """
-            update sf_rate_limit
-            set tokens          = least(capacity, tokens + extract(epoch from clock_timestamp() - updated_at)::float8 * refill_per_sec),
-                updated_at      = clock_timestamp(),
-                refill_per_sec  = greatest(base_refill_per_sec * @speed, 0.01),
-                paused_until    = case when @pauseSeconds > 0
-                                       then greatest(coalesce(paused_until, clock_timestamp()),
-                                                     clock_timestamp() + make_interval(secs => @pauseSeconds))
-                                       else paused_until end,
-                api_used        = coalesce(@apiUsed, api_used),
-                api_max         = coalesce(@apiMax, api_max),
-                burst_used      = coalesce(@burstUsed, burst_used),
-                burst_max       = coalesce(@burstMax, burst_max),
-                app_used        = coalesce(@appUsed, app_used),
-                app_max         = coalesce(@appMax, app_max),
-                app_name        = coalesce(@appName, app_name),
-                usage_updated_at = clock_timestamp()
-            where name = 'salesforce';
-            delete from sf_api_usage where bucket < clock_timestamp() - interval '25 hours';
-            """;
     }
 }

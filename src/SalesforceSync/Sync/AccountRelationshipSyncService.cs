@@ -9,29 +9,13 @@ namespace SalesforceSync.Sync;
 /// Salesforce yet, the relationship is retried until the account sync has created it.
 /// </summary>
 public sealed class AccountRelationshipSyncService(
-    SalesforceBatchUpsertService upsert,
-    ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships) : ISalesforceEntitySync
+    SalesforceBatchUpsertService engine,
+    ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
+    : EntitySyncService<AccountRelationshipEvent>(engine, CreateStrategy(relationships), DefaultTopic)
 {
     public const string Type = "accountRelationship";
     public const string InboxTable = "sf_account_relationship_inbox";
     public const string DefaultTopic = "account-relationship-changes";
-
-    private readonly UpsertStrategy<AccountRelationshipEvent> _strategy = CreateStrategy(relationships);
-
-    public string EntityType => Type;
-
-    string ISalesforceEntitySync.InboxTable => InboxTable;
-
-    public string Topic => DefaultTopic;
-
-    public bool TryReadEvent(string json, out string? entityId, out string? problem)
-    {
-        var ok = _strategy.TryRead(json, out var read, out problem);
-        entityId = read?.EntityId;
-        return ok;
-    }
-
-    public Task<int> SyncBatchAsync(CancellationToken ct) => upsert.UpsertBatchAsync(_strategy, ct);
 
     /// <summary>The strategy the engine runs, with the mapper it maps through (injected, so built per instance).</summary>
     public static UpsertStrategy<AccountRelationshipEvent> CreateStrategy(

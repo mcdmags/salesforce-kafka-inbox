@@ -3,19 +3,6 @@ using Npgsql;
 
 namespace SalesforceSync.Data;
 
-public sealed class PostgresRetryOptions
-{
-    public const string Section = "Postgres:Retry";
-
-    /// <summary>Retries after the first attempt (0 = no retries).</summary>
-    public int MaxRetryCount { get; set; } = 5;
-
-    /// <summary>Delay before the first retry; doubles per retry (with jitter) up to <see cref="MaxRetryDelay"/>.</summary>
-    public TimeSpan BaseDelay { get; set; } = TimeSpan.FromMilliseconds(100);
-
-    public TimeSpan MaxRetryDelay { get; set; } = TimeSpan.FromSeconds(5);
-}
-
 /// <summary>
 /// Runs a unit of work against Postgres and runs it again, from the start, when it fails with a transient error:
 /// a dropped connection, a timeout, a failover or restart, a serialization failure or deadlock (the same idea as

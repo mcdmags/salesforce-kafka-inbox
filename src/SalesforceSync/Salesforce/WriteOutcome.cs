@@ -1,29 +1,6 @@
-using System.Net;
 using SalesforceSync.RateLimiting;
 
 namespace SalesforceSync.Salesforce;
-
-/// <summary>Salesforce answered with an error status. <see cref="IsSalesforceError"/>: the body is Salesforce's own error list.</summary>
-public sealed class SalesforceResponseException(HttpStatusCode status, string body)
-    : HttpRequestException($"Salesforce {(int)status}: {body}", null, status)
-{
-    /// <summary>
-    /// True when Salesforce itself produced the response (<c>[{ "errorCode": ..., "message": ... }]</c>), as opposed to a
-    /// gateway or load balancer in front of it, which can't know whether the request was processed.
-    /// </summary>
-    public bool IsSalesforceError { get; } = body.Contains("\"errorCode\"", StringComparison.Ordinal);
-}
-
-/// <summary>
-/// A write was sent (or may have been) and its result never arrived, so Salesforce may still apply it, possibly later.
-/// The entities in it must not be written again until it has either landed or been abandoned.
-/// </summary>
-public sealed class UnknownOutcomeException(Exception inner)
-    : Exception($"The outcome of the Salesforce write is unknown: {inner.Message}", inner)
-{
-    /// <summary>Stored as <c>last_error_code</c> on the held rows.</summary>
-    public const string Code = "UNKNOWN_OUTCOME";
-}
 
 /// <summary>What a failed write call says about whether Salesforce applied it.</summary>
 public static class WriteOutcome
