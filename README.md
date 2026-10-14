@@ -1,7 +1,7 @@
 # salesforce-kafka-inbox
 
 Kafka change events → Postgres inbox → Salesforce, with per-entity ordering, atomic multi-record upserts,
-type-aware change-only updates and a shared, limit-aware rate limiter. One generic engine syncs every object;
+and type-aware change-only updates. One generic engine syncs every object;
 each object only defines its typed payload, its Salesforce sObject class, the mapper between them and its queries.
 Written in C# / .NET 8.
 
@@ -23,10 +23,7 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
    API calls. Each record is read, diffed and only the changed fields are sent; new records are created.
    Nothing extra may be stored in Salesforce for the sync's own bookkeeping (no custom version field).
 4. **Batching.** Salesforce limits are per call, so updates have to be grouped efficiently.
-5. **Rate limits shared by every worker.** The org has a daily API allocation (also used by other
-   integrations), a burst allowance and a cap on concurrent long-running requests. Many workers in
-   many pods must respect them together, and back off when Salesforce says so.
-6. **At-least-once delivery.** Kafka redelivers, workers crash, leases expire, and none of that may
+5. **At-least-once delivery.** Kafka redelivers, workers crash, leases expire, and none of that may
    duplicate or regress data.
 
 ## How it's solved
@@ -45,8 +42,8 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 | Batching and API calls | **2 calls per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries), one Composite request with all writes (≤5 collections of ≤200 records; more are split over further requests). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (skipped because of another entity's record) → back to the inbox without spending a retry. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
-| Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` around a transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new transaction, change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
-| Rate limits | Configured from the org's daily API allocation and Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) and own usage slow everyone down at 80% and pause at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
+| Postgres failures | Every unit of work (claim, outcomes, ingest, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` around a transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new transaction, change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
+| Salesforce API limits | Not throttled by the sync itself (no shared rate limiter): 2 calls per batch keep usage low, and a 429 or `REQUEST_LIMIT_EXCEEDED` is an ordinary transient failure, retried with backoff. Each call times out after `Salesforce:RequestTimeout`. See [Salesforce API limits](#salesforce-api-limits). |
 
 ```
 Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per object type (Postgres: entity_id +
@@ -63,7 +60,6 @@ Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per 
                                 → describe → normalize → 1 composite read → decide (diff + lookups)
                                 → 1 composite write → per-record results → outcome per entity → record outcomes
                                                        │  inbox: IRepository<TRow> (EF Core + raw SQL, PostgresRetryStrategy)
-                                                       │  token bucket + daily budget + concurrency slots
                                                        ▼
                                                   Salesforce  (standard + existing fields only)
 ```
@@ -74,8 +70,8 @@ The sync is three layers, each with one job:
 
 | Layer | Classes | Does |
 |---|---|---|
-| **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryonStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
-| **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
+| **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryStrategy`) | Sends requests and returns raw results. Decides nothing. |
+| **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the two ways a batch can fail (unknown outcome → hold, anything else → retry all). |
 | **Rules, no I/O** | `BatchPreparer` (coalesce, watermark, map), `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `RecordDiffer` (changed fields), `WritePlanner` (create / update / unchanged, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`); the schema
@@ -84,9 +80,9 @@ and `SchemaTests` checks the model against the real tables column by column. Eve
 they all live on the abstract `InboxRow`; `AccountInboxRow` and `AccountRelationshipInboxRow` only name their tables
 (two independent entity types, no shared table), and the one `InboxRepository<TRow>` (`IRepository<TRow>`, registered as
 an open generic) serves both. The table name comes from the EF model. What EF can express is LINQ (`Add` + `SaveChanges`
-for an event, `ExecuteUpdate` for the lease-conditional outcomes done, superseded, released, held and deferred, a query for
-the watermarks); the claim, `ReleaseLostClaims`, `MarkSynced`, fail and dead-letter, and the rate limiter's statements are
-the SQL texts of `InboxSql` and `RateLimitSql` run unchanged through `Database.SqlQueryRaw` / `ExecuteSqlRaw` with named
+for an event, `ExecuteUpdate` for the lease-conditional outcomes done, superseded, released and held, a query for
+the watermarks); the claim, `ReleaseLostClaims`, `MarkSynced`, fail and dead-letter statements are
+the SQL texts of `InboxSql` run unchanged through `Database.SqlQueryRaw` / `ExecuteSqlRaw` with named
 `NpgsqlParameter`s, since a recursive CTE with `FOR UPDATE SKIP LOCKED` or `UPDATE ... RETURNING` has no LINQ form.
 
 Describe results are cached by `SalesforceSchemaCache`.
@@ -282,8 +278,10 @@ someone else created the record first, an unknown error code, a failed read) is 
 with exponential backoff: `Sync:RetryBaseDelay` (30 s) doubling per attempt up to `Sync:MaxRetryDelay` (1 h), and
 dead-lettered after `Sync:MaxRetries` (8) attempts. With the defaults the attempts come about 30 s, 1 min, 2 min,
 4 min, 8 min, 16 min and 32 min apart: roughly an hour from the first failure to the dead letter. Permanent errors
-are dead-lettered at once. The error code that caused it stays in `last_error_code`. Rate limits, records that were
-not attempted and unknown outcomes don't spend a retry.
+are dead-lettered at once. The error code that caused it stays in `last_error_code`. Records that were not attempted
+and unknown outcomes don't spend a retry. A call Salesforce refused because of its API limits (429,
+`REQUEST_LIMIT_EXCEEDED`) is an ordinary transient failure: nothing was written, so the batch's entities are retried
+on the schedule above.
 
 **A relationship that arrives before its Accounts** waits this way: the read doesn't find the Account, the event
 fails with `DEPENDENCY_NOT_SYNCED` before anything is sent, and it is retried on the schedule above until the
@@ -315,7 +313,7 @@ the entity were released and a newer event synced in the meantime, the late writ
   503 that is not Salesforce's own, or a response that can't be read.
 - **What does not**: anything Salesforce itself answered (4xx including 429, `REQUEST_LIMIT_EXCEEDED`, per-record
   errors, a 5xx with a Salesforce error body), a connection that was never established (refused, DNS, TLS), and
-  failures before the request left (waiting for a rate-limit token, getting the OAuth token). Failures of the
+  failures before the request left (getting the OAuth token). Failures of the
   describe or the read are never unknown: nothing was written. These follow the normal rules at once.
 - **What happens**: every entity of that batch is held. Its claimed rows stay `pending` with `locked_until = now() +
   Sync:UnknownOutcomeHold`, no `lock_token` (the old worker can't record anything on them), `last_error_code =
@@ -327,7 +325,7 @@ the entity were released and a newer event synced in the meantime, the late writ
   stopped. Lower `Sync:UnknownOutcomeHold` only if your org's requests are certain to end sooner.
 - **Shutdown**: a worker stopping mid-write still records the hold (with its own short timeout). If it can't (the
   process is killed), the lease is what protects the entity, which is why startup requires `Sync:Lease` to be longer
-  than `SalesforceLimits:RequestTimeout`. The remaining risk is a hard kill combined with a lease shorter than the
+  than `Salesforce:RequestTimeout`. The remaining risk is a hard kill combined with a lease shorter than the
   time Salesforce takes to finish the request.
 
 ### Parallel processing: what is guaranteed
@@ -378,8 +376,7 @@ Composite request with up to 5 queries.
 
 When a batch needs more than one write request, each request's failure affects only its own entities; outcomes of the
 requests already sent are recorded normally. A later request that fails outright retries only its entities, one with an
-unknown outcome holds only its entities (and stops the batch: entities not yet sent are released), and one that is
-rate limited defers its entities and the ones not yet sent. A failure of the first request applies to the whole batch.
+unknown outcome holds only its entities (and stops the batch: entities not yet sent are released). A failure of the first request applies to the whole batch.
 
 **`Sync:BatchSize`** is 1 to 100 entities (default 75). The bound comes from the read, not the write: a query takes
 100 external ids and a Composite request 5 queries, and a relationship needs up to three ids per entity (itself and
@@ -422,7 +419,7 @@ succeeded**. Until then Salesforce can show the new Account with the old or no P
 | a child not saved only because its parent in the same entity wasn't | whatever the parent's error says; the child's own "parent missing" error is ignored |
 | its whole subrequest went down because of another entity's record (`PROCESSING_HALTED` on a reference without a value) | released, no retry spent |
 | a subrequest that failed as a whole for any other reason | retried with backoff, never dead-lettered (it says nothing about one record's data) |
-| the call itself failed | as before: rate-limited → deferred; provably not applied → retried; otherwise [unknown outcome](#unknown-outcomes) → held |
+| the call itself failed | as before: provably not applied (429 and `REQUEST_LIMIT_EXCEEDED` included) → retried; otherwise [unknown outcome](#unknown-outcomes) → held |
 
 ### Linking a child to a parent created in the same request
 
@@ -449,8 +446,8 @@ always literal Ids from the read.
 
 ## Adding a Salesforce object
 
-The engine (`SalesforceBatchUpsertService.UpsertBatchAsync<TEvent, TRow>`) owns claiming, ordering, coalescing, rate
-limits, batching, normalization, diffing, lookups, retries and dead-lettering. Nothing in the engine, the consumer or
+The engine (`SalesforceBatchUpsertService.UpsertBatchAsync<TEvent, TRow>`) owns claiming, ordering, coalescing,
+batching, normalization, diffing, lookups, retries and dead-lettering. Nothing in the engine, the consumer or
 the worker loops names an object. An object supplies four small things: a payload class, an sObject class, a mapper,
 an inbox row class (which selects the object's inbox table) and a strategy class that names the object's topic and says
 how an event becomes records. The strategy class derives from `EntitySyncService<TEvent, TRow>`, which does the rest of
@@ -556,10 +553,9 @@ events there, and the worker loops sync it. A lookup whose target isn't in Sales
 related objects can arrive in any order. A strategy may build `SObjectRecord`s by hand; the typed layers are how the built-in objects do it, not something the
 engine requires.
 
-**Why `SemaphoreSlim` isn't used for parallel batches:** it limits concurrency within one process, while
-Salesforce's limits are org-wide. Parallelism comes from competing worker loops in every pod pulling from the
-shared inbox, capped globally by Postgres advisory-lock slots and a shared token bucket. (The Describe cache
-does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers don't all describe at once.)
+**Parallelism** comes from competing worker loops in every pod pulling from the shared inbox: `Sync:Workers` loops
+per pod, so at most `Workers` × pods batches call Salesforce at once. (The Describe cache uses a `SemaphoreSlim`, as
+an in-process single-flight so concurrent workers don't all describe at once.)
 
 ## Repository layout
 
@@ -574,7 +570,6 @@ src/
     Sync/Mapping/                 Mappers: payload -> sObject
     Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors
     Salesforce/SObjects/          sObject classes and the attributes they are read by
-    RateLimiting/                 Token bucket, daily budget, pause, concurrency slots, the batch gate
     Data/                         SyncDbContext (the EF model of the tables), PostgresRetryStrategy, raw-SQL helpers
   SalesforceSync.FakeSalesforce/  In-memory Salesforce (describe, query, composite, sObject collections, Salesforce-like
                                   value storage, error injection, write history, Sforce-Limit-Info): FakeSalesforceStore
@@ -586,14 +581,14 @@ src/
 tests/
   SalesforceSync.Tests/           Unit tests: the Salesforce half of the engine with both strategies against the
                                   in-memory org, the engine's flow with a stand-in inbox, the pure write-path rules,
-                                  type normalization, error classification, execution strategy, limits
+                                  type normalization, error classification, execution strategy, options validation
   SalesforceSync.IntegrationTests/  End-to-end tests: Postgres + Kafka in Testcontainers, worker pods and the mock org
                                   in-process; Kafka in, assertions on the mock org + inbox
 benchmarks/
   SalesforceSync.Benchmarks/      BenchmarkDotNet: real Postgres inbox, fake Salesforce HTTP
 sql/
-  schema.sql                      Inbox table template (applied once per object type) + indexes, sync watermark,
-                                  rate-limit and API usage tables (embedded, applied at worker startup)
+  schema.sql                      Inbox table template (applied once per object type) + indexes, sync watermark
+                                  (embedded, applied at worker startup)
   claim-audit.sql                 Test/benchmark-only trigger that records every entity claim
 ```
 
@@ -639,8 +634,7 @@ literal), and **Testcontainers** (`Testcontainers.PostgreSql`, `Testcontainers.K
 
 ### Integration tests
 
-Each xUnit collection fixture (`SyncFixture`, `MultiPodFixture`, `FewRetriesFixture`, `DailyBudgetFixture`,
-`ConcurrentLimitFixture`)
+Each xUnit collection fixture (`SyncFixture`, `MultiPodFixture`, `FewRetriesFixture`)
 starts its own environment once, shared by the tests in that collection:
 
 - **Postgres** (`postgres:17`) and **Kafka** (KRaft) in containers, removed when the collection finishes. Both
@@ -649,17 +643,15 @@ starts its own environment once, shared by the tests in that collection:
   the same code its `Program.cs` runs) on Kestrel at a random loopback port, so the worker goes through real HTTP:
   OAuth token, gzip, the REST client.
 - **Worker pods**: each pod is its own in-process `IHost` built with `AddSalesforceSyncWorker()`, the exact
-  registrations `Program.cs` uses (options and validation, Npgsql, the Salesforce client with the rate limiter,
-  auth handler and token provider, `KafkaInboxConsumer`, `InboxSchemaInitializer`, `RateLimitInitializer`,
-  `InboxWorkerService`). A pod has its own connection pool, Kafka consumer (all pods share the consumer group),
-  token cache, rate limiter (sharing the Postgres bucket, budget and slots), HTTP stack and worker loops, so
+  registrations `Program.cs` uses (options and validation, Npgsql, the Salesforce client,
+  auth handler and token provider, `KafkaInboxConsumer`, `InboxSchemaInitializer`, `InboxWorkerService`). A pod has
+  its own connection pool, Kafka consumer (all pods share the consumer group), token cache, HTTP stack and worker loops, so
   several pods behave like replicas. Pods read the worker's `appsettings.json` plus the fixture's settings, never
   the environment. Each pod sets `Salesforce:UserAgentInstance` so the mock org can tell them apart.
 
 A fixture shapes the deployment in its constructor: the pod count, `WorkerSettings` that every pod gets (e.g.
-`Sync:Workers`, `Sync:BatchSize`, `Sync:Lease`, `Sync:RetryBaseDelay`, `RateLimit:*`) and `FakeOrgSettings` for the
-org (`FakeSalesforce:Latency`, `LongRunningThreshold`, `ConcurrentLongRunningLimit`, ...). Waits for a result poll
-with `Eventually`; the only fixed delay checks that nothing more happens once the daily budget is used up. Tests
+`Sync:Workers`, `Sync:BatchSize`, `Sync:Lease`, `Sync:RetryBaseDelay`, `Salesforce:RequestTimeout`) and
+`FakeOrgSettings` for the org (`FakeSalesforce:Latency`, ...). Waits for a result poll with `Eventually`. Tests
 publish to Kafka and assert on the records in the mock org and the inbox rows' status. `LeaseTests` play a worker by hand
 with the worker's own SQL, so a lease lasts exactly as long as the test wants.
 
@@ -687,15 +679,6 @@ updating only what differs. `DeadLetterTests` (`FewRetriesFixture`, `Sync:MaxRet
 relationship whose Account never arrives dead-lettered after `MaxRetries` with `DEPENDENCY_NOT_SYNCED`, then synced
 once the Accounts exist and the dead letter is re-queued.
 
-Rate limits (`RateLimitTests`, each with its own fixture, i.e. its own containers, org and pods):
-
-- **Daily budget across pods**: 3 pods share a budget of 30 calls (`DailyApiAllocation=1000`, the mock org
-  reporting a limit of 60, `DailyBudgetShare=0.5`). Exactly 30 calls reach the org, then nothing more; the
-  remaining events are deferred until the budget frees up, without spending retries or being dead-lettered.
-- **Concurrent long-running limit**: the mock org allows 2 concurrent long-running calls while 12 workers send
-  them. The `ConcurrentPerOrgLongTxn` rejections cause a short pause (not the long daily one) and every event
-  still syncs, with no retries spent.
-
 ### Unit tests
 
 Unit tests (`dotnet test tests/SalesforceSync.Tests`, no Docker) run the Salesforce half of the engine with both
@@ -711,17 +694,16 @@ id), the guard that every Salesforce name on an sObject class exists in the mock
 (account with and without a profile, relationships, missing Account ids, camelCase and PascalCase bodies), what the
 engine does with a claim (newest `meta.time` wins, ties, watermark, A → B → A, invalid rows alone), what the consumer
 admits (the typed read: id, time with offset, `meta.type`), the classification of failed writes (unknown outcome or
-not), inbox table names as plain identifiers, every normalization rule (including the documented 15 → 18-character id
-example), error classification, the Postgres execution strategy (retried, not retried, gives up), the daily budget
-(the configured allocation as the maximum, lowered by the one Salesforce reports), startup validation and throttle
-decisions.
+not; a 429 or `REQUEST_LIMIT_EXCEEDED` is not, and is retried with backoff), inbox table names as plain identifiers, every normalization rule (including the documented 15 → 18-character id
+example), error classification, the Postgres execution strategy (retried, not retried, gives up) and startup validation
+(`Salesforce:RequestTimeout` within the API timeout and shorter than the lease).
 
 ### Concurrency: many threads, many pods, same accounts
 
 `ConcurrencyTests` (`MultiPodFixture`) scales the worker like a Kubernetes deployment: **3 pods x 8 worker loops**, all on one
 inbox and one org, while 60 accounts each receive 25 updates in waves (new events keep arriving while those
 accounts are being processed). Salesforce has nothing that rejects an out-of-order write, so a race would
-land in the org and show up in the mock's write history. The rate limiter is opened up and batches are small
+land in the org and show up in the mock's write history. Batches are small
 (10 accounts) so workers contend for the same accounts. The test asserts:
 
 - **No overlapping claims**: `sql/claim-audit.sql` (test-only trigger on every inbox table) records every claim from the
@@ -752,10 +734,10 @@ the 20 s lease), so a unit of work outlasts the chaos instead of giving up and l
 
 ## Benchmarks
 
-Only the Salesforce HTTP endpoint is mocked; the Postgres inbox, workers, client and rate limiter are real.
+Only the Salesforce HTTP endpoint is mocked; the Postgres inbox, workers and client are real.
 
 ```bash
-# use a dedicated database: the benchmark truncates the inbox tables and resets sf_rate_limit
+# use a dedicated database: the benchmark truncates the inbox tables
 export ConnectionStrings__benchdb="Host=localhost;Port=5432;Database=benchdb;Username=postgres;Password=postgres"
 
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*'             # everything, about 20 minutes
@@ -765,11 +747,11 @@ dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter
 
 Results, the SQL statement measurements and the before/after of this tuning: [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
-The micro benchmarks need no database: header parsing, coalescing, the typed mapping (`MapAccountEvent`: event JSON →
+The micro benchmarks need no database: coalescing, the typed mapping (`MapAccountEvent`: event JSON →
 payload → sObjects → records; `MapPayloadToSObject` and `MapSObjectToRecord` for its two halves) and the type-aware
 diff.
 
-Both drain benchmarks run P **pods** (independent service providers: own connection pool, rate limiter and
+Both drain benchmarks run P **pods** (independent service providers: own connection pool and
 HTTP client, like separate processes) x W worker loops against one Postgres inbox and one org. Each iteration
 **fails** if any account doesn't end at its newest version, any record's write history shows an older version
 after a newer one, any inbox row isn't `done` or `superseded`, or the claim audit shows two overlapping claims on
@@ -789,112 +771,17 @@ dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter
 
 ## Salesforce API limits
 
-Configured from "API Request Limits and Allocations" in the
-[Salesforce Developer Limits and Allocations Quick Reference](https://developer.salesforce.com/docs/platform/salesforce-app-limits-cheatsheet/guide/salesforce-app-limits-platform-api.html),
-with the response header and status codes from the REST API Developer Guide
-([Limit Info Header](https://developer.salesforce.com/docs/platform/api-rest/guide/headers-api-usage.html),
-[Composite](https://developer.salesforce.com/docs/platform/api-rest/guide/resources-composite-composite-post.html)).
-Set the org's daily API allocation (`DailyApiAllocation`, the number in Setup: System Overview, API Requests, Last
-24 Hours) and its type; the worker logs its limits at startup and refuses to start on a configuration that can't
-work, including a missing or non-positive `DailyApiAllocation`. The configured allocation is the maximum: Salesforce
-reports the org's real one on every REST response (`Sforce-Limit-Info: api-usage=25/5000`, a limit of 5,000), and
-when that is lower the budget follows it. A response without the header, or with one that can't be read, leaves the
-budget on the configuration.
+The sync does not throttle itself: there is no shared rate limiter, daily budget or global concurrency cap. What
+keeps it within the org's limits
+([API Request Limits and Allocations](https://developer.salesforce.com/docs/platform/salesforce-app-limits-cheatsheet/guide/salesforce-app-limits-platform-api.html))
+is how little it calls, how many workers run, and Salesforce's own refusals:
 
-```json
-"SalesforceLimits": {
-  "OrgType": "Production",          // Production | Sandbox | DeveloperEdition | Trial: the default concurrent limit
-  "DailyApiAllocation": 115000,     // required: the org's calls per 24 hours, from Setup
-  "ConcurrentLongRunningLimit": null,
-  "LongRunningThreshold": "00:00:20",
-  "RequestTimeout": "00:01:30"
-},
-"RateLimit": {
-  "MaxRequestsPerSecond": 2,        // token bucket refill, all pods together
-  "BurstCapacity": 5,               // token bucket size
-  "DailyBudgetShare": 0.5,          // this integration's share of the org's daily allocation
-  "DailySoftRatio": 0.8, "DailySoftSpeed": 0.25,
-  "DailyHardRatio": 0.95, "DailyHardPause": "00:15:00",
-  "ConcurrentLimitPause": "00:00:30",
-  "MaxWait": "00:00:20"
-}
-```
-
-| Salesforce limit | How it's applied |
+| Salesforce limit | How it's handled |
 |---|---|
-| **Total API requests per 24 hours**: depends on the edition, licenses and add-ons (e.g. 115,000 for an Enterprise org with 15 Salesforce licenses); Setup shows the org's number | `SalesforceLimits:DailyApiAllocation` (required) as the maximum, lowered to the limit in `Sforce-Limit-Info: api-usage` when Salesforce reports less. The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling 24 hours. When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
-| **What a call is**: each HTTP request; a Composite request (and an sObject Collections request) counts as one call however many subrequests it holds | One token per HTTP request: a describe (cached), each query page and each Composite write. |
-| **Org-wide usage** (also other integrations): `Sforce-Limit-Info: api-usage=used/limit` on every REST response | `api-usage` and, when Salesforce sends it, `per-app-api-usage` (the connected app's quota): slow down at `DailySoftRatio`, pause at `DailyHardRatio`. The allocation Salesforce reports, the configured maximum and the resulting budget are logged when first seen and whenever Salesforce's changes. `api-bursts` appears in Salesforce's example of the header but isn't defined, so it is recorded in `sf_limit_status` and not acted on. |
-| **Requests per second**: Salesforce publishes no such limit, and none on concurrent requests shorter than 20 s | `MaxRequestsPerSecond` and `BurstCapacity` are this integration's own pacing, so it spreads its share of the daily allocation instead of spending it in bursts. |
-| **Concurrent long-running requests** (20 s or longer): 25 for production and sandboxes, 5 for Developer Edition and trials | `Sync:MaxConcurrentRequests` (global advisory-lock slots) must not exceed it, or startup fails. Calls that take `LongRunningThreshold` or longer are logged. `REQUEST_LIMIT_EXCEEDED` with `ConcurrentPerOrgLongTxn` pauses all workers for `ConcurrentLimitPause`. |
-| **Total requests exceeded** (`REQUEST_LIMIT_EXCEEDED`, `TotalRequests`) | Pauses all workers for `DailyHardPause`. Salesforce may allow some overage on paid orgs, but it isn't relied on. |
-| **API timeout**: 10 minutes for REST calls, for a composite request as a whole (query calls follow the SOQL limits and fail with `QUERY_TIMEOUT`, retried as transient) | `RequestTimeout` (HTTP client timeout, including the token wait) must be at most 10 minutes, or startup fails. The worker also gives up at 80% of its lease. |
-
-The limiter is registered by `AddSalesforceRateLimiting()`, which the worker (`AddSalesforceSyncWorker`), the
-benchmark pods and the test pods all use. Its handler is always the outermost on the Salesforce client (rate limiter
-→ gzip → auth), so every request takes a token before it is compressed and authenticated.
-
-Every pod applies the bucket size, rate and budget to the shared `sf_rate_limit` row at startup, so roll out
-configuration changes to all pods together. `sf_limit_status` shows the last reported usage, this integration's
-own calls over the last 24 hours and its budget.
-
-### Concurrency slots: Postgres advisory locks
-
-`SalesforceConcurrencySlots` caps how many batches are calling Salesforce at once **across all pods**, so the
-integration stays under the org's concurrent long-running limit (25, or 5 on Developer Edition).
-
-**How it works.** There is no table for it. `pg_try_advisory_lock(key)` is a built-in Postgres function that
-locks an application-chosen number, held in Postgres's lock manager (in memory). There are
-`Sync:MaxConcurrentRequests` slots, keys `0x53460000 + 0 … N-1`. Before calling Salesforce, a worker opens a
-connection and tries the keys in random order:
-
-- it gets `true` → it holds that slot for the batch, then calls `pg_advisory_unlock(key)`;
-- `false` comes back immediately if another session holds that key, so there is no waiting;
-- all `false` → every slot is busy, so the worker skips this round and claims nothing.
-
-If a pod crashes or its connection drops, Postgres ends the session and releases its locks. A slot can't leak,
-so there is no expiry, heartbeat or cleanup job. (`pg_advisory_xact_lock` in `InboxSchema` does the same for
-schema setup: it lets one pod at a time apply `schema.sql`, released at commit.)
-
-**Why this rather than the alternatives**
-
-| Option | Why not (here) |
-| --- | --- |
-| `SemaphoreSlim` per pod | Only limits one process. Splitting the limit statically (`25 / pods`) breaks when pods scale up or down and wastes slots when some pods are idle. |
-| Slot rows in a table with a lease (`locked_until`) | Works, but a crashed holder keeps the slot until the lease expires, needs heartbeats for long calls, and every acquire/release is a write (WAL, vacuum). |
-| Redis semaphore / Redlock | Another piece of infrastructure to run, and it's also TTL-based, with the same expiry trade-offs. |
-| Counting in-flight rows in the inbox tables | Needs a lock or `serializable` isolation to count and claim atomically, and is easy to get subtly wrong. |
-| **Advisory locks** | Postgres is already the coordinator. Acquiring is one non-blocking statement, a crashed holder is released automatically, and nothing is written to disk. |
-
-**Is it best practice?** Yes, for a distributed semaphore or mutex when Postgres is already shared state.
-It's the documented use of advisory locks ("locks with application-defined meanings"), and established
-Postgres-backed job systems use them for the same purpose (e.g. Que and GoodJob for job locking, and Flyway
-for its migration lock on Postgres). It's the wrong tool if no shared Postgres exists, or if slots must
-outlive a connection.
-
-**Trade-offs and how they're handled**
-
-- **Session-level locks need a stable session.** Use Npgsql's own connection pooling (a slot is a pooled `SyncDbContext` whose connection is opened explicitly and held
-  until the slot is disposed) or a pooler in *session* mode, not PgBouncer in *transaction* mode: there the unlock can
-  run on a different server connection, so the lock would stay held.
-- **A held slot keeps a connection open** for the whole batch, in addition to the short claim/outcome
-  connections. Size `Maximum Pool Size` per pod above `Workers` (one slot connection per worker plus headroom),
-  and Postgres `max_connections` for all pods together.
-- **Pooled connections:** a slot is always unlocked explicitly before its connection goes back to the pool.
-  As a backstop, Npgsql resets a pooled connection with `DISCARD ALL` (which also drops advisory locks) when
-  it's next used, and a broken connection is discarded, which ends the session.
-- **Acquire cost** is at most N quick round trips when all slots are busy. That's negligible for N ≤ 25. The
-  random order spreads pods across keys so they don't all contend for slot 0.
-- **Key namespace:** keys are `0x5346xxxx` ("SF"). Advisory locks are per database, so other applications in
-  the same database must not use the same range.
-
-To see the slots held right now:
-
-```sql
-select pid, objid::bigint - 1397096448 as slot, application_name, client_addr, state
-from pg_locks join pg_stat_activity using (pid)
-where locktype = 'advisory' and classid = 0 and objid::bigint between 1397096448 and 1397096448 + 100;
-```
+| **Total API requests per 24 hours**, shared by every user and integration of the org | 2 calls per batch of up to 75 entities (describe cached and revalidated), and nothing written when nothing changed. A call refused with `REQUEST_LIMIT_EXCEEDED` is a transient failure: nothing was written, so the batch's entities are retried with the normal backoff (`Sync:RetryBaseDelay` doubling up to `MaxRetryDelay`) and dead-lettered only after `Sync:MaxRetries`. |
+| **429 Too Many Requests** (not one of Salesforce's documented REST status codes, but sent by things in front of it) | The same: a 4xx means the write was not applied, so it is retried with backoff, never held. |
+| **Concurrent long-running requests** (20 s or longer): 25 for production and sandboxes, 5 for Developer Edition and trials | At most `Sync:Workers` × pods batches call Salesforce at once; keep that below the org's limit. A refusal (`REQUEST_LIMIT_EXCEEDED`, `ConcurrentPerOrgLongTxn`) is retried with backoff like any other. |
+| **API timeout**: 10 minutes for REST calls, for a composite request as a whole | `Salesforce:RequestTimeout` (HTTP client timeout per call, default 90 s) must be positive and at most 10 minutes, and `Sync:Lease` must be longer than it, or startup fails. The worker also gives up at 80% of its lease. A write that times out has an [unknown outcome](#unknown-outcomes) and is held. |
 
 ## Using a real Salesforce org
 
@@ -903,12 +790,13 @@ where locktype = 'advisory' and classid = 0 and objid::bigint between 1397096448
    `Related_Account__c` lookups on the relationship.
 2. Set `Salesforce:UseFake=false` (the default outside Aspire) plus `InstanceUrl`, `TokenUrl`,
    `ClientId`, `ClientSecret` (OAuth client credentials).
-3. Set the org's `SalesforceLimits:DailyApiAllocation` (and `OrgType`) and choose this integration's
-   `RateLimit:DailyBudgetShare` (see [Salesforce API limits](#salesforce-api-limits)).
+3. Choose `Sync:Workers` per pod so that workers × pods stays well below the org's concurrent long-running limit
+   (see [Salesforce API limits](#salesforce-api-limits)).
 4. Adjust object and field names on the sObject classes (`Salesforce/SObjects/`, the only place they appear), and
    the payload classes and mappers if the events differ. Tune `Salesforce:PermanentErrorCodes`, `Sync:RetryBaseDelay` / `MaxRetryDelay` / `MaxRetries` and
-   `Postgres:Retry` if needed. `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-100, ...)
-   and a missing `Salesforce:InstanceUrl` fail startup.
+   `Postgres:Retry` if needed. `Sync` values that can't work (no workers, `BatchSize` outside 1-100, ...),
+   a missing `Salesforce:InstanceUrl` and a `Salesforce:RequestTimeout` above 10 minutes or not shorter than
+   `Sync:Lease` fail startup.
 
 ## Status
 

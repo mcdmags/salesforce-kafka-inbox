@@ -3,7 +3,6 @@ using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
 using SalesforceSync.Inbox.Payloads;
-using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 using SalesforceSync.Sync.Mapping;
@@ -21,19 +20,7 @@ public sealed class EngineFlowTests
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly RecordingInbox _inbox = new();
-    private readonly Gate _gate = new();
     private readonly Interceptor _http = new();
-
-    [Fact]
-    public async Task Nothing_is_claimed_while_there_is_no_capacity()
-    {
-        _gate.Open = false;
-        _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
-
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
-
-        _inbox.Calls.Should().BeEmpty();
-    }
 
     [Fact]
     public async Task An_empty_claim_is_nothing_to_do()
@@ -41,7 +28,6 @@ public sealed class EngineFlowTests
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
 
         _inbox.Calls.Should().Equal("claim account");
-        _gate.Released.Should().Be(1, "the slot is given back");
     }
 
     [Fact]
@@ -67,7 +53,6 @@ public sealed class EngineFlowTests
         outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.EventId == 3 && f.Code == SalesforceErrors.InvalidEvent);
         outcomes.Released.Should().BeEmpty();
         outcomes.Failed.Should().BeEmpty();
-        _gate.Released.Should().Be(1);
     }
 
     [Fact]
@@ -82,14 +67,14 @@ public sealed class EngineFlowTests
     }
 
     [Fact]
-    public async Task A_rate_limited_batch_is_deferred_and_counts_as_no_progress()
+    public async Task A_rate_limited_batch_is_retried_as_a_whole_with_backoff()
     {
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
-        _http.Throw = new RateLimitedException(TimeSpan.FromSeconds(7));
+        _http.Throw = new SalesforceResponseException(System.Net.HttpStatusCode.TooManyRequests, "");
 
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
 
-        _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "defer 00:00:07");
+        _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: Salesforce 429:  ()");
     }
 
     [Fact]
@@ -145,17 +130,18 @@ public sealed class EngineFlowTests
     }
 
     [Fact]
-    public async Task A_later_call_that_is_rate_limited_defers_only_the_entities_not_sent()
+    public async Task A_later_call_refused_with_REQUEST_LIMIT_EXCEEDED_costs_only_its_own_entities_a_retry()
     {
         await CreateOldAsync();
-        _http.FailWrite = (2, new RateLimitedException(TimeSpan.FromSeconds(7)));
+        _http.FailWrite = (2, new SalesforceResponseException(System.Net.HttpStatusCode.Forbidden,
+            /*lang=json,strict*/ """[{"errorCode":"REQUEST_LIMIT_EXCEEDED","message":"TotalRequests Limit exceeded."}]"""));
 
         await TwoCallBatchAsync();
 
         _inbox.Calls.Should().Equal("claim account", "record");
         _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
-        _inbox.Recorded.Deferred.Should().Equal(2L);
-        _inbox.Recorded.DeferFor.Should().Be(TimeSpan.FromSeconds(7));
+        _inbox.Recorded.Failed.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.EventId == 2 && f.Code == "UNKNOWN_ERROR");
+        _inbox.Recorded.Held.Should().BeEmpty();
     }
 
     // ---------- Failures of the read ----------
@@ -277,7 +263,7 @@ public sealed class EngineFlowTests
         var options = Options.Create(new SalesforceOptions());
         _http.InnerHandler ??= new FakeSalesforceHandler(_org);
         var http = new HttpClient(_http) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
-        return new SalesforceBatchUpsertService(_gate, new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
+        return new SalesforceBatchUpsertService(new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
             new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
             NullLogger<SalesforceBatchUpsertService>.Instance);
     }
@@ -320,23 +306,6 @@ public sealed class EngineFlowTests
         }
     }
 
-    private sealed class Gate : ISalesforceBatchGate, IAsyncDisposable
-    {
-        public bool Open { get; set; } = true;
-        public int Released { get; private set; }
-
-        public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct)
-        {
-            return Task.FromResult<IAsyncDisposable?>(Open ? this : null);
-        }
-
-        public ValueTask DisposeAsync()
-        {
-            Released++;
-            return ValueTask.CompletedTask;
-        }
-    }
-
     private sealed class RecordingInbox : IRepository<AccountInboxRow>
     {
         public List<InboxEvent> Rows { get; } = [];
@@ -365,11 +334,6 @@ public sealed class EngineFlowTests
         public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
         {
             return Call("hold");
-        }
-
-        public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
-        {
-            return Call($"defer {delay}");
         }
 
         public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)

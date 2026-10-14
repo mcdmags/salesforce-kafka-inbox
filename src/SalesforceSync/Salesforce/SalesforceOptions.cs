@@ -4,6 +4,9 @@ public sealed class SalesforceOptions
 {
     public const string Section = "Salesforce";
 
+    /// <summary>Salesforce stops REST calls (a composite request as a whole) after this long.</summary>
+    public static readonly TimeSpan MaxApiTimeout = TimeSpan.FromMinutes(10);
+
     public string InstanceUrl { get; set; } = "";
     public string TokenUrl { get; set; } = "";
     public string ClientId { get; set; } = "";
@@ -14,6 +17,12 @@ public sealed class SalesforceOptions
     /// counters) show. Unset = machine name (the pod name in Kubernetes) and process id.
     /// </summary>
     public string? UserAgentInstance { get; set; }
+
+    /// <summary>
+    /// Client timeout per Salesforce call. Salesforce stops REST calls (a composite request as a whole) after
+    /// <see cref="MaxApiTimeout"/>, so this must not exceed that, and it must be shorter than the sync's lease.
+    /// </summary>
+    public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(90);
 
     /// <summary>Salesforce does not return expires_in for client credentials; refresh proactively.</summary>
     public TimeSpan TokenLifetime { get; set; } = TimeSpan.FromMinutes(30);

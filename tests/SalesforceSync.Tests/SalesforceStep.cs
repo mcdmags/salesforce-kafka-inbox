@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Inbox;
-using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 
@@ -15,22 +14,17 @@ internal static class SalesforceStep
 {
     public static SalesforceBatchUpsertService Service(HttpClient http, IOptions<SalesforceOptions> options)
     {
-        return new(new NoDatabase(), new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
+        return new(new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
                 new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
                 NullLogger<SalesforceBatchUpsertService>.Instance);
     }
 
-    /// <summary>The Salesforce step never claims, records or takes a slot.</summary>
-    private sealed class NoDatabase : ISalesforceBatchGate, IRepository<AccountInboxRow>
+    /// <summary>The Salesforce step never claims or records.</summary>
+    private sealed class NoDatabase : IRepository<AccountInboxRow>
     {
         private static NotSupportedException NotUsed()
         {
             return new("The Salesforce step does not use the inbox");
-        }
-
-        public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct)
-        {
-            throw NotUsed();
         }
 
         public Task AddAsync(string entityId, string payload, CancellationToken ct)
@@ -49,11 +43,6 @@ internal static class SalesforceStep
         }
 
         public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
-        {
-            throw NotUsed();
-        }
-
-        public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
         {
             throw NotUsed();
         }

@@ -7,8 +7,8 @@ namespace SalesforceSync.Inbox;
 public static class InboxSchema
 {
     private const string ResourceName = "SalesforceSync.schema.sql";
-    // Advisory lock key in the "SF" namespace (see SalesforceConcurrencySlots.KeyBase): ASCII "SFSH", SF schema.
-    // Its low 16 bits (0x5348 = 21,320) are far above any concurrency slot index, so the two never collide.
+    // Advisory lock key, in a distinctive range rather than a small number other code might pick: ASCII "SFSH",
+    // SF schema. It must only be identical in every pod and unused by other applications.
     private const long MigrationLockKey = 0x5346_5348;
 
     private const string TemplateStart = "-- >>> inbox table template";

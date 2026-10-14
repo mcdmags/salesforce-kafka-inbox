@@ -9,9 +9,6 @@ public sealed class SyncOptions
     /// <summary>Parallel worker loops in this process.</summary>
     public int Workers { get; set; } = 4;
 
-    /// <summary>Max in-flight Salesforce batches across ALL processes.</summary>
-    public int MaxConcurrentRequests { get; set; } = 6;
-
     /// <summary>
     /// Entities per batch, 1 to <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/> (100): a batch is read with one
     /// Composite request, which carries 5 queries of 100 external ids.

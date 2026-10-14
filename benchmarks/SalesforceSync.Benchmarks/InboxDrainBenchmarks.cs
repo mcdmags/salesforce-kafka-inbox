@@ -11,7 +11,6 @@ using NpgsqlTypes;
 using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
-using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 using static SalesforceSync.Data.SqlCommands;
@@ -21,9 +20,9 @@ namespace SalesforceSync.Benchmarks;
 /// <summary>
 /// End-to-end: put N events (Account changes, and Account_Relationship__c changes between those accounts) into the
 /// real Postgres inbox and drain it with P "pods" x W parallel worker loops. A pod is wired exactly like the worker
-/// (<see cref="SyncServiceCollectionExtensions"/>, rate limiter included) and its loops run the worker's own pass
+/// (<see cref="SyncServiceCollectionExtensions"/>) and its loops run the worker's own pass
 /// (<see cref="InboxWorkerService.SyncOnceAsync"/>) over every registered entity type. Only the Salesforce HTTP
-/// endpoint is fake. A pod is an independent service provider (own connection pool, rate limiter, HTTP client), like a separate
+/// endpoint is fake. A pod is an independent service provider (own connection pool, HTTP client), like a separate
 /// process; all pods share the Postgres inbox and one Salesforce org.
 /// <para>
 /// Each iteration also verifies correctness. Nothing in the org rejects an out-of-order write, so a race would
@@ -217,7 +216,7 @@ public abstract class DrainBenchmarkBase
     // ---------- Setup ----------
 
     /// <summary>
-    /// One "pod": its own connection pool, limiter and HTTP stack; shares Postgres and the org. Wired with the worker's
+    /// One "pod": its own connection pool and HTTP stack; shares Postgres and the org. Wired with the worker's
     /// registrations; only options, the data source and the primary HTTP handler (the mock org) differ.
     /// </summary>
     private ServiceProvider BuildPod()
@@ -231,7 +230,6 @@ public abstract class DrainBenchmarkBase
         services.Configure<SyncOptions>(o =>
         {
             o.Workers = Workers;
-            o.MaxConcurrentRequests = Workers * Pods; // global cap across all pods
             o.BatchSize = StreamIngest ? 10 : 75;     // streaming: small batches, so entities are claimed again and again
             o.Lease = TimeSpan.FromMinutes(5);
             // A relationship can be claimed before its Accounts are in the org (DEPENDENCY_NOT_SYNCED): retry it
@@ -240,12 +238,8 @@ public abstract class DrainBenchmarkBase
             o.MaxRetryDelay = TimeSpan.FromMilliseconds(500);
             o.MaxRetries = 50;
         });
-        services.Configure<RateLimitOptions>(_ => { });
-        // Required by the limiter (0 is a budget of nothing); the budget is then the mock org's reported limit
-        services.Configure<SalesforceLimitsOptions>(o => o.DailyApiAllocation = 1_000_000_000);
 
         services.AddSalesforceClient()
-            .AddSalesforceRateLimiting() // the bucket is opened up per iteration (SetupAsync)
             .ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
         services.AddInboxSync();
         return services.BuildServiceProvider();
@@ -261,14 +255,7 @@ public abstract class DrainBenchmarkBase
         {
             await db.Database.ExecuteAsync($"truncate {table} restart identity", default);
         }
-        await db.Database.ExecuteAsync("truncate sf_sync_state; truncate sf_api_usage; truncate sf_claim_audit", default);
-        // Effectively unlimited bucket and no daily budget: measure the pipeline, not the throttle
-        await db.Database.ExecuteAsync("""
-            update sf_rate_limit
-            set tokens = 1e9, capacity = 1e9, base_refill_per_sec = 1e9, refill_per_sec = 1e9,
-                daily_budget = null, paused_until = null, updated_at = clock_timestamp()
-            where name = 'salesforce'
-            """, default);
+        await db.Database.ExecuteAsync("truncate sf_sync_state; truncate sf_claim_audit", default);
 
         (_events, _expected) = Generate();
         if (!StreamIngest)

@@ -2,7 +2,6 @@ using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
-using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 
@@ -23,8 +22,8 @@ public sealed class WriteOutcomeTests
         // Proven not applied
         { "400 from Salesforce", new SalesforceResponseException(HttpStatusCode.BadRequest, /*lang=json,strict*/ """[{"errorCode":"JSON_PARSER_ERROR","message":"x"}]"""), false },
         { "401 without a body", new SalesforceResponseException(HttpStatusCode.Unauthorized, ""), false },
-        { "403 REQUEST_LIMIT_EXCEEDED", new RateLimitedException(TimeSpan.FromSeconds(30)), false },
-        { "no rate-limit token (never sent)", new RateLimitedException(TimeSpan.FromSeconds(1)), false },
+        { "403 REQUEST_LIMIT_EXCEEDED", new SalesforceResponseException(HttpStatusCode.Forbidden, /*lang=json,strict*/ """[{"errorCode":"REQUEST_LIMIT_EXCEEDED","message":"TotalRequests Limit exceeded."}]"""), false },
+        { "429 Too Many Requests", new SalesforceResponseException(HttpStatusCode.TooManyRequests, ""), false },
         { "503 with Salesforce's error body", new SalesforceResponseException(HttpStatusCode.ServiceUnavailable, SalesforceBody), false },
         { "500 with Salesforce's error body", new SalesforceResponseException(HttpStatusCode.InternalServerError, SalesforceBody), false },
         { "connection refused", new HttpRequestException(HttpRequestError.ConnectionError, "refused", new SocketException((int)SocketError.ConnectionRefused)), false },
@@ -41,7 +40,6 @@ public sealed class WriteOutcomeTests
         { "502 from a gateway", new SalesforceResponseException(HttpStatusCode.BadGateway, "<html>Bad Gateway</html>"), true },
         { "504 from a gateway", new SalesforceResponseException(HttpStatusCode.GatewayTimeout, ""), true },
         { "503 without a Salesforce body", new SalesforceResponseException(HttpStatusCode.ServiceUnavailable, "<html>Service Unavailable</html>"), true },
-        { "503 from a gateway, via the rate limiter", new RateLimitedException(TimeSpan.FromSeconds(30), mayHaveBeenProcessed: true), true },
         { "unreadable response", new System.Text.Json.JsonException("unexpected end of data"), true },
         { "empty response", new InvalidOperationException("Empty composite response"), true }
     };

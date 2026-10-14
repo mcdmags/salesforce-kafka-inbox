@@ -22,7 +22,7 @@ if (!testMode)
 // Mock Salesforce org (HTTP service; inspect it at /__fake/stats and /__fake/records/{sobject})
 var salesforce = builder.AddProject<Projects.SalesforceSync_FakeSalesforce_Server>("fake-salesforce")
     .WithEnvironment("FakeSalesforce__Latency", testMode ? "00:00:00" : "00:00:00.050")
-    // Matches the worker's SalesforceLimits:DailyApiAllocation
+    // Daily API allocation of an Enterprise org with 15 Salesforce licenses (100,000 + 15 x 1,000)
     .WithEnvironment("FakeSalesforce__DailyApiLimit", "115000")
     .WithHttpHealthCheck("/health");
 var salesforceUrl = salesforce.GetEndpoint("http");

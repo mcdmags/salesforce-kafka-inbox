@@ -3,7 +3,7 @@
 -- Run it after the inbox tables exist: it attaches to every table named sf_*_inbox.
 --
 -- A claim starts when a worker sets lock_token (InboxSql.ClaimEntities) and ends when that worker clears
--- the token (Complete / Fail / Dead / Release / Defer / Hold). Ordering uses a sequence, not the clock: wall-clock
+-- the token (Complete / Fail / Dead / Release / Hold). Ordering uses a sequence, not the clock: wall-clock
 -- time can step backwards (NTP / VM time sync), while a claim that can only happen after another worker's
 -- release commits always draws a higher sequence number than that release.
 

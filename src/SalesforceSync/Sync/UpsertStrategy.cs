@@ -7,7 +7,7 @@ namespace SalesforceSync.Sync;
 /// <summary>
 /// What varies per synced object: how to read an event's entity id and time, how an
 /// event becomes Salesforce records, and what to read from Salesforce to diff them and resolve their lookups.
-/// Everything else (claiming, ordering, coalescing, rate limits, batching, retries, dead-lettering) is
+/// Everything else (claiming, ordering, coalescing, batching, retries, dead-lettering) is
 /// <see cref="SalesforceBatchUpsertService"/>'s. The engine, the Kafka consumer and the SQL never name an event
 /// field: they go through <paramref name="EntityId"/> and <paramref name="EventTime"/>.
 /// </summary>

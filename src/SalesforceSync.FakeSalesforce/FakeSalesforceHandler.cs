@@ -9,7 +9,7 @@ namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
 /// HttpMessageHandler that answers Salesforce REST calls from a <see cref="FakeSalesforceStore"/>.
-/// Plug it in as the primary handler so the real client, auth and rate-limit handlers stay in the pipeline.
+/// Plug it in as the primary handler so the real client and auth handlers stay in the pipeline.
 /// </summary>
 public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : HttpMessageHandler
 {

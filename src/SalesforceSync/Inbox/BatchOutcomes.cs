@@ -24,9 +24,4 @@ public sealed record BatchOutcomes(
     /// Only a later write of a batch is held this way; when the first fails, the whole claim is held.
     /// </summary>
     public IReadOnlyList<FailedEvent> Held { get; init; } = [];
-
-    /// <summary>Not sent because of a rate limit: handed back for <see cref="DeferFor"/>, no retry spent.</summary>
-    public IReadOnlyList<long> Deferred { get; init; } = [];
-
-    public TimeSpan DeferFor { get; init; }
 }

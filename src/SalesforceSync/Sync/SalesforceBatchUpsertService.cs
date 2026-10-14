@@ -2,7 +2,6 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Inbox;
-using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync.Upsert;
 
@@ -13,7 +12,6 @@ namespace SalesforceSync.Sync;
 /// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds the events, and the
 /// strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
-/// <item>Takes a global concurrency slot and respects a shared pause (rate limits, all pods).</item>
 /// <item>Claims up to <see cref="SyncOptions.BatchSize"/> entities from the inbox table: per entity, the head
 /// row is locked with FOR UPDATE SKIP LOCKED and its oldest pending rows are leased, so no two workers in any pod
 /// ever process the same entity at once.</item>
@@ -31,7 +29,6 @@ namespace SalesforceSync.Sync;
 /// through <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
 /// </summary>
 public sealed class SalesforceBatchUpsertService(
-    ISalesforceBatchGate gate,
     SalesforceRestClient salesforce,
     SalesforceSchemaCache schemaCache,
     SalesforceErrors errors,
@@ -59,16 +56,10 @@ public sealed class SalesforceBatchUpsertService(
     private readonly WriteResultInterpreter _interpreter = new(errors);
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
-    /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
+    /// <returns>Inbox rows processed (0 = nothing to do).</returns>
     public async Task<int> UpsertBatchAsync<TEvent, TRow>(UpsertStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
         where TRow : InboxRow, new()
     {
-        await using var admission = await gate.TryEnterAsync(ct);
-        if (admission is null)
-        {
-            return 0;
-        }
-
         // Give up on Salesforce before the lease runs out, so another worker never claims an entity while this one
         // can still write to it. Started before the claim, so the margin is measured from when the lease began.
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -104,17 +95,11 @@ public sealed class SalesforceBatchUpsertService(
             ct.ThrowIfCancellationRequested();
             return claim.Events.Count;
         }
-        catch (RateLimitedException ex)
-        {
-            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}", claim.Events.Count, strategy.EntityType, ex.RetryAfter);
-            await inbox.DeferAsync(claim, ex.RetryAfter, ct);
-            return 0;
-        }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // The request failed before anything was written (describe, the read, or a write Salesforce provably did
-            // not apply): every entity may succeed on retry. Shutdown (ct) is not caught: nothing was written, and
-            // the lease simply expires.
+            // not apply, such as a 429 or REQUEST_LIMIT_EXCEEDED): every entity may succeed on retry, with backoff.
+            // Shutdown (ct) is not caught: nothing was written, and the lease simply expires.
             log.LogError(ex, "{Type} batch failed", strategy.EntityType);
             await inbox.FailAllAsync(claim, ex.Message, ex is SalesforceQueryException q ? q.Errors.FirstOrDefault()?.Code : null, ct);
             return claim.Events.Count;
@@ -189,7 +174,7 @@ public sealed class SalesforceBatchUpsertService(
                 var answers = await SendAsync(request, ct);
                 results.AddRange(_interpreter.Interpret(request, answers));
             }
-            // A failed first call fails the batch (the caller fails, holds or defers the whole claim): nothing of it
+            // A failed first call fails the batch (the caller fails or holds the whole claim): nothing of it
             // was written. A later call's failure costs only its own entities: the earlier calls' records are final.
             catch (Exception ex) when (i > 0)
             {
@@ -205,15 +190,15 @@ public sealed class SalesforceBatchUpsertService(
     }
 
     /// <summary>
-    /// The outcomes of a write call after the first that threw: its entities are held if its outcome is unknown,
-    /// deferred if it was rate limited (and so are the calls after it), otherwise retried with backoff.
+    /// The outcomes of a write call after the first that threw: its entities are held if its outcome is unknown
+    /// (and the calls after it are not sent), otherwise retried with backoff.
     /// </summary>
     /// <returns>True if no further call may be sent.</returns>
     private static bool LaterCallFailed(Exception ex, CompositeWrite failed, IEnumerable<CompositeWrite> notSent, List<UpsertResult> results)
     {
-        IEnumerable<UpsertResult> For(CompositeWrite request, SyncOutcome outcome, IReadOnlyList<SalesforceError> errors, TimeSpan? retryAfter = null)
+        IEnumerable<UpsertResult> For(CompositeWrite request, SyncOutcome outcome, IReadOnlyList<SalesforceError> errors)
         {
-            return request.Units.Select(u => new UpsertResult(u.Key, outcome, errors, retryAfter));
+            return request.Units.Select(u => new UpsertResult(u.Key, outcome, errors));
         }
 
         switch (ex)
@@ -223,11 +208,8 @@ public sealed class SalesforceBatchUpsertService(
                 results.AddRange(For(failed, SyncOutcome.OutcomeUnknown, [new SalesforceError(null, UnknownOutcomeException.Code, ex.Message)]));
                 results.AddRange(notSent.SelectMany(r => For(r, SyncOutcome.NotAttempted, [])));
                 return true;
-            case RateLimitedException limited:
-                results.AddRange(new[] { failed }.Concat(notSent).SelectMany(r => For(r, SyncOutcome.RateLimited, [], limited.RetryAfter)));
-                return true;
             default:
-                // Salesforce provably did not apply it
+                // Salesforce provably did not apply it (a 429 or REQUEST_LIMIT_EXCEEDED included)
                 results.AddRange(For(failed, SyncOutcome.TransientFailure, [new SalesforceError(null, "UNKNOWN_ERROR", ex.Message)]));
                 return false;
         }
@@ -301,12 +283,6 @@ public sealed class SalesforceBatchUpsertService(
         {
             log.LogWarning("{Type} {Key}: {Outcome} ({Code}) {Errors}", entityType, r.Key, r.Outcome,
                 r.PrimaryError?.Code, string.Join("; ", r.Errors));
-        }
-
-        if (results.FirstOrDefault(r => r.Outcome == SyncOutcome.RateLimited) is { } limited)
-        {
-            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}",
-                results.Count(r => r.Outcome == SyncOutcome.RateLimited), entityType, limited.RetryAfter);
         }
     }
 }

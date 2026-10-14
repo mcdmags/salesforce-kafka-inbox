@@ -73,10 +73,9 @@ public sealed class LeaseTests(SyncFixture app)
         var claim = ClaimOf(acct, stale, claimed);
         var failed = new FailedEvent(claimed[0], "x", "UNKNOWN_OUTCOME");
         await inbox.RecordAsync(claim, new BatchOutcomes([new SyncedEntity(acct, farFuture, claimed[0])], claimed, claimed, [failed], [failed]), CancellationToken.None);
-        await inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [], []) { Held = [failed], Deferred = claimed, DeferFor = TimeSpan.FromHours(1) },
+        await inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [], []) { Held = [failed] },
             CancellationToken.None);
         await inbox.HoldAsync(claim, "x", CancellationToken.None);
-        await inbox.DeferAsync(claim, TimeSpan.FromHours(1), CancellationToken.None);
         await inbox.FailAllAsync(claim, "x", "UNKNOWN_OUTCOME", CancellationToken.None);
 
         (await app.GetInboxAsync(acct)).Should().Equal((1L, "done"));

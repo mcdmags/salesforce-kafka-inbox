@@ -119,21 +119,12 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             {
                 await HoldAsync(db, Ids(outcomes.Held), token, outcomes.Held[0].Error, t);
             }
-            if (outcomes.Deferred.Count > 0)
-            {
-                await DeferAsync(db, [.. outcomes.Deferred], token, outcomes.DeferFor, t);
-            }
         }, ct);
     }
 
     public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
     {
         return contexts.RunAsync((db, t) => HoldAsync(db, claim.EventIds, claim.Token, error, t), ct);
-    }
-
-    public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
-    {
-        return contexts.RunAsync((db, t) => DeferAsync(db, claim.EventIds, claim.Token, delay, t), ct);
     }
 
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
@@ -169,17 +160,6 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
                 .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
                 .SetProperty(r => r.NextAttemptAt, _ => DateTimeOffset.UtcNow)
                 .SetProperty(r => r.RetryCount, r => Math.Max(r.RetryCount - 1, 0)), ct);
-    }
-
-    /// <summary>Rate limited: hand back without spending a retry, not before <paramref name="delay"/>.</summary>
-    private static Task<int> DeferAsync(SyncDbContext db, long[] ids, Guid token, TimeSpan delay, CancellationToken ct)
-    {
-        return Leased(db, ids, token).ExecuteUpdateAsync(u => u
-                .SetProperty(r => r.LockedUntil, (DateTimeOffset?)null)
-                .SetProperty(r => r.LockToken, (Guid?)null)
-                .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
-                .SetProperty(r => r.RetryCount, r => Math.Max(r.RetryCount - 1, 0))
-                .SetProperty(r => r.NextAttemptAt, _ => DateTimeOffset.UtcNow + delay), ct);
     }
 
     /// <summary>

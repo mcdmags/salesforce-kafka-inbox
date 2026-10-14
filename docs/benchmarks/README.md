@@ -1,8 +1,9 @@
 # Benchmarks
 
 Measurements of the Postgres inbox (claim and outcome SQL) and of the whole sync path (Postgres inbox, workers,
-Salesforce client and rate limiter real; only the Salesforce HTTP endpoint mocked). How to run them is in the
-[main README](../../README.md#benchmarks).
+Salesforce client real; only the Salesforce HTTP endpoint mocked). How to run them is in the
+[main README](../../README.md#benchmarks). The drain numbers below were measured with a shared Postgres rate limiter
+in the path, opened up so it did not throttle; this version has none, so its per-call cost is no longer included.
 
 These numbers come from the claim and outcome tuning merged in PR #13 and re-measured after the move to EF Core
 (PR #12). Later changes (PR #14 formatting, PR #15 simplification of the write path) do not touch the inbox SQL;
@@ -406,7 +407,6 @@ Within noise: streaming keeps the inbox small, so the claim is cheap either way.
 
 | Method               | Mean         | Error        | StdDev       | Gen0   | Gen1   | Allocated |
 |---|---|---|---|---|---|---|
-| ParseLimitHeader     |  1,341.70 ns |    26.347 ns |    38.619 ns | 0.3376 | 0.0019 |    2832 B |
 | CoalesceTenEvents    |     46.64 ns |     2.159 ns |     6.090 ns |      - |      - |         - |
 | PrepareTenEvents     | 36,475.42 ns | 1,810.361 ns | 5,135.692 ns | 2.4414 | 0.0916 |   20480 B |
 | ReadAndValidateEvent |  3,156.44 ns |   110.016 ns |   317.421 ns | 0.1945 |      - |    1632 B |

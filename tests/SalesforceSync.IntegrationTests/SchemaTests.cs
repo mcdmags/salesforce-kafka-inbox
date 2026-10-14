@@ -15,7 +15,7 @@ public sealed class SchemaTests(SyncFixture app)
     {
         // The worker already applied the schema at startup; a restart against a persisted volume applies it again
         var before = await TablesAndIndexesAsync();
-        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_sync_state", "sf_rate_limit", "sf_api_usage"]);
+        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_sync_state"]);
         before.Should().Contain([
             "sf_account_inbox_ready", "sf_account_inbox_pending", "sf_account_inbox_leased", "sf_account_inbox_pkey",
             "sf_account_relationship_inbox_ready", "sf_account_relationship_inbox_pending", "sf_account_relationship_inbox_leased"]);
