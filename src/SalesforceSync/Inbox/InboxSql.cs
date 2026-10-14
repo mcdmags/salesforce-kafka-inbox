@@ -262,7 +262,7 @@ public sealed partial class InboxSql
             where id = any(@ids) and lock_token = @token
             """;
 
-        /// <summary>Not attempted (graph halted / rolled back by others): hand back for the next claim, no retry spent.</summary>
+        /// <summary>Not attempted (rolled back or skipped because of another entity's record): hand back for the next claim, no retry spent.</summary>
         public const string Release = """
             update {inbox}
             set locked_until = null, lock_token = null, last_updated = now(), next_attempt_at = now(),

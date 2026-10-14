@@ -105,7 +105,7 @@ public sealed class FieldValuesTests
     [InlineData(new[] { "UNABLE_TO_LOCK_ROW", "PROCESSING_HALTED" }, SyncOutcome.TransientFailure)]
     [InlineData(new[] { "REQUIRED_FIELD_MISSING", "PROCESSING_HALTED" }, SyncOutcome.PermanentFailure)]
     [InlineData(new[] { "SOMETHING_NEW" }, SyncOutcome.TransientFailure)]
-    public void Graph_errors_are_classified(string[] codes, SyncOutcome expected)
+    public void Record_errors_are_classified(string[] codes, SyncOutcome expected)
     {
         var errors = new SalesforceErrors(Microsoft.Extensions.Options.Options.Create(new SalesforceOptions()));
         errors.Classify(codes.Select(c => new SalesforceError("acct", c, null)).ToList()).Should().Be(expected);

@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
+using SalesforceSync.Inbox;
 using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
@@ -11,7 +12,7 @@ using SalesforceSync.Sync.Mapping;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The generic Salesforce half of the engine (Describe, composite read, diff, lookups, graph write, classification)
+/// The generic Salesforce half of the engine (Describe, composite read, diff, lookups, collections write, classification)
 /// driven by the real Account and AccountRelationship strategies and mappers, against the in-memory org. Events are
 /// written as the source sends them (camelCase payload names, full records); assertions read Salesforce names.
 /// </summary>
@@ -27,15 +28,19 @@ public sealed class SalesforceRecordUpserterTests
     private readonly Fixture _any = new();
     private readonly SalesforceRecordUpserter _upserter;
 
-    public SalesforceRecordUpserterTests()
+    public SalesforceRecordUpserterTests() => _upserter = Upserter();
+
+    /// <summary>An upserter on the same org and its own caches, with the given settings.</summary>
+    private SalesforceRecordUpserter Upserter(SalesforceOptions? salesforce = null, SyncOptions? sync = null)
     {
-        var options = Options.Create(new SalesforceOptions());
+        var options = Options.Create(salesforce ?? new SalesforceOptions());
         var http = new HttpClient(new GzipRequestHandler(options) { InnerHandler = new FakeSalesforceHandler(_org) })
         {
             BaseAddress = new Uri("https://fake.my.salesforce.com")
         };
-        _upserter = new SalesforceRecordUpserter(new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
-            new SalesforceErrors(options), new WriteEchoTracker(), options, NullLogger<SalesforceRecordUpserter>.Instance);
+        return new SalesforceRecordUpserter(new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
+            new SalesforceErrors(options), new WriteEchoTracker(), options, Options.Create(sync ?? new SyncOptions()),
+            NullLogger<SalesforceRecordUpserter>.Instance);
     }
 
     // ---------- Accounts ----------
@@ -50,11 +55,11 @@ public sealed class SalesforceRecordUpserterTests
         result.Outcome.Should().Be(SyncOutcome.Saved);
         ((string?)_org.FindByExternalId("Account", "A1")!["Name"]).Should().Be(name);
         ((string?)_org.FindByExternalId("Profile__c", "P-A1")!["Account__c"]).Should().Be(IdOf("Account", "A1"),
-            "the Profile is linked to the Account created in the same graph");
+            "the Profile is linked to the Account created in the same request");
     }
 
     [Fact]
-    public async Task A_batch_costs_one_composite_read_and_one_graph_write()
+    public async Task A_batch_costs_one_composite_read_and_one_composite_write()
     {
         await Account("A1", new() { ["name"] = _any.Create<string>() }, new());  // warms the describe cache
         var before = _org.GetStats();
@@ -65,8 +70,9 @@ public sealed class SalesforceRecordUpserterTests
 
         var after = _org.GetStats();
         (after.ApiCalls - before.ApiCalls).Should().Be(2);
-        (after.CompositeRequests - before.CompositeRequests).Should().Be(1, "every read goes in one composite request");
-        (after.GraphRequests - before.GraphRequests).Should().Be(1, "every write goes in one composite graph request");
+        (after.CompositeRequests - before.CompositeRequests).Should().Be(2, "one composite request reads, one writes");
+        (after.WriteRequests - before.WriteRequests).Should().Be(1, "every record goes in one composite request");
+        (after.RecordsSucceeded - before.RecordsSucceeded).Should().Be(4, "two Accounts and two Profiles");
         (after.Describes - before.Describes).Should().Be(0, "Describe results are cached");
     }
 
@@ -192,41 +198,330 @@ public sealed class SalesforceRecordUpserterTests
     [Fact]
     public async Task Validation_rule_error_is_permanent_for_that_unit_only()
     {
-        _org.InjectFault("Account", "A1", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Industry is required", int.MaxValue);
+        var keys = new[] { "A1", "A2", "A3", "A4" };
+        await Accounts(keys.Select(k => (k, Event(new() { ["name"] = "Before" }, new() { ["tier"] = "Gold" }))).ToArray());
+        _org.InjectFault("Account", "A2", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Industry is required", int.MaxValue);
 
-        var results = await Accounts(("A1", Event(new() { ["name"] = "One" }, new())), ("A2", Event(new() { ["name"] = "Two" }, new())));
+        var results = await Accounts(keys.Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" }))).ToArray());
 
-        var failed = results.Should().ContainSingle(r => r.Key == "A1").Subject;
+        var failed = results.Should().ContainSingle(r => r.Key == "A2").Subject;
         failed.Outcome.Should().Be(SyncOutcome.PermanentFailure);
         (failed.PrimaryError?.Code).Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION");
-        results.Should().ContainSingle(r => r.Key == "A2").Which.Outcome.Should().Be(SyncOutcome.Saved);
-        _org.FindByExternalId("Profile__c", "P-A1").Should().BeNull("the graph rolled back as a whole");
+        (failed.PrimaryError?.ReferenceId).Should().Be("acct", "the error names the record of the unit it is about");
+        results.Where(r => r.Key != "A2").Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
+        ((string?)_org.FindByExternalId("Account", "A2")!["Name"]).Should().Be("Before");
+        ((string?)_org.FindByExternalId("Account", "A3")!["Name"]).Should().Be("After");
     }
 
     [Fact]
-    public async Task Row_lock_is_transient()
+    public async Task Row_lock_is_transient_for_that_unit_only()
     {
+        await Accounts(("A1", Event(new() { ["name"] = "Before" }, new())), ("A2", Event(new() { ["name"] = "Before" }, new())));
         _org.InjectFault("Account", "A1", "UNABLE_TO_LOCK_ROW", "unable to obtain exclusive access", 1);
 
-        var name = _any.Create<string>();
+        var results = await Accounts(("A1", Event(new() { ["name"] = "After" }, new())), ("A2", Event(new() { ["name"] = "After" }, new())));
 
-        (await Account("A1", new() { ["name"] = name }, new())).Outcome.Should().Be(SyncOutcome.TransientFailure);
-        (await Account("A1", new() { ["name"] = name }, new())).Outcome.Should().Be(SyncOutcome.Saved, "the lock was released");
+        results.Should().ContainSingle(r => r.Key == "A1").Which.Outcome.Should().Be(SyncOutcome.TransientFailure);
+        results.Should().ContainSingle(r => r.Key == "A2").Which.Outcome.Should().Be(SyncOutcome.Saved);
+        (await Account("A1", new() { ["name"] = "After" }, new())).Outcome.Should().Be(SyncOutcome.Saved, "the lock was released");
     }
 
     [Fact]
-    public async Task Graphs_halted_after_14_failures_are_not_attempted_not_failed()
+    public async Task Account_saved_but_Profile_failed_is_retried_until_both_are_in()
     {
-        var items = Enumerable.Range(0, 25).Select(i => ($"A{i:D2}", Event(new() { ["name"] = $"N{i}" }, new()))).ToArray();
-        foreach (var (key, _) in items.Take(15))
-            _org.InjectFault("Account", key, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "nope", int.MaxValue);
+        _org.InjectFault("Profile__c", "P-A1", "UNABLE_TO_LOCK_ROW", "unable to obtain exclusive access", 1);
 
-        var results = (await Accounts(items)).ToDictionary(r => r.Key);
+        var first = await Account("A1", new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" });
 
-        items.Take(15).Select(i => results[i.Item1].Outcome).Should().AllBeEquivalentTo(SyncOutcome.PermanentFailure);
-        items.Skip(15).Select(i => results[i.Item1].Outcome).Should().AllBeEquivalentTo(SyncOutcome.NotAttempted,
-            "Salesforce stops processing after 14 failed graphs");
-        _org.GetStats().GraphsHalted.Should().Be(10);
+        first.Outcome.Should().Be(SyncOutcome.TransientFailure, "the entity is synced only when all of its records are");
+        (first.PrimaryError?.ReferenceId).Should().Be("prof");
+        _org.FindByExternalId("Account", "A1").Should().NotBeNull("the Account and the Profile are not atomic");
+        _org.FindByExternalId("Profile__c", "P-A1").Should().BeNull();
+
+        (await Account("A1", new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" })).Outcome.Should().Be(SyncOutcome.Saved);
+        ((string?)_org.FindByExternalId("Profile__c", "P-A1")!["Account__c"]).Should().Be(IdOf("Account", "A1"));
+        _org.History("Account", "A1").Should().ContainSingle("the retry had nothing left to write on the Account");
+    }
+
+    [Fact]
+    public async Task Create_that_loses_a_race_is_retried_into_an_update()
+    {
+        // Another writer creates A1 between our read and our create
+        _org.InjectFault("Account", "A1", "DUPLICATE_VALUE", "duplicate value found: External_Id__c duplicates value A1", 1);
+        var lost = await Account("A1", new() { ["name"] = "Ours" }, new());
+        lost.Outcome.Should().Be(SyncOutcome.TransientFailure);
+        (lost.PrimaryError?.Code).Should().Be("DUPLICATE_VALUE");
+        await Upserter().UpsertAsync([("A1", RawAccount("A1", new() { ["Name"] = "Theirs" }))],
+            [new SoqlQuery("Account", "External_Id__c", ["A1"])], CancellationToken.None);
+
+        (await Account("A1", new() { ["name"] = "Ours" }, new())).Outcome.Should().Be(SyncOutcome.Saved);
+
+        Sub(_org.WriteRequests[^1], 0)["method"]!.GetValue<string>().Should().Be("PATCH", "the retry read the record and updated it");
+        ((string?)_org.FindByExternalId("Account", "A1")!["Name"]).Should().Be("Ours");
+        _org.All("Account").Should().ContainSingle();
+    }
+
+    // ---------- What is sent ----------
+
+    [Fact]
+    public async Task New_Accounts_and_Profiles_go_in_one_request_and_each_Profile_refers_to_its_Account_by_position()
+    {
+        var results = await Accounts(
+            ("A1", Event(new() { ["name"] = "One" }, new() { ["tier"] = "Gold" })),
+            ("A2", Event(new() { ["name"] = "Two" }, new() { ["tier"] = "Silver" })));
+
+        results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
+        var write = _org.WriteRequests.Should().ContainSingle().Subject;
+        write["allOrNone"]!.GetValue<bool>().Should().BeFalse("allOrNone is sent explicitly");
+        write["compositeRequest"]!.AsArray().Should().HaveCount(2);
+
+        var accounts = Sub(write, 0);
+        ((string?)accounts["method"], (string?)accounts["url"], (string?)accounts["referenceId"]).Should()
+            .Be(("POST", "/services/data/v62.0/composite/sobjects", "Account_create"));
+        accounts["body"]!["allOrNone"]!.GetValue<bool>().Should().BeFalse();
+        Records(accounts).Select(r => ((string?)r["attributes"]!["type"], (string?)r["External_Id__c"], (string?)r["Name"]))
+            .Should().Equal(("Account", "A1", "One"), ("Account", "A2", "Two"));
+
+        var profiles = Sub(write, 1);
+        ((string?)profiles["method"], (string?)profiles["referenceId"]).Should().Be(("POST", "Profile__c_create_ref"));
+        Records(profiles).Select(r => ((string?)r["External_Id__c"], (string?)r["Account__c"]))
+            .Should().Equal(("P-A1", "@{Account_create[0].id}"), ("P-A2", "@{Account_create[1].id}"));
+
+        ((string?)_org.FindByExternalId("Profile__c", "P-A2")!["Account__c"]).Should().Be(IdOf("Account", "A2"));
+    }
+
+    [Fact]
+    public async Task Profile_of_an_existing_unchanged_Account_gets_its_Id_and_the_Account_is_not_written()
+    {
+        await Upsert(AccountStrategy, ("A1", Read<AccountEvent>(WithoutProfile("A1", "Acme"))));
+
+        (await Account("A1", new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" })).Outcome.Should().Be(SyncOutcome.Saved);
+
+        var write = _org.WriteRequests[^1];
+        var only = write["compositeRequest"]!.AsArray().Should().ContainSingle().Subject!;
+        ((string?)only["method"], (string?)only["referenceId"]).Should().Be(("POST", "Profile__c_create"));
+        ((string?)Records(only).Single()["Account__c"]).Should().Be(IdOf("Account", "A1"), "the Id comes from the read");
+    }
+
+    [Fact]
+    public async Task Update_is_a_PATCH_with_the_record_Id_and_only_the_changed_fields()
+    {
+        await Account("A1", new() { ["name"] = "Acme", ["rating"] = "Hot" }, new() { ["tier"] = "Gold" });
+
+        await Account("A1", new() { ["name"] = "Acme", ["rating"] = "Cold" }, new() { ["tier"] = "Gold" });
+
+        var only = _org.WriteRequests[^1]["compositeRequest"]!.AsArray().Should().ContainSingle().Subject!;
+        ((string?)only["method"], (string?)only["referenceId"]).Should().Be(("PATCH", "Account_update"));
+        Records(only).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "id", "Rating");
+        ((string?)Records(only).Single()["id"]).Should().Be(IdOf("Account", "A1"));
+    }
+
+    [Fact]
+    public async Task One_new_Account_failing_takes_down_the_Profiles_that_use_references_but_dead_letters_nobody_else()
+    {
+        _org.InjectFault("Account", "A1", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Industry is required", int.MaxValue);
+
+        var results = await Accounts(
+            ("A1", Event(new() { ["name"] = "One" }, new() { ["tier"] = "Gold" })),
+            ("A2", Event(new() { ["name"] = "Two" }, new() { ["tier"] = "Silver" })));
+
+        var bad = results.Should().ContainSingle(r => r.Key == "A1").Subject;
+        bad.Outcome.Should().Be(SyncOutcome.PermanentFailure);
+        bad.Errors.Select(e => e.Code).Should().Equal(["FIELD_CUSTOM_VALIDATION_EXCEPTION"], "the Profile failed only because its Account did");
+        _org.FindByExternalId("Profile__c", "P-A1").Should().BeNull();
+        results.Should().ContainSingle(r => r.Key == "A2").Which.Outcome.Should().Be(SyncOutcome.NotAttempted,
+            "its Account is in, its Profile's subrequest failed on A1's reference: it goes back without spending a retry");
+        _org.FindByExternalId("Account", "A2").Should().NotBeNull();
+
+        // The next claim no longer contains A1 (dead-lettered); A2's Account now exists, so its Profile gets a literal Id
+        (await Account("A2", new() { ["name"] = "Two" }, new() { ["tier"] = "Silver" })).Outcome.Should().Be(SyncOutcome.Saved);
+        ((string?)Sub(_org.WriteRequests[^1], 0)["referenceId"]).Should().Be("Profile__c_create");
+        ((string?)_org.FindByExternalId("Profile__c", "P-A2")!["Account__c"]).Should().Be(IdOf("Account", "A2"));
+    }
+
+    [Fact]
+    public async Task Linking_by_external_id_sends_the_relationship_and_a_failing_Account_costs_only_its_own_Profile()
+    {
+        var upserter = Upserter(new SalesforceOptions { ParentLink = ParentLink.ExternalId });
+        _org.InjectFault("Account", "A1", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Industry is required", int.MaxValue);
+
+        var results = await Accounts(upserter, null,
+            ("A1", Event(new() { ["name"] = "One" }, new() { ["tier"] = "Gold" })),
+            ("A2", Event(new() { ["name"] = "Two" }, new() { ["tier"] = "Silver" })));
+
+        var profiles = Sub(_org.WriteRequests.Should().ContainSingle().Subject, 1);
+        ((string?)profiles["referenceId"]).Should().Be("Profile__c_create");
+        var second = Records(profiles)[1];
+        second["Account__r"]!.ToJsonString().Should().Be("""{"External_Id__c":"A2"}""");
+        second.ContainsKey("Account__c").Should().BeFalse();
+
+        results.Should().ContainSingle(r => r.Key == "A2").Which.Outcome.Should().Be(SyncOutcome.Saved);
+        ((string?)_org.FindByExternalId("Profile__c", "P-A2")!["Account__c"]).Should().Be(IdOf("Account", "A2"));
+        var bad = results.Should().ContainSingle(r => r.Key == "A1").Subject;
+        bad.Outcome.Should().Be(SyncOutcome.PermanentFailure, "the Account's own error decides, not the Profile's missing parent");
+        (bad.PrimaryError?.Code).Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION");
+        _org.FindByExternalId("Profile__c", "P-A1").Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Linking_by_external_id_still_uses_the_Id_of_an_Account_that_already_exists()
+    {
+        var upserter = Upserter(new SalesforceOptions { ParentLink = ParentLink.ExternalId });
+        await Upsert(upserter, AccountStrategy, null, ("A1", Read<AccountEvent>(WithoutProfile("A1", "Acme"))));
+
+        (await Accounts(upserter, null, ("A1", Event(new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" })))).Single()
+            .Outcome.Should().Be(SyncOutcome.Saved);
+
+        var record = Records(_org.WriteRequests[^1]["compositeRequest"]!.AsArray().Should().ContainSingle().Subject!).Single();
+        ((string?)record["Account__c"]).Should().Be(IdOf("Account", "A1"));
+        record.ContainsKey("Account__r").Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task More_than_five_collections_are_split_over_requests_with_each_units_records_together()
+    {
+        // Account + Profile + relationship per unit: new units need 3 collections, existing ones 3 others
+        UpsertUnit Unit(string key, string name) => new(
+        [
+            new SObjectRecord("acct", "Account", "External_Id__c", key, new Dictionary<string, object?> { ["Name"] = name }),
+            new SObjectRecord("prof", "Profile__c", "External_Id__c", $"P-{key}", new Dictionary<string, object?> { ["Tier__c"] = name },
+                [new SObjectLookup("Account__c", "Account", "External_Id__c", key)]),
+            new SObjectRecord("rel", "Account_Relationship__c", "External_Id__c", $"R-{key}", new Dictionary<string, object?> { ["Type__c"] = name },
+                [new SObjectLookup("Account__c", "Account", "External_Id__c", key), new SObjectLookup("Related_Account__c", "Account", "External_Id__c", key)])
+        ]);
+        Task<List<UpsertResult>> Send(params (string Key, UpsertUnit Unit)[] units) => _upserter.UpsertAsync(units,
+        [
+            new SoqlQuery("Account", "External_Id__c", units.Select(u => u.Key).ToList()),
+            new SoqlQuery("Profile__c", "External_Id__c", units.Select(u => $"P-{u.Key}").ToList()),
+            new SoqlQuery("Account_Relationship__c", "External_Id__c", units.Select(u => $"R-{u.Key}").ToList())
+        ], CancellationToken.None);
+        await Send(("OLD1", Unit("OLD1", "Gold")), ("OLD2", Unit("OLD2", "Gold")));
+        var before = _org.GetStats();
+
+        var results = await Send(("NEW1", Unit("NEW1", "Gold")), ("OLD1", Unit("OLD1", "Silver")),
+            ("NEW2", Unit("NEW2", "Gold")), ("OLD2", Unit("OLD2", "Silver")));
+
+        results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
+        var after = _org.GetStats();
+        (after.WriteRequests - before.WriteRequests).Should().Be(2, "6 collections don't fit one request (5)");
+        (after.ApiCalls - before.ApiCalls).Should().Be(3, "one read, two writes");
+        var writes = _org.WriteRequests.TakeLast(2).Select(w => (Json: w.ToJsonString(), Collections: w["compositeRequest"]!.AsArray().Count)).ToList();
+        writes.Select(w => w.Collections).Should().OnlyContain(n => n <= SalesforceRestClient.MaxCompositeCollections);
+        // Each unit's three records are in the same request
+        foreach (var key in new[] { "NEW1", "NEW2", "OLD1", "OLD2" })
+        {
+            var id = IdOf("Account", key)!;
+            var own = writes.Where(w => w.Json.Contains($"\"{key}\"") || w.Json.Contains($"\"id\":\"{id}\"")).Should().ContainSingle(key).Subject;
+            writes.Where(w => w.Json.Contains(IdOf("Profile__c", $"P-{key}")!) || w.Json.Contains($"P-{key}")).Should().Equal(own);
+            writes.Where(w => w.Json.Contains(IdOf("Account_Relationship__c", $"R-{key}")!) || w.Json.Contains($"R-{key}")).Should().Equal(own);
+        }
+        ((string?)_org.FindByExternalId("Account_Relationship__c", "R-NEW2")!["Related_Account__c"]).Should().Be(IdOf("Account", "NEW2"));
+        ((string?)_org.FindByExternalId("Profile__c", "P-OLD2")!["Tier__c"]).Should().Be("Silver");
+    }
+
+    // ---------- allOrNone ----------
+
+    [Fact]
+    public async Task With_allOrNone_one_bad_record_rolls_back_the_request_and_only_its_entity_fails()
+    {
+        var upserter = Upserter(new SalesforceOptions { AllOrNone = true });
+        var keys = new[] { "A1", "A2", "A3" };
+        await Accounts(keys.Select(k => (k, Event(new() { ["name"] = "Before" }, new() { ["tier"] = "Gold" }))).ToArray());
+        _org.InjectFault("Account", "A2", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Industry is required", int.MaxValue);
+
+        var results = await Accounts(upserter, null,
+            keys.Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" }))).ToArray());
+
+        var write = _org.WriteRequests[^1];
+        write["allOrNone"]!.GetValue<bool>().Should().BeTrue();
+        write["compositeRequest"]!.AsArray().Select(sub => sub!["body"]!["allOrNone"]!.GetValue<bool>()).Should().AllBeEquivalentTo(true);
+        results.Should().ContainSingle(r => r.Key == "A2").Which.Outcome.Should().Be(SyncOutcome.PermanentFailure);
+        results.Where(r => r.Key != "A2").Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.NotAttempted,
+            "they were rolled back because of A2: retried at once, without spending a retry");
+        _org.All("Account").Select(a => (string?)a["Name"]).Should().AllBe("Before");
+        _org.All("Profile__c").Select(a => (string?)a["Tier__c"]).Should().AllBe("Gold");
+
+        // The next claim: A2 is dead-lettered, the others go through
+        var retried = await Accounts(upserter, null,
+            keys.Where(k => k != "A2").Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" }))).ToArray());
+        retried.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
+    }
+
+    [Fact]
+    public async Task Failures_without_an_identifiable_cause_spend_a_retry_instead_of_looping()
+    {
+        var upserter = Upserter(new SalesforceOptions { AllOrNone = true });
+        // Every record reports being rolled back because of another one; none is the cause
+        _org.InjectFault("Account", "A1", "ALL_OR_NONE_OPERATION_ROLLED_BACK", "Record rolled back", int.MaxValue);
+
+        var results = await Accounts(upserter, null,
+            ("A1", Event(new() { ["name"] = "One" }, new())), ("A2", Event(new() { ["name"] = "Two" }, new())));
+
+        results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.TransientFailure,
+            "released as 'not attempted' they would be claimed and rolled back again forever");
+        results.Select(r => r.PrimaryError?.Code).Should().AllBe("UNKNOWN_ERROR");
+    }
+
+    // ---------- The event's type against what Salesforce has ----------
+
+    [Theory]
+    [InlineData(EventType.Inserted, false, "POST")]
+    [InlineData(EventType.Updated, true, "PATCH")]
+    [InlineData(EventType.Inserted, true, "PATCH")]   // mismatch: the record is already there
+    [InlineData(EventType.Updated, false, "POST")]    // mismatch: the record is missing
+    public async Task Create_or_update_is_decided_by_Salesforce_whatever_the_event_type_says(EventType type, bool exists, string verb)
+    {
+        if (exists) await Account("A1", new() { ["name"] = "Before", ["rating"] = "Hot" }, new());
+        var before = _org.WriteRequests.Count;
+
+        var result = (await Accounts(_upserter, type, ("A1", Event(new() { ["name"] = "After" }, new())))).Single();
+
+        result.Outcome.Should().Be(SyncOutcome.Saved);
+        _org.WriteRequests.Should().HaveCount(before + 1);
+        var account = Sub(_org.WriteRequests[^1], 0);
+        ((string?)account["method"]).Should().Be(verb);
+        var stored = _org.FindByExternalId("Account", "A1")!;
+        ((string?)stored["Name"]).Should().Be("After");
+        stored["Rating"].Should().BeNull("the event is the full record, whichever way it is written");
+        if (exists) Records(account).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "id", "Name", "Rating");
+        _org.All("Account").Should().ContainSingle();
+    }
+
+    [Theory]
+    [InlineData(EventType.Inserted)]
+    [InlineData(EventType.Updated)]
+    public async Task Event_that_matches_Salesforce_already_writes_nothing(EventType type)
+    {
+        await Account("A1", new() { ["name"] = "Same" }, new() { ["tier"] = "Gold" });
+        var before = _org.GetStats().WriteRequests;
+
+        var result = (await Accounts(_upserter, type, ("A1", Event(new() { ["name"] = "Same" }, new() { ["tier"] = "Gold" })))).Single();
+
+        result.Outcome.Should().Be(SyncOutcome.Unchanged, "a redelivered insert creates no duplicate and updates nothing");
+        _org.GetStats().WriteRequests.Should().Be(before);
+    }
+
+    [Theory]
+    [InlineData(EventType.Inserted, true)]
+    [InlineData(EventType.Updated, false)]
+    public async Task Event_type_mismatch_can_be_dead_lettered_instead(EventType type, bool exists)
+    {
+        var upserter = Upserter(sync: new SyncOptions { EventTypeMismatch = EventTypeMismatch.DeadLetter });
+        if (exists) await Account("A1", new() { ["name"] = "Before" }, new());
+        var before = _org.GetStats().WriteRequests;
+
+        var results = await Accounts(upserter, type,
+            ("A1", Event(new() { ["name"] = "After" }, new())),
+            ("A2", Event(new() { ["name"] = "Fine" }, new())));
+
+        var mismatch = results.Should().ContainSingle(r => r.Key == "A1").Subject;
+        mismatch.Outcome.Should().Be(SyncOutcome.PermanentFailure);
+        (mismatch.PrimaryError?.Code).Should().Be(SalesforceErrors.EventTypeMismatch);
+        (_org.FindByExternalId("Account", "A1")?["Name"]?.GetValue<string>()).Should().Be(exists ? "Before" : null);
+        // A2 is new: fine for "inserted", itself a mismatch for "updated"
+        results.Should().ContainSingle(r => r.Key == "A2").Which.Outcome.Should().Be(
+            type == EventType.Inserted ? SyncOutcome.Saved : SyncOutcome.PermanentFailure);
+        (_org.GetStats().WriteRequests - before).Should().Be(type == EventType.Inserted ? 1 : 0);
     }
 
     [Fact]
@@ -273,16 +568,36 @@ public sealed class SalesforceRecordUpserterTests
     public async Task Relationship_whose_Account_is_not_synced_yet_is_retried_later()
     {
         await Account("A1", new() { ["name"] = "Parent" }, new());
-        var graphsBefore = _org.GetStats().GraphRequests;
+        var writesBefore = _org.GetStats().WriteRequests;
 
         var early = await Relationship("R1", "A1", "A2", new() { ["type"] = "Parent" });
 
         early.Outcome.Should().Be(SyncOutcome.TransientFailure);
         (early.PrimaryError?.Code).Should().Be(SalesforceErrors.DependencyNotSynced);
         (early.PrimaryError?.Message).Should().Contain("A2");
-        _org.GetStats().GraphRequests.Should().Be(graphsBefore, "nothing was written");
+        _org.GetStats().WriteRequests.Should().Be(writesBefore, "nothing was sent");
 
         await Account("A2", new() { ["name"] = _any.Create<string>() }, new());
+        (await Relationship("R1", "A1", "A2", new() { ["type"] = "Parent" })).Outcome.Should().Be(SyncOutcome.Saved);
+    }
+
+    /// <summary>The read found both Accounts, but one is gone (or not visible) by the time Salesforce applies the write.</summary>
+    [Theory]
+    [InlineData("INVALID_CROSS_REFERENCE_KEY", "invalid cross reference id")]
+    [InlineData("ENTITY_IS_DELETED", "entity is deleted")]
+    public async Task Relationship_whose_Account_Salesforce_cannot_find_at_write_time_waits_the_same_way(string code, string message)
+    {
+        await Accounts(("A1", Event(new() { ["name"] = "Parent" }, new())), ("A2", Event(new() { ["name"] = "Child" }, new())));
+        _org.InjectFault("Account_Relationship__c", "R1", code, message, 1);
+
+        var rejected = await Relationship("R1", "A1", "A2", new() { ["type"] = "Parent" });
+
+        rejected.Outcome.Should().Be(SyncOutcome.TransientFailure, $"{code} on a lookup is not a reason to dead-letter");
+        (rejected.PrimaryError?.Code).Should().Be(SalesforceErrors.DependencyNotSynced);
+        (rejected.PrimaryError?.Message).Should().StartWith(code);
+        ((string?)Records(Sub(_org.WriteRequests[^1], 0)).Single()["Account__c"]).Should().Be(IdOf("Account", "A1"),
+            "a relationship is its own request, so its Accounts are always literal Ids from the read");
+
         (await Relationship("R1", "A1", "A2", new() { ["type"] = "Parent" })).Outcome.Should().Be(SyncOutcome.Saved);
     }
 
@@ -309,9 +624,11 @@ public sealed class SalesforceRecordUpserterTests
     private async Task<UpsertResult> Account(string key, Dictionary<string, object?> account, Dictionary<string, object?> profile)
         => (await Accounts((key, Event(account, profile)))).Single();
 
+    private Task<List<UpsertResult>> Accounts(params (string Key, JsonObject Event)[] items) => Accounts(_upserter, null, items);
+
     /// <summary>Profiles are keyed "P-{account}" unless the event says otherwise.</summary>
-    private Task<List<UpsertResult>> Accounts(params (string Key, JsonObject Event)[] items)
-        => Upsert(AccountStrategy, items.Select(i =>
+    private Task<List<UpsertResult>> Accounts(SalesforceRecordUpserter upserter, EventType? type, params (string Key, JsonObject Event)[] items)
+        => Upsert(upserter, AccountStrategy, type, items.Select(i =>
         {
             var account = i.Event["account"]!.AsObject();
             account["externalId"] = i.Key;
@@ -329,12 +646,30 @@ public sealed class SalesforceRecordUpserterTests
             (key, Read<AccountRelationshipEvent>(new JsonObject { ["accountRelationship"] = rel })))).Single();
     }
 
-    /// <summary>What the engine does with a strategy, minus the inbox: map, query, upsert.</summary>
     private Task<List<UpsertResult>> Upsert<TEvent>(UpsertStrategy<TEvent> strategy, params (string Key, TEvent Event)[] items)
+        => Upsert(_upserter, strategy, null, items);
+
+    /// <summary>What the engine does with a strategy, minus the inbox: map (with the event's type), query, upsert.</summary>
+    private static Task<List<UpsertResult>> Upsert<TEvent>(SalesforceRecordUpserter upserter, UpsertStrategy<TEvent> strategy,
+        EventType? type, params (string Key, TEvent Event)[] items)
     {
-        var units = items.Select(i => (i.Key, strategy.Map(i.Key, i.Event))).ToList();
-        return _upserter.UpsertAsync(units, strategy.Queries(units.Select(u => u.Item2).ToList()).ToList(), CancellationToken.None);
+        var units = items.Select(i => (i.Key, strategy.Map(i.Key, i.Event) with { EventType = type })).ToList();
+        return upserter.UpsertAsync(units, strategy.Queries(units.Select(u => u.Item2).ToList()).ToList(), CancellationToken.None);
     }
+
+    private static JsonObject WithoutProfile(string key, string name)
+    {
+        var e = Event(new() { ["name"] = name }, new());
+        e["account"]!.AsObject().Remove("profile");
+        e["account"]!["externalId"] = key;
+        return e;
+    }
+
+    /// <summary>The i-th subrequest of a recorded composite write.</summary>
+    private static JsonObject Sub(JsonObject write, int i) => write["compositeRequest"]![i]!.AsObject();
+
+    private static List<JsonObject> Records(JsonNode collection)
+        => collection["body"]!["records"]!.AsArray().Select(r => r!.AsObject()).ToList();
 
     /// <summary>An account event envelope (externalId and the profile's default id are filled in by <see cref="Accounts"/>).</summary>
     private static JsonObject Event(Dictionary<string, object?> account, Dictionary<string, object?> profile, string? profileId = null)

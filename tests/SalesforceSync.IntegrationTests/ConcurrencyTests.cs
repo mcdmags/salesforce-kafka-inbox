@@ -73,7 +73,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         //    every account's Description and every profile's Score__c must only ever move forward
         var stats = await app.GetStatsAsync();
         output.WriteLine($"fake org: {stats}");
-        stats.GetProperty("graphsFailed").GetInt64().Should().Be(0);
+        stats.GetProperty("recordsFailed").GetInt64().Should().Be(0);
         var regressions = new List<string>();
         foreach (var id in ids)
         {
@@ -112,7 +112,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         // 5. The work really was spread across pods
         var clients = await app.Salesforce.GetFromJsonAsync<Dictionary<string, long>>("/__fake/clients");
         clients.Should().NotBeNull();
-        foreach (var (client, requests) in clients!) output.WriteLine($"{client}: {requests} graph requests");
+        foreach (var (client, requests) in clients!) output.WriteLine($"{client}: {requests} composite requests");
         clients.Should().HaveCount(MultiPodFixture.PodCount, "every pod should have written to Salesforce");
     }
 

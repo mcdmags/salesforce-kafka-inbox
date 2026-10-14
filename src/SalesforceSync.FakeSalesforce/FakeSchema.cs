@@ -12,7 +12,9 @@ public sealed record FakeField(
     int Scale = 0,
     bool Createable = true,
     bool Updateable = true,
-    bool Nillable = true);
+    bool Nillable = true,
+    string? ReferenceTo = null,
+    string? RelationshipName = null);
 
 /// <summary>
 /// The mock org's metadata (served by sObject Describe) and how it stores values, the way Salesforce does:
@@ -49,7 +51,7 @@ public static class FakeSchema
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
                 new("Name", "string", 80),
                 new("External_Id__c", "string", 255),
-                new("Account__c", "reference", 18),
+                new("Account__c", "reference", 18, ReferenceTo: "Account", RelationshipName: "Account__r"),
                 new("Tier__c", "picklist", 255),
                 new("Score__c", "double", Precision: 18, Scale: 2),
                 new("Discount__c", "percent", Precision: 5, Scale: 2),
@@ -64,8 +66,8 @@ public static class FakeSchema
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
                 new("Name", "string", 80),
                 new("External_Id__c", "string", 255),
-                new("Account__c", "reference", 18),
-                new("Related_Account__c", "reference", 18),
+                new("Account__c", "reference", 18, ReferenceTo: "Account", RelationshipName: "Account__r"),
+                new("Related_Account__c", "reference", 18, ReferenceTo: "Account", RelationshipName: "Related_Account__r"),
                 new("Type__c", "picklist", 255),
                 new("Start_Date__c", "date"),
                 new("Active__c", "boolean", Nillable: false),
@@ -91,7 +93,9 @@ public static class FakeSchema
             ["scale"] = f.Scale,
             ["createable"] = f.Createable,
             ["updateable"] = f.Updateable,
-            ["nillable"] = f.Nillable
+            ["nillable"] = f.Nillable,
+            ["referenceTo"] = f.ReferenceTo is null ? new JsonArray() : new JsonArray(f.ReferenceTo),
+            ["relationshipName"] = f.RelationshipName
         }).ToArray())
     };
 

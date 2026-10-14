@@ -7,12 +7,17 @@ namespace SalesforceSync.Salesforce;
 /// <summary>A SOQL query to run as one subrequest of a Composite request.</summary>
 public sealed record CompositeQuery(string ReferenceId, string Soql);
 
-/// <summary>One Composite Graph: all of its nodes succeed or none do.</summary>
-public sealed record GraphRequest(string GraphId, IReadOnlyList<GraphNode> Nodes);
+/// <summary>
+/// An sObject Collections subrequest: creates (POST) or updates (PATCH) up to 200 records, each
+/// <c>{ "attributes": { "type": ... }, field: value, ... }</c>, with its <c>id</c> when updating.
+/// </summary>
+public sealed record CollectionRequest(string ReferenceId, bool Create, IReadOnlyList<IReadOnlyDictionary<string, object?>> Records);
 
-public sealed record GraphNode(string Method, string Url, string ReferenceId, IReadOnlyDictionary<string, object?> Body);
+/// <summary>One record's result within a collection, in request order.</summary>
+public sealed record RecordResult(bool Success, string? Id, IReadOnlyList<SalesforceError> Errors);
 
-public sealed record GraphResult(string GraphId, bool IsSuccessful, IReadOnlyList<SalesforceError> Errors);
+/// <param name="Records">Null when the subrequest failed as a whole (see <paramref name="Errors"/>).</param>
+public sealed record CollectionResult(string ReferenceId, IReadOnlyList<RecordResult>? Records, IReadOnlyList<SalesforceError> Errors);
 
 /// <summary>Salesforce REST transport. Every method is exactly one API call.</summary>
 public sealed class SalesforceRestClient(HttpClient http)
@@ -20,12 +25,20 @@ public sealed class SalesforceRestClient(HttpClient http)
     public const string ApiVersion = "v62.0";
     public const string DataPath = $"/services/data/{ApiVersion}";
 
-    /// <summary>Composite Graph: max graphs and nodes in one request.</summary>
-    public const int MaxGraphsPerRequest = 75;
-    public const int MaxNodesPerRequest = 500;
-
-    /// <summary>Composite: max subrequests, of which at most 5 may be queries.</summary>
+    /// <summary>Composite: max subrequests, of which at most 5 may be queries or sObject Collections operations.</summary>
+    public const int MaxCompositeSubrequests = 25;
     public const int MaxCompositeQueries = 5;
+    public const int MaxCompositeCollections = 5;
+
+    /// <summary>sObject Collections: max records in one create or update.</summary>
+    public const int MaxCollectionRecords = 200;
+
+    /// <summary>
+    /// Entities per batch. Not a Salesforce limit of its own: the batch's read must fit one Composite request, i.e. 5
+    /// queries of 100 external ids each, and an entity can need up to 3 ids per 100 (a relationship: itself and two
+    /// Accounts). The write side would allow more (5 collections of 200 records).
+    /// </summary>
+    public const int MaxEntitiesPerBatch = 100;
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
@@ -42,7 +55,7 @@ public sealed class SalesforceRestClient(HttpClient http)
         var body = await res.Content.ReadFromJsonAsync<DescribeBody>(Json, ct)
                    ?? throw new InvalidOperationException($"Empty describe response for {sobject}");
         return new DescribeResult(new SObjectSchema(body.Name, body.Fields.Select(f => new SalesforceField(
-            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable))));
+            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable, f.RelationshipName))));
     }
 
     /// <summary>
@@ -93,50 +106,52 @@ public sealed class SalesforceRestClient(HttpClient http)
         return results;
     }
 
-    /// <summary>Sends up to 75 graphs / 500 nodes in one Composite Graph request and returns each graph's outcome.</summary>
-    public async Task<IReadOnlyList<GraphResult>> SendGraphsAsync(IReadOnlyList<GraphRequest> graphs, CancellationToken ct)
+    /// <summary>
+    /// Sends up to 5 sObject Collections creates/updates as the subrequests of one Composite request (one API call),
+    /// in the given order; a later one may refer to an earlier one's results (<c>@{referenceId[i].id}</c>).
+    /// <paramref name="allOrNone"/> is sent on the composite request and on every collection: false lets every record
+    /// succeed or fail on its own, true rolls everything back when any record fails.
+    /// </summary>
+    /// <returns>One result per subrequest Salesforce answered (HTTP 200 does not mean any record was saved).</returns>
+    public async Task<IReadOnlyList<CollectionResult>> SendCollectionsAsync(IReadOnlyList<CollectionRequest> collections,
+        bool allOrNone, CancellationToken ct)
     {
-        var nodes = graphs.Sum(g => g.Nodes.Count);
-        if (graphs.Count > MaxGraphsPerRequest || nodes > MaxNodesPerRequest)
-            throw new ArgumentOutOfRangeException(nameof(graphs),
-                $"{graphs.Count} graphs / {nodes} nodes exceed {MaxGraphsPerRequest} graphs / {MaxNodesPerRequest} nodes per request");
+        if (collections.Count is 0 or > MaxCompositeCollections)
+            throw new ArgumentOutOfRangeException(nameof(collections), $"1 to {MaxCompositeCollections} collections per request");
+        if (collections.FirstOrDefault(c => c.Records.Count is 0 or > MaxCollectionRecords) is { } tooLarge)
+            throw new ArgumentOutOfRangeException(nameof(collections),
+                $"{tooLarge.ReferenceId}: {tooLarge.Records.Count} records; a collection takes 1 to {MaxCollectionRecords}");
 
         var payload = new
         {
-            graphs = graphs.Select(g => new
+            allOrNone,
+            compositeRequest = collections.Select(c => new
             {
-                graphId = g.GraphId,
-                compositeRequest = g.Nodes.Select(n => new
-                {
-                    method = n.Method,
-                    url = DataPath + n.Url,
-                    referenceId = n.ReferenceId,
-                    body = n.Body
-                })
+                method = c.Create ? "POST" : "PATCH",
+                url = $"{DataPath}/composite/sobjects",
+                referenceId = c.ReferenceId,
+                body = new { allOrNone, records = c.Records }
             })
         };
 
-        using var res = await http.PostAsJsonAsync($"{DataPath}/composite/graph", payload, Json, ct);
+        using var res = await http.PostAsJsonAsync($"{DataPath}/composite", payload, Json, ct);
         await EnsureSuccessAsync(res, ct);
-        var body = await res.Content.ReadFromJsonAsync<GraphEnvelope>(Json, ct)
-                   ?? throw new InvalidOperationException("Empty composite graph response");
+        var body = await res.Content.ReadFromJsonAsync<CompositeBody>(Json, ct)
+                   ?? throw new InvalidOperationException("Empty composite response");
 
-        return body.Graphs.Select(g => new GraphResult(g.GraphId, g.IsSuccessful, g.IsSuccessful ? [] : GraphErrors(g)))
-            .ToList();
-    }
+        return body.CompositeResponse.Select(sub =>
+        {
+            // A subrequest that failed as a whole answers with an error list instead of one result per record
+            if (sub.HttpStatusCode >= 400 || sub.Body.ValueKind != JsonValueKind.Array)
+                return new CollectionResult(sub.ReferenceId, null, ParseErrors(sub.ReferenceId, sub.Body));
 
-    /// <summary>
-    /// Errors of a failed graph. A failure without any error detail is reported as UNKNOWN_ERROR (transient), never
-    /// as an empty list, which would read as "not attempted" and be retried forever without spending a retry.
-    /// </summary>
-    private static List<SalesforceError> GraphErrors(GraphBodyResult graph)
-    {
-        var errors = graph.GraphResponse.CompositeResponse
-            .Where(s => s.HttpStatusCode >= 400)
-            .SelectMany(s => ParseErrors(s.ReferenceId, s.Body))
-            .ToList();
-        if (errors.Count == 0) errors.Add(new SalesforceError(null, "UNKNOWN_ERROR", $"Graph {graph.GraphId} failed without error details"));
-        return errors;
+            return new CollectionResult(sub.ReferenceId, sub.Body.EnumerateArray().Select(r => new RecordResult(
+                r.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True,
+                r.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
+                r.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
+                    ? errors.EnumerateArray().Select(e => ParseError(null, e, "statusCode")).ToList()
+                    : [])).ToList(), []);
+        }).ToList();
     }
 
     public static string Soql(string sobject, IEnumerable<string> fields, string whereField, IEnumerable<string> values)
@@ -150,12 +165,18 @@ public sealed class SalesforceRestClient(HttpClient http)
         if (body.ValueKind != JsonValueKind.Array)
             return [new SalesforceError(referenceId, "UNKNOWN_ERROR", body.ValueKind == JsonValueKind.Undefined ? null : body.GetRawText())];
 
-        return body.EnumerateArray().Select(e => new SalesforceError(
-                referenceId,
-                e.TryGetProperty("errorCode", out var c) && c.GetString() is { } code ? code : "UNKNOWN_ERROR",
-                e.TryGetProperty("message", out var m) ? m.GetString() : null))
-            .ToList();
+        return body.EnumerateArray().Select(e => ParseError(referenceId, e, "errorCode")).ToList();
     }
+
+    /// <param name="codeProperty">"errorCode" in an error response, "statusCode" in a collection's per-record errors.</param>
+    private static SalesforceError ParseError(string? referenceId, JsonElement e, string codeProperty) => new(
+        referenceId,
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(codeProperty, out var c) && c.ValueKind == JsonValueKind.String
+            ? c.GetString()! : "UNKNOWN_ERROR",
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String
+            ? m.GetString() : null,
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty("fields", out var f) && f.ValueKind == JsonValueKind.Array
+            ? f.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList() : null);
 
     private static async Task EnsureSuccessAsync(HttpResponseMessage res, CancellationToken ct)
     {
@@ -167,12 +188,9 @@ public sealed class SalesforceRestClient(HttpClient http)
 
     private sealed record DescribeBody(string Name, List<DescribeField> Fields);
     private sealed record DescribeField(string Name, string Type, int Length, int Precision, int Scale,
-        bool Createable, bool Updateable, bool Nillable);
+        bool Createable, bool Updateable, bool Nillable, string? RelationshipName);
     private sealed record CompositeBody(List<SubResponse> CompositeResponse);
     private sealed record QueryPage(List<JsonElement> Records, string? NextRecordsUrl);
-    private sealed record GraphEnvelope(List<GraphBodyResult> Graphs);
-    private sealed record GraphBodyResult(string GraphId, bool IsSuccessful, GraphBody GraphResponse);
-    private sealed record GraphBody(List<SubResponse> CompositeResponse);
     private sealed record SubResponse(string ReferenceId, int HttpStatusCode, JsonElement Body);
 }
 

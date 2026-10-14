@@ -130,7 +130,7 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
         output.WriteLine($"fake org: {stats}");
         stats.GetProperty("concurrencyRejections").GetInt64().Should().BePositive(
             "Salesforce should reject some requests for exceeding the concurrent long-running limit");
-        stats.GetProperty("graphsFailed").GetInt64().Should().Be(0);
+        stats.GetProperty("recordsFailed").GetInt64().Should().Be(0);
 
         // Rate-limited attempts are handed back without spending a retry
         await using var conn = await app.Db.OpenConnectionAsync();

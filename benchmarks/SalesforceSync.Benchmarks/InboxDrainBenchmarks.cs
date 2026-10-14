@@ -355,7 +355,7 @@ public abstract class DrainBenchmarkBase
         var stats = _store.GetStats();
         Console.WriteLine(
             $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms] " +
-            $"events={Events} relationshipEvents={relationshipEvents} {stats} coalescing={(double)Events / Math.Max(1, stats.GraphsSucceeded):F1} events/graph " +
+            $"events={Events} relationshipEvents={relationshipEvents} {stats} coalescing={(double)Events / Math.Max(1, stats.RecordsSucceeded):F1} events/record written " +
             $"claims={claims} retries={retries} superseded={superseded} overlappingClaims={overlaps} notDone={notDone} wrong={wrong.Count} regressions={regressions}");
 
         if (wrong.Count > 0 || rows != Events || notDone > 0 || overlaps > 0 || regressions > 0)

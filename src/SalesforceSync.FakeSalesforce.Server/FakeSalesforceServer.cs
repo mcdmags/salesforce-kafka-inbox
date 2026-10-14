@@ -58,7 +58,9 @@ public static class FakeSalesforceServer
             store.Edit(sobject, externalId, fields) ? Results.NoContent() : Results.NotFound());
         fake.MapGet("/history/{sobject}/{externalId}", (string sobject, string externalId, FakeSalesforceStore store) =>
             store.History(sobject, externalId) is { } writes ? Results.Ok(writes) : Results.NotFound());
-        fake.MapGet("/clients", (ClientLog clients) => clients.GraphRequests);
+        fake.MapGet("/clients", (ClientLog clients) => clients.CompositeRequests);
+        // The composite requests that contained writes, as received (to check what the client really sent)
+        fake.MapGet("/requests", (FakeSalesforceStore store) => store.WriteRequests);
         fake.MapGet("/transport", (ClientLog clients) => clients.Transport);
         // Make create/update of one record fail with a Salesforce error code the next N times
         fake.MapPost("/faults", (FaultRequest f, FakeSalesforceStore store) =>

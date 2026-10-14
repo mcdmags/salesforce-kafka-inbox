@@ -48,7 +48,7 @@ public static class WriteOutcome
             HttpRequestError: HttpRequestError.ConnectionError or HttpRequestError.NameResolutionError
                 or HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError
         } => false,
-        ArgumentException => false, // refused by the client before anything was sent (too many graphs or nodes)
+        ArgumentException => false, // refused by the client before anything was sent (too many collections or records)
         _ => true
     };
 

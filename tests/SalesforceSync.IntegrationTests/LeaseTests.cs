@@ -37,7 +37,7 @@ public sealed class LeaseTests(SyncFixture app)
         during[0].LockToken.Should().Be(token);
         (await app.GetRecordAsync("Account", acct)).Should().BeNull("nobody has written the account yet");
 
-        // The first worker finishes without having written (as if its graph was not attempted) and releases
+        // The first worker finishes without having written (as if its records were not attempted) and releases
         await ExecuteAsync(Sql.Release, new { ids = claimed, token });
 
         var settled = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
