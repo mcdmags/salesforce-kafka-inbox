@@ -140,7 +140,6 @@ public sealed class FieldValuesTests
 
     [Theory]
     [InlineData(new[] { "PROCESSING_HALTED" }, SyncOutcome.NotAttempted)]
-    [InlineData(new[] { "ALL_OR_NONE_OPERATION_ROLLED_BACK" }, SyncOutcome.NotAttempted)]
     [InlineData(new[] { "UNABLE_TO_LOCK_ROW", "PROCESSING_HALTED" }, SyncOutcome.TransientFailure)]
     [InlineData(new[] { "REQUIRED_FIELD_MISSING", "PROCESSING_HALTED" }, SyncOutcome.PermanentFailure)]
     [InlineData(new[] { "SOMETHING_NEW" }, SyncOutcome.TransientFailure)]

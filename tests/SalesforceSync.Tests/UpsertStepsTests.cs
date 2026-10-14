@@ -21,7 +21,7 @@ public sealed class UpsertStepsTests
     [
         new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
         new SalesforceField("External_Id__c", "string", 255, 0, 0, true, true, true),
-        new SalesforceField("Account__c", "reference", 18, 0, 0, true, true, true, "Account__r")
+        new SalesforceField("Account__c", "reference", 18, 0, 0, true, true, true)
     ]);
 
     private static readonly Dictionary<string, SObjectSchema> Schemas = new(StringComparer.OrdinalIgnoreCase)

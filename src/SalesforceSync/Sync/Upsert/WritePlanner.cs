@@ -14,13 +14,12 @@ internal sealed record WritePlan(
 
 /// <summary>
 /// Turns units and Salesforce's current records into the collection requests to send. Whether a record is created or
-/// updated is decided by what the read found. A lookup becomes a literal Id, a reference to a create in the same
-/// request or a link by external id (<see cref="SalesforceOptions.ParentLink"/>). No I/O.
+/// updated is decided by what the read found. A lookup becomes a literal Id, or a reference to a create in the same
+/// request (<c>@{Account_create[3].id}</c>). No I/O.
 /// </summary>
-internal sealed class WritePlanner(SalesforceOptions options)
+internal static class WritePlanner
 {
-    public WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current,
-        IReadOnlyDictionary<string, SObjectSchema> schemas)
+    public static WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current)
     {
         var planned = new List<PlannedUnit>();
         var decided = new List<UpsertResult>();
@@ -30,7 +29,7 @@ internal sealed class WritePlanner(SalesforceOptions options)
         {
             var problems = new List<SalesforceError>();
             var missing = new List<SalesforceError>();
-            var writes = PlanUnit(unit, current, schemas, problems, missing, rewrites);
+            var writes = PlanUnit(unit, current, problems, missing, rewrites);
 
             if (problems.Count > 0)
             {
@@ -62,9 +61,8 @@ internal sealed class WritePlanner(SalesforceOptions options)
     /// </summary>
     /// <param name="problems">Receives what Salesforce would reject (a field that can't be written).</param>
     /// <param name="missing">Receives the lookups whose target is neither in Salesforce nor in the unit.</param>
-    private List<PlannedWrite> PlanUnit(NormalizedUnit unit, CurrentRecords current,
-        IReadOnlyDictionary<string, SObjectSchema> schemas, List<SalesforceError> problems, List<SalesforceError> missing,
-        List<FieldWrite> rewrites)
+    private static List<PlannedWrite> PlanUnit(NormalizedUnit unit, CurrentRecords current, List<SalesforceError> problems,
+        List<SalesforceError> missing, List<FieldWrite> rewrites)
     {
         var writes = new List<PlannedWrite>();
         // The unit's records so far, by (sobject, external id), for the later records that look them up
@@ -110,7 +108,7 @@ internal sealed class WritePlanner(SalesforceOptions options)
                 }
                 else
                 {
-                    links.Add(LinkTo(target.Create, lookup, schemas));
+                    links.Add(new NewParentLink(lookup.Field, target.Create));
                 }
             }
 
@@ -150,14 +148,6 @@ internal sealed class WritePlanner(SalesforceOptions options)
                 : null;
     }
 
-    /// <summary>By external id only if the lookup can be addressed that way; a reference always can.</summary>
-    private NewParentLink LinkTo(PlannedWrite parent, NormalizedLookup lookup, IReadOnlyDictionary<string, SObjectSchema> schemas)
-    {
-        var byExternalId = options.ParentLink == ParentLink.ExternalId && lookup.Field.RelationshipName is not null;
-        return new NewParentLink(lookup.Field, parent, lookup.Target.ExternalId,
-            byExternalId ? schemas[lookup.Target.SObject].Find(lookup.Target.ExternalIdField)!.Name : null);
-    }
-
     /// <summary>A create for a new record (with its external id), an update if anything differs, else null.</summary>
     private static PlannedWrite? Write(NormalizedRecord record, CurrentRecord? existing, Dictionary<string, object?> changes,
         List<NewParentLink> links, List<FieldWrite> sent, int depth)
@@ -168,7 +158,7 @@ internal sealed class WritePlanner(SalesforceOptions options)
         }
 
         var lookupFields = record.Lookups.Where(l => changes.ContainsKey(l.Field.Name)).Select(l => l.Field.Name)
-            .Concat(links.SelectMany(l => new[] { l.Field.Name, l.Field.RelationshipName ?? l.Field.Name }))
+            .Concat(links.Select(l => l.Field.Name))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         if (existing is null)

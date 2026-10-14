@@ -2,18 +2,13 @@ using System.Text.Json.Nodes;
 
 namespace SalesforceSync.IntegrationTests;
 
-/// <summary>
-/// The non-default write settings, bound from configuration like in a deployment: parents linked by external id,
-/// allOrNone, and few, fast retries so a dead letter is reached in seconds.
-/// </summary>
-public sealed class AlternativeSettingsFixture : SyncFixture
+/// <summary>Few, fast retries, bound from configuration like in a deployment, so a dead letter is reached in seconds.</summary>
+public sealed class FewRetriesFixture : SyncFixture
 {
     public const int MaxRetries = 3;
 
-    public AlternativeSettingsFixture()
+    public FewRetriesFixture()
     {
-        WorkerSettings["Salesforce:ParentLink"] = "ExternalId";
-        WorkerSettings["Salesforce:AllOrNone"] = "true";
         WorkerSettings["Sync:MaxRetries"] = MaxRetries.ToString();
         WorkerSettings["Sync:RetryBaseDelay"] = "00:00:00.200";
         WorkerSettings["Sync:IdleDelay"] = "00:00:00.100";
@@ -21,36 +16,14 @@ public sealed class AlternativeSettingsFixture : SyncFixture
 }
 
 [CollectionDefinition(Name)]
-public sealed class AlternativeSettingsCollection : ICollectionFixture<AlternativeSettingsFixture>
+public sealed class FewRetriesCollection : ICollectionFixture<FewRetriesFixture>
 {
-    public const string Name = "AlternativeSettings";
+    public const string Name = "FewRetries";
 }
 
-[Collection(AlternativeSettingsCollection.Name)]
-public sealed class AlternativeSettingsTests(AlternativeSettingsFixture app)
+[Collection(FewRetriesCollection.Name)]
+public sealed class DeadLetterTests(FewRetriesFixture app)
 {
-    [Fact]
-    public async Task New_Account_and_Profile_are_linked_through_the_Accounts_external_id_with_allOrNone()
-    {
-        var acct = SyncFixture.NewAccountId();
-
-        await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, new JsonObject { ["tier"] = "Gold" });
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
-
-        var write = (await app.GetWriteRequestsAsync(acct)).Should().ContainSingle().Subject;
-        write["allOrNone"]!.GetValue<bool>().Should().BeTrue();
-        var subrequests = write["compositeRequest"]!.AsArray();
-        subrequests.Select(s => ((string?)s!["referenceId"], s["body"]!["allOrNone"]!.GetValue<bool>()))
-            .Should().Equal(("Account_create", true), ("Profile__c_create", true));
-        var profile = subrequests[1]!["body"]!["records"]!.AsArray()
-            .Single(r => (string?)r!["External_Id__c"] == SyncFixture.ProfileIdFor(acct))!.AsObject();
-        profile["Account__r"]!.ToJsonString().Should().Be($$"""{"External_Id__c":"{{acct}}"}""");
-        profile.ContainsKey("Account__c").Should().BeFalse();
-
-        ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Account__c"])
-            .Should().Be((string?)(await app.GetRecordAsync("Account", acct))!["Id"]);
-    }
-
     [Fact]
     public async Task Relationship_whose_Account_never_arrives_is_dead_lettered_after_MaxRetries_and_syncs_once_requeued()
     {
@@ -61,7 +34,7 @@ public sealed class AlternativeSettingsTests(AlternativeSettingsFixture app)
         (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Equal((1L, "dead"));
         var dead = (await app.GetInboxRowsAsync(rel, SyncFixture.Relationships))[0];
         dead.ErrorCode.Should().Be("DEPENDENCY_NOT_SYNCED", "the cause stays on the dead letter");
-        dead.RetryCount.Should().Be(AlternativeSettingsFixture.MaxRetries);
+        dead.RetryCount.Should().Be(FewRetriesFixture.MaxRetries);
         (await app.GetRecordAsync("Account_Relationship__c", rel)).Should().BeNull();
 
         // The Accounts arrive after all; the dead letter is re-queued by hand (the statement from the README)

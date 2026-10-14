@@ -4,7 +4,7 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// What is sent to Salesforce and what per-record results do to an entity: one Composite request of sObject
-/// Collections creates and updates, each record saved or rejected on its own (allOrNone false, the default).
+/// Collections creates and updates, each record saved or rejected on its own (allOrNone false).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class CollectionsWriteTests(SyncFixture app)

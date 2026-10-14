@@ -57,7 +57,6 @@ public sealed class SalesforceBatchUpsertService(
 
     private readonly SyncOptions _opt = options.Value;
     private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
-    private readonly WritePlanner _planner = new(salesforceOptions.Value);
     private readonly WriteResultInterpreter _interpreter = new(errors);
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
@@ -179,7 +178,7 @@ public sealed class SalesforceBatchUpsertService(
 
         // 4. Decide per record: unchanged, create or update (by what the read found), and how each lookup is linked;
         // the writes are grouped into collections and Composite requests
-        var plan = _planner.Plan(normalized, current, schemas);
+        var plan = WritePlanner.Plan(normalized, current);
         results.AddRange(plan.NotSent);
         WarnAboutFlappingFields(plan.Rewrites);
 
@@ -285,7 +284,7 @@ public sealed class SalesforceBatchUpsertService(
     {
         try
         {
-            return await salesforce.SendCollectionsAsync(request.BuildRequests(), _salesforceOpt.AllOrNone, ct);
+            return await salesforce.SendCollectionsAsync(request.BuildRequests(), ct);
         }
         catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
         {
