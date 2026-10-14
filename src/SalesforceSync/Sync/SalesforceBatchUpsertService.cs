@@ -57,7 +57,7 @@ public sealed class SalesforceBatchUpsertService(
 
     private readonly SyncOptions _opt = options.Value;
     private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
-    private readonly WritePlanner _planner = new(salesforceOptions.Value, options.Value);
+    private readonly WritePlanner _planner = new(salesforceOptions.Value);
     private readonly WriteResultInterpreter _interpreter = new(errors);
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
@@ -177,12 +177,11 @@ public sealed class SalesforceBatchUpsertService(
         // 3. Read: one Composite call with the strategy's queries
         var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas), schemas.Keys, ct);
 
-        // 4. Decide per record: unchanged, create or update (checked against the event's type), and how each lookup
-        // is linked; the writes are grouped into collections and Composite requests
+        // 4. Decide per record: unchanged, create or update (by what the read found), and how each lookup is linked;
+        // the writes are grouped into collections and Composite requests
         var plan = _planner.Plan(normalized, current, schemas);
         results.AddRange(plan.NotSent);
         WarnAboutFlappingFields(plan.Rewrites);
-        LogTypeMismatches(plan, normalized.Count);
 
         // 5. Send: normally one Composite call. 6. Per-record results -> one outcome per unit.
         var saved = new List<WriteEcho>();
@@ -294,27 +293,6 @@ public sealed class SalesforceBatchUpsertService(
             // on Salesforce may have the write, and may still apply it after we stop waiting.
             throw new UnknownOutcomeException(ex);
         }
-    }
-
-    private void LogTypeMismatches(WritePlan plan, int total)
-    {
-        if (plan.TypeMismatches.Count == 0)
-        {
-            return;
-        }
-
-        var deadLettered = plan.MismatchHandling == EventTypeMismatch.DeadLetter;
-        if (!deadLettered)
-        {
-            foreach (var (key, message) in plan.TypeMismatches)
-            {
-                log.LogDebug("{Key}: {Mismatch}; going by Salesforce", key, message);
-            }
-        }
-
-        log.LogInformation(
-            "{Count} of {Total} events had a type that disagrees with Salesforce (inserted but the record exists, or updated but it does not): {Action}",
-            plan.TypeMismatches.Count, total, deadLettered ? "dead-lettered" : "reconciled with Salesforce");
     }
 
     /// <summary>Warns about a field that still differs after the same value was written to it before (<see cref="WriteEchoTracker"/>).</summary>

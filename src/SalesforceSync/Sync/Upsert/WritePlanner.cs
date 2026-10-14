@@ -1,5 +1,4 @@
 using System.Text.Json;
-using SalesforceSync.Inbox;
 using SalesforceSync.Salesforce;
 
 namespace SalesforceSync.Sync.Upsert;
@@ -7,44 +6,28 @@ namespace SalesforceSync.Sync.Upsert;
 /// <summary>What to do with a batch after the read.</summary>
 /// <param name="Requests">The Composite requests to send, each with its units and their writes by collection.</param>
 /// <param name="NotSent">The units that won't be sent, with their outcome: unchanged, rejected, too large, or waiting for a lookup target.</param>
-/// <param name="TypeMismatches">Units whose event type disagrees with Salesforce.</param>
-/// <param name="MismatchHandling">What was done about them (<see cref="SyncOptions.EventTypeMismatch"/>).</param>
 /// <param name="Rewrites">Every value that differs from an existing record's, for the flapping check.</param>
 internal sealed record WritePlan(
     IReadOnlyList<CompositeWrite> Requests,
     IReadOnlyList<UpsertResult> NotSent,
-    IReadOnlyList<(string Key, string? Message)> TypeMismatches,
-    EventTypeMismatch MismatchHandling,
     IReadOnlyList<FieldWrite> Rewrites);
 
 /// <summary>
 /// Turns units and Salesforce's current records into the collection requests to send. Whether a record is created or
-/// updated is decided by what the read found; the event's type is checked against it
-/// (<see cref="SyncOptions.EventTypeMismatch"/>). A lookup becomes a literal Id, a reference to a create in the same
+/// updated is decided by what the read found. A lookup becomes a literal Id, a reference to a create in the same
 /// request or a link by external id (<see cref="SalesforceOptions.ParentLink"/>). No I/O.
 /// </summary>
-internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOptions)
+internal sealed class WritePlanner(SalesforceOptions options)
 {
     public WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current,
         IReadOnlyDictionary<string, SObjectSchema> schemas)
     {
         var planned = new List<PlannedUnit>();
         var decided = new List<UpsertResult>();
-        var mismatches = new List<(string, string?)>();
         var rewrites = new List<FieldWrite>();
 
         foreach (var unit in units)
         {
-            if (EventTypeCheck.Mismatch(unit, current) is { } mismatch)
-            {
-                mismatches.Add((unit.Key, mismatch.Message));
-                if (syncOptions.EventTypeMismatch == EventTypeMismatch.DeadLetter)
-                {
-                    decided.Add(new(unit.Key, SyncOutcome.PermanentFailure, [mismatch]));
-                    continue;
-                }
-            }
-
             var problems = new List<SalesforceError>();
             var missing = new List<SalesforceError>();
             var writes = PlanUnit(unit, current, schemas, problems, missing, rewrites);
@@ -69,7 +52,7 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
 
         var (requests, tooLarge) = CompositeWrite.Pack(planned);
         decided.AddRange(tooLarge);
-        return new WritePlan(requests, decided, mismatches, syncOptions.EventTypeMismatch, rewrites);
+        return new WritePlan(requests, decided, rewrites);
     }
 
     /// <summary>

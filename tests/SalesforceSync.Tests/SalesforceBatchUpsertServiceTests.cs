@@ -345,7 +345,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         var upserter = Upserter(new SalesforceOptions { ParentLink = ParentLink.ExternalId });
         _org.InjectFault("Account", "A1", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Industry is required", int.MaxValue);
 
-        var results = await Accounts(upserter, null,
+        var results = await Accounts(upserter,
             ("A1", Event(new() { ["name"] = "One" }, new() { ["tier"] = "Gold" })),
             ("A2", Event(new() { ["name"] = "Two" }, new() { ["tier"] = "Silver" })));
 
@@ -367,9 +367,9 @@ public sealed class SalesforceBatchUpsertServiceTests
     public async Task Linking_by_external_id_still_uses_the_Id_of_an_Account_that_already_exists()
     {
         var upserter = Upserter(new SalesforceOptions { ParentLink = ParentLink.ExternalId });
-        await Upsert(upserter, AccountStrategy, null, ("A1", Read<AccountEvent>(WithoutProfile("A1", "Acme"))));
+        await Upsert(upserter, AccountStrategy, ("A1", Read<AccountEvent>(WithoutProfile("A1", "Acme"))));
 
-        (await Accounts(upserter, null, ("A1", Event(new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" })))).Single()
+        (await Accounts(upserter, ("A1", Event(new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" })))).Single()
             .Outcome.Should().Be(SyncOutcome.Saved);
 
         var record = Records(_org.WriteRequests[^1]["compositeRequest"]!.AsArray().Should().ContainSingle().Subject!).Single();
@@ -437,7 +437,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         await Accounts([.. keys.Select(k => (k, Event(new() { ["name"] = "Before" }, new() { ["tier"] = "Gold" })))]);
         _org.InjectFault("Account", "A2", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Industry is required", int.MaxValue);
 
-        var results = await Accounts(upserter, null,
+        var results = await Accounts(upserter,
             [.. keys.Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" })))]);
 
         var write = _org.WriteRequests[^1];
@@ -450,7 +450,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         _org.All("Profile__c").Select(a => (string?)a["Tier__c"]).Should().AllBe("Gold");
 
         // The next claim: A2 is dead-lettered, the others go through
-        var retried = await Accounts(upserter, null,
+        var retried = await Accounts(upserter,
             [.. keys.Where(k => k != "A2").Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" })))]);
         retried.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
     }
@@ -462,7 +462,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         // Every record reports being rolled back because of another one; none is the cause
         _org.InjectFault("Account", "A1", "ALL_OR_NONE_OPERATION_ROLLED_BACK", "Record rolled back", int.MaxValue);
 
-        var results = await Accounts(upserter, null,
+        var results = await Accounts(upserter,
             ("A1", Event(new() { ["name"] = "One" }, [])), ("A2", Event(new() { ["name"] = "Two" }, [])));
 
         results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.TransientFailure,
@@ -470,14 +470,12 @@ public sealed class SalesforceBatchUpsertServiceTests
         results.Select(r => r.PrimaryError?.Code).Should().AllBe("UNKNOWN_ERROR");
     }
 
-    // ---------- The event's type against what Salesforce has ----------
+    // ---------- Create or update: decided by what Salesforce has ----------
 
     [Theory]
-    [InlineData(EventType.Inserted, false, "POST")]
-    [InlineData(EventType.Updated, true, "PATCH")]
-    [InlineData(EventType.Inserted, true, "PATCH")]   // mismatch: the record is already there
-    [InlineData(EventType.Updated, false, "POST")]    // mismatch: the record is missing
-    public async Task Create_or_update_is_decided_by_Salesforce_whatever_the_event_type_says(EventType type, bool exists, string verb)
+    [InlineData(false, "POST")]
+    [InlineData(true, "PATCH")]
+    public async Task Create_or_update_is_decided_by_what_Salesforce_has(bool exists, string verb)
     {
         if (exists)
         {
@@ -486,7 +484,7 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         var before = _org.WriteRequests.Count;
 
-        var result = (await Accounts(_upserter, type, ("A1", Event(new() { ["name"] = "After" }, [])))).Single();
+        var result = await Account("A1", new() { ["name"] = "After" }, []);
 
         result.Outcome.Should().Be(SyncOutcome.Saved);
         _org.WriteRequests.Should().HaveCount(before + 1);
@@ -503,45 +501,16 @@ public sealed class SalesforceBatchUpsertServiceTests
         _org.All("Account").Should().ContainSingle();
     }
 
-    [Theory]
-    [InlineData(EventType.Inserted)]
-    [InlineData(EventType.Updated)]
-    public async Task Event_that_matches_Salesforce_already_writes_nothing(EventType type)
+    [Fact]
+    public async Task Event_that_matches_Salesforce_already_writes_nothing()
     {
         await Account("A1", new() { ["name"] = "Same" }, new() { ["tier"] = "Gold" });
         var before = _org.GetStats().WriteRequests;
 
-        var result = (await Accounts(_upserter, type, ("A1", Event(new() { ["name"] = "Same" }, new() { ["tier"] = "Gold" })))).Single();
+        var result = await Account("A1", new() { ["name"] = "Same" }, new() { ["tier"] = "Gold" });
 
         result.Outcome.Should().Be(SyncOutcome.Unchanged, "a redelivered insert creates no duplicate and updates nothing");
         _org.GetStats().WriteRequests.Should().Be(before);
-    }
-
-    [Theory]
-    [InlineData(EventType.Inserted, true)]
-    [InlineData(EventType.Updated, false)]
-    public async Task Event_type_mismatch_can_be_dead_lettered_instead(EventType type, bool exists)
-    {
-        var upserter = Upserter(sync: new SyncOptions { EventTypeMismatch = EventTypeMismatch.DeadLetter });
-        if (exists)
-        {
-            await Account("A1", new() { ["name"] = "Before" }, []);
-        }
-
-        var before = _org.GetStats().WriteRequests;
-
-        var results = await Accounts(upserter, type,
-            ("A1", Event(new() { ["name"] = "After" }, [])),
-            ("A2", Event(new() { ["name"] = "Fine" }, [])));
-
-        var mismatch = results.Should().ContainSingle(r => r.Key == "A1").Subject;
-        mismatch.Outcome.Should().Be(SyncOutcome.PermanentFailure);
-        (mismatch.PrimaryError?.Code).Should().Be(SalesforceErrors.EventTypeMismatch);
-        (_org.FindByExternalId("Account", "A1")?["Name"]?.GetValue<string>()).Should().Be(exists ? "Before" : null);
-        // A2 is new: fine for "inserted", itself a mismatch for "updated"
-        results.Should().ContainSingle(r => r.Key == "A2").Which.Outcome.Should().Be(
-            type == EventType.Inserted ? SyncOutcome.Saved : SyncOutcome.PermanentFailure);
-        (_org.GetStats().WriteRequests - before).Should().Be(type == EventType.Inserted ? 1 : 0);
     }
 
     [Fact]
@@ -648,13 +617,13 @@ public sealed class SalesforceBatchUpsertServiceTests
 
     private Task<List<UpsertResult>> Accounts(params (string Key, JsonObject Event)[] items)
     {
-        return Accounts(_upserter, null, items);
+        return Accounts(_upserter, items);
     }
 
     /// <summary>Profiles are keyed "P-{account}" unless the event says otherwise.</summary>
-    private Task<List<UpsertResult>> Accounts(SalesforceBatchUpsertService upserter, EventType? type, params (string Key, JsonObject Event)[] items)
+    private Task<List<UpsertResult>> Accounts(SalesforceBatchUpsertService upserter, params (string Key, JsonObject Event)[] items)
     {
-        return Upsert(upserter, AccountStrategy, type, [.. items.Select(i =>
+        return Upsert(upserter, AccountStrategy, [.. items.Select(i =>
             {
                 var account = i.Event["account"]!.AsObject();
                 account["externalId"] = i.Key;
@@ -675,14 +644,14 @@ public sealed class SalesforceBatchUpsertServiceTests
 
     private Task<List<UpsertResult>> Upsert<TEvent>(UpsertStrategy<TEvent> strategy, params (string Key, TEvent Event)[] items)
     {
-        return Upsert(_upserter, strategy, null, items);
+        return Upsert(_upserter, strategy, items);
     }
 
-    /// <summary>What the engine does with a strategy, minus the inbox: map (with the event's type), query, upsert.</summary>
+    /// <summary>What the engine does with a strategy, minus the inbox: map, query, upsert.</summary>
     private static Task<List<UpsertResult>> Upsert<TEvent>(SalesforceBatchUpsertService upserter, UpsertStrategy<TEvent> strategy,
-        EventType? type, params (string Key, TEvent Event)[] items)
+        params (string Key, TEvent Event)[] items)
     {
-        var units = items.Select(i => (i.Key, strategy.Map(i.Key, i.Event) with { EventType = type })).ToList();
+        var units = items.Select(i => (i.Key, strategy.Map(i.Key, i.Event))).ToList();
         return upserter.WriteToSalesforceAsync(units, [.. strategy.Queries([.. units.Select(u => u.Item2)])], CancellationToken.None);
     }
 

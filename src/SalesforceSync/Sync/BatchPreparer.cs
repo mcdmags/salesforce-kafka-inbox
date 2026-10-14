@@ -36,7 +36,7 @@ internal static class BatchPreparer
 
             try
             {
-                var unit = strategy.Map(entity.Key, Read.Event) with { EventType = Read.Type };
+                var unit = strategy.Map(entity.Key, Read.Event);
                 batch.Work.Add(new Work(entity.Key, unit, time, Row.Id));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

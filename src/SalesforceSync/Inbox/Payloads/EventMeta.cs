@@ -14,7 +14,8 @@ public enum EventType
 /// The <c>meta</c> object every event carries next to its entity:
 /// <c>{ "time": "2026-10-14T01:02:03.456Z", "type": "inserted" }</c>.
 /// The time is the event's place in its entity's history: the newest time wins, whatever order events arrive in.
-/// The type is what the source expects the write to be (a create or an update).
+/// The type must be inserted or updated (deletes are not synced); whether a record is created or updated is decided
+/// by what Salesforce has.
 /// </summary>
 public sealed partial class EventMeta
 {

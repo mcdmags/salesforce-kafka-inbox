@@ -274,20 +274,15 @@ public sealed class InboxEventTests
     }
 
     [Theory]
-    [InlineData("inserted", EventType.Inserted)]
-    [InlineData("updated", EventType.Updated)]
-    [InlineData("Inserted", EventType.Inserted)]
-    [InlineData("UPDATED", EventType.Updated)]
-    public void Event_type_is_read_without_regard_to_case_and_travels_with_the_newest_event(string type, EventType expected)
+    [InlineData("inserted")]
+    [InlineData("updated")]
+    [InlineData("Inserted")]
+    [InlineData("UPDATED")]
+    public void Event_type_is_inserted_or_updated_in_any_case(string type)
     {
-        var older = $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "account": { "externalId": "ACC-1" } }""";
-        var newer = $$"""{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "{{type}}" }, "account": { "externalId": "ACC-1" } }""";
-        Accounts.TryRead(older, out var first, out _).Should().BeTrue();
-        Accounts.TryRead(newer, out var second, out _).Should().BeTrue();
+        var json = $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "{{type}}" }, "account": { "externalId": "ACC-1" } }""";
 
-        var newest = BatchPreparer.Coalesce([(new InboxEvent(1, "ACC-1", newer, 1), second!), (new InboxEvent(2, "ACC-1", older, 1), first!)]);
-
-        newest.Read.Type.Should().Be(expected);
+        Accounts.TryRead(json, out _, out var problem).Should().BeTrue("the type is valid, but: {0}", problem);
     }
 
     [Theory]

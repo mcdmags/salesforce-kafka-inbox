@@ -4,7 +4,7 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// The non-default write settings, bound from configuration like in a deployment: parents linked by external id,
-/// allOrNone, event type mismatches dead-lettered, and few, fast retries so a dead letter is reached in seconds.
+/// allOrNone, and few, fast retries so a dead letter is reached in seconds.
 /// </summary>
 public sealed class AlternativeSettingsFixture : SyncFixture
 {
@@ -14,7 +14,6 @@ public sealed class AlternativeSettingsFixture : SyncFixture
     {
         WorkerSettings["Salesforce:ParentLink"] = "ExternalId";
         WorkerSettings["Salesforce:AllOrNone"] = "true";
-        WorkerSettings["Sync:EventTypeMismatch"] = "DeadLetter";
         WorkerSettings["Sync:MaxRetries"] = MaxRetries.ToString();
         WorkerSettings["Sync:RetryBaseDelay"] = "00:00:00.200";
         WorkerSettings["Sync:IdleDelay"] = "00:00:00.100";
@@ -79,28 +78,5 @@ public sealed class AlternativeSettingsTests(AlternativeSettingsFixture app)
         (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Equal((1L, "done"));
         ((string?)(await app.GetRecordAsync("Account_Relationship__c", rel))!["Related_Account__c"])
             .Should().Be((string?)(await app.GetRecordAsync("Account", child))!["Id"]);
-    }
-
-    [Fact]
-    public async Task Event_whose_type_disagrees_with_Salesforce_is_dead_lettered()
-    {
-        var (missing, existing) = (SyncFixture.NewAccountId(), SyncFixture.NewAccountId());
-
-        // "updated", but Salesforce has no such Account
-        await app.PublishAsync(missing, 2, new JsonObject { ["name"] = "v2" }, []);
-        (await app.WaitForInboxSettledAsync(missing, expectedRows: 1)).Should().Equal((2L, "dead"));
-        (await app.GetInboxRowsAsync(missing))[0].ErrorCode.Should().Be("EVENT_TYPE_MISMATCH");
-        (await app.GetRecordAsync("Account", missing)).Should().BeNull();
-
-        // "inserted", but the Account is already there
-        await app.PublishAsync(existing, 1, new JsonObject { ["name"] = "v1" }, []);
-        await app.WaitForInboxSettledAsync(existing, expectedRows: 1);
-        var again = SyncFixture.AccountEvent(existing, 2, new JsonObject { ["name"] = "v2" }, []);
-        again["meta"] = SyncFixture.Meta(2, "inserted");
-        await app.PublishRawAsync(existing, again.ToJsonString());
-
-        (await app.WaitForInboxSettledAsync(existing, expectedRows: 2)).Should().Equal((1L, "done"), (2L, "dead"));
-        (await app.GetInboxRowsAsync(existing))[1].ErrorCode.Should().Be("EVENT_TYPE_MISMATCH");
-        ((string?)(await app.GetRecordAsync("Account", existing))!["Name"]).Should().Be("v1");
     }
 }

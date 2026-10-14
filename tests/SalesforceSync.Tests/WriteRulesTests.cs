@@ -1,7 +1,5 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
-using SalesforceSync.Inbox;
-using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 using SalesforceSync.Sync.Upsert;
@@ -171,30 +169,6 @@ public sealed class WriteRulesTests
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.PermanentFailure, "INVALID_FIELD_FOR_INSERT_UPDATE"));
     }
 
-    [Theory]
-    [InlineData(EventTypeMismatch.Reconcile)]
-    [InlineData(EventTypeMismatch.DeadLetter)]
-    public void An_event_type_that_disagrees_with_Salesforce_is_reconciled_or_dead_lettered(EventTypeMismatch mode)
-    {
-        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","External_Id__c":"A1","Name":"Acme","Active__c":false}"""));
-        var inserted = Account("A1", "Changed") with { EventType = EventType.Inserted };
-
-        var plan = Planner(sync: new SyncOptions { EventTypeMismatch = mode }).Plan([Normalized(inserted)], current, Schemas);
-
-        plan.TypeMismatches.Should().ContainSingle().Which.Key.Should().Be("A1");
-        plan.MismatchHandling.Should().Be(mode);
-        if (mode == EventTypeMismatch.Reconcile)
-        {
-            plan.Requests.Single().BuildRequests().Single().ReferenceId.Should().Be("Account_update");
-            plan.NotSent.Should().BeEmpty();
-        }
-        else
-        {
-            plan.Requests.Should().BeEmpty();
-            plan.NotSent.Single().PrimaryError!.Code.Should().Be(SalesforceErrors.EventTypeMismatch);
-        }
-    }
-
     // ---------- CompositeWrite ----------
 
     [Fact]
@@ -312,9 +286,9 @@ public sealed class WriteRulesTests
         return new(name, type, 255, 0, 0, createable, updateable, nillable, relationship);
     }
 
-    private static WritePlanner Planner(SalesforceOptions? options = null, SyncOptions? sync = null)
+    private static WritePlanner Planner(SalesforceOptions? options = null)
     {
-        return new(options ?? new SalesforceOptions(), sync ?? new SyncOptions());
+        return new(options ?? new SalesforceOptions());
     }
 
     private static UpsertUnit Account(string key, object? name, bool? active = false, string? locked = null)

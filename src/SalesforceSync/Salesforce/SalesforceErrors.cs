@@ -15,12 +15,6 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     /// <summary>Our own code: the inbox event can't be mapped to records (malformed payload). Permanent.</summary>
     public const string InvalidEvent = "INVALID_EVENT";
 
-    /// <summary>
-    /// Our own code: the event's meta.type disagrees with Salesforce (inserted but the record exists, updated but it
-    /// doesn't) and <see cref="Inbox.SyncOptions.EventTypeMismatch"/> says to dead-letter rather than reconcile.
-    /// </summary>
-    public const string EventTypeMismatch = "EVENT_TYPE_MISMATCH";
-
     /// <summary>The record itself was fine but was not saved, because of another record in the request.</summary>
     public static readonly IReadOnlySet<string> NotAttemptedCodes = new HashSet<string>(StringComparer.Ordinal)
     {

@@ -40,7 +40,7 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement and the watermark are conditional on its `lock_token`. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
 | Records that belong together | **One Composite request of sObject Collections** creates and updates: Accounts first, then their Profiles. Each record is saved or rejected on its own (`allOrNone: false`, configurable); the entity is done, and its watermark advanced, only when all of its records are in. A new Profile points at its new Account by reference (`@{Account_create[i].id}`) or by the Account's external id (`Salesforce:ParentLink`); existing records (e.g. a relationship's Accounts) are linked by the Id read from Salesforce. See [Writing to Salesforce](#writing-to-salesforce). |
-| Create or update | Decided by the read, checked against the event's `meta.type`: a mismatch (`inserted` but the record exists, `updated` but it doesn't) is reconciled by default, or dead-lettered (`Sync:EventTypeMismatch`). |
+| Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. The event's `meta.type` is not consulted. |
 | Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the second and time to the millisecond, int/long within their `digits`, 18-character ids checked against their case suffix, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event (a warning flags any field that still keeps differing). The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
 | Batching and API calls | **2 calls per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries), one Composite request with all writes (≤5 collections of ≤200 records; more are split over further requests). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
@@ -76,7 +76,7 @@ The sync is three layers, each with one job:
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryonStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
 | **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | `BatchPreparer` (coalesce, watermark, map), `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `EventTypeCheck` (`meta.type` against existence), `RecordDiffer` (changed fields), `WritePlanner` (create / update / unchanged, lookups by Id, reference or external id, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
+| **Rules, no I/O** | `BatchPreparer` (coalesce, watermark, map), `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `RecordDiffer` (changed fields), `WritePlanner` (create / update / unchanged, lookups by Id, reference or external id, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`); the schema
 stays `sql/schema.sql` (partial indexes, the table template, views, autovacuum settings: not expressible as migrations),
@@ -120,9 +120,9 @@ JSON with the source system's own field names (nothing in an event is a Salesfor
   the newest `meta.time` wins; an event that is not newer than what was already synced is superseded. This relies on
   the source's clock. Two events of an entity with the same time: the one stored later wins if they are claimed
   together, otherwise the first one synced stays.
-- **Type**: `meta.type`, `"inserted"` or `"updated"` (any case), is required. It is parsed and validated at ingest
-  and travels with the event; a missing or other value (`deleted`, ...) makes the event invalid. Deletes are out of
-  scope.
+- **Type**: `meta.type`, `"inserted"` or `"updated"` (any case), is required. It is validated at ingest, where a
+  missing or other value (`deleted`, ...) makes the event invalid. Deletes are out of scope. It does not decide
+  whether a record is created or updated: Salesforce's current state does.
 - **Casing**: camelCase is the contract. Events are bound to the typed classes with `JsonSerializerDefaults.Web`,
   which ignores case (so `"Name"` binds too), for the envelope (`meta`, `time`, `type`, `account`, `externalId`) as
   much as for the fields. A property the classes don't have is ignored.
@@ -386,21 +386,18 @@ rate limited defers its entities and the ones not yet sent. A failure of the fir
 100 external ids and a Composite request 5 queries, and a relationship needs up to three ids per entity (itself and
 two Accounts).
 
-### Create or update: `meta.type` against what Salesforce has
+### Create or update: decided by what Salesforce has
 
-Which verb a record gets is decided by the read; the event's `meta.type` is checked against it:
+Which verb a record gets is decided by the read alone; the event's `meta.type` is not consulted:
 
-| `meta.type` | In Salesforce | What happens |
-|---|---|---|
-| `inserted` | no | **create** |
-| `updated` | yes | **update** with the fields that differ; nothing differs → no write (`done`) |
-| `inserted` | yes | mismatch → **update** with what differs (a redelivered insert writes nothing and creates no duplicate) |
-| `updated` | no | mismatch → **create** from the full record |
+| In Salesforce | What happens |
+|---|---|
+| no | **create** from the full record |
+| yes | **update** with the fields that differ; nothing differs → no write (`done`) |
 
-`Sync:EventTypeMismatch` = `Reconcile` (default: the two mismatch rows as above, counted in one log line per batch)
-or `DeadLetter` (`last_error_code = 'EVENT_TYPE_MISMATCH'`). The check is made on the entity's main record (the
-Account of an account event); a Profile is created or updated by what Salesforce has, whatever the type. An
-`inserted` and an `updated` event pending together are coalesced first, so they become one create with the newest
+A redelivered insert therefore writes nothing and creates no duplicate, and an `updated` event for a record that
+isn't in Salesforce (its insert was lost or dead-lettered, or the record was deleted there) creates it. An
+`inserted` and an `updated` event pending together are coalesced first, so they become one write of the newest
 data. A create that Salesforce answers with `DUPLICATE_VALUE` (someone created the record between the read and the
 write) is retried, and the retry's read turns it into an update.
 
@@ -696,8 +693,8 @@ Profile's reference to its Account; an Account saved while its Profile failed be
 unmoved until both are in; a failing Account dead-lettered alone, without its Profile, while another account is
 saved; `inserted` and `updated` pending together becoming one create; a later `inserted` for an existing record
 updating only what differs. `AlternativeSettingsTests` run the non-default settings from configuration
-(`Salesforce:ParentLink=ExternalId`, `Salesforce:AllOrNone=true`, `Sync:EventTypeMismatch=DeadLetter`,
-`Sync:MaxRetries=3`): the link through `Account__r`, both type mismatches dead-lettered, and a relationship whose
+(`Salesforce:ParentLink=ExternalId`, `Salesforce:AllOrNone=true`, `Sync:MaxRetries=3`): the link through
+`Account__r`, and a relationship whose
 Account never arrives dead-lettered after `MaxRetries` with `DEPENDENCY_NOT_SYNCED`, then synced once the Accounts
 exist and the dead letter is re-queued.
 
@@ -718,7 +715,7 @@ written once instead of flapping, a bad value failing only its own unit before a
 row lock costing only its own entity, an Account saved without its Profile, a create losing a race, a failed new
 Account taking down the reference subrequest without dead-lettering anyone else, both `ParentLink` modes, more than
 5 collections split over requests, `allOrNone: true` (rollback, and failures without a cause spending a retry),
-every row of the `meta.type` table in both mismatch modes, relinking, relationships and missing dependencies
+create or update decided by what Salesforce has, relinking, relationships and missing dependencies
 (found by the read, or rejected by Salesforce), gzip, clearing fields that became empty. Also: each mapper (an AutoFixture payload in, the
 expected sObject out, nulls passed through), sObject → record (names from the attributes, nulls included, lookups
 and external id), the guard that every Salesforce name on an sObject class exists in the mock org's schema, the

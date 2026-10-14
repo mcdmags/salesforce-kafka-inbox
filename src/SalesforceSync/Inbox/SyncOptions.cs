@@ -43,19 +43,4 @@ public sealed class SyncOptions
 
     public TimeSpan MaxRetryDelay { get; set; } = TimeSpan.FromHours(1);
     public TimeSpan IdleDelay { get; set; } = TimeSpan.FromSeconds(1);
-
-    /// <summary>
-    /// What to do when an event's meta.type disagrees with Salesforce: "inserted" but the record exists, or "updated"
-    /// but it doesn't. Judged on the entity's main record (the first of its unit).
-    /// </summary>
-    public EventTypeMismatch EventTypeMismatch { get; set; } = EventTypeMismatch.Reconcile;
-}
-
-public enum EventTypeMismatch
-{
-    /// <summary>Salesforce decides: an existing record is updated with what differs, a missing one is created. Logged.</summary>
-    Reconcile,
-
-    /// <summary>The event is dead-lettered with <c>last_error_code = 'EVENT_TYPE_MISMATCH'</c>.</summary>
-    DeadLetter
 }
