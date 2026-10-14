@@ -1,6 +1,5 @@
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
-using Dapper;
 using SalesforceSync.Data;
 using SalesforceSync.Sync;
 
@@ -55,52 +54,62 @@ public sealed class KafkaInboxConsumer(
         {
             while (!ct.IsCancellationRequested)
             {
-                ConsumeResult<string, string>? result;
-                try
-                {
-                    result = consumer.Consume(ct);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (ConsumeException ex) when (!ex.Error.IsFatal)
-                {
-                    log.LogWarning(ex, "Kafka consume error");
-                    continue;
-                }
+                if (!TryConsume(ct, out var message)) break;
+                if (message?.Message?.Value is null) continue;
 
-                if (result?.Message?.Value is null) continue;
-
-                var sync = byTopic[result.Topic];
-                if (!sync.TryReadEvent(result.Message.Value, out var entityId, out var problem))
-                {
-                    // Retrying can't fix it, and retrying would block every later event on the partition: log where
-                    // it is (to fix or replay at the source) and move on.
-                    log.LogError("Skipping malformed {Type} event at {Offset}: {Problem}", sync.EntityType, result.TopicPartitionOffset, problem);
-                    StoreOffset(result);
-                    continue;
-                }
-
-                try
-                {
-                    await pg.ExecuteAsync((conn, t) => conn.ExecuteAsync(new CommandDefinition(InboxSql.For(sync.InboxTable).Insert,
-                        new { entityId, payload = result.Message.Value }, cancellationToken: t)), ct);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    log.LogError(ex, "Failed to store {Offset}; will retry", result.TopicPartitionOffset);
-                    Rewind(result);
-                    await Task.Delay(StoreRetryDelay, ct);
-                    continue;
-                }
-                StoreOffset(result);
+                await IngestAsync(message, byTopic[message.Topic], ct);
             }
         }
         finally
         {
             consumer.Close();
         }
+    }
+
+    /// <returns>False when the consumer is shutting down. True with a null message after a consume error that isn't fatal.</returns>
+    private bool TryConsume(CancellationToken ct, out ConsumeResult<string, string>? message)
+    {
+        message = null;
+        try
+        {
+            message = consumer.Consume(ct);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (ConsumeException ex) when (!ex.Error.IsFatal)
+        {
+            log.LogWarning(ex, "Kafka consume error");
+            return true;
+        }
+    }
+
+    /// <summary>Stores a valid event in its type's inbox table, then its offset; skips a message that can never be synced.</summary>
+    private async Task IngestAsync(ConsumeResult<string, string> message, ISalesforceEntitySync sync, CancellationToken ct)
+    {
+        if (!sync.TryReadEvent(message.Message.Value, out var entityId, out var problem))
+        {
+            // Retrying can't fix it, and retrying would block every later event on the partition: log where
+            // it is (to fix or replay at the source) and move on.
+            log.LogError("Skipping malformed {Type} event at {Offset}: {Problem}", sync.EntityType, message.TopicPartitionOffset, problem);
+            StoreOffset(message);
+            return;
+        }
+
+        try
+        {
+            await pg.ExecuteAsync(InboxSql.For(sync.InboxTable).Insert, new { entityId, payload = message.Message.Value }, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogError(ex, "Failed to store {Offset}; will retry", message.TopicPartitionOffset);
+            Rewind(message);
+            await Task.Delay(StoreRetryDelay, ct);
+            return;
+        }
+        StoreOffset(message);
     }
 
     /// <summary>

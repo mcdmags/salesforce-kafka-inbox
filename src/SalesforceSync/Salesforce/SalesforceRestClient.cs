@@ -4,22 +4,11 @@ using System.Text.Json;
 
 namespace SalesforceSync.Salesforce;
 
-/// <summary>A SOQL query to run as one subrequest of a Composite request.</summary>
-public sealed record CompositeQuery(string ReferenceId, string Soql);
-
 /// <summary>
-/// An sObject Collections subrequest: creates (POST) or updates (PATCH) up to 200 records, each
-/// <c>{ "attributes": { "type": ... }, field: value, ... }</c>, with its <c>id</c> when updating.
+/// Salesforce REST transport, and the only class that talks to Salesforce. Every method is exactly one API call: it
+/// takes requests and returns the raw results per subrequest and per record. It decides nothing (what to write, what
+/// a result means); that is <see cref="Sync.SalesforceBatchUpsertService"/>'s.
 /// </summary>
-public sealed record CollectionRequest(string ReferenceId, bool Create, IReadOnlyList<IReadOnlyDictionary<string, object?>> Records);
-
-/// <summary>One record's result within a collection, in request order.</summary>
-public sealed record RecordResult(bool Success, string? Id, IReadOnlyList<SalesforceError> Errors);
-
-/// <param name="Records">Null when the subrequest failed as a whole (see <paramref name="Errors"/>).</param>
-public sealed record CollectionResult(string ReferenceId, IReadOnlyList<RecordResult>? Records, IReadOnlyList<SalesforceError> Errors);
-
-/// <summary>Salesforce REST transport. Every method is exactly one API call.</summary>
 public sealed class SalesforceRestClient(HttpClient http)
 {
     public const string ApiVersion = "v62.0";
@@ -78,13 +67,10 @@ public sealed class SalesforceRestClient(HttpClient http)
             })
         };
 
-        using var res = await http.PostAsJsonAsync($"{DataPath}/composite", payload, Json, ct);
-        await EnsureSuccessAsync(res, ct);
-        var body = await res.Content.ReadFromJsonAsync<CompositeBody>(Json, ct)
-                   ?? throw new InvalidOperationException("Empty composite response");
+        var subresponses = await PostCompositeAsync(payload, ct);
 
         var results = new Dictionary<string, List<JsonElement>>(StringComparer.Ordinal);
-        foreach (var sub in body.CompositeResponse)
+        foreach (var sub in subresponses)
         {
             if (sub.HttpStatusCode >= 400)
                 throw new SalesforceQueryException(sub.ReferenceId, ParseErrors(sub.ReferenceId, sub.Body));
@@ -134,24 +120,26 @@ public sealed class SalesforceRestClient(HttpClient http)
             })
         };
 
-        using var res = await http.PostAsJsonAsync($"{DataPath}/composite", payload, Json, ct);
-        await EnsureSuccessAsync(res, ct);
-        var body = await res.Content.ReadFromJsonAsync<CompositeBody>(Json, ct)
-                   ?? throw new InvalidOperationException("Empty composite response");
+        var subresponses = await PostCompositeAsync(payload, ct);
 
-        return body.CompositeResponse.Select(sub =>
+        return subresponses.Select(sub =>
         {
             // A subrequest that failed as a whole answers with an error list instead of one result per record
             if (sub.HttpStatusCode >= 400 || sub.Body.ValueKind != JsonValueKind.Array)
                 return new CollectionResult(sub.ReferenceId, null, ParseErrors(sub.ReferenceId, sub.Body));
 
-            return new CollectionResult(sub.ReferenceId, sub.Body.EnumerateArray().Select(r => new RecordResult(
-                r.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True,
-                r.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
-                r.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
-                    ? errors.EnumerateArray().Select(e => ParseError(null, e, "statusCode")).ToList()
-                    : [])).ToList(), []);
+            return new CollectionResult(sub.ReferenceId, sub.Body.EnumerateArray().Select(ParseRecordResult).ToList(), []);
         }).ToList();
+    }
+
+    /// <summary>Posts a Composite request and returns its subresponses, in request order.</summary>
+    private async Task<List<SubResponse>> PostCompositeAsync(object payload, CancellationToken ct)
+    {
+        using var res = await http.PostAsJsonAsync($"{DataPath}/composite", payload, Json, ct);
+        await EnsureSuccessAsync(res, ct);
+        var body = await res.Content.ReadFromJsonAsync<CompositeBody>(Json, ct)
+                   ?? throw new InvalidOperationException("Empty composite response");
+        return body.CompositeResponse;
     }
 
     public static string Soql(string sobject, IEnumerable<string> fields, string whereField, IEnumerable<string> values)
@@ -168,15 +156,25 @@ public sealed class SalesforceRestClient(HttpClient http)
         return body.EnumerateArray().Select(e => ParseError(referenceId, e, "errorCode")).ToList();
     }
 
+    private static RecordResult ParseRecordResult(JsonElement record) => new(
+        record.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True,
+        record.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
+        record.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
+            ? errors.EnumerateArray().Select(e => ParseError(null, e, "statusCode")).ToList()
+            : []);
+
     /// <param name="codeProperty">"errorCode" in an error response, "statusCode" in a collection's per-record errors.</param>
     private static SalesforceError ParseError(string? referenceId, JsonElement e, string codeProperty) => new(
         referenceId,
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(codeProperty, out var c) && c.ValueKind == JsonValueKind.String
-            ? c.GetString()! : "UNKNOWN_ERROR",
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String
-            ? m.GetString() : null,
+        StringProperty(e, codeProperty) ?? "UNKNOWN_ERROR",
+        StringProperty(e, "message"),
         e.ValueKind == JsonValueKind.Object && e.TryGetProperty("fields", out var f) && f.ValueKind == JsonValueKind.Array
             ? f.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList() : null);
+
+    private static string? StringProperty(JsonElement e, string name)
+        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     private static async Task EnsureSuccessAsync(HttpResponseMessage res, CancellationToken ct)
     {
@@ -192,12 +190,4 @@ public sealed class SalesforceRestClient(HttpClient http)
     private sealed record CompositeBody(List<SubResponse> CompositeResponse);
     private sealed record QueryPage(List<JsonElement> Records, string? NextRecordsUrl);
     private sealed record SubResponse(string ReferenceId, int HttpStatusCode, JsonElement Body);
-}
-
-/// <summary>A query subrequest failed, e.g. INVALID_FIELD because a field was deleted after it was described.</summary>
-public sealed class SalesforceQueryException(string referenceId, IReadOnlyList<SalesforceError> errors)
-    : Exception($"Query {referenceId} failed: {string.Join("; ", errors)}")
-{
-    public string ReferenceId { get; } = referenceId;
-    public IReadOnlyList<SalesforceError> Errors { get; } = errors;
 }

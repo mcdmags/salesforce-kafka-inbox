@@ -3,12 +3,6 @@ using System.Text.Json;
 
 namespace SalesforceSync.Salesforce;
 
-/// <summary>A value Salesforce would reject; the code is Salesforce's own error code for it.</summary>
-public readonly record struct FieldError(string Field, string Code, string Message)
-{
-    public override string ToString() => $"{Field}: {Code} {Message}";
-}
-
 /// <summary>
 /// Type-aware handling of field values, driven by sObject Describe. A desired value is first normalized to exactly
 /// what Salesforce stores for that field type (number rounded to the field's scale, checkbox null -> false,
@@ -34,91 +28,90 @@ public static class FieldValues
         normalized = null;
         error = default;
         var type = field.Type;
+        var isBoolean = type.Equals("boolean", StringComparison.OrdinalIgnoreCase);
 
         if (value is null || value is string { Length: 0 })
         {
-            if (type.Equals("boolean", StringComparison.OrdinalIgnoreCase))
-            {
-                normalized = false; // a checkbox is never null
-                return true;
-            }
-            if (!field.Nillable)
-                return Fail(field, "REQUIRED_FIELD_MISSING", "Required field can't be empty", out error);
+            if (isBoolean) normalized = false; // a checkbox is never null
+            else if (!field.Nillable) return Fail(field, "REQUIRED_FIELD_MISSING", "Required field can't be empty", out error);
             return true; // Salesforce stores "" as null
         }
 
         if (TextTypes.Contains(type))
-        {
-            var text = AsString(value);
-            if (field.Length > 0 && text.Length > field.Length)
-                return Fail(field, "STRING_TOO_LONG", $"{text.Length} characters, max {field.Length}", out error);
-            normalized = text;
-            return true;
-        }
+            return TryText(field, AsString(value), out normalized, out error);
 
         if (type.Equals("multipicklist", StringComparison.OrdinalIgnoreCase))
-        {
-            var text = string.Join(';', SplitMultiPicklist(AsString(value)));
-            if (field.Length > 0 && text.Length > field.Length)
-                return Fail(field, "STRING_TOO_LONG", $"{text.Length} characters, max {field.Length}", out error);
-            normalized = text;
-            return true;
-        }
+            return TryText(field, string.Join(';', SplitMultiPicklist(AsString(value))), out normalized, out error);
 
         if (type is "id" or "reference")
-        {
-            var id = To18CharId(AsString(value));
-            if (id is null) return Fail(field, "MALFORMED_ID", $"'{value}' is not a Salesforce id", out error);
-            normalized = id;
-            return true;
-        }
+            return (normalized = To18CharId(AsString(value))) is not null
+                   || Fail(field, "MALFORMED_ID", $"'{value}' is not a Salesforce id", out error);
 
-        if (type.Equals("boolean", StringComparison.OrdinalIgnoreCase))
+        if (isBoolean)
         {
             if (value is bool b) normalized = b;
             else if (value is string s && bool.TryParse(s, out var parsed)) normalized = parsed;
-            else return Fail(field, "INVALID_TYPE_ON_FIELD_IN_RECORD", $"'{value}' is not a boolean", out error);
+            else return WrongType(field, value, "a boolean", out error);
             return true;
         }
 
         if (NumberTypes.Contains(type))
-        {
-            if (!TryDecimal(value, out var number))
-                return Fail(field, "INVALID_TYPE_ON_FIELD_IN_RECORD", $"'{value}' is not a number", out error);
-            var scale = type is "int" or "long" ? 0 : field.Scale;
-            number = Math.Round(number, scale, MidpointRounding.AwayFromZero);
-            var integerDigits = field.Precision - scale;
-            if (field.Precision > 0 && Math.Abs(number) >= Pow10(integerDigits))
-                return Fail(field, "NUMBER_OUTSIDE_VALID_RANGE",
-                    $"{number} doesn't fit {field.Precision} digits with {scale} decimal places", out error);
-            normalized = number;
-            return true;
-        }
+            return TryNumber(field, value, out normalized, out error);
 
         if (type.Equals("date", StringComparison.OrdinalIgnoreCase))
         {
-            if (TryDate(value, out var date)) normalized = date;
-            else return Fail(field, "INVALID_TYPE_ON_FIELD_IN_RECORD", $"'{value}' is not a date", out error);
+            if (!TryDate(value, out var date)) return WrongType(field, value, "a date", out error);
+            normalized = date;
             return true;
         }
 
         if (type.Equals("datetime", StringComparison.OrdinalIgnoreCase))
         {
-            if (TryDateTime(value, out var instant)) normalized = instant;
-            else return Fail(field, "INVALID_TYPE_ON_FIELD_IN_RECORD", $"'{value}' is not a date/time", out error);
+            if (!TryDateTime(value, out var instant)) return WrongType(field, value, "a date/time", out error);
+            normalized = instant;
             return true;
         }
 
         if (type.Equals("time", StringComparison.OrdinalIgnoreCase))
         {
-            if (TryTime(value, out var time)) normalized = time;
-            else return Fail(field, "INVALID_TYPE_ON_FIELD_IN_RECORD", $"'{value}' is not a time", out error);
+            if (!TryTime(value, out var time)) return WrongType(field, value, "a time", out error);
+            normalized = time;
             return true;
         }
 
         normalized = value; // other types (base64, anyType, ...): compared as JSON
         return true;
     }
+
+    private static bool TryText(SalesforceField field, string text, out object? normalized, out FieldError error)
+    {
+        normalized = null;
+        error = default;
+        if (field.Length > 0 && text.Length > field.Length)
+            return Fail(field, "STRING_TOO_LONG", $"{text.Length} characters, max {field.Length}", out error);
+        normalized = text;
+        return true;
+    }
+
+    /// <summary>Rounded to the field's scale (integers: 0), and within its precision.</summary>
+    private static bool TryNumber(SalesforceField field, object value, out object? normalized, out FieldError error)
+    {
+        normalized = null;
+        error = default;
+        if (!TryDecimal(value, out var number)) return WrongType(field, value, "a number", out error);
+
+        var scale = field.Type is "int" or "long" ? 0 : field.Scale;
+        number = Math.Round(number, scale, MidpointRounding.AwayFromZero);
+        var integerDigits = field.Precision - scale;
+        if (field.Precision > 0 && Math.Abs(number) >= Pow10(integerDigits))
+            return Fail(field, "NUMBER_OUTSIDE_VALID_RANGE",
+                $"{number} doesn't fit {field.Precision} digits with {scale} decimal places", out error);
+        normalized = number;
+        return true;
+    }
+
+    private static bool WrongType(SalesforceField field, object value, string expected, out FieldError error)
+        => Fail(field, "INVALID_TYPE_ON_FIELD_IN_RECORD", $"'{value}' is not {expected}", out error);
 
     /// <summary>Whether Salesforce's current value equals a value produced by <see cref="TryNormalize"/>.</summary>
     public static bool AreEqual(SalesforceField field, object? normalized, JsonElement current)
