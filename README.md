@@ -620,6 +620,8 @@ The dashboard shows:
   account, plus relationship events between accounts
 - **benchmarks**: explicit start (click ▶), runs the inbox drain benchmark against `benchdb`
 
+To sync to a Salesforce sandbox instead of the mock org, see [Run against the sandbox](#5-run-against-the-sandbox).
+
 ## Tests
 
 Requires the .NET 8 SDK; the integration tests also need **Docker** (Docker Desktop, OrbStack or Colima), nothing
@@ -897,17 +899,238 @@ where locktype = 'advisory' and classid = 0 and objid::bigint between 1397096448
 
 ## Using a real Salesforce org
 
-1. No fields need to be added for the sync itself. Account, `Profile__c` and `Account_Relationship__c` need
-   their external id fields (marked **Unique**), the `Account__c` lookup on the Profile and the `Account__c` /
-   `Related_Account__c` lookups on the relationship.
-2. Set `Salesforce:UseFake=false` (the default outside Aspire) plus `InstanceUrl`, `TokenUrl`,
-   `ClientId`, `ClientSecret` (OAuth client credentials).
-3. Set the org's `SalesforceLimits:DailyApiAllocation` (and `ConcurrentLongRunningLimit`, 5 on Developer Edition and trial orgs) and choose this integration's
-   `RateLimit:DailyBudgetShare` (see [Salesforce API limits](#salesforce-api-limits)).
-4. Adjust object and field names on the sObject classes (`Salesforce/SObjects/`, the only place they appear), and
-   the payload classes and mappers if the events differ. Tune `Salesforce:PermanentErrorCodes`, `Sync:RetryBaseDelay` / `MaxRetryDelay` / `MaxRetries` and
-   `Postgres:Retry` if needed. `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-100, ...)
-   and a missing `Salesforce:InstanceUrl` fail startup.
+The steps below connect the sync to a sandbox. The same steps work for production, but use a sandbox first. Every
+Salesforce screen named here is under **Setup** (the gear icon, top right). Type the name into **Quick Find** to
+open it.
+
+### 1. Find the org's API address
+
+Lightning shows the org at an address like `https://acme--dev.sandbox.lightning.force.com`. The API uses the org's
+**My Domain** address instead: replace `lightning.force.com` with `my.salesforce.com`.
+
+| What you see in the browser | `Salesforce:InstanceUrl` |
+|---|---|
+| `https://acme--dev.sandbox.lightning.force.com` (sandbox) | `https://acme--dev.sandbox.my.salesforce.com` |
+| `https://acme.lightning.force.com` (production) | `https://acme.my.salesforce.com` |
+
+**Setup → My Domain** shows the exact address. Use it, not `login.salesforce.com` or `test.salesforce.com`: the
+client credentials flow only works on the org's own domain. The token URL is the same address plus
+`/services/oauth2/token`.
+
+### 2. Create the user the sync runs as
+
+With the client credentials flow there is no login. Salesforce runs every API call as one user that you choose, so the
+sync can do only what that user may do.
+
+1. **Users → New User**. User License **Salesforce Integration**, Profile **Minimum Access - API Only Integrations**.
+   Give it a name like "Salesforce Sync" and a real email address you can read. The username must be unique across
+   all Salesforce orgs, for example `salesforce-sync@acme.dev-sandbox`.
+2. **Permission Sets → New**. Label `Salesforce Sync`, License **Salesforce API Integration**. In **Object Settings**,
+   give it **Read, Create and Edit** on Account, Profile and Account Relationship (the objects created in step 4), and
+   **Edit** access on every field listed in step 4. Delete isn't needed.
+3. On the user: **Permission Set License Assignments → Edit Assignments → Salesforce API Integration**, then
+   **Permission Set Assignments → Edit Assignments → Salesforce Sync**.
+
+If the org has no Salesforce Integration licenses left, use a standard Salesforce user with a profile that has **API
+Enabled**. For a first test in a sandbox you can also run as your own administrator user, but don't do that in
+production.
+
+### 3. Create the app and get the client id and secret
+
+Salesforce calls the client id and secret the **Consumer Key** and **Consumer Secret**. They belong to an **External
+Client App** (newer orgs) or a **Connected App** (older orgs). New orgs can't create Connected Apps any more, so
+start with an External Client App.
+
+**External Client App:**
+
+1. **External Client App Manager → New External Client App**. Name `Salesforce Sync`, a contact email, Distribution
+   State **Local**.
+2. Under **API (Enable OAuth Settings)**, tick **Enable OAuth**.
+   - **Callback URL**: `https://login.salesforce.com/services/oauth2/callback`. It's required but this flow never uses
+     it.
+   - **OAuth Scopes**: add **Manage user data via APIs (api)**. Nothing else is needed.
+   - **Flow Enablement**: tick **Enable Client Credentials Flow** and confirm.
+   - Save with **Create**.
+3. Open the app's **Policies** tab → **Edit**. Under **OAuth Policies**, tick **Enable Client Credentials Flow** and
+   set **Run As (Username)** to the user from step 2. Save.
+4. Open the **Settings** tab → **OAuth Settings** → **Consumer Key and Secret**. Salesforce emails you a verification
+   code. Copy the **Consumer Key** (the `ClientId`) and the **Consumer Secret** (the `ClientSecret`).
+
+**Connected App** (only if the org still offers **App Manager → New Connected App**):
+
+1. Name `Salesforce Sync`, a contact email, tick **Enable OAuth Settings**, the same callback URL, scope **Manage user
+   data via APIs (api)**, and tick **Enable Client Credentials Flow**. Save.
+2. **App Manager** → the app's row menu → **Manage → Edit Policies**: under **Client Credentials Flow**, set **Run As**
+   to the user from step 2. Save.
+3. **App Manager** → the app's row menu → **View → Manage Consumer Details** shows the key and secret.
+
+A new or changed app can take up to 10 minutes to work. Check it before going on (replace the three values):
+
+```bash
+curl -s https://acme--dev.sandbox.my.salesforce.com/services/oauth2/token \
+  -d grant_type=client_credentials -d client_id='<Consumer Key>' -d client_secret='<Consumer Secret>'
+```
+
+A JSON answer with an `access_token` means it works. The usual errors:
+
+| Error | Cause |
+|---|---|
+| `request not supported on this domain` | The URL isn't the org's My Domain address (step 1). |
+| `no client credentials user enabled` | **Run As** isn't set in the app's policies (step 3). |
+| `invalid_client` / `invalid_client_id` | Wrong key or secret, or the app is less than 10 minutes old. |
+
+Treat the secret like a password: never commit it. The next steps keep it in .NET user secrets, which live in your
+home folder, outside the repository.
+
+### 4. Create the objects and fields
+
+The sync writes three objects. Account is standard; `Profile__c` and `Account_Relationship__c` are custom objects to
+create. Create them and their fields in **Object Manager** (**Create → Custom Object**, then **Fields &
+Relationships → New** on each object). The API name is what you type in **Field Name** plus `__c`: Field Name
+`External_Id` gives `External_Id__c`.
+
+Every object needs an `External_Id__c` field with **Unique** and **External ID** ticked. The sync finds and links
+records by it, never by the Salesforce Id.
+
+**Account** (standard object). These standard fields need nothing: `Name`, `Rating`, `Industry`, `Description`,
+`AnnualRevenue`, `NumberOfEmployees`, `Phone`, `Website`. Add:
+
+| Field Name → API name | Type |
+|---|---|
+| `External_Id__c` | Text(255), Unique, External ID |
+| `Active__c` | Checkbox |
+| `Tags__c` | Picklist (Multi-Select). Values the events send, e.g. `B2B`, `Retail` |
+| `Customer_Since__c` | Date |
+| `Last_Contacted__c` | Date/Time |
+
+**`Profile__c`** (custom object). Label `Profile`, Object Name `Profile`, Record Name `Profile Name` of type Text.
+If Salesforce refuses the name, pick another and change it on `ProfileSObject` (see [field mappings](#field-mappings)).
+
+| Field Name → API name | Type |
+|---|---|
+| `External_Id__c` | Text(255), Unique, External ID |
+| `Account__c` | Lookup Relationship to Account |
+| `Tier__c` | Picklist: `Bronze`, `Silver`, `Gold`, `Platinum` |
+| `Score__c` | Number(16, 2) |
+| `Discount__c` | Percent(3, 2) |
+| `Notes__c` | Text Area(255) |
+| `Opt_In__c` | Checkbox |
+| `Start_Date__c` | Date |
+
+**`Account_Relationship__c`** (custom object). Label `Account Relationship`, Object Name `Account_Relationship`,
+Record Name `Relationship Name` of type Text.
+
+| Field Name → API name | Type |
+|---|---|
+| `External_Id__c` | Text(255), Unique, External ID |
+| `Account__c` | Lookup Relationship to Account (Child Relationship Name e.g. `Relationships`) |
+| `Related_Account__c` | Lookup Relationship to Account (a different Child Relationship Name, e.g. `Related_Relationships`) |
+| `Type__c` | Picklist: `Parent`, `Subsidiary`, `Partner`, `Reseller` |
+| `Start_Date__c` | Date |
+| `Active__c` | Checkbox |
+
+While creating each field, Salesforce asks for field-level security: make it visible (not read-only) for the
+`Salesforce Sync` permission set, or grant field access in the permission set afterwards.
+
+A picklist with **Restrict picklist to the values defined in the value set** ticked rejects any other value. That
+event is then dead-lettered (`INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST`). Add every value the source system sends, or
+leave the picklist unrestricted.
+
+### Field mappings
+
+A mapping is code, in three places:
+
+1. **Payload** (`Inbox/Payloads/`): the event's JSON fields.
+2. **sObject** (`Salesforce/SObjects/`): the Salesforce object and field API names, in the `[SObject]` and
+   `[JsonPropertyName]` attributes. This is the only place Salesforce names appear.
+3. **Mapper** (`Sync/Mapping/`): one line per field, from the payload to the sObject.
+
+The mappings as they are:
+
+| Event field | Salesforce field |
+|---|---|
+| `account.externalId` | `Account.External_Id__c` |
+| `account.name`, `rating`, `industry`, `description`, `annualRevenue`, `numberOfEmployees`, `phone`, `website` | `Account.Name`, `Rating`, `Industry`, `Description`, `AnnualRevenue`, `NumberOfEmployees`, `Phone`, `Website` |
+| `account.isActive` | `Account.Active__c` |
+| `account.tags` (a list) | `Account.Tags__c` (values joined with `;`) |
+| `account.customerSince` | `Account.Customer_Since__c` |
+| `account.lastContactedAt` | `Account.Last_Contacted__c` |
+| `account.profile.externalId` (the account's own if missing) | `Profile__c.External_Id__c` |
+| the account itself | `Profile__c.Account__c` |
+| `account.profile.name`, `tier`, `score`, `notes`, `optIn`, `startDate` | `Profile__c.Name`, `Tier__c`, `Score__c`, `Notes__c`, `Opt_In__c`, `Start_Date__c` |
+| `account.profile.discountPercent` | `Profile__c.Discount__c` |
+| `accountRelationship.externalId`, `name`, `type`, `startDate`, `isActive` | `Account_Relationship__c.External_Id__c`, `Name`, `Type__c`, `Start_Date__c`, `Active__c` |
+| `accountRelationship.accountExternalId` | `Account_Relationship__c.Account__c` (the Account with that external id) |
+| `accountRelationship.relatedAccountExternalId` | `Account_Relationship__c.Related_Account__c` |
+
+To change a mapping:
+
+- **A field has a different API name in your org** (e.g. `LLC_BI__Active__c`): change the string in its
+  `[JsonPropertyName("...")]` on the sObject class. Same for an object name in `[SObject("...")]`.
+- **Drop a field**: remove its property from the sObject class and its line from the mapper. A field the sync doesn't
+  know is never touched.
+- **Add a field**: add the property to the payload class (the JSON name in camelCase), the property with its
+  `[JsonPropertyName]` to the sObject class, and one line to the mapper. Add it to `FakeSchema`
+  (`src/SalesforceSync.FakeSalesforce/FakeSchema.cs`) too: a unit test checks every sObject name against the mock org,
+  and the mock org rejects fields it doesn't know.
+- **A new object**: see [Adding a Salesforce object](#adding-a-salesforce-object).
+
+Every property on an sObject class is the record's full desired state: an event without a value clears that field in
+Salesforce.
+
+### 5. Run against the sandbox
+
+Store the values from steps 1 and 3 in the AppHost's user secrets. When they are set, the AppHost skips the mock org,
+points the worker at the sandbox, and makes the load generator send a small run (200 events over 20 accounts) instead
+of 20,000.
+
+```bash
+cd src/SalesforceSync.AppHost
+dotnet user-secrets set "Salesforce:InstanceUrl" "https://acme--dev.sandbox.my.salesforce.com"
+dotnet user-secrets set "Salesforce:ClientId" "<Consumer Key>"
+dotnet user-secrets set "Salesforce:ClientSecret" "<Consumer Secret>"
+dotnet user-secrets set "SalesforceLimits:DailyApiAllocation" "5000000"
+cd ../..
+dotnet run --project src/SalesforceSync.AppHost
+```
+
+`DailyApiAllocation` is the org's number of API calls per 24 hours: **Setup → Company Information → API Requests, Last
+24 Hours** shows it (sandboxes usually have 5,000,000). `dotnet user-secrets clear` (in `src/SalesforceSync.AppHost`)
+goes back to the mock org.
+
+Then check the result in the sandbox, for example in **Developer Console → Query Editor**:
+
+```sql
+SELECT External_Id__c, Name, Description, Active__c, LastModifiedDate FROM Account WHERE External_Id__c LIKE 'ACC-%'
+SELECT External_Id__c, Account__r.External_Id__c, Tier__c, Score__c FROM Profile__c
+SELECT External_Id__c, Account__r.External_Id__c, Related_Account__r.External_Id__c, Type__c FROM Account_Relationship__c
+```
+
+The `salesforce-sync` logs in the Aspire dashboard show each batch, and pgAdmin shows the inbox tables: every row should
+end `done` or `superseded`. A `dead` row's `last_error` says what Salesforce rejected. Delete the test records
+afterwards: `ACC-…`, `PRF-…` and `REL-…`.
+
+To run the worker without Aspire (a server or Kubernetes), give it the same settings as environment variables
+(`Salesforce__InstanceUrl`, `Salesforce__TokenUrl`, `Salesforce__ClientId`, `Salesforce__ClientSecret`,
+`SalesforceLimits__DailyApiAllocation`), plus `ConnectionStrings__inboxdb` and `ConnectionStrings__kafka`.
+
+### 6. Tune and check
+
+- Choose this integration's share of the daily allocation with `RateLimit:DailyBudgetShare`, and set
+  `SalesforceLimits:ConcurrentLongRunningLimit` (5 on Developer Edition and trial orgs). See
+  [Salesforce API limits](#salesforce-api-limits).
+- Tune `Salesforce:PermanentErrorCodes`, `Sync:RetryBaseDelay` / `MaxRetryDelay` / `MaxRetries` and `Postgres:Retry`
+  if needed. `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-100, ...) and a missing
+  `Salesforce:InstanceUrl` fail startup.
+- The mock org was built from Salesforce's documentation. These behaviours are worth confirming in the sandbox:
+  - an empty checkbox (`null`) is stored as `false`, and an empty text (`""`) as empty;
+  - a number with more decimals than the field allows is rounded;
+  - a Date/Time keeps whole seconds;
+  - updating a record whose Id no longer exists, and linking to an Account that doesn't exist, fail with a clear error
+    code;
+  - a required field that has a default value can be left out on create;
+  - concurrent workers on the same account, and a worker killed mid-batch, still end with every account at its newest
+    version.
 
 ## Status
 
