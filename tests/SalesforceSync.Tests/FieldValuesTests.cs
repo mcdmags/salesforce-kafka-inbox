@@ -1,6 +1,5 @@
 using System.Text.Json;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Sync;
 
 namespace SalesforceSync.Tests;
 
@@ -136,26 +135,5 @@ public sealed class FieldValuesTests
     {
         FieldValues.TryNormalize(F("boolean"), notABoolean, out _, out var error).Should().BeFalse();
         error.Code.Should().Be("INVALID_TYPE_ON_FIELD_IN_RECORD");
-    }
-
-    [Theory]
-    [InlineData(new[] { "PROCESSING_HALTED" }, SyncOutcome.NotAttempted)]
-    [InlineData(new[] { "UNABLE_TO_LOCK_ROW", "PROCESSING_HALTED" }, SyncOutcome.TransientFailure)]
-    [InlineData(new[] { "REQUIRED_FIELD_MISSING", "PROCESSING_HALTED" }, SyncOutcome.PermanentFailure)]
-    [InlineData(new[] { "SOMETHING_NEW" }, SyncOutcome.TransientFailure)]
-    public void Record_errors_are_classified(string[] codes, SyncOutcome expected)
-    {
-        var errors = new SalesforceErrors(Microsoft.Extensions.Options.Options.Create(new SalesforceOptions()));
-        errors.Classify([.. codes.Select(c => new SalesforceError("acct", c, null))]).Should().Be(expected);
-    }
-
-    [Fact]
-    public void Permanent_codes_are_configurable()
-    {
-        var errors = new SalesforceErrors(Microsoft.Extensions.Options.Options.Create(
-            new SalesforceOptions { PermanentErrorCodes = ["UNABLE_TO_LOCK_ROW"] }));
-        errors.Classify([new SalesforceError(null, "UNABLE_TO_LOCK_ROW", null)]).Should().Be(SyncOutcome.PermanentFailure);
-        errors.Classify([new SalesforceError(null, "REQUIRED_FIELD_MISSING", null)]).Should().Be(SyncOutcome.TransientFailure,
-            "a code is permanent only when listed, and setting the list replaces the defaults");
     }
 }

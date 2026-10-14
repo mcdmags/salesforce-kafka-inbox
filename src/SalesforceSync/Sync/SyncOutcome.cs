@@ -15,14 +15,5 @@ public enum SyncOutcome
     TransientFailure,
 
     /// <summary>Retrying the same data fails the same way (validation, unknown or read-only field): dead-letter now.</summary>
-    PermanentFailure,
-
-    /// <summary>
-    /// Sent, but the answer never came: Salesforce may still apply it. Hold the entity for
-    /// <see cref="Inbox.SyncOptions.UnknownOutcomeHold"/>, no retry spent.
-    /// </summary>
-    OutcomeUnknown,
-
-    /// <summary>Not sent because of a rate limit: hand back after <see cref="UpsertResult.RetryAfter"/>, no retry spent.</summary>
-    RateLimited
+    PermanentFailure
 }

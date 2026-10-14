@@ -376,10 +376,11 @@ collections (Account create / update, Profile create by reference / create with 
 more are split over further Composite requests, an entity's records always in the same one. The read is unchanged: one
 Composite request with up to 5 queries.
 
-When a batch needs more than one write request, each request's failure affects only its own entities; outcomes of the
-requests already sent are recorded normally. A later request that fails outright retries only its entities, one with an
-unknown outcome holds only its entities (and stops the batch: entities not yet sent are released), and one that is
-rate limited defers its entities and the ones not yet sent. A failure of the first request applies to the whole batch.
+When a batch needs more than one write request and one of them fails as a whole (the call, not records in it), the
+batch stops and the failure applies to every event of the batch, as if the first request had failed: retried with
+backoff, held if the request's outcome is unknown, deferred if it was rate limited. That is safe even though earlier
+requests may have saved their records: the retry reads Salesforce again and writes only what still differs, so those
+entities end `done` without being written twice.
 
 **`Sync:BatchSize`** is 1 to 100 entities (default 75). The bound comes from the read, not the write: a query takes
 100 external ids and a Composite request 5 queries, and a relationship needs up to three ids per entity (itself and
@@ -422,7 +423,7 @@ succeeded**. Until then Salesforce can show the new Account with the old or no P
 | a child not saved only because its parent in the same entity wasn't | whatever the parent's error says; the child's own "parent missing" error is ignored |
 | its whole subrequest went down because of another entity's record (`PROCESSING_HALTED` on a reference without a value) | released, no retry spent |
 | a subrequest that failed as a whole for any other reason | retried with backoff, never dead-lettered (it says nothing about one record's data) |
-| the call itself failed | as before: rate-limited → deferred; provably not applied → retried; otherwise [unknown outcome](#unknown-outcomes) → held |
+| the call itself failed (any write request of the batch) | every event of the batch: rate-limited → deferred; provably not applied → retried; otherwise [unknown outcome](#unknown-outcomes) → held |
 
 ### Linking a child to a parent created in the same request
 
@@ -518,9 +519,8 @@ public sealed class AccountRelationshipSyncService(
     public static UpsertStrategy<AccountRelationshipEvent> CreateStrategy(
         ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
         => new(Type,
-            EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id,
-            EventTime: e => e.Meta?.Timestamp(),                 // the time and the type are in the event
-            EventType: e => e.Meta?.Kind(),
+            EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id
+            Meta: e => e.Meta,                                  // and the meta (time and type) are in the event
             Map: (key, e) => Map(key, e, relationships),
             Queries: Queries);
 
@@ -795,7 +795,7 @@ with the response header and status codes from the REST API Developer Guide
 ([Limit Info Header](https://developer.salesforce.com/docs/platform/api-rest/guide/headers-api-usage.html),
 [Composite](https://developer.salesforce.com/docs/platform/api-rest/guide/resources-composite-composite-post.html)).
 Set the org's daily API allocation (`DailyApiAllocation`, the number in Setup: System Overview, API Requests, Last
-24 Hours) and its type; the worker logs its limits at startup and refuses to start on a configuration that can't
+24 Hours) and its concurrent long-running request limit (`ConcurrentLongRunningLimit`); the worker logs its limits at startup and refuses to start on a configuration that can't
 work, including a missing or non-positive `DailyApiAllocation`. The configured allocation is the maximum: Salesforce
 reports the org's real one on every REST response (`Sforce-Limit-Info: api-usage=25/5000`, a limit of 5,000), and
 when that is lower the budget follows it. A response without the header, or with one that can't be read, leaves the
@@ -803,9 +803,8 @@ budget on the configuration.
 
 ```json
 "SalesforceLimits": {
-  "OrgType": "Production",          // Production | Sandbox | DeveloperEdition | Trial: the default concurrent limit
   "DailyApiAllocation": 115000,     // required: the org's calls per 24 hours, from Setup
-  "ConcurrentLongRunningLimit": null,
+  "ConcurrentLongRunningLimit": 25, // the org's limit: 25 for production and sandboxes, 5 for Developer Edition and trials
   "LongRunningThreshold": "00:00:20",
   "RequestTimeout": "00:01:30"
 },
@@ -826,7 +825,7 @@ budget on the configuration.
 | **What a call is**: each HTTP request; a Composite request (and an sObject Collections request) counts as one call however many subrequests it holds | One token per HTTP request: a describe (cached), each query page and each Composite write. |
 | **Org-wide usage** (also other integrations): `Sforce-Limit-Info: api-usage=used/limit` on every REST response | `api-usage` and, when Salesforce sends it, `per-app-api-usage` (the connected app's quota): slow down at `DailySoftRatio`, pause at `DailyHardRatio`. The allocation Salesforce reports, the configured maximum and the resulting budget are logged when first seen and whenever Salesforce's changes. `api-bursts` appears in Salesforce's example of the header but isn't defined, so it is recorded in `sf_limit_status` and not acted on. |
 | **Requests per second**: Salesforce publishes no such limit, and none on concurrent requests shorter than 20 s | `MaxRequestsPerSecond` and `BurstCapacity` are this integration's own pacing, so it spreads its share of the daily allocation instead of spending it in bursts. |
-| **Concurrent long-running requests** (20 s or longer): 25 for production and sandboxes, 5 for Developer Edition and trials | `Sync:MaxConcurrentRequests` (global advisory-lock slots) must not exceed it, or startup fails. Calls that take `LongRunningThreshold` or longer are logged. `REQUEST_LIMIT_EXCEEDED` with `ConcurrentPerOrgLongTxn` pauses all workers for `ConcurrentLimitPause`. |
+| **Concurrent long-running requests** (20 s or longer): 25 for production and sandboxes, 5 for Developer Edition and trials | `SalesforceLimits:ConcurrentLongRunningLimit` (default 25). `Sync:MaxConcurrentRequests` (global advisory-lock slots) must not exceed it, or startup fails. Calls that take `LongRunningThreshold` or longer are logged. `REQUEST_LIMIT_EXCEEDED` with `ConcurrentPerOrgLongTxn` pauses all workers for `ConcurrentLimitPause`. |
 | **Total requests exceeded** (`REQUEST_LIMIT_EXCEEDED`, `TotalRequests`) | Pauses all workers for `DailyHardPause`. Salesforce may allow some overage on paid orgs, but it isn't relied on. |
 | **API timeout**: 10 minutes for REST calls, for a composite request as a whole (query calls follow the SOQL limits and fail with `QUERY_TIMEOUT`, retried as transient) | `RequestTimeout` (HTTP client timeout, including the token wait) must be at most 10 minutes, or startup fails. The worker also gives up at 80% of its lease. |
 
@@ -903,7 +902,7 @@ where locktype = 'advisory' and classid = 0 and objid::bigint between 1397096448
    `Related_Account__c` lookups on the relationship.
 2. Set `Salesforce:UseFake=false` (the default outside Aspire) plus `InstanceUrl`, `TokenUrl`,
    `ClientId`, `ClientSecret` (OAuth client credentials).
-3. Set the org's `SalesforceLimits:DailyApiAllocation` (and `OrgType`) and choose this integration's
+3. Set the org's `SalesforceLimits:DailyApiAllocation` (and `ConcurrentLongRunningLimit`, 5 on Developer Edition and trial orgs) and choose this integration's
    `RateLimit:DailyBudgetShare` (see [Salesforce API limits](#salesforce-api-limits)).
 4. Adjust object and field names on the sObject classes (`Salesforce/SObjects/`, the only place they appear), and
    the payload classes and mappers if the events differ. Tune `Salesforce:PermanentErrorCodes`, `Sync:RetryBaseDelay` / `MaxRetryDelay` / `MaxRetries` and

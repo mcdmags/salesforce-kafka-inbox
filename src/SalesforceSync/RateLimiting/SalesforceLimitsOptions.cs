@@ -3,8 +3,6 @@ using SalesforceSync.Inbox;
 
 namespace SalesforceSync.RateLimiting;
 
-public enum SalesforceOrgType { Production, Sandbox, DeveloperEdition, Trial }
-
 /// <summary>
 /// The org's Platform API limits, from "API Request Limits and Allocations" in the Salesforce Developer Limits and
 /// Allocations Quick Reference. <see cref="DailyApiAllocation"/> is the maximum: when Salesforce reports a lower limit
@@ -17,9 +15,6 @@ public sealed class SalesforceLimitsOptions
     /// <summary>Salesforce stops REST calls (a composite request as a whole) after this long.</summary>
     public static readonly TimeSpan MaxApiTimeout = TimeSpan.FromMinutes(10);
 
-    /// <summary>Decides the default <see cref="ConcurrentLongRunningLimit"/>.</summary>
-    public SalesforceOrgType OrgType { get; set; } = SalesforceOrgType.Production;
-
     /// <summary>
     /// The org's total calls per rolling 24 hours (all integrations and users together), as shown in Setup (System
     /// Overview, API Requests, Last 24 Hours). Required and positive.
@@ -27,10 +22,10 @@ public sealed class SalesforceLimitsOptions
     public long DailyApiAllocation { get; set; }
 
     /// <summary>
-    /// Max concurrent inbound requests lasting <see cref="LongRunningThreshold"/> or longer, across the whole org.
-    /// Defaults to 25 for production orgs and sandboxes, 5 for Developer Edition and trial orgs.
+    /// The org's max concurrent inbound requests lasting <see cref="LongRunningThreshold"/> or longer: 25 for
+    /// production orgs and sandboxes (the default), 5 for Developer Edition and trial orgs. Must be positive.
     /// </summary>
-    public int? ConcurrentLongRunningLimit { get; set; }
+    public int ConcurrentLongRunningLimit { get; set; } = 25;
 
     /// <summary>Requests at least this long count toward <see cref="ConcurrentLongRunningLimit"/>.</summary>
     public TimeSpan LongRunningThreshold { get; set; } = TimeSpan.FromSeconds(20);
@@ -40,12 +35,6 @@ public sealed class SalesforceLimitsOptions
     /// (a composite request as a whole) after 10 minutes, so this must not exceed that.
     /// </summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(90);
-
-    public int EffectiveConcurrentLongRunningLimit => ConcurrentLongRunningLimit ?? OrgType switch
-    {
-        SalesforceOrgType.DeveloperEdition or SalesforceOrgType.Trial => 5,
-        _ => 25
-    };
 }
 
 /// <summary>Fails startup when the configuration can't work against the org's published limits.</summary>
@@ -62,11 +51,15 @@ public sealed class SalesforceLimitsValidator(IOptions<SyncOptions> sync, IOptio
                        "allocation, a positive number (Setup: System Overview, API Requests, Last 24 Hours).");
         }
 
-        var concurrent = o.EffectiveConcurrentLongRunningLimit;
-        if (sync.Value.MaxConcurrentRequests > concurrent)
+        if (o.ConcurrentLongRunningLimit <= 0)
+        {
+            errors.Add($"{SalesforceLimitsOptions.Section}:ConcurrentLongRunningLimit ({o.ConcurrentLongRunningLimit}) must be the " +
+                       "org's concurrent long-running request limit, a positive number (25 for production orgs and sandboxes).");
+        }
+        else if (sync.Value.MaxConcurrentRequests > o.ConcurrentLongRunningLimit)
         {
             errors.Add($"Sync:MaxConcurrentRequests ({sync.Value.MaxConcurrentRequests}) exceeds the org's limit of " +
-                       $"{concurrent} concurrent long-running requests ({o.OrgType}). Other integrations share that " +
+                       $"{o.ConcurrentLongRunningLimit} concurrent long-running requests. Other integrations share that " +
                        "limit, so keep it well below.");
         }
 

@@ -24,7 +24,7 @@ public sealed class AccountSyncService(
         ISObjectMapper<AccountPayload, AccountSObject> accounts,
         ISObjectMapper<ProfilePayload, ProfileSObject> profiles)
     {
-        return new(Type, e => e.Account?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
+        return new(Type, e => e.Account?.ExternalId, e => e.Meta,
                 (key, e) => Map(key, e, accounts, profiles), Queries);
     }
 

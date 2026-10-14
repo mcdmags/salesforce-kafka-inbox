@@ -22,7 +22,7 @@ public sealed class AccountRelationshipSyncService(
     public static UpsertStrategy<AccountRelationshipEvent> CreateStrategy(
         ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
     {
-        return new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
+        return new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta,
                 (key, e) => Map(key, e, relationships), Queries);
     }
 

@@ -50,7 +50,7 @@ public sealed class SalesforceRateLimitHandler(
                     "Salesforce call {Method} {Path} took {Elapsed}; calls of {Threshold} or longer count toward the org's " +
                     "limit of {Limit} concurrent long-running requests. Consider a smaller Sync:BatchSize.",
                     request.Method, request.RequestUri?.AbsolutePath, elapsed, limits.Value.LongRunningThreshold,
-                    limits.Value.EffectiveConcurrentLongRunningLimit);
+                    limits.Value.ConcurrentLongRunningLimit);
             }
 
             await ReportLimitsAsync(res, ct);
