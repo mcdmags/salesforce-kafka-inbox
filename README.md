@@ -59,13 +59,27 @@ Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per 
                                 AccountRelationshipSyncService ─┤          sObject → records, + queries)
                                                                 ▼
                               SalesforceBatchUpsertService.UpsertBatchAsync<TEvent>(strategy)
-                                claim → read → coalesce (newest meta.time) → supersede stale → map → SalesforceRecordUpserter
-                                (describe → normalize → 1 composite read → diff + lookups → 1 composite write)
-                                → record outcomes            all Postgres work via PostgresExecutionStrategy
+                                claim → newest meta.time per entity (supersede stale) → map
+                                → describe → normalize → 1 composite read → decide (diff + lookups)
+                                → 1 composite write → per-record results → outcome per entity → record outcomes
+                                                       │  inbox: IInboxRepository (Postgres, PostgresExecutionStrategy)
                                                        │  token bucket + daily budget + concurrency slots
                                                        ▼
                                                   Salesforce  (standard + existing fields only)
 ```
+
+### How the code is layered
+
+The sync is three layers, each with one job:
+
+| Layer | Classes | Does |
+|---|---|---|
+| **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`); `InboxRepository` (`IInboxRepository`: claim, record, hold, defer, fail, over `InboxSql` and `PostgresExecutionStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
+| **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
+| **Rules, no I/O** | `BatchPreparer` (coalesce, watermark, map), `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `EventTypeCheck` (`meta.type` against existence), `RecordDiffer` (changed fields), `WritePlanner` (create / update / unchanged, lookups by Id, reference or external id, `DEPENDENCY_NOT_SYNCED`) with `CompositeWritePacker` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
+
+Describe results are cached by `SalesforceSchemaCache` and written values remembered by `WriteEchoTracker` (to warn
+about a field that is rewritten on every event).
 
 ## Event format
 
@@ -412,8 +426,10 @@ always literal Ids from the read; `ParentLink` doesn't apply to it.
 ## Adding a Salesforce object
 
 The engine (`SalesforceBatchUpsertService.UpsertBatchAsync<TEvent>`) owns claiming, ordering, coalescing, rate
-limits, batching, normalization, diffing, lookups, retries and dead-lettering. An object supplies four small things:
-a payload class, an sObject class, a mapper and a strategy that names the object's inbox table and topic.
+limits, batching, normalization, diffing, lookups, retries and dead-lettering. Nothing in the engine, the consumer or
+the worker loops names an object. An object supplies four small things: a payload class, an sObject class, a mapper,
+and a strategy class that names the object's inbox table and topic and says how an event becomes records. The
+strategy class derives from `EntitySyncService<TEvent>`, which does the rest of `ISalesforceEntitySync`.
 
 ```csharp
 // 1. Payload: the event as the source sends it  { "meta": {...}, "accountRelationship": { "externalId": ..., ... } }
@@ -460,32 +476,22 @@ public sealed class AccountRelationshipMapper : ISObjectMapper<AccountRelationsh
 
 // 4. Strategy: where the events are, how to read one (id, time, type), event -> records, and what to read
 public sealed class AccountRelationshipSyncService(
-    SalesforceBatchUpsertService upsert,
-    ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships) : ISalesforceEntitySync
+    SalesforceBatchUpsertService engine,
+    ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
+    : EntitySyncService<AccountRelationshipEvent>(engine, CreateStrategy(relationships), DefaultTopic)
 {
+    public const string Type = "accountRelationship";
     public const string InboxTable = "sf_account_relationship_inbox";  // created at startup
+    public const string DefaultTopic = "account-relationship-changes";  // Kafka:Topics:accountRelationship overrides
 
-    private readonly UpsertStrategy<AccountRelationshipEvent> _strategy = new(
-        EntityType: "accountRelationship",
-        InboxTable: InboxTable,
-        EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id,
-        EventTime: e => e.Meta?.Timestamp(),                 // the time and the type are in the event
-        EventType: e => e.Meta?.Kind(),
-        Map: (key, e) => Map(key, e, relationships),
-        Queries: Queries);
-
-    public string EntityType => _strategy.EntityType;
-    string ISalesforceEntitySync.InboxTable => InboxTable;
-    public string Topic => "account-relationship-changes";  // default; Kafka:Topics:accountRelationship overrides
-    public Task<int> SyncBatchAsync(CancellationToken ct) => upsert.UpsertBatchAsync(_strategy, ct);
-
-    // What the consumer calls for each message of the topic
-    public bool TryReadEvent(string json, out string? entityId, out string? problem)
-    {
-        var ok = _strategy.TryRead(json, out var read, out problem);
-        entityId = read?.EntityId;
-        return ok;
-    }
+    public static UpsertStrategy<AccountRelationshipEvent> CreateStrategy(
+        ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
+        => new(Type, InboxTable,
+            EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id,
+            EventTime: e => e.Meta?.Timestamp(),                 // the time and the type are in the event
+            EventType: e => e.Meta?.Kind(),
+            Map: (key, e) => Map(key, e, relationships),
+            Queries: Queries);
 
     // Throwing dead-letters the event (INVALID_EVENT)
     public static UpsertUnit Map(string key, AccountRelationshipEvent e,
@@ -529,18 +535,28 @@ does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers
 
 ```
 src/
-  SalesforceSync/                 Worker: Kafka consumer, inbox SQL and event payload classes (Inbox/, Inbox/Payloads/), sync
-                                  engine + strategies + mappers (Sync/, Sync/Mapping/), Salesforce client and
-                                  sObject classes (Salesforce/, Salesforce/SObjects/), rate limiting, Postgres
-                                  execution strategy (Data/)
+  SalesforceSync/                 Worker:
+    Inbox/                        Kafka consumer, worker loops, inbox schema, InboxSql and InboxRepository
+    Inbox/Payloads/               The typed events (payload classes) and their meta
+    Sync/                         The engine (SalesforceBatchUpsertService), BatchPreparer, the strategies
+                                  (EntitySyncService and one class per object) and the engine's model types
+    Sync/Upsert/                  The write path's rules, no I/O: normalize, read queries, diff, plan, pack, interpret
+    Sync/Mapping/                 Mappers: payload -> sObject
+    Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors
+    Salesforce/SObjects/          sObject classes and the attributes they are read by
+    RateLimiting/                 Token bucket, daily budget, pause, concurrency slots, the batch gate
+    Data/                         Postgres execution strategy
   SalesforceSync.FakeSalesforce/  In-memory Salesforce (describe, query, composite, sObject collections, Salesforce-like
-                                  value storage, error injection, write history, Sforce-Limit-Info)
+                                  value storage, error injection, write history, Sforce-Limit-Info): FakeSalesforceStore
+                                  is the org's surface and lock; FakeRecords, FakeSoql, FakeCollectionWriter,
+                                  CompositeReferences, FakeFaults and FakeCounters are its parts
   SalesforceSync.FakeSalesforce.Server/  The in-memory org as an HTTP service (+ /__fake inspection API)
   SalesforceSync.LoadGenerator/   Produces account change (with bursts) and relationship events to Kafka
   SalesforceSync.AppHost/         Aspire: Postgres + pgAdmin, Kafka + Kafka UI, mock Salesforce, worker, generator, benchmarks
 tests/
   SalesforceSync.Tests/           Unit tests: the Salesforce half of the engine with both strategies against the
-                                  in-memory org, type normalization, error classification, execution strategy, limits
+                                  in-memory org, the engine's flow with a stand-in inbox, the pure write-path rules,
+                                  type normalization, error classification, execution strategy, limits
   SalesforceSync.IntegrationTests/  End-to-end tests: Postgres + Kafka in Testcontainers, worker pods and the mock org
                                   in-process; Kafka in, assertions on the mock org + inbox
 benchmarks/
