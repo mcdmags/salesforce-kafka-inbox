@@ -105,6 +105,18 @@ internal static class InboxSql
         where i.id = f.id and i.lock_token = @token
         """;
 
+    /// <summary>
+    /// Rate limited (all claimed rows): hand back without spending a retry. Filtered by id like the others, since
+    /// lock_token has no index.
+    /// </summary>
+    public const string Defer = """
+        update sf_inbox
+        set locked_until = null, lock_token = null, last_updated = now(),
+            retry_count = greatest(retry_count - 1, 0),
+            next_attempt_at = now() + @delay
+        where id = any(@ids) and lock_token = @token
+        """;
+
     /// <summary>Not attempted (graph halted / rolled back by others): hand back for the next claim, no retry spent.</summary>
     public const string Release = """
         update sf_inbox
