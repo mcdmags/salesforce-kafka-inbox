@@ -3,9 +3,12 @@ using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
+using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
+using SalesforceSync.Salesforce.SObjects;
 using SalesforceSync.Sync;
+using SalesforceSync.Sync.Mapping;
 
 namespace SalesforceSync;
 
@@ -150,13 +153,18 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Inbox -> Salesforce: the Postgres execution strategy, one engine, and one strategy per synced object.
-    /// Register a new object's <see cref="ISalesforceEntitySync"/> here and the worker loops pick it up.
+    /// Inbox -> Salesforce: the Postgres execution strategy, one engine, and per synced object its mappers (payload ->
+    /// sObject) and its strategy. Register a new object's mapper and <see cref="ISalesforceEntitySync"/> here and the
+    /// worker loops pick it up.
     /// </summary>
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {
         services.AddSingleton<PostgresExecutionStrategy>(); // every unit of work retries transient Postgres errors
         services.AddTransient<SalesforceBatchUpsertService>();
+        // Mappers are stateless
+        services.AddSingleton<ISObjectMapper<AccountPayload, AccountSObject>, AccountMapper>();
+        services.AddSingleton<ISObjectMapper<ProfilePayload, ProfileSObject>, ProfileMapper>();
+        services.AddSingleton<ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject>, AccountRelationshipMapper>();
         services.AddTransient<ISalesforceEntitySync, AccountSyncService>();
         services.AddTransient<ISalesforceEntitySync, AccountRelationshipSyncService>();
         return services;

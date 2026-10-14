@@ -252,9 +252,9 @@ public abstract class DrainBenchmarkBase
                         ["externalId"] = relKey,
                         ["accountExternalId"] = a,
                         ["relatedAccountExternalId"] = b,
-                        ["Name"] = $"v{relVersion}",
-                        ["Type__c"] = "Partner",
-                        ["Active__c"] = true
+                        ["name"] = $"v{relVersion}",
+                        ["type"] = "Partner",
+                        ["isActive"] = true
                     }
                 };
                 events.Add(new InboxRow(AccountRelationshipSyncService.Type, relPayload.ToJsonString()));
@@ -275,9 +275,9 @@ public abstract class DrainBenchmarkBase
                     [AccountSyncService.Type] = new JsonObject
                     {
                         ["externalId"] = key,
-                        ["Name"] = $"Account {key}",
-                        ["Description"] = $"v{version}",
-                        ["profile"] = new JsonObject { ["Score__c"] = version }
+                        ["name"] = $"Account {key}",
+                        ["description"] = $"v{version}",
+                        ["profile"] = new JsonObject { ["score"] = version }
                     }
                 };
                 events.Add(new InboxRow(AccountSyncService.Type, payload.ToJsonString()));
@@ -349,19 +349,21 @@ public abstract class DrainBenchmarkBase
                 "after a newer one. " + string.Join("; ", wrong.Take(5)));
     }
 
+    private const string RelationshipObject = "Account_Relationship__c";
+
     /// <summary>Newest version (Name "vN"), only moving forward, and linked to the right two Accounts.</summary>
     private bool VerifyRelationship(string key, long expected, ref int regressions, out string problem)
     {
         problem = "";
-        var versions = (_store.History(AccountRelationshipSyncService.RelationshipObject, key) ?? [])
+        var versions = (_store.History(RelationshipObject, key) ?? [])
             .Where(w => w.ContainsKey("Name"))
             .Select(w => long.Parse(((string)w["Name"]!)[1..])).ToList();
         if (!IsIncreasing(versions)) regressions++;
 
         var (account, related) = _relationships[key];
-        var record = _store.FindByExternalId(AccountRelationshipSyncService.RelationshipObject, key);
-        var accountId = (string?)_store.FindByExternalId(AccountSyncService.AccountObject, account)?["Id"];
-        var relatedId = (string?)_store.FindByExternalId(AccountSyncService.AccountObject, related)?["Id"];
+        var record = _store.FindByExternalId(RelationshipObject, key);
+        var accountId = (string?)_store.FindByExternalId("Account", account)?["Id"];
+        var relatedId = (string?)_store.FindByExternalId("Account", related)?["Id"];
         if (versions.LastOrDefault() == expected && record is not null && accountId is not null &&
             (string?)record["Account__c"] == accountId && (string?)record["Related_Account__c"] == relatedId)
             return true;

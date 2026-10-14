@@ -42,7 +42,7 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
     {
         var ids = Enumerable.Range(0, 30).Select(_ => SyncFixture.NewAccountId()).ToArray();
         foreach (var id in ids)
-            app.Publish(id, 1, new JsonObject { ["Name"] = Any.String("Budget ") }, new JsonObject { ["Tier__c"] = "Gold" });
+            app.Publish(id, 1, new JsonObject { ["name"] = Any.String("Budget ") }, new JsonObject { ["tier"] = "Gold" });
         app.Flush();
 
         // The budget is used up...
@@ -119,7 +119,7 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
     {
         var ids = Enumerable.Range(0, 40).Select(_ => SyncFixture.NewAccountId()).ToArray();
         foreach (var id in ids)
-            app.Publish(id, 1, new JsonObject { ["Name"] = Any.String("Concurrent ") }, new JsonObject { ["Tier__c"] = "Gold" });
+            app.Publish(id, 1, new JsonObject { ["name"] = Any.String("Concurrent ") }, new JsonObject { ["tier"] = "Gold" });
         app.Flush();
 
         // Short pause per rejection (ConcurrentPerOrgLongTxn), not the 30-minute daily pause, so everything lands

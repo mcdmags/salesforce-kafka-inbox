@@ -1,39 +1,48 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SalesforceSync.Inbox;
+using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.Sync;
+using SalesforceSync.Sync.Mapping;
 
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The raw event format: how an envelope maps to Salesforce records, how an entity's envelopes are merged, and
-/// what the Kafka consumer admits into the inbox.
+/// The raw event format: how an envelope (camelCase JSON, full record) maps to Salesforce records, how an entity's
+/// pending events are coalesced, and what the Kafka consumer admits into the inbox.
 /// </summary>
 public sealed class InboxEventTests
 {
     private static readonly HashSet<string> Types = [AccountSyncService.Type, AccountRelationshipSyncService.Type];
 
+    private static readonly UpsertStrategy<AccountEvent> Accounts =
+        AccountSyncService.CreateStrategy(new AccountMapper(), new ProfileMapper());
+
+    private static readonly UpsertStrategy<AccountRelationshipEvent> Relationships =
+        AccountRelationshipSyncService.CreateStrategy(new AccountRelationshipMapper());
+
     // ---------- Mapping ----------
 
     [Theory, AutoData]
-    public void Account_fields_are_everything_but_externalId_and_profile_and_the_profile_defaults_to_the_account_id(
-        string key, string name, int score)
+    public void Account_event_maps_to_an_Account_and_a_Profile_that_defaults_to_the_account_id(string key, string name, int score)
     {
-        var unit = AccountSyncService.Map(key, Read<AccountEvent>(new JsonObject
+        var unit = Accounts.Map(key, Read<AccountEvent>(new JsonObject
         {
             ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z" },
             ["account"] = new JsonObject
             {
-                ["externalId"] = key, ["Name"] = name, ["Rating"] = null,
-                ["profile"] = new JsonObject { ["Tier__c"] = "Gold", ["Score__c"] = score }
+                ["externalId"] = key, ["name"] = name, ["rating"] = null, ["tags"] = new JsonArray("B2B", "Retail"),
+                ["profile"] = new JsonObject { ["tier"] = "Gold", ["score"] = score }
             }
         }));
 
         var (account, profile) = (unit.Records[0], unit.Records[1]);
-        (account.SObject, account.ExternalId).Should().Be(("Account", key));
-        account.Fields.Should().BeEquivalentTo(new Dictionary<string, object?> { ["Name"] = name, ["Rating"] = null });
+        (account.SObject, account.ExternalIdField, account.ExternalId).Should().Be(("Account", "External_Id__c", key));
+        account.Fields.Should().Contain("Name", name).And.Contain("Tags__c", "B2B;Retail");
+        account.Fields.Should().Contain("Rating", null).And.Contain("Description", null,
+            "the event is the full record: null and absent both mean empty, and are sent on to the diff");
         (profile.SObject, profile.ExternalId).Should().Be(("Profile__c", key));
-        profile.Fields.Should().BeEquivalentTo(new Dictionary<string, object?> { ["Tier__c"] = "Gold", ["Score__c"] = (decimal)score });
+        profile.Fields.Should().Contain("Tier__c", "Gold").And.Contain("Score__c", (decimal)score).And.Contain("Notes__c", null);
         profile.Lookups.Should().ContainSingle()
             .Which.Should().Be(new SObjectLookup("Account__c", "Account", "External_Id__c", key));
     }
@@ -41,48 +50,53 @@ public sealed class InboxEventTests
     [Theory, AutoData]
     public void Profile_externalId_is_used_when_given(string key, string profileKey)
     {
-        var unit = AccountSyncService.Map(key, Read<AccountEvent>(new JsonObject
+        var unit = Accounts.Map(key, Read<AccountEvent>(new JsonObject
         {
             ["account"] = new JsonObject
             {
                 ["externalId"] = key,
-                ["profile"] = new JsonObject { ["externalId"] = profileKey, ["Tier__c"] = "Gold" }
+                ["profile"] = new JsonObject { ["externalId"] = profileKey, ["tier"] = "Gold" }
             }
         }));
 
         unit.Records[1].ExternalId.Should().Be(profileKey);
-        unit.Records[1].Fields.Keys.Should().Equal("Tier__c");
+        unit.Records[1].Lookups.Should().ContainSingle().Which.ExternalId.Should().Be(key, "it still belongs to the event's account");
     }
 
     [Theory, AutoData]
     public void Account_without_a_profile_writes_only_the_Account(string key, string name)
     {
-        var unit = AccountSyncService.Map(key, Read<AccountEvent>(new JsonObject
+        var unit = Accounts.Map(key, Read<AccountEvent>(new JsonObject
         {
             ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z" },
-            ["account"] = new JsonObject { ["externalId"] = key, ["Name"] = name }
+            ["account"] = new JsonObject { ["externalId"] = key, ["name"] = name }
         }));
 
         unit.Records.Should().ContainSingle().Which.SObject.Should().Be("Account");
     }
 
     [Theory, AutoData]
-    public void Relationship_fields_are_everything_but_the_ids(string key, string account, string related)
+    public void Relationship_event_maps_to_a_relationship_looking_up_both_Accounts(string key, string account, string related)
     {
-        var unit = AccountRelationshipSyncService.Map(key, Read<AccountRelationshipEvent>(new JsonObject
+        var unit = Relationships.Map(key, Read<AccountRelationshipEvent>(new JsonObject
         {
             ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z" },
             ["accountRelationship"] = new JsonObject
             {
                 ["externalId"] = key, ["accountExternalId"] = account, ["relatedAccountExternalId"] = related,
-                ["Type__c"] = "Parent"
+                ["type"] = "Parent", ["startDate"] = "2026-01-31"
             }
         }));
 
         var rel = unit.Records.Should().ContainSingle().Subject;
         (rel.SObject, rel.ExternalId).Should().Be(("Account_Relationship__c", key));
-        rel.Fields.Keys.Should().Equal("Type__c");
-        rel.Lookups!.Select(l => l.ExternalId).Should().Equal(account, related);
+        rel.Fields.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["Name"] = null, ["Type__c"] = "Parent", ["Start_Date__c"] = new DateOnly(2026, 1, 31), ["Active__c"] = null
+        });
+        rel.Lookups.Should().Equal(
+            new SObjectLookup("Account__c", "Account", "External_Id__c", account),
+            new SObjectLookup("Related_Account__c", "Account", "External_Id__c", related));
     }
 
     [Theory]
@@ -91,28 +105,68 @@ public sealed class InboxEventTests
     [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03.456Z" } }""")]
     public void Relationship_without_both_accounts_cannot_be_mapped(string json)
     {
-        var map = () => AccountRelationshipSyncService.Map("REL-1", Read<AccountRelationshipEvent>(json));
+        var map = () => Relationships.Map("REL-1", Read<AccountRelationshipEvent>(json));
 
         map.Should().ThrowExactly<ArgumentException>();
+    }
+
+    [Fact]
+    public void CamelCase_is_the_contract_but_a_PascalCase_body_binds_to_the_same_sObject()
+    {
+        const string camel = """
+            { "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": "ACC-1", "name": "Acme", "isActive": true,
+              "annualRevenue": 12.5, "customerSince": "2020-01-15", "profile": { "tier": "Gold", "discountPercent": 5 } } }
+            """;
+        const string pascal = """
+            { "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "ExternalId": "ACC-1", "Name": "Acme", "IsActive": true,
+              "AnnualRevenue": 12.5, "CustomerSince": "2020-01-15", "Profile": { "Tier": "Gold", "DiscountPercent": 5 } } }
+            """;
+
+        var fromCamel = Accounts.Map("ACC-1", Read<AccountEvent>(camel));
+        var fromPascal = Accounts.Map("ACC-1", Read<AccountEvent>(pascal));
+
+        fromPascal.Should().BeEquivalentTo(fromCamel);
+        fromCamel.Records[0].Fields.Should().Contain("Name", "Acme").And.Contain("Active__c", true)
+            .And.Contain("AnnualRevenue", 12.5m).And.Contain("Customer_Since__c", new DateOnly(2020, 1, 15));
+        fromCamel.Records[1].Fields.Should().Contain("Tier__c", "Gold").And.Contain("Discount__c", 5m);
+    }
+
+    [Fact]
+    public void Value_of_the_wrong_type_makes_the_event_unreadable()
+    {
+        var read = () => Read<AccountEvent>("""{ "account": { "externalId": "ACC-1", "name": "Acme", "numberOfEmployees": "lots" } }""");
+
+        read.Should().Throw<JsonException>("the engine dead-letters an event it can't deserialize (INVALID_EVENT)");
     }
 
     // ---------- Coalescing ----------
 
     [Fact]
-    public void Envelopes_are_merged_in_order_with_the_newest_time_and_nested_profile_fields()
+    public void Pending_events_coalesce_to_the_newest_by_time_then_by_id()
     {
-        var merged = SalesforceBatchUpsertService.Coalesce(
+        var events = new[]
+        {
+            new InboxEvent(Id: 7, "ACC-1", Version: 20, """{ "account": { "externalId": "ACC-1", "name": "newest time, ingested first" } }""", 1),
+            new InboxEvent(Id: 5, "ACC-1", Version: 10, """{ "account": { "externalId": "ACC-1", "name": "older" } }""", 1),
+            new InboxEvent(Id: 9, "ACC-1", Version: 20, """{ "account": { "externalId": "ACC-1", "name": "newest time, ingested last" } }""", 1),
+            new InboxEvent(Id: 12, "ACC-1", Version: 15, """{ "account": { "externalId": "ACC-1", "name": "ingested last, but older" } }""", 1)
+        };
+
+        SalesforceBatchUpsertService.Coalesce(events).Id.Should().Be(9, "the newest time wins; of two with the same time, the one ingested later");
+    }
+
+    [Fact]
+    public void The_newest_full_record_replaces_older_events_rather_than_merging_with_them()
+    {
+        var newest = SalesforceBatchUpsertService.Coalesce(
         [
-            Row(1, """{ "meta": { "time": "2026-10-14T01:00:00Z" }, "account": { "externalId": "ACC-1", "Name": "Acme", "Rating": "Hot", "profile": { "Tier__c": "Gold" } } }"""),
-            Row(2, """{ "meta": { "time": "2026-10-14T02:00:00Z" }, "account": { "externalId": "ACC-1", "Rating": null, "profile": { "Score__c": 9 } } }""")
+            Row(1, """{ "meta": { "time": "2026-10-14T01:00:00Z" }, "account": { "externalId": "ACC-1", "name": "Acme", "rating": "Hot", "profile": { "tier": "Gold" } } }"""),
+            Row(2, """{ "meta": { "time": "2026-10-14T02:00:00Z" }, "account": { "externalId": "ACC-1", "name": "Acme Ltd", "profile": { "score": 9 } } }""")
         ]);
 
-        ((string?)merged["meta"]!["time"]).Should().Be("2026-10-14T02:00:00Z");
-        var unit = AccountSyncService.Map("ACC-1", merged.Deserialize<AccountEvent>(SalesforceBatchUpsertService.EventJson)!);
-        unit.Records[0].Fields.Should().BeEquivalentTo(new Dictionary<string, object?> { ["Name"] = "Acme", ["Rating"] = null },
-            "a later null clears the field, an absent field keeps the earlier value");
-        unit.Records[1].Fields.Should().BeEquivalentTo(new Dictionary<string, object?> { ["Tier__c"] = "Gold", ["Score__c"] = 9m },
-            "nested profile fields are merged too");
+        var unit = Accounts.Map("ACC-1", Read<AccountEvent>(newest.Payload));
+        unit.Records[0].Fields.Should().Contain("Name", "Acme Ltd").And.Contain("Rating", null, "the newest record has no rating any more");
+        unit.Records[1].Fields.Should().Contain("Score__c", 9m).And.Contain("Tier__c", null, "nor a tier");
     }
 
     // ---------- What the consumer admits ----------
