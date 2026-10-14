@@ -287,7 +287,8 @@ public sealed class SalesforceBatchUpsertService(
             if (echoTracker.IsFlapping(echo, stored!))
                 log.LogWarning(
                     "{Object}.{Field} on {ExternalId} keeps differing after it is written: sent {Sent}, Salesforce stores {Stored}. " +
-                    "FieldValues is missing a normalization rule for '{Type}' fields, so every event rewrites this field.",
+                    "Every event rewrites this field: org automation (a trigger or flow) changes the value, or FieldValues " +
+                    "is missing a normalization rule for '{Type}' fields.",
                     echo.Object, echo.Field, echo.ExternalId, echo.Value, stored, fieldType);
     }
 

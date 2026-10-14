@@ -12,7 +12,10 @@ public sealed record LimitCounter(long Used, long Max)
 /// <summary>
 /// Parsed <c>Sforce-Limit-Info</c> response header, e.g.
 /// <c>api-usage=10018/100000; api-bursts=1/750; per-app-api-usage=17/250(appName=my-app)</c>.
-/// Unknown entries are ignored, so new Salesforce counters don't break parsing.
+/// The REST API Developer Guide (Limit Info Header) defines only api-usage: the org's calls used and its limit per
+/// 24 hours. per-app-api-usage is the connected app's quota, documented in earlier versions as a pilot and sent only
+/// when the app has one. api-bursts appears in the guide's example but is not defined, so it is recorded for
+/// sf_limit_status and never throttled on. Unknown entries are ignored, so new Salesforce counters don't break parsing.
 /// </summary>
 public sealed partial record SalesforceLimitInfo(
     LimitCounter? ApiUsage,
@@ -25,8 +28,6 @@ public sealed partial record SalesforceLimitInfo(
 
     /// <summary>The tighter of the org-wide and per-connected-app daily allocations.</summary>
     public double DailyRatio => Math.Max(ApiUsage?.Ratio ?? 0, PerAppUsage?.Ratio ?? 0);
-
-    public double BurstRatio => ApiBursts?.Ratio ?? 0;
 
     public static SalesforceLimitInfo? Parse(string? header)
     {

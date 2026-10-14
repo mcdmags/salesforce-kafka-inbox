@@ -34,7 +34,7 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 | Problem | Solution |
 |---|---|
 | Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to that object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`) with the entity's id in a plain `entity_id` column, before storing its offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. A redelivery is simply stored again and ends `superseded`. A message that isn't a valid event of its topic's type (see below) is logged with its offset and skipped, rather than blocking its partition. |
-| Ordering across parallel batches | Workers claim **entities, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each entity's *head* (oldest pending) row plus a per-entity claim lock (`pg_try_advisory_xact_lock`), only for entities with nothing in flight, then lease the entity's rows (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same entity. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
+| Ordering across parallel batches | Workers claim **entities, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each entity's *head* (oldest pending) row plus a per-entity advisory **claim lock** for the claim transaction, only for entities with nothing in flight, then lease the entity's rows (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same entity. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
 | Bursts of updates to one entity | Pending events for an entity are **coalesced**: every event carries the full record, so of the events claimed together only the one with the newest `meta.time` is written (ties: the one stored later) and the others are marked `superseded`. Five updates in five seconds become one Salesforce write with the newest data. At most `Sync:MaxEventsPerEntity` (20) events of an entity are taken per claim, so a deep backlog is never leased or loaded whole. |
 | Late or replayed older events | **Sync watermark in Postgres**: `sf_sync_state` holds the newest `meta.time` synced per entity, advanced in the same transaction that completes the events and only while the worker still holds the lease. A claimed event at or before the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement and the watermark are conditional on its `lock_token`. |
@@ -46,7 +46,7 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (rolled back or skipped because of another entity's record) → back to the inbox without spending a retry. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
 | Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through **`PostgresExecutionStrategy`**: a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new connection, new transaction) with backoff. After a lost connection the pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
-| Rate limits | Configured from Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, `api-bursts`, `per-app-api-usage`) and own usage slow everyone down at 80% and pause at 95%; 429/503 and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
+| Rate limits | Configured from Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) and own usage slow everyone down at 80% and pause at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
 
 ```
 Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per object type (Postgres: entity_id +
@@ -212,26 +212,21 @@ locks them; a second leases them:
 1. Read the first 500 claimable rows (`status = 'pending'`, `next_attempt_at <= now()`) in `(next_attempt_at, id)`
    order off the ready index, and reduce them to distinct entities.
 2. Per entity (not per row): find its head (lowest pending `id`), require it to be due and the entity to have no live
-   lease on any row, lock the head by primary key `FOR UPDATE SKIP LOCKED`, re-checking the conditions on the
-   locked row, and take the entity's **claim lock**: `pg_try_advisory_xact_lock(hashtext(table), hashtext(entity_id))`,
-   held until the claim transaction ends. An entity whose claim lock another worker holds is skipped.
+   lease on any row, and lock the head by primary key `FOR UPDATE SKIP LOCKED`, re-checking the conditions on the
+   locked row. Then take the entity's claim lock, `pg_try_advisory_xact_lock(hashtext(table), hashtext(entity_id))`,
+   held until the claim transaction ends; an entity whose claim lock another worker holds is skipped.
 3. Only if those 500 rows were not enough for a batch (they can all belong to entities that are in flight or backing
    off): walk the pending entities in id order to find the ones behind them.
 4. Lease the claimed entities' oldest `Sync:MaxEventsPerEntity` pending rows (`lock_token`, `locked_until`,
-   `retry_count + 1`) and return them, **unless another token holds a live lease on the entity** (checked again
-   here, in a statement that starts after the claim lock was taken). While a row is leased its `next_attempt_at` is
-   the end of the lease, so leased rows are outside the range step 1 scans and come back by themselves if the lease
-   expires.
+   `retry_count + 1`) and return them. While a row is leased its `next_attempt_at` is the end of the lease, so leased
+   rows are outside the range step 1 scans and come back by themselves if the lease expires. An entity on which
+   another worker holds a live lease gets no rows.
 
-**Why the claim lock.** The head row lock alone does not exclude a second worker: the head is whichever row a
-worker's snapshot shows as oldest, and two consumers storing events of one entity can commit them out of id order.
-Then two workers see different heads, neither row lock conflicts, and the lease check in step 2 reads a snapshot from
-before the other worker's commit; both leased the entity. `ClaimRaceTests` reproduces this with four connections
-(it failed on the earlier claim: both rows ended with the second worker's token while the first worker's lease was
-live). With the claim lock, an entity is leased only by a transaction that holds its claim lock until commit, and
-step 4 reads a snapshot taken after that lock was acquired, so it sees every earlier lease of the entity (READ
-COMMITTED, the default, is required: under REPEATABLE READ step 4 would reuse the older snapshot). Two entities whose
-hashes collide only make one of them wait for the next claim.
+The claim lock and the lease check in step 4 are what keep two workers off one entity; the head row lock alone is
+not enough. The head is whatever row a worker's snapshot shows as oldest, and an event committed out of id order
+(two consumers storing events of one entity) makes it a different row for two workers, so neither row lock
+conflicts. Step 4 runs while holding the claim lock, so its snapshot is taken after every earlier claim of the entity
+committed, and it sees their leases (`ClaimRaceTests` replays that interleaving on four connections).
 
 **Plans don't depend on statistics.** An inbox's statistics describe some earlier moment: never taken after a bulk
 load, or taken while every row was finished. With the latter, the earlier claim chose plans that read the whole
@@ -329,7 +324,7 @@ the entity were released and a newer event synced in the meantime, the late writ
 
 | Guarantee | How | Test |
 |---|---|---|
-| Two workers or pods never hold the same entity at once | per-entity claim lock for the claim transaction, lease checked again under it; head row `FOR UPDATE SKIP LOCKED` | `ConcurrencyTests.Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version` (3 pods × 8 loops, claim audit: 0 overlaps), `ClaimRaceTests` (events committed out of id order) |
+| Two workers or pods never hold the same entity at once | head row `FOR UPDATE SKIP LOCKED`, per-entity claim lock, lease on the entity's rows checked under that lock | `ConcurrencyTests.Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version` (3 pods × 8 loops, claim audit: 0 overlaps); `ClaimRaceTests` (a row committed out of id order; fails without the claim lock and lease check) |
 | An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | the claim requires the head to be due and the entity unleased | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
 | Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | newest-time coalescing + watermark | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
 | A worker whose lease expired can't record outcomes or move the watermark | every statement is conditional on `lock_token` | `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark` |
@@ -739,9 +734,9 @@ Mutation checks on the current claim (each reverted afterwards):
 
 - Without the in-flight checks (the lease conditions, the claim lock, the lease re-check in `ClaimEntities` and the
   head's due check): this test failed with 10,119 overlapping claims.
-- Without the lease conditions and the claim lock but with the due check: this test still passed (a leased head is
-  not due, so it is never locked), and `ClaimRaceTests` failed. The protections overlap; the race test is the one
-  that covers the claim lock.
+- Without the lease conditions, the claim lock and the lease re-check, but with the head's due check: this test
+  still passed (a leased head is not due, so it is never locked). The protections overlap; `ClaimRaceTests` is what
+  covers the claim lock and the lease re-check.
 - Without `SKIP LOCKED` only: both passed (a second worker waits for the row lock and then sees the lease); it costs
   throughput, not correctness.
 
@@ -791,7 +786,10 @@ dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter
 ## Salesforce API limits
 
 Configured from "API Request Limits and Allocations" in the
-[Salesforce Developer Limits and Allocations Quick Reference](https://developer.salesforce.com/docs/platform/salesforce-app-limits-cheatsheet/guide/salesforce-app-limits-platform-api.html).
+[Salesforce Developer Limits and Allocations Quick Reference](https://developer.salesforce.com/docs/platform/salesforce-app-limits-cheatsheet/guide/salesforce-app-limits-platform-api.html),
+with the response header and status codes from the REST API Developer Guide
+([Limit Info Header](https://developer.salesforce.com/docs/platform/api-rest/guide/headers-api-usage.html),
+[Composite](https://developer.salesforce.com/docs/platform/api-rest/guide/resources-composite-composite-post.html)).
 Describe the org and the limits are derived; the worker logs what it derived at startup and refuses to start on
 a configuration that can't work.
 
@@ -802,7 +800,7 @@ a configuration that can't work.
   "Licenses": { "Salesforce": 15, "Partner Community": 200 },
   "CallsPerLicense": {},            // add license types / override the built-in table
   "PurchasedApiCalls": 0,           // API Call Add-Ons
-  "DailyApiAllocation": null,       // or copy the number from Setup (needed for template-based sandboxes)
+  "DailyApiAllocation": null,       // or copy the number from Setup; required for Sandbox, Trial and template-based Full Sandboxes
   "ConcurrentLongRunningLimit": null,
   "LongRunningThreshold": "00:00:20",
   "RequestTimeout": "00:01:30"
@@ -813,7 +811,6 @@ a configuration that can't work.
   "DailyBudgetShare": 0.5,          // this integration's share of the org's daily allocation
   "DailySoftRatio": 0.8, "DailySoftSpeed": 0.25,
   "DailyHardRatio": 0.95, "DailyHardPause": "00:15:00",
-  "BurstSoftRatio": 0.8, "BurstSoftSpeed": 0.5, "BurstPause": "00:00:10",
   "ConcurrentLimitPause": "00:00:30",
   "MaxWait": "00:00:20"
 }
@@ -821,11 +818,13 @@ a configuration that can't work.
 
 | Salesforce limit | How it's applied |
 |---|---|
-| **Total API requests per 24 hours**: Developer Edition 15,000; Full Sandbox 5,000,000; otherwise 100,000 + licenses × calls per license type (Enterprise/Professional: Salesforce 1,000, Platform 1,000, One App 200, Customer Community Plus 200, Partner Community 200, ...; Unlimited/Performance: Salesforce 5,000, Platform 5,000, ...) + purchased add-ons | Computed from `SalesforceLimits` (or `DailyApiAllocation`). The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling 24 hours. When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
-| **Org-wide usage** (also other integrations) | `Sforce-Limit-Info: api-usage` and `per-app-api-usage`: slow down at `DailySoftRatio`, pause at `DailyHardRatio`. A warning is logged if Salesforce reports a different allocation than configured. |
+| **Total API requests per 24 hours**: Developer Edition 15,000; Full Sandbox 5,000,000 (unless created from a template); Enterprise, Professional with API access, Unlimited and Performance 100,000 + licenses × calls per license type (Enterprise/Professional: Salesforce 1,000, Platform 1,000, One App 200, Customer Community Plus 200, Partner Community 200, ...; Unlimited/Performance: Salesforce 5,000, Platform 5,000, ...) + purchased add-ons. No figure is published for other sandboxes or trial orgs | Computed from `SalesforceLimits` (or `DailyApiAllocation`, which startup requires for `Sandbox` and `Trial`). The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling 24 hours. When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
+| **What a call is**: each HTTP request; a Composite request (and an sObject Collections request) counts as one call however many subrequests it holds | One token per HTTP request: a describe (cached), each query page and each Composite write. |
+| **Org-wide usage** (also other integrations): `Sforce-Limit-Info: api-usage=used/limit` on every REST response | `api-usage` and, when Salesforce sends it, `per-app-api-usage` (the connected app's quota): slow down at `DailySoftRatio`, pause at `DailyHardRatio`. A warning is logged if Salesforce reports a different allocation than configured. `api-bursts` appears in Salesforce's example of the header but isn't defined, so it is recorded in `sf_limit_status` and not acted on. |
+| **Requests per second**: Salesforce publishes no such limit, and none on concurrent requests shorter than 20 s | `MaxRequestsPerSecond` and `BurstCapacity` are this integration's own pacing, so it spreads its share of the daily allocation instead of spending it in bursts. |
 | **Concurrent long-running requests** (20 s or longer): 25 for production and sandboxes, 5 for Developer Edition and trials | `Sync:MaxConcurrentRequests` (global advisory-lock slots) must not exceed it, or startup fails. Calls that take `LongRunningThreshold` or longer are logged. `REQUEST_LIMIT_EXCEEDED` with `ConcurrentPerOrgLongTxn` pauses all workers for `ConcurrentLimitPause`. |
 | **Total requests exceeded** (`REQUEST_LIMIT_EXCEEDED`, `TotalRequests`) | Pauses all workers for `DailyHardPause`. Salesforce may allow some overage on paid orgs, but it isn't relied on. |
-| **API timeout**: 10 minutes for REST calls, for a composite request as a whole | `RequestTimeout` (HTTP client timeout, including the token wait) must be at most 10 minutes, or startup fails. The worker also gives up at 80% of its lease. |
+| **API timeout**: 10 minutes for REST calls, for a composite request as a whole (query calls follow the SOQL limits and fail with `QUERY_TIMEOUT`, retried as transient) | `RequestTimeout` (HTTP client timeout, including the token wait) must be at most 10 minutes, or startup fails. The worker also gives up at 80% of its lease. |
 
 The limiter is registered by `AddSalesforceRateLimiting()`, which the worker (`AddSalesforceSyncWorker`), the
 benchmark pods and the test pods all use. Its handler is always the outermost on the Salesforce client (rate limiter

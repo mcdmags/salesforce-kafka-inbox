@@ -51,6 +51,17 @@ public sealed class SalesforceLimitsTests
         limits.EffectiveDailyApiAllocation.Should().Be(allocation, "the licenses don't matter for this org type");
     }
 
+    [Theory]
+    [InlineData(SalesforceOrgType.Sandbox)]
+    [InlineData(SalesforceOrgType.Trial)]
+    public void Orgs_without_a_published_allocation_must_set_it_from_Setup(SalesforceOrgType type)
+    {
+        Validate(new SalesforceLimitsOptions { OrgType = type, Licenses = { ["Salesforce"] = 15 } })
+            .FailureMessage.Should().Contain("DailyApiAllocation", "Salesforce doesn't publish this org type's allocation");
+        Validate(new SalesforceLimitsOptions { OrgType = type, DailyApiAllocation = 200_000 }, new SyncOptions { MaxConcurrentRequests = 2 })
+            .Succeeded.Should().BeTrue();
+    }
+
     [Theory, AutoData]
     public void Allocation_from_Setup_overrides_the_formula(long fromSetup)
     {
@@ -169,6 +180,16 @@ public sealed class SalesforceLimitsTests
         var orgAt85Percent = new SalesforceLimitInfo(new LimitCounter(85_000, 100_000), null, null, null);
 
         limiter.Decide(orgAt85Percent, ownDailyRatio: 0.1).Speed.Should().Be(0.25, "the org is past DailySoftRatio");
+    }
+
+    [Fact]
+    public void Api_bursts_is_recorded_but_not_throttled_on()
+    {
+        // Salesforce's REST guide shows api-bursts in an example but doesn't define it
+        var info = SalesforceLimitInfo.Parse("api-usage=10018/100000; api-bursts=749/750")!;
+
+        info.ApiBursts.Should().Be(new LimitCounter(749, 750));
+        Limiter(new RateLimitOptions()).Decide(info).Should().Be(SalesforceRateLimiter.ThrottleDecision.Normal);
     }
 
     [Fact]
