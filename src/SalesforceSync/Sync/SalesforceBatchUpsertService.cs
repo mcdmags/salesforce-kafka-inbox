@@ -165,7 +165,7 @@ public sealed class SalesforceBatchUpsertService(
         results.AddRange(rejected);
         if (normalized.Count == 0)
         {
-            InvalidateRecordTypes(units, results);
+            await InvalidateRecordTypesAsync(units, results, ct);
             return results;
         }
 
@@ -184,7 +184,7 @@ public sealed class SalesforceBatchUpsertService(
             results.AddRange(_interpreter.Interpret(request, answers));
         }
 
-        InvalidateRecordTypes(units, results);
+        await InvalidateRecordTypesAsync(units, results, ct);
         return results;
     }
 
@@ -192,7 +192,8 @@ public sealed class SalesforceBatchUpsertService(
     /// A record type the cached describe doesn't have (or not as active and available), or whose Id Salesforce
     /// rejected, may just have been created, activated or assigned: its object is described again next time.
     /// </summary>
-    private void InvalidateRecordTypes(IReadOnlyList<(string Key, UpsertUnit Unit)> units, IEnumerable<UpsertResult> results)
+    private async Task InvalidateRecordTypesAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units, IEnumerable<UpsertResult> results,
+        CancellationToken ct)
     {
         var failed = results
             .SelectMany(r => r.Errors.Where(e => e.Code == SalesforceErrors.InvalidRecordType).Select(e => (r.Key, e.ReferenceId)))
@@ -206,7 +207,7 @@ public sealed class SalesforceBatchUpsertService(
         {
             foreach (var record in unit.Records.Where(r => failed.Contains((key, r.ReferenceId))))
             {
-                schemaCache.Invalidate(record.SObject);
+                await schemaCache.InvalidateAsync(record.SObject, ct);
             }
         }
     }
@@ -247,7 +248,7 @@ public sealed class SalesforceBatchUpsertService(
             // The cached describe is out of date (a field was removed or renamed): describe again next time
             foreach (var sobject in describedSObjects)
             {
-                schemaCache.Invalidate(sobject);
+                await schemaCache.InvalidateAsync(sobject, ct);
             }
 
             throw;

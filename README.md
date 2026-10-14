@@ -90,7 +90,35 @@ the watermarks); the claim, `ReleaseLostClaims`, `MarkSynced`, fail and dead-let
 the SQL texts of `InboxSql` and `RateLimitSql` run unchanged through `Database.SqlQueryRaw` / `ExecuteSqlRaw` with named
 `NpgsqlParameter`s, since a recursive CTE with `FOR UPDATE SKIP LOCKED` or `UPDATE ... RETURNING` has no LINQ form.
 
-Describe results (fields and record types) are cached by `SalesforceSchemaCache`.
+### The Describe cache
+
+Describe results (fields and record types) are cached by `SalesforceSchemaCache`, in two layers:
+
+| Layer | What it holds | Shared by |
+|---|---|---|
+| In process | The snapshot every worker loop reads without I/O; one describe in flight per object | The pod's worker loops |
+| `IDistributedCache` (Redis) | The same snapshot as JSON: fields, record types, when it was fetched and last checked | Every pod |
+
+A pod whose own snapshot is missing or older than `Salesforce:SchemaRefreshInterval` (15 min) first looks in Redis. An
+entry checked within the interval (by any pod) is used as it is, without calling Salesforce, so the org is described
+about once per interval in total rather than once per pod, and a new pod starts warm. Otherwise the pod describes with
+`If-Modified-Since` (the entry's date), reuses the stored schema on 304 Not Modified, and writes the result back.
+
+- **Key**: `salesforce-sync:describe:{org host}:{API version}:{object, lower case}`, e.g.
+  `salesforce-sync:describe:acme.my.salesforce.com:v62.0:account`. Different orgs and API versions never share one.
+- **Expiry**: 1 day (absolute). Much longer than the refresh interval on purpose: an entry too old to trust still
+  dates the conditional describe, so a 304 replaces a download.
+- **Invalidation**: when Salesforce rejects a field the cached schema has (`INVALID_FIELD` on the read) or a record
+  type is missing (`INVALID_RECORD_TYPE`), the object's entry is invalidated in the pod **and removed from Redis**, so
+  every pod describes it again.
+- **Failures**: the shared layer only saves calls. If Redis is unreachable, slower than 2 seconds, or holds an entry
+  that can't be read, the pod logs a warning (at most once a minute) and describes as if the entry were missing.
+  Syncing never waits for or fails because of Redis.
+- **Configuration**: `ConnectionStrings:redis` (Aspire injects it; elsewhere set `ConnectionStrings__redis`, e.g.
+  `redis:6379`). Without it the shared layer is an in-memory cache of the process (`AddDistributedMemoryCache`), so
+  tests, benchmarks and single-process runs need no Redis.
+
+Two pods that miss at the same moment may both describe once; that costs a call, never correctness.
 
 ## Event format
 
@@ -643,6 +671,7 @@ The dashboard shows:
 
 - **postgres / inboxdb / benchdb** (+ pgAdmin)
 - **kafka** (+ Kafka UI)
+- **redis** (+ Redis Insight): the Describe cache shared by the sync's pods ([The Describe cache](#the-describe-cache))
 - **fake-salesforce**: mock Salesforce org over HTTP (OAuth token, describe, query, composite with sObject
   collections, gzip). Logs its counters every 15s; inspect it at `/__fake/stats`, `/__fake/transport`,
   `/__fake/records/{sobject}[/{externalId}]`, `/__fake/history/{sobject}/{externalId}` and `/__fake/requests` (the
@@ -659,8 +688,8 @@ To sync to a Salesforce sandbox instead of the mock org, see [Run against the sa
 ## Tests
 
 Requires the .NET 8 SDK; the integration tests also need **Docker** (Docker Desktop, OrbStack or Colima), nothing
-else: no Aspire, no local Postgres or Kafka, no ports to free up. Images are pulled on first run (`postgres:17`,
-`apache/kafka:3.9.1`).
+else: no Aspire, no local Postgres, Kafka or Redis, no ports to free up. Images are pulled on first run (`postgres:17`,
+`apache/kafka:3.9.1`, `redis:7.4-alpine`).
 
 ```bash
 dotnet test                                      # everything
@@ -680,7 +709,9 @@ Each xUnit collection fixture (`SyncFixture`, `MultiPodFixture`, `FewRetriesFixt
 starts its own environment once, shared by the tests in that collection:
 
 - **Postgres** (`postgres:17`) and **Kafka** (KRaft) in containers, removed when the collection finishes. Both
-  topics are created up front with 6 partitions, like production.
+  topics are created up front with 6 partitions, like production. `MultiPodFixture` also starts **Redis**
+  (`redis:7.4-alpine`), so its pods share their Describe cache like replicas in production; the other fixtures'
+  pods use the in-memory fallback.
 - **The mock Salesforce org**: the `SalesforceSync.FakeSalesforce.Server` app itself (`FakeSalesforceServer.Build`,
   the same code its `Program.cs` runs) on Kestrel at a random loopback port, so the worker goes through real HTTP:
   OAuth token, gzip, the REST client.
@@ -712,7 +743,8 @@ identical columns, the schema being reapplied, and an earlier `sf_inbox` kept as
 publish version N as `meta.time` = a fixed base time + N ms, and read it back from the stored payload. Relationships
 (`RelationshipTests`): linked to two synced Accounts with only changed fields sent later; a relationship that
 arrives before its Accounts waits (`DEPENDENCY_NOT_SYNCED`, retried) and syncs once they exist; a malformed
-relationship event is dead-lettered alone. Writes are checked with the mock's per-record write history
+relationship event is dead-lettered alone. Every record ends with its class's `RecordTypeId`. Pods share their
+Describes through Redis, so a pod that has described nothing finds them there (`SharedDescribeCacheTests`). Writes are checked with the mock's per-record write history
 (`/__fake/history/{sobject}/{externalId}`) and with the requests it received (`/__fake/requests`).
 
 The write itself (`CollectionsWriteTests`): a new Account and Profile in one request with `allOrNone: false` and the
@@ -1168,7 +1200,10 @@ afterwards: `ACC-…`, `PRF-…` and `REL-…`.
 
 To run the worker without Aspire (a server or Kubernetes), give it the same settings as environment variables
 (`Salesforce__InstanceUrl`, `Salesforce__TokenUrl`, `Salesforce__ClientId`, `Salesforce__ClientSecret`,
-`SalesforceLimits__DailyApiAllocation`), plus `ConnectionStrings__inboxdb` and `ConnectionStrings__kafka`.
+`SalesforceLimits__DailyApiAllocation`), plus `ConnectionStrings__inboxdb` and `ConnectionStrings__kafka`, and
+`ConnectionStrings__redis` so the replicas share their Describe results (optional: without it each process describes on
+its own; see [The Describe cache](#the-describe-cache)). With Aspire, Redis needs no setup: the AppHost starts it and
+passes the connection string.
 
 ### 6. Tune and check
 
