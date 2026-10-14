@@ -251,11 +251,12 @@ Then, per claimed entity, in C#: deserialize its rows, keep the one with the new
 the watermark. A row that can't be read is dead-lettered on its own (`INVALID_EVENT`). All outcome statements are
 set-based and conditional on the `lock_token`.
 
-**Cost.** A claim of 75 entities locks them in 1 to 3 ms in every measured scenario (5,000 or 100,000 pending
-rows, 100 to 5,000 entities, any statistics, up to 90% of entities in flight). Leasing costs about 11 to 20 µs per
-row (each lease is an update that adds an entry to all four indexes), so a claim that leases 75 events is a few
-milliseconds and one that leases 1,500 (75 entities with 20 or more pending events each) is 20 to 40 ms on the
-measuring machine. Lower `Sync:MaxEventsPerEntity` to make deep-backlog claims cheaper, at the price of more
+**Cost.** A claim of 75 entities locks them in about 2 ms (median over 108 measured scenarios: 5,000 or 100,000
+pending rows, 100 to 5,000 entities, fresh, analyzed or stale statistics, up to 90% of entities in flight); the
+slowest scenario's median is 9.5 ms and the slowest single run 21.5 ms, on a loaded machine. Leasing costs about
+11 µs per row on a quiet machine and 30 to 55 µs under load (each lease is an update that adds an entry to all four
+indexes), so a claim that leases 75 events is a few milliseconds and one that leases 1,500 (75 entities with 20 or
+more pending events each) is 20 to 40 ms, about 54 ms under load. Lower `Sync:MaxEventsPerEntity` to make deep-backlog claims cheaper, at the price of more
 Salesforce calls per event.
 
 **Upgrade.** An `sf_inbox` table from an earlier version (any shape) is renamed to `sf_inbox_legacy` at startup, rows
