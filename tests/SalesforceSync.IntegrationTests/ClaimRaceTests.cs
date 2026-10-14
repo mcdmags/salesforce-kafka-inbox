@@ -59,10 +59,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
     }
 
     private static async Task<string[]> LockHeadsAsync(NpgsqlConnection conn, NpgsqlTransaction tx)
-    {
-        await conn.ExecuteAsync(InboxSql.PinPlans, transaction: tx);
-        return (await conn.QueryAsync<string>(Sql.LockHeads, new { window = InboxSql.ClaimWindow, batchSize = 75 }, tx)).ToArray();
-    }
+        => (await conn.QueryAsync<string>(InboxSql.Pinned(Sql.LockHeads), new { window = InboxSql.ClaimWindow, batchSize = 75 }, tx)).ToArray();
 
     private static async Task<int> ClaimAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string entity, Guid token)
         => (await conn.QueryAsync<InboxEvent>(Sql.ClaimEntities,

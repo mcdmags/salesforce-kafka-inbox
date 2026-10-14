@@ -30,16 +30,15 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
         var attemptedEntityIds = new HashSet<string>(StringComparer.Ordinal);
         return pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
         {
-            CommandDefinition Command(string statement, object? args) => new(statement, args, tx, cancellationToken: t);
+            CommandDefinition Command(string statement, object args) => new(statement, args, tx, cancellationToken: t);
 
-            await conn.ExecuteAsync(Command(InboxSql.PinPlans, null));
             if (attemptedEntityIds.Count > 0)
-                await conn.ExecuteAsync(Command(sql.ReleaseLostClaims,
+                await conn.ExecuteAsync(Command(InboxSql.Pinned(sql.ReleaseLostClaims),
                     new { tokens = attempted.ToArray(), entityIds = attemptedEntityIds.ToArray() }));
 
             var token = Guid.NewGuid();
             attempted.Add(token);
-            var entityIds = (await conn.QueryAsync<string>(Command(sql.LockHeads, new
+            var entityIds = (await conn.QueryAsync<string>(Command(InboxSql.Pinned(sql.LockHeads), new
             {
                 window = InboxSql.ClaimWindow,
                 batchSize = Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)
@@ -65,9 +64,15 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
         var token = claim.Token;
         return pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
         {
-            Task Run(string statement, object? args) => conn.ExecuteAsync(new CommandDefinition(statement, args, tx, cancellationToken: t));
+            // The first statement sent also pins the plans for the transaction (same round trip)
+            var first = true;
+            Task Run(string statement, object args)
+            {
+                var text = first ? InboxSql.Pinned(statement) : statement;
+                first = false;
+                return conn.ExecuteAsync(new CommandDefinition(text, args, tx, cancellationToken: t));
+            }
 
-            await Run(InboxSql.PinPlans, null);
             if (outcomes.Synced.Count > 0)
             {
                 // Watermarks first: Complete releases the lease that MarkSynced checks

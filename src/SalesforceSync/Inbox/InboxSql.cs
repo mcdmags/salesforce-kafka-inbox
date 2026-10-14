@@ -103,6 +103,12 @@ public sealed partial class InboxSql
         set local enable_bitmapscan = off; set local enable_sort = off; set local enable_seqscan = off; set local jit = off
         """;
 
+    /// <summary>
+    /// <paramref name="statement"/> preceded by <see cref="PinPlans"/> in the same command, so pinning costs no round
+    /// trip of its own (Npgsql sends the statements together; the SETs return no rows).
+    /// </summary>
+    public static string Pinned(string statement) => PinPlans + ";\n" + statement;
+
     /// <summary>The entities' watermarks. Not per table: sf_sync_state is keyed by entity type.</summary>
     public const string SyncedTimes = """
         select entity_id as EntityId, synced_time as Time

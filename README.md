@@ -34,7 +34,7 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 | Problem | Solution |
 |---|---|
 | Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to that object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`) with the entity's id in a plain `entity_id` column, before storing its offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. A redelivery is simply stored again and ends `superseded`. A message that isn't a valid event of its topic's type (see below) is logged with its offset and skipped, rather than blocking its partition. |
-| Ordering across parallel batches | Workers claim **entities, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each entity's *head* (oldest pending) row, only for entities with nothing in flight, then lease the entity's rows (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same entity. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
+| Ordering across parallel batches | Workers claim **entities, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each entity's *head* (oldest pending) row plus a per-entity claim lock (`pg_try_advisory_xact_lock`), only for entities with nothing in flight, then lease the entity's rows (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same entity. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
 | Bursts of updates to one entity | Pending events for an entity are **coalesced**: every event carries the full record, so of the events claimed together only the one with the newest `meta.time` is written (ties: the one stored later) and the others are marked `superseded`. Five updates in five seconds become one Salesforce write with the newest data. At most `Sync:MaxEventsPerEntity` (20) events of an entity are taken per claim, so a deep backlog is never leased or loaded whole. |
 | Late or replayed older events | **Sync watermark in Postgres**: `sf_sync_state` holds the newest `meta.time` synced per entity, advanced in the same transaction that completes the events and only while the worker still holds the lease. A claimed event at or before the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement and the watermark are conditional on its `lock_token`. |
@@ -52,7 +52,7 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per object type (Postgres: entity_id +
   account-changes              typed read + validate,   │  raw event JSON + processing state)
   account-relationship-changes store raw + entity_id    │  sf_account_inbox, sf_account_relationship_inbox
-                                                       │  claim entities: FOR UPDATE SKIP LOCKED on head row
+                                                       │  claim entities: head row + per-entity claim lock
                                                        ▼
                               InboxWorkerService ×N loops (any number of pods), round-robin over:
                                 AccountSyncService ─┐            (strategy: typed event → mapper →
@@ -197,6 +197,7 @@ create table if not exists sf_account_inbox (       -- and sf_account_relationsh
 create index if not exists sf_account_inbox_ready   on sf_account_inbox (next_attempt_at, id)     where status = 'pending';
 create index if not exists sf_account_inbox_pending on sf_account_inbox (entity_id, id)           where status = 'pending';
 create index if not exists sf_account_inbox_leased  on sf_account_inbox (entity_id, locked_until) where locked_until is not null;
+alter table sf_account_inbox set (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000);
 ```
 
 There is no entity type, version or time column and **no SQL that names a JSON field**: the event's field names are
@@ -206,27 +207,51 @@ last event of A → B → A. `sf_sync_state (entity_type, entity_id, synced_time
 newest synced `meta.time` per entity in microseconds, supplied by C#.
 
 **Claim** (`InboxSql`, the same statements for every table). One statement picks up to `Sync:BatchSize` entities and
-locks each one's head row; a second leases them:
+locks them; a second leases them:
 
 1. Read the first 500 claimable rows (`status = 'pending'`, `next_attempt_at <= now()`) in `(next_attempt_at, id)`
    order off the ready index, and reduce them to distinct entities.
 2. Per entity (not per row): find its head (lowest pending `id`), require it to be due and the entity to have no live
-   lease on any row, and lock the head by primary key `FOR UPDATE SKIP LOCKED`, re-checking the conditions on the
-   locked row.
+   lease on any row, lock the head by primary key `FOR UPDATE SKIP LOCKED`, re-checking the conditions on the
+   locked row, and take the entity's **claim lock**: `pg_try_advisory_xact_lock(hashtext(table), hashtext(entity_id))`,
+   held until the claim transaction ends. An entity whose claim lock another worker holds is skipped.
 3. Only if those 500 rows were not enough for a batch (they can all belong to entities that are in flight or backing
    off): walk the pending entities in id order to find the ones behind them.
 4. Lease the claimed entities' oldest `Sync:MaxEventsPerEntity` pending rows (`lock_token`, `locked_until`,
-   `retry_count + 1`) and return them. While a row is leased its `next_attempt_at` is the end of the lease, so leased
-   rows are outside the range step 1 scans and come back by themselves if the lease expires.
+   `retry_count + 1`) and return them, **unless another token holds a live lease on the entity** (checked again
+   here, in a statement that starts after the claim lock was taken). While a row is leased its `next_attempt_at` is
+   the end of the lease, so leased rows are outside the range step 1 scans and come back by themselves if the lease
+   expires.
+
+**Why the claim lock.** The head row lock alone does not exclude a second worker: the head is whichever row a
+worker's snapshot shows as oldest, and two consumers storing events of one entity can commit them out of id order.
+Then two workers see different heads, neither row lock conflicts, and the lease check in step 2 reads a snapshot from
+before the other worker's commit; both leased the entity. `ClaimRaceTests` reproduces this with four connections
+(it failed on the earlier claim: both rows ended with the second worker's token while the first worker's lease was
+live). With the claim lock, an entity is leased only by a transaction that holds its claim lock until commit, and
+step 4 reads a snapshot taken after that lock was acquired, so it sees every earlier lease of the entity (READ
+COMMITTED, the default, is required: under REPEATABLE READ step 4 would reuse the older snapshot). Two entities whose
+hashes collide only make one of them wait for the next claim.
+
+**Plans don't depend on statistics.** An inbox's statistics describe some earlier moment: never taken after a bulk
+load, or taken while every row was finished. With the latter, the earlier claim chose plans that read the whole
+ready index per entity: 1.5 s per statement on 100,000 pending rows, 11 s with most entities leased. The claim and
+outcome transactions now start with `InboxSql.PinPlans` (`SET LOCAL` no bitmap scans, sorts, sequential scans or
+JIT, sent in the same round trip as the first statement), and conditions that also fit a partial index the
+statement must not use are written as a `CASE`. Every statement got one plan across 108 measured scenarios. Claim
+and outcome costs are in [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
 Then, per claimed entity, in C#: deserialize its rows, keep the one with the newest `meta.time` (the rest are
 `superseded`), supersede that one too if it is not newer than the entity's watermark, otherwise map → write → advance
 the watermark. A row that can't be read is dead-lettered on its own (`INVALID_EVENT`). All outcome statements are
 set-based and conditional on the `lock_token`.
 
-Claim cost was only sanity-checked for this change (the plan reads the first index entries and probes per entity; on
-a 100,000-row table with 100 or 5,000 entities, analyzed or not, a claim typically planned and ran in a
-few milliseconds on a busy laptop). A measured matrix and tuning are left for a follow-up.
+**Cost.** A claim of 75 entities locks them in 1 to 3 ms in every measured scenario (5,000 or 100,000 pending
+rows, 100 to 5,000 entities, any statistics, up to 90% of entities in flight). Leasing costs about 11 to 20 µs per
+row (each lease is an update that adds an entry to all four indexes), so a claim that leases 75 events is a few
+milliseconds and one that leases 1,500 (75 entities with 20 or more pending events each) is 20 to 40 ms on the
+measuring machine. Lower `Sync:MaxEventsPerEntity` to make deep-backlog claims cheaper, at the price of more
+Salesforce calls per event.
 
 **Upgrade.** An `sf_inbox` table from an earlier version (any shape) is renamed to `sf_inbox_legacy` at startup, rows
 kept for inspection and not migrated; the `sf_event_*` SQL functions are dropped; `sf_sync_state` keeps its
@@ -304,7 +329,7 @@ the entity were released and a newer event synced in the meantime, the late writ
 
 | Guarantee | How | Test |
 |---|---|---|
-| Two workers or pods never hold the same entity at once | head row `FOR UPDATE SKIP LOCKED`, lease on the entity's rows | `ConcurrencyTests.Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version` (3 pods × 8 loops, claim audit: 0 overlaps) |
+| Two workers or pods never hold the same entity at once | per-entity claim lock for the claim transaction, lease checked again under it; head row `FOR UPDATE SKIP LOCKED` | `ConcurrencyTests.Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version` (3 pods × 8 loops, claim audit: 0 overlaps), `ClaimRaceTests` (events committed out of id order) |
 | An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | the claim requires the head to be due and the entity unleased | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
 | Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | newest-time coalescing + watermark | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
 | A worker whose lease expired can't record outcomes or move the watermark | every statement is conditional on `lock_token` | `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark` |
@@ -710,9 +735,15 @@ land in the org and show up in the mock's write history. The rate limiter is ope
 - Every account was claimed repeatedly (real contention) and all 3 pods wrote to Salesforce (`/__fake/clients`, per
   User-Agent).
 
-The same test, run against an earlier version of the claim with the `FOR UPDATE SKIP LOCKED` / in-flight check
-removed, failed with over ten thousand overlapping claims; that mutation has not been repeated on the current claim
-statement.
+Mutation checks on the current claim (each reverted afterwards):
+
+- Without the in-flight checks (the lease conditions, the claim lock, the lease re-check in `ClaimEntities` and the
+  head's due check): this test failed with 10,119 overlapping claims.
+- Without the lease conditions and the claim lock but with the due check: this test still passed (a leased head is
+  not due, so it is never locked), and `ClaimRaceTests` failed. The protections overlap; the race test is the one
+  that covers the claim lock.
+- Without `SKIP LOCKED` only: both passed (a second worker waits for the row lock and then sees the lease); it costs
+  throughput, not correctness.
 
 `Pods_survive_their_Postgres_connections_being_dropped` repeats this while every worker and consumer connection
 is terminated (`pg_terminate_backend`) every 200 ms (the test's own sessions are spared by their
@@ -728,9 +759,12 @@ Only the Salesforce HTTP endpoint is mocked; the Postgres inbox, workers, client
 # use a dedicated database: the benchmark truncates the inbox tables and resets sf_rate_limit
 export ConnectionStrings__benchdb="Host=localhost;Port=5432;Database=benchdb;Username=postgres;Password=postgres"
 
+dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*'             # everything, about 20 minutes
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*InboxDrain*'
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*Micro*'
 ```
+
+Results, the SQL statement measurements and the before/after of this tuning: [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
 The micro benchmarks need no database: header parsing, coalescing, the typed mapping (`MapAccountEvent`: event JSON →
 payload → sObjects → records; `MapPayloadToSObject` and `MapSObjectToRecord` for its two halves) and the type-aware
@@ -740,8 +774,9 @@ Both drain benchmarks run P **pods** (independent service providers: own connect
 HTTP client, like separate processes) x W worker loops against one Postgres inbox and one org. Each iteration
 **fails** if any account doesn't end at its newest version, any record's write history shows an older version
 after a newer one, any inbox row isn't `done` or `superseded`, or the claim audit shows two overlapping claims on
-the same entity. Each iteration prints a `//` line with
-fake-org counters, claims, overlaps and regressions.
+the same entity. Each iteration prints a `//` line with the mock org's counters (`api`, `writeRequests`,
+`recordsOk`, ...), `done` (entity syncs) and `superseded` rows, the coalescing (events per entity sync), claims,
+retries, overlaps and regressions.
 
 - `InboxDrainBenchmarks`: the whole inbox is loaded, then drained. Params: `Pods` (1/3), `Workers` (1/4/8),
   `Accounts` (100/1000), `LatencyMs` (0/25), `Events` (5000).
