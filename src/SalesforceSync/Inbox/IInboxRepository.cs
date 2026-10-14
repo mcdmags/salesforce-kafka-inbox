@@ -9,7 +9,7 @@ public interface IInboxRepository
     /// <summary>Leases up to <see cref="SyncOptions.BatchSize"/> entities of the table; no events = nothing to do.</summary>
     Task<InboxClaim> ClaimAsync(string inboxTable, string entityType, CancellationToken ct);
 
-    /// <summary>Records every entity's outcome in one transaction.</summary>
+    /// <summary>Records every entity's outcome in one transaction, including entities held or deferred on their own.</summary>
     Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct);
 
     /// <summary>

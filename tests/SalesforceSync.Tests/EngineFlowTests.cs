@@ -114,6 +114,89 @@ public sealed class EngineFlowTests
         _inbox.Recorded!.Dead.Should().ContainSingle();
     }
 
+    // ---------- A batch written in more than one call ----------
+
+    [Fact]
+    public async Task A_later_call_that_provably_failed_costs_only_its_own_entities_a_retry()
+    {
+        await CreateOldAsync();
+        _http.FailWrite = (2, new HttpRequestException(HttpRequestError.ConnectionError, "refused"));
+
+        await TwoCallBatchAsync();
+
+        _inbox.Calls.Should().Equal("claim sf_account_inbox account", "record");
+        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
+        _inbox.Recorded.Failed.Should().ContainSingle().Which.Should().Be(new FailedEvent(2, "UNKNOWN_ERROR refused", "UNKNOWN_ERROR"));
+        _inbox.Recorded.Held.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_later_call_whose_answer_is_lost_holds_only_its_own_entities()
+    {
+        await CreateOldAsync();
+        _org.LoseResponsesFor("Account", "OLD", 1);
+
+        await TwoCallBatchAsync();
+
+        _inbox.Calls.Should().Equal("claim sf_account_inbox account", "record");
+        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
+        _inbox.Recorded.Held.Should().ContainSingle().Which.Should().Match<FailedEvent>(h => h.EventId == 2 && h.Code == UnknownOutcomeException.Code);
+        _inbox.Recorded.Failed.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_later_call_that_is_rate_limited_defers_only_the_entities_not_sent()
+    {
+        await CreateOldAsync();
+        _http.FailWrite = (2, new RateLimitedException(TimeSpan.FromSeconds(7)));
+
+        await TwoCallBatchAsync();
+
+        _inbox.Calls.Should().Equal("claim sf_account_inbox account", "record");
+        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
+        _inbox.Recorded.Deferred.Should().Equal(2L);
+        _inbox.Recorded.DeferFor.Should().Be(TimeSpan.FromSeconds(7));
+    }
+
+    // ---------- Failures of the read ----------
+
+    [Fact]
+    public async Task A_read_rejecting_a_field_fails_the_batch_and_forces_a_fresh_describe()
+    {
+        var engine = Engine();
+        _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
+        await engine.UpsertBatchAsync(Accounts, CancellationToken.None); // describes are cached now
+        _inbox.Calls.Clear();
+        _http.OnRead = request => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            RequestMessage = request,
+            Content = new StringContent("""{"compositeResponse":[{"referenceId":"q0","httpStatusCode":400,"httpHeaders":{},"body":[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating'"}]}]}""")
+        };
+
+        await engine.UpsertBatchAsync(Accounts, CancellationToken.None);
+
+        _inbox.Calls.Should().HaveElementAt(1, "fail all: Query q0 failed: q0: INVALID_FIELD No such column 'Rating' (INVALID_FIELD)");
+        var before = _org.GetStats();
+        _http.OnRead = null;
+        await engine.UpsertBatchAsync(Accounts, CancellationToken.None);
+        var after = _org.GetStats();
+        (after.Describes - before.Describes).Should().BeGreaterThan(0, "the cached describe was invalidated");
+        (after.DescribesNotModified - before.DescribesNotModified).Should().Be(0, "an invalidated describe is unconditional");
+    }
+
+    [Fact]
+    public async Task A_read_cut_off_by_the_lease_is_retried_not_held_because_nothing_was_written()
+    {
+        _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
+        _http.OnRead = _ => throw new TaskCanceledException("The lease cutoff");
+
+        await Engine().UpsertBatchAsync(Accounts, CancellationToken.None);
+
+        _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: The lease cutoff ()");
+    }
+
+    // ---------- Grouping ----------
+
     [Fact]
     public void Outcomes_are_grouped_by_what_the_inbox_does_with_them()
     {
@@ -140,10 +223,55 @@ public sealed class EngineFlowTests
 
     // ---------- Helpers ----------
 
+    /// <summary>
+    /// Account, Profile and relationship per entity: a new entity needs three collections (creates), an existing one
+    /// three others (updates), so the two together take two Composite write calls (5 collections each at most).
+    /// </summary>
+    private static readonly UpsertStrategy<AccountEvent> ThreeObjects = new("account", "sf_account_inbox",
+        e => e.Account?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
+        (key, e) => new UpsertUnit(
+        [
+            new SObjectRecord("acct", "Account", "External_Id__c", key, new Dictionary<string, object?> { ["Name"] = e.Account!.Name }),
+            new SObjectRecord("prof", "Profile__c", "External_Id__c", $"P-{key}", new Dictionary<string, object?> { ["Tier__c"] = e.Account.Name },
+                [new SObjectLookup("Account__c", "Account", "External_Id__c", key)]),
+            new SObjectRecord("rel", "Account_Relationship__c", "External_Id__c", $"R-{key}", new Dictionary<string, object?> { ["Type__c"] = e.Account.Name },
+                [new SObjectLookup("Account__c", "Account", "External_Id__c", key), new SObjectLookup("Related_Account__c", "Account", "External_Id__c", key)])
+        ]),
+        units =>
+        [
+            new SoqlQuery("Account", "External_Id__c", SoqlQuery.ExternalIdsOf(units, "Account")),
+            new SoqlQuery("Profile__c", "External_Id__c", SoqlQuery.ExternalIdsOf(units, "Profile__c")),
+            new SoqlQuery("Account_Relationship__c", "External_Id__c", SoqlQuery.ExternalIdsOf(units, "Account_Relationship__c"))
+        ]);
+
+    /// <summary>Creates the entity OLD, so that changing it takes the second write call.</summary>
+    private async Task CreateOldAsync()
+    {
+        _inbox.Rows.Add(Row(9, "OLD", "2026-10-14T01:00:00Z", "Gold"));
+        (await Engine().UpsertBatchAsync(ThreeObjects, CancellationToken.None)).Should().Be(1);
+        _inbox.Recorded!.Synced.Should().ContainSingle();
+        _inbox.Rows.Clear();
+        _inbox.Calls.Clear();
+        _http.Writes = 0;
+    }
+
+    /// <summary>NEW (row 1, first call) and a change of OLD (row 2, second call).</summary>
+    private async Task TwoCallBatchAsync()
+    {
+        _inbox.Rows.AddRange([Row(1, "NEW", "2026-10-14T02:00:00Z", "Gold"), Row(2, "OLD", "2026-10-14T02:00:00Z", "Silver")]);
+        var before = _org.GetStats().WriteRequests;
+
+        (await Engine().UpsertBatchAsync(ThreeObjects, CancellationToken.None)).Should().Be(2);
+
+        _http.Writes.Should().Be(2, "the batch takes two write calls");
+        _org.FindByExternalId("Account", "NEW").Should().NotBeNull("the first call's records are in Salesforce");
+        (_org.GetStats().WriteRequests - before).Should().BeGreaterThanOrEqualTo(1, "the first call reached the org");
+    }
+
     private SalesforceBatchUpsertService Engine()
     {
         var options = Options.Create(new SalesforceOptions());
-        _http.InnerHandler = new FakeSalesforceHandler(_org);
+        _http.InnerHandler ??= new FakeSalesforceHandler(_org);
         var http = new HttpClient(_http) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
         return new SalesforceBatchUpsertService(_gate, _inbox, new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
             new SalesforceErrors(options), new WriteEchoTracker(), options, Options.Create(new SyncOptions()),
@@ -153,12 +281,25 @@ public sealed class EngineFlowTests
     private static InboxEvent Row(long id, string account, string time, string name = "Acme") => new(id, account,
         $$"""{ "meta": { "time": "{{time}}", "type": "inserted" }, "account": { "externalId": "{{account}}", "name": "{{name}}" } }""", 1);
 
+    /// <summary>Lets requests through to the org, or fails all of them, the read, or the Nth write.</summary>
     private sealed class Interceptor : DelegatingHandler
     {
         public Exception? Throw { get; set; }
+        public Func<HttpRequestMessage, HttpResponseMessage>? OnRead { get; set; }
+        public (int Number, Exception Failure)? FailWrite { get; set; }
+        public int Writes { get; set; }
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
-            => Throw is null ? base.SendAsync(request, ct) : throw Throw;
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (Throw is not null) throw Throw;
+            if (request.RequestUri!.AbsolutePath.EndsWith("/composite", StringComparison.Ordinal))
+            {
+                var isWrite = (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
+                if (!isWrite && OnRead is not null) return OnRead(request);
+                if (isWrite && ++Writes == FailWrite?.Number) throw FailWrite.Value.Failure;
+            }
+            return await base.SendAsync(request, ct);
+        }
     }
 
     private sealed class Gate : ISalesforceBatchGate, IAsyncDisposable

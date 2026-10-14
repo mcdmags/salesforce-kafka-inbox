@@ -82,15 +82,15 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
                 await Run(sql.Dead, new { ids = Ids(outcomes.Dead), errors = ErrorsJson(outcomes.Dead), token });
             if (outcomes.Failed.Count > 0)
                 await Run(sql.Fail, FailArgs(outcomes.Failed, token));
+            if (outcomes.Held.Count > 0)
+                await Run(sql.Hold, HoldArgs(Ids(outcomes.Held), token, outcomes.Held[0].Error));
+            if (outcomes.Deferred.Count > 0)
+                await Run(sql.Defer, new { ids = outcomes.Deferred.ToArray(), token, delay = outcomes.DeferFor });
         }, ct);
     }
 
     public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
-        => pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Hold, new
-        {
-            ids = claim.EventIds, token = claim.Token, hold = _opt.UnknownOutcomeHold,
-            error, code = UnknownOutcomeException.Code
-        }, ct);
+        => pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Hold, HoldArgs(claim.EventIds, claim.Token, error), ct);
 
     public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
         => pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Defer, new { ids = claim.EventIds, token = claim.Token, delay }, ct);
@@ -110,6 +110,9 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
         baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
         maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
     };
+
+    private object HoldArgs(long[] ids, Guid token, string error)
+        => new { ids, token, hold = _opt.UnknownOutcomeHold, error, code = UnknownOutcomeException.Code };
 
     private static long[] Ids(IReadOnlyList<FailedEvent> rows) => rows.Select(r => r.EventId).ToArray();
 

@@ -118,8 +118,20 @@ public sealed class SalesforceBatchUpsertService(
         }
 
         // 4. Record every entity's outcome in the inbox
-        await inbox.RecordAsync(claim, batch.Outcomes(results), ct);
+        var outcomes = batch.Outcomes(results);
         LogFailures(strategy.EntityType, batch, results.Values);
+        if (outcomes.Held.Count == 0)
+        {
+            await inbox.RecordAsync(claim, outcomes, ct);
+        }
+        else
+        {
+            // Some entities are held (a later write's outcome is unknown): like a whole-claim hold, that must be
+            // recorded even on shutdown
+            using var recording = new CancellationTokenSource(HoldRecordingTimeout);
+            await inbox.RecordAsync(claim, outcomes, recording.Token);
+            ct.ThrowIfCancellationRequested();
+        }
 
         return claim.Events.Count;
     }
@@ -159,18 +171,54 @@ public sealed class SalesforceBatchUpsertService(
         WarnAboutFlappingFields(plan.Rewrites);
         LogTypeMismatches(plan, normalized.Count);
 
-        // 5. Send: normally one Composite call. Each call's records are final once it returns, so a later call that
-        // fails outright only costs its own entities a retry (the earlier ones then read back as unchanged).
-        // 6. Per-record results -> one outcome per unit
+        // 5. Send: normally one Composite call. 6. Per-record results -> one outcome per unit.
         var saved = new List<WriteEcho>();
-        foreach (var request in plan.Requests)
+        for (var i = 0; i < plan.Requests.Count; i++)
         {
-            var answers = await SendAsync(request, ct);
-            results.AddRange(_interpreter.Interpret(request, answers, saved));
+            var request = plan.Requests[i];
+            try
+            {
+                var answers = await SendAsync(request, ct);
+                results.AddRange(_interpreter.Interpret(request, answers, saved));
+            }
+            // A failed first call fails the batch (the caller fails, holds or defers the whole claim): nothing of it
+            // was written. A later call's failure costs only its own entities: the earlier calls' records are final.
+            catch (Exception ex) when (i > 0)
+            {
+                var stop = LaterCallFailed(ex, request, plan.Requests.Skip(i + 1), results);
+                if (stop) break;
+            }
         }
         echoTracker.Record(saved);
 
         return results;
+    }
+
+    /// <summary>
+    /// The outcomes of a write call after the first that threw: its entities are held if its outcome is unknown,
+    /// deferred if it was rate limited (and so are the calls after it), otherwise retried with backoff.
+    /// </summary>
+    /// <returns>True if no further call may be sent.</returns>
+    private static bool LaterCallFailed(Exception ex, CompositeWrite failed, IEnumerable<CompositeWrite> notSent, List<UpsertResult> results)
+    {
+        IEnumerable<UpsertResult> For(CompositeWrite request, SyncOutcome outcome, IReadOnlyList<SalesforceError> errors, TimeSpan? retryAfter = null)
+            => request.Units.Select(u => new UpsertResult(u.Key, outcome, errors, retryAfter));
+
+        switch (ex)
+        {
+            case UnknownOutcomeException:
+                // Stop: nothing more is sent while Salesforce may still be applying this call
+                results.AddRange(For(failed, SyncOutcome.OutcomeUnknown, [new SalesforceError(null, UnknownOutcomeException.Code, ex.Message)]));
+                results.AddRange(notSent.SelectMany(r => For(r, SyncOutcome.NotAttempted, [])));
+                return true;
+            case RateLimitedException limited:
+                results.AddRange(new[] { failed }.Concat(notSent).SelectMany(r => For(r, SyncOutcome.RateLimited, [], limited.RetryAfter)));
+                return true;
+            default:
+                // Salesforce provably did not apply it
+                results.AddRange(For(failed, SyncOutcome.TransientFailure, [new SalesforceError(null, "UNKNOWN_ERROR", ex.Message)]));
+                return false;
+        }
     }
 
     private async Task<Dictionary<string, SObjectSchema>> DescribeAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
@@ -247,9 +295,12 @@ public sealed class SalesforceBatchUpsertService(
     {
         foreach (var (id, error) in batch.Invalid)
             log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", id, SalesforceErrors.InvalidEvent, error);
-        foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure))
+        foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure or SyncOutcome.OutcomeUnknown))
             log.LogWarning("{Type} {Key}: {Outcome} ({Code}) {Errors}", entityType, r.Key, r.Outcome,
                 r.PrimaryError?.Code, string.Join("; ", r.Errors));
+        if (results.FirstOrDefault(r => r.Outcome == SyncOutcome.RateLimited) is { } limited)
+            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}",
+                results.Count(r => r.Outcome == SyncOutcome.RateLimited), entityType, limited.RetryAfter);
     }
 
     /// <summary><see cref="BatchPreparer.Prepare{TEvent}"/>, callable on the engine.</summary>
