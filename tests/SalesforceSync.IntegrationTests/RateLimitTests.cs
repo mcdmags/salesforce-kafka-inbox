@@ -5,8 +5,9 @@ using Xunit.Abstractions;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// A tiny daily allocation shared by 3 pods: SalesforceLimits:DailyApiAllocation = 60 and
-/// RateLimit:DailyBudgetShare = 0.5 give this integration 30 calls per rolling 24 hours.
+/// A tiny daily allocation shared by 3 pods: the configuration allows 1,000 calls, but the mock org reports
+/// <c>Sforce-Limit-Info: api-usage=n/60</c>, the lower, so RateLimit:DailyBudgetShare = 0.5 gives this integration
+/// 30 calls per rolling 24 hours.
 /// </summary>
 public sealed class DailyBudgetFixture : SyncFixture
 {
@@ -15,7 +16,8 @@ public sealed class DailyBudgetFixture : SyncFixture
 
     public DailyBudgetFixture() : base(PodCount)
     {
-        WorkerSettings["SalesforceLimits:DailyApiAllocation"] = "60";
+        WorkerSettings["SalesforceLimits:DailyApiAllocation"] = "1000";
+        FakeOrgSettings["FakeSalesforce:DailyApiLimit"] = "60";
         WorkerSettings["RateLimit:DailyBudgetShare"] = "0.5";
         // Normally pods slow down at 80% and stop at 95% of the budget (unit-tested); turned off here to
         // test the hard cap itself

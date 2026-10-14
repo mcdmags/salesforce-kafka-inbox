@@ -10,7 +10,8 @@ public enum SalesforceEdition { Enterprise, Professional, Unlimited, Performance
 /// <summary>
 /// The org's Platform API limits, from "API Request Limits and Allocations" in the Salesforce Developer Limits and
 /// Allocations Quick Reference. Describe the org (type, edition, licenses, add-ons) and the limits are derived from
-/// the published tables; any derived value can be overridden with the number shown in Setup.
+/// the published tables; any derived value can be overridden with the number shown in Setup. The result is the
+/// maximum: when Salesforce reports a lower limit in <c>Sforce-Limit-Info</c>, the budget follows that.
 /// </summary>
 public sealed class SalesforceLimitsOptions
 {

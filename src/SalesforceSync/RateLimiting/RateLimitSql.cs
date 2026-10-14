@@ -45,7 +45,8 @@ internal static class RateLimitSql
         from s, w
         """;
 
-    // Keeps the current throttle factor (refill_per_sec / base_refill_per_sec) under the new base rate.
+    // Keeps the current throttle factor (refill_per_sec / base_refill_per_sec) under the new base rate. The budget is
+    // the configured one, lowered to the share of the allocation Salesforce last reported (least ignores a null).
     public const string ApplyConfiguration = """
         update sf_rate_limit
         set tokens              = least(@capacity, tokens + extract(epoch from clock_timestamp() - updated_at)::float8 * refill_per_sec),
@@ -53,7 +54,7 @@ internal static class RateLimitSql
             capacity            = @capacity,
             refill_per_sec      = @rate * coalesce(refill_per_sec / nullif(base_refill_per_sec, 0), 1),
             base_refill_per_sec = @rate,
-            daily_budget        = @budget
+            daily_budget        = least(@budget, floor(@share * api_max)::bigint)
         where name = 'salesforce';
         delete from sf_api_usage where bucket < clock_timestamp() - interval '25 hours';
         """;
@@ -69,7 +70,8 @@ internal static class RateLimitSql
         where name = 'salesforce'
         """;
 
-    // Refill tokens accrued at the old rate before changing the rate, so the switch is exact.
+    // Refill tokens accrued at the old rate before changing the rate, so the switch is exact. @budget: the budget under
+    // the allocation this response reported (SalesforceRateLimiter.BudgetFor), null if it reported none.
     public const string ReportLimits = """
         update sf_rate_limit
         set tokens          = least(capacity, tokens + extract(epoch from clock_timestamp() - updated_at)::float8 * refill_per_sec),
@@ -86,6 +88,7 @@ internal static class RateLimitSql
             app_used        = coalesce(@appUsed, app_used),
             app_max         = coalesce(@appMax, app_max),
             app_name        = coalesce(@appName, app_name),
+            daily_budget    = coalesce(@budget, daily_budget),
             usage_updated_at = clock_timestamp()
         where name = 'salesforce';
         delete from sf_api_usage where bucket < clock_timestamp() - interval '25 hours';
