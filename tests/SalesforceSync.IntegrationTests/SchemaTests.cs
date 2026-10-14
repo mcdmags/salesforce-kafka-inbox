@@ -1,4 +1,5 @@
-using Dapper;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Npgsql;
 using SalesforceSync.Inbox;
 using SalesforceSync.Sync;
@@ -8,7 +9,7 @@ namespace SalesforceSync.IntegrationTests;
 [Collection(SyncCollection.Name)]
 public sealed class SchemaTests(SyncFixture app)
 {
-    private static readonly string[] InboxTables = [AccountSyncService.InboxTable, AccountRelationshipSyncService.InboxTable];
+    private static readonly string[] InboxTables = [SyncFixture.InboxTable(), SyncFixture.InboxTable(SyncFixture.Relationships)];
 
     [Fact]
     public async Task Startup_created_one_inbox_table_per_object_type_and_reapplying_changes_nothing()
@@ -21,8 +22,8 @@ public sealed class SchemaTests(SyncFixture app)
             "sf_account_relationship_inbox_ready", "sf_account_relationship_inbox_pending", "sf_account_relationship_inbox_leased"]);
         before.Should().NotContain("sf_inbox", "there is no shared inbox any more");
 
-        await InboxSchema.EnsureCreatedAsync(app.Db, InboxTables);
-        await InboxSchema.EnsureCreatedAsync(app.Db, InboxTables);
+        await InboxSchema.EnsureCreatedAsync(app.Contexts, InboxTables);
+        await InboxSchema.EnsureCreatedAsync(app.Contexts, InboxTables);
 
         (await TablesAndIndexesAsync()).Should().BeEquivalentTo(before);
     }
@@ -35,13 +36,48 @@ public sealed class SchemaTests(SyncFixture app)
             "select column_name::text || ' ' || data_type from information_schema.columns where table_schema = current_schema() and table_name = @table order by ordinal_position",
             new { table })).ToList();
 
-        var account = await Columns(AccountSyncService.InboxTable);
+        var account = await Columns(SyncFixture.InboxTable());
         account.Select(c => c.Split(' ')[0]).Should().Equal(
             "id", "entity_id", "payload", "status", "retry_count", "last_updated", "last_error", "last_error_code",
             "next_attempt_at", "locked_until", "lock_token", "received_at");
-        (await Columns(AccountRelationshipSyncService.InboxTable)).Should().Equal(account);
+        (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await conn.ExecuteScalarAsync<long>("select count(*) from pg_proc where proname like 'sf\\_event\\_%'"))
             .Should().Be(0, "no SQL function reads inside an event");
+    }
+
+    [Fact]
+    public async Task The_EF_model_maps_every_column_of_its_tables_with_the_type_the_database_has()
+    {
+        await using var db = await app.Contexts.CreateDbContextAsync();
+        await using var conn = await app.Db.OpenConnectionAsync();
+
+        var mappedByTable = new Dictionary<string, List<(string Name, string Type, bool Nullable)>>();
+        foreach (var entity in db.Model.GetEntityTypes())
+        {
+            var table = entity.GetTableName()!;
+            var store = StoreObjectIdentifier.Table(table);
+            var mapped = entity.GetProperties()
+                .Select(p => (Name: p.GetColumnName(store)!, Type: p.GetColumnType(store), Nullable: p.IsColumnNullable(store)))
+                .ToList();
+            mappedByTable[table] = mapped;
+
+            var actual = await conn.QueryAsync<(string Name, string Type, string Nullable)>(
+                "select column_name::text, data_type::text, is_nullable::text from information_schema.columns where table_schema = current_schema() and table_name = @table",
+                new { table });
+            actual.Should().NotBeEmpty($"{table} is created by sql/schema.sql");
+            mapped.Select(c => c.Name).Should().BeEquivalentTo(actual.Select(c => c.Name),
+                $"every column of {table} is mapped and the model maps nothing else");
+            foreach (var column in mapped)
+            {
+                var found = actual.Single(c => c.Name == column.Name);
+                found.Type.Should().Be(column.Type, $"{table}.{column.Name}");
+                (found.Nullable == "YES").Should().Be(column.Nullable, $"{table}.{column.Name} nullability");
+            }
+        }
+
+        mappedByTable[SyncFixture.InboxTable()].Should().Equal(mappedByTable[SyncFixture.InboxTable(SyncFixture.Relationships)],
+            "both inboxes have exactly the same fields");
+        db.InboxTables.Should().BeEquivalentTo(InboxTables);
     }
 
     [Fact]
@@ -69,8 +105,8 @@ public sealed class SchemaTests(SyncFixture app)
             insert into sf_sync_state (entity_type, entity_key, synced_version) values ('account', 'ACC-1', 1791939723000000);
             """, transaction: tx);
 
-        await InboxSchema.ApplyAsync(conn, tx, InboxTables);
-        await InboxSchema.ApplyAsync(conn, tx, InboxTables); // still idempotent after the upgrade
+        await PgSql.ApplySchemaAsync(conn, tx, InboxTables);
+        await PgSql.ApplySchemaAsync(conn, tx, InboxTables); // still idempotent after the upgrade
 
         (await conn.ExecuteScalarAsync<long>("select count(*) from sf_inbox_legacy where payload -> 'account' ->> 'externalId' = 'ACC-1'", transaction: tx))
             .Should().Be(1, "the old rows are kept aside for inspection");
@@ -85,7 +121,7 @@ public sealed class SchemaTests(SyncFixture app)
 
         // A second upgrade (an sf_inbox appears again next to an existing legacy table) doesn't collide
         await conn.ExecuteAsync("create table sf_inbox (id bigserial primary key, payload jsonb not null)", transaction: tx);
-        await InboxSchema.ApplyAsync(conn, tx, InboxTables);
+        await PgSql.ApplySchemaAsync(conn, tx, InboxTables);
         (await TablesAndIndexesAsync(conn, tx)).Should().Contain(["sf_inbox_legacy", "sf_inbox_legacy_2"]).And.NotContain("sf_inbox");
 
         await tx.RollbackAsync();

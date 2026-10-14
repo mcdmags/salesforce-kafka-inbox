@@ -257,8 +257,9 @@ public sealed class SalesforceLimitsTests
         => new SalesforceLimitsValidator(Options.Create(sync ?? new SyncOptions()), Options.Create(rate ?? new RateLimitOptions()))
             .Validate(null, limits);
 
+    private static readonly NpgsqlDataSource Db = NpgsqlDataSource.Create("Host=unused");
+
     private static SalesforceRateLimiter Limiter(RateLimitOptions rate, SalesforceLimitsOptions? limits = null)
-        => new(new PostgresExecutionStrategy(NpgsqlDataSource.Create("Host=unused"), Options.Create(new PostgresRetryOptions()),
-                NullLogger<PostgresExecutionStrategy>.Instance), Options.Create(rate),
+        => new(SyncDbContext.CreateFactory(Db), Options.Create(rate),
             Options.Create(limits ?? new SalesforceLimitsOptions()), NullLogger<SalesforceRateLimiter>.Instance);
 }

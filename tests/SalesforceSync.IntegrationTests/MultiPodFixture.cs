@@ -1,4 +1,3 @@
-using Dapper;
 
 namespace SalesforceSync.IntegrationTests;
 

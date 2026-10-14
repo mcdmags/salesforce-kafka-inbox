@@ -1,18 +1,26 @@
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
 using SalesforceSync.Data;
 
 namespace SalesforceSync.Tests;
 
-public sealed class PostgresExecutionStrategyTests
+public sealed class PostgresRetryStrategyTests
 {
     private readonly Fixture _any = new();
 
-    private static PostgresExecutionStrategy Strategy(int maxRetries = 3) => new(
-        NpgsqlDataSource.Create("Host=unused"),
-        Options.Create(new PostgresRetryOptions { MaxRetryCount = maxRetries, BaseDelay = TimeSpan.FromMilliseconds(1), MaxRetryDelay = TimeSpan.FromMilliseconds(5) }),
-        NullLogger<PostgresExecutionStrategy>.Instance);
+    private static readonly NpgsqlDataSource Db = NpgsqlDataSource.Create("Host=unused");
+
+    /// <summary>EF's strategy as the worker configures it (the unit never touches the database here).</summary>
+    private static IExecutionStrategy Strategy(int maxRetries = 3)
+    {
+        var options = new PostgresRetryOptions
+        {
+            MaxRetryCount = maxRetries, BaseDelay = TimeSpan.FromMilliseconds(1), MaxRetryDelay = TimeSpan.FromMilliseconds(5)
+        };
+        var db = SyncDbContext.CreateFactory(Db, options).CreateDbContext();
+        return db.Database.CreateExecutionStrategy();
+    }
 
     public static TheoryData<Exception> Transient => new()
     {
@@ -21,6 +29,7 @@ public sealed class PostgresExecutionStrategyTests
         new PostgresException("deadlock detected", "ERROR", "ERROR", "40P01"),
         new PostgresException("terminating connection due to administrator command", "FATAL", "FATAL", "57P01"),
         new PostgresException("the database system is starting up", "FATAL", "FATAL", "57P03"),
+        new PostgresException("connection failure", "FATAL", "FATAL", "08006"),
         new TimeoutException("timeout")
     };
 
@@ -31,7 +40,7 @@ public sealed class PostgresExecutionStrategyTests
         var attempts = 0;
         var value = _any.Create<string>();
 
-        var result = await Strategy().RetryAsync(_ => ++attempts < 3 ? throw error : Task.FromResult(value), CancellationToken.None);
+        var result = await Strategy().ExecuteAsync(_ => ++attempts < 3 ? throw error : Task.FromResult(value), CancellationToken.None);
 
         result.Should().Be(value, "the unit's result is returned once an attempt succeeds");
         attempts.Should().Be(3);
@@ -43,7 +52,7 @@ public sealed class PostgresExecutionStrategyTests
         var attempts = 0;
         var duplicate = new PostgresException("duplicate key value", "ERROR", "ERROR", "23505");
 
-        var act = () => Strategy().RetryAsync<int>(_ => { attempts++; throw duplicate; }, CancellationToken.None);
+        var act = () => Strategy().ExecuteAsync<int>(_ => { attempts++; throw duplicate; }, CancellationToken.None);
 
         await act.Should().ThrowExactlyAsync<PostgresException>();
         attempts.Should().Be(1, "a unique violation won't succeed on retry");
@@ -54,9 +63,9 @@ public sealed class PostgresExecutionStrategyTests
     {
         var attempts = 0;
 
-        var act = () => Strategy(maxRetries: 2).RetryAsync<int>(_ => { attempts++; throw new TimeoutException(); }, CancellationToken.None);
+        var act = () => Strategy(maxRetries: 2).ExecuteAsync<int>(_ => { attempts++; throw new TimeoutException(); }, CancellationToken.None);
 
-        await act.Should().ThrowExactlyAsync<TimeoutException>();
+        (await act.Should().ThrowExactlyAsync<RetryLimitExceededException>()).WithInnerExceptionExactly<TimeoutException>();
         attempts.Should().Be(3, "the first attempt + 2 retries");
     }
 
@@ -64,15 +73,15 @@ public sealed class PostgresExecutionStrategyTests
     public void Lost_connections_are_told_apart_from_failed_transactions()
     {
         // Lost: the pool is cleared before retrying, since its idle connections are likely dead too
-        PostgresExecutionStrategy.IsConnectionLost(new NpgsqlException("connection reset", new IOException("broken pipe"))).Should().BeTrue();
-        PostgresExecutionStrategy.IsConnectionLost(
+        PostgresRetryStrategy.IsConnectionLost(new NpgsqlException("connection reset", new IOException("broken pipe"))).Should().BeTrue();
+        PostgresRetryStrategy.IsConnectionLost(
             new PostgresException("terminating connection due to administrator command", "FATAL", "FATAL", "57P01")).Should().BeTrue();
-        PostgresExecutionStrategy.IsConnectionLost(new PostgresException("connection failure", "FATAL", "FATAL", "08006")).Should().BeTrue();
+        PostgresRetryStrategy.IsConnectionLost(new PostgresException("connection failure", "FATAL", "FATAL", "08006")).Should().BeTrue();
 
         // The session is fine: retry on the same pool
-        PostgresExecutionStrategy.IsConnectionLost(new PostgresException("could not serialize access", "ERROR", "ERROR", "40001")).Should().BeFalse();
-        PostgresExecutionStrategy.IsConnectionLost(new PostgresException("deadlock detected", "ERROR", "ERROR", "40P01")).Should().BeFalse();
-        PostgresExecutionStrategy.IsConnectionLost(new TimeoutException()).Should().BeFalse();
+        PostgresRetryStrategy.IsConnectionLost(new PostgresException("could not serialize access", "ERROR", "ERROR", "40001")).Should().BeFalse();
+        PostgresRetryStrategy.IsConnectionLost(new PostgresException("deadlock detected", "ERROR", "ERROR", "40P01")).Should().BeFalse();
+        PostgresRetryStrategy.IsConnectionLost(new TimeoutException()).Should().BeFalse();
     }
 
     [Fact]
@@ -81,7 +90,7 @@ public sealed class PostgresExecutionStrategyTests
         using var cts = new CancellationTokenSource();
         var attempts = 0;
 
-        var act = () => Strategy().RetryAsync<int>(_ =>
+        var act = () => Strategy().ExecuteAsync<int>(_ =>
         {
             attempts++;
             cts.Cancel();

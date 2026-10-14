@@ -1,3 +1,4 @@
+using SalesforceSync.Inbox;
 using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.Salesforce.SObjects;
 using SalesforceSync.Sync.Mapping;
@@ -10,19 +11,19 @@ namespace SalesforceSync.Sync;
 /// </summary>
 public sealed class AccountSyncService(
     SalesforceBatchUpsertService engine,
+    IRepository<AccountInboxRow> inbox,
     ISObjectMapper<AccountPayload, AccountSObject> accounts,
     ISObjectMapper<ProfilePayload, ProfileSObject> profiles)
-    : EntitySyncService<AccountEvent>(engine, CreateStrategy(accounts, profiles), DefaultTopic)
+    : EntitySyncService<AccountEvent, AccountInboxRow>(engine, inbox, CreateStrategy(accounts, profiles), DefaultTopic)
 {
     public const string Type = "account";
-    public const string InboxTable = "sf_account_inbox";
     public const string DefaultTopic = "account-changes";
 
     /// <summary>The strategy the engine runs, with the mappers it maps through (injected, so built per instance).</summary>
     public static UpsertStrategy<AccountEvent> CreateStrategy(
         ISObjectMapper<AccountPayload, AccountSObject> accounts,
         ISObjectMapper<ProfilePayload, ProfileSObject> profiles)
-        => new(Type, InboxTable, e => e.Account?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
+        => new(Type, e => e.Account?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
             (key, e) => Map(key, e, accounts, profiles), Queries);
 
     public static UpsertUnit Map(string accountKey, AccountEvent e,

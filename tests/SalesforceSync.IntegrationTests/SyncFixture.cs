@@ -4,8 +4,12 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
-using Dapper;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Npgsql;
+using SalesforceSync.Data;
+using SalesforceSync.Inbox;
+using SalesforceSync.Sync;
 using SalesforceSync.IntegrationTests.Hosting;
 using Testcontainers.Kafka;
 using Testcontainers.PostgreSql;
@@ -52,6 +56,7 @@ public class SyncFixture : IAsyncLifetime
     private FakeOrgHost? _org;
     private IProducer<string, string>? _producer;
     private NpgsqlDataSource? _db;
+    private IDbContextFactory<SyncDbContext>? _contexts;
 
     /// <param name="pods">Worker pods (replicas) sharing the inbox, the Kafka consumer group and the org.</param>
     protected SyncFixture(int pods)
@@ -95,6 +100,11 @@ public class SyncFixture : IAsyncLifetime
 
     public NpgsqlDataSource Db => _db ?? throw new InvalidOperationException("Fixture not started");
 
+    /// <summary>The database's full connection string (the data source's own hides the password).</summary>
+    public string ConnectionString { get; private set; } = "";
+
+    public IDbContextFactory<SyncDbContext> Contexts => _contexts ??= SyncDbContext.CreateFactory(Db);
+
     /// <summary>The running pods, in start order.</summary>
     public IReadOnlyList<WorkerPod> RunningPods => _pods;
 
@@ -121,6 +131,7 @@ public class SyncFixture : IAsyncLifetime
         }).Build();
 
         var inbox = _postgres.GetConnectionString();
+        ConnectionString = inbox;
         _db = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(inbox) { ApplicationName = TestsApplicationName }.ConnectionString);
 
         var instanceUrl = _org.Url.GetLeftPart(UriPartial.Authority);
@@ -267,10 +278,22 @@ public class SyncFixture : IAsyncLifetime
         res.EnsureSuccessStatusCode();
     }
 
-    /// <summary>The inbox table of an entity type (the strategies' constants).</summary>
-    public static string InboxTable(string entityType = Accounts) => entityType == Relationships
-        ? Sync.AccountRelationshipSyncService.InboxTable
-        : Sync.AccountSyncService.InboxTable;
+    /// <summary>The inbox table of an entity type, as the EF model names it.</summary>
+    public static string InboxTable(string entityType = Accounts)
+    {
+        // Only the model is read: nothing connects to this address
+        using var model = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
+        return entityType == Relationships ? model.TableOf<AccountRelationshipInboxRow>() : model.TableOf<AccountInboxRow>();
+    }
+
+    /// <summary>The account inbox through the worker's own repository, to play a worker by hand.</summary>
+    public IRepository<AccountInboxRow> AccountInbox
+    {
+        get
+        {
+            return new InboxRepository<AccountInboxRow>(Contexts, Options.Create(new SyncOptions()));
+        }
+    }
 
     /// <summary>(version, status) of every inbox row for the entity, by version then arrival (version N = meta.time BaseTime + N ms).</summary>
     public async Task<IReadOnlyList<(long Version, string Status)>> GetInboxAsync(string key, string entityType = Accounts)

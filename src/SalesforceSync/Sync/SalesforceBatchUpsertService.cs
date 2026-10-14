@@ -10,12 +10,12 @@ using SalesforceSync.Sync.Upsert;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// The one sync engine for every Salesforce object. <see cref="UpsertBatchAsync{TEvent}(UpsertStrategy{TEvent}, CancellationToken)"/>
-/// runs one batch end to end; the strategy says where the type's events are, how to read one, how it maps to
-/// Salesforce records and what to read from Salesforce.
+/// The one sync engine for every Salesforce object. <see cref="UpsertBatchAsync{TEvent, TRow}"/>
+/// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds the events, and the
+/// strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
 /// <item>Takes a global concurrency slot and respects a shared pause (rate limits, all pods).</item>
-/// <item>Claims up to <see cref="SyncOptions.BatchSize"/> entities from the strategy's inbox table: per entity, the head
+/// <item>Claims up to <see cref="SyncOptions.BatchSize"/> entities from the inbox table: per entity, the head
 /// row is locked with FOR UPDATE SKIP LOCKED and its oldest pending rows are leased, so no two workers in any pod
 /// ever process the same entity at once.</item>
 /// <item>Per entity, reads the claimed events and keeps the one with the newest event time (events carry the full
@@ -29,11 +29,10 @@ namespace SalesforceSync.Sync;
 /// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="BatchPreparer"/> and the
 /// ones in <c>Sync/Upsert</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
-/// through <see cref="IInboxRepository"/>, whose every unit of work runs through <see cref="PostgresExecutionStrategy"/>.
+/// through <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
 /// </summary>
 public sealed class SalesforceBatchUpsertService(
     ISalesforceBatchGate gate,
-    IInboxRepository inbox,
     SalesforceRestClient salesforce,
     SalesforceSchemaCache schemaCache,
     SalesforceErrors errors,
@@ -64,7 +63,8 @@ public sealed class SalesforceBatchUpsertService(
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
-    public async Task<int> UpsertBatchAsync<TEvent>(UpsertStrategy<TEvent> strategy, CancellationToken ct)
+    public async Task<int> UpsertBatchAsync<TEvent, TRow>(UpsertStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
+        where TRow : InboxRow, new()
     {
         await using var admission = await gate.TryEnterAsync(ct);
         if (admission is null) return 0;
@@ -74,8 +74,8 @@ public sealed class SalesforceBatchUpsertService(
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
 
-        // 1. Claim events from the strategy's inbox table (short transaction)
-        var claim = await inbox.ClaimAsync(strategy.InboxTable, strategy.EntityType, ct);
+        // 1. Claim events from the inbox table (short transaction)
+        var claim = await inbox.ClaimAsync(strategy.EntityType, ct);
         if (claim.Events.Count == 0) return 0;
 
         // 2. Per entity: keep the newest event, drop it if it isn't newer than what is synced, map it to records

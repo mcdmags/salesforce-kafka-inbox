@@ -1,6 +1,6 @@
-using Dapper;
-using Npgsql;
+using Microsoft.EntityFrameworkCore;
 using SalesforceSync.Data;
+using static SalesforceSync.Data.SqlCommands;
 
 namespace SalesforceSync.Inbox;
 
@@ -36,32 +36,21 @@ public static class InboxSchema
         return sql[..start] + tables + sql[(end + TemplateEnd.Length)..];
     }
 
-    /// <summary>Applies the schema on a connection the caller owns (tests: inside a transaction, in a schema of their own).</summary>
-    public static async Task ApplyAsync(NpgsqlConnection conn, NpgsqlTransaction? tx, IEnumerable<string> inboxTables, CancellationToken ct = default)
+    /// <summary>Applies the schema in the context's current transaction (tests: in a schema of their own).</summary>
+    public static async Task ApplyAsync(SyncDbContext db, IEnumerable<string> inboxTables, CancellationToken ct = default)
     {
-        await conn.ExecuteAsync(new CommandDefinition("select pg_advisory_xact_lock(@key)",
-            new { key = MigrationLockKey }, tx, cancellationToken: ct));
-        await conn.ExecuteAsync(new CommandDefinition(Script(inboxTables), transaction: tx, cancellationToken: ct));
+        await db.Database.ExecuteAsync("select pg_advisory_xact_lock(@key)", ct, Param("key", MigrationLockKey));
+        await db.Database.ExecuteAsync(Script(inboxTables), ct);
     }
 
     /// <summary>
     /// Applies sql/schema.sql with one inbox table per name in <paramref name="inboxTables"/> (idempotent, so safe to
-    /// retry). Serialized across processes with an advisory lock. Without an execution strategy, runs once
-    /// (benchmarks, tools).
+    /// retry). Serialized across processes with an advisory lock.
     /// </summary>
-    public static async Task EnsureCreatedAsync(NpgsqlDataSource db, IEnumerable<string> inboxTables, CancellationToken ct = default,
-        PostgresExecutionStrategy? pg = null)
+    public static async Task EnsureCreatedAsync(IDbContextFactory<SyncDbContext> contexts, IEnumerable<string> inboxTables,
+        CancellationToken ct = default)
     {
         var tables = inboxTables.ToList();
-        if (pg is not null)
-        {
-            await pg.ExecuteInTransactionAsync((conn, tx, t) => ApplyAsync(conn, tx, tables, t), ct);
-            return;
-        }
-
-        await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
-        await ApplyAsync(conn, tx, tables, ct);
-        await tx.CommitAsync(ct);
+        await contexts.RunInTransactionAsync((db, t) => ApplyAsync(db, tables, t), ct);
     }
 }

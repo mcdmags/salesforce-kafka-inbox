@@ -1,23 +1,23 @@
-using Npgsql;
+using Microsoft.EntityFrameworkCore;
 using SalesforceSync.Data;
-using SalesforceSync.Sync;
 
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// Runs before the workers start (hosted services start in registration order): creates the shared tables and one
-/// inbox table per registered <see cref="ISalesforceEntitySync"/>.
+/// Runs before the workers start (hosted services start in registration order): creates the shared tables and the
+/// inbox table of every <see cref="InboxRow"/> type in the model.
 /// </summary>
-public sealed class InboxSchemaInitializer(NpgsqlDataSource db, PostgresExecutionStrategy pg, IServiceScopeFactory scopes,
-    ILogger<InboxSchemaInitializer> log) : IHostedService
+public sealed class InboxSchemaInitializer(IDbContextFactory<SyncDbContext> contexts, ILogger<InboxSchemaInitializer> log) : IHostedService
 {
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         string[] tables;
-        using (var scope = scopes.CreateScope())
-            tables = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().Select(s => s.InboxTable).ToArray();
+        using (var db = contexts.CreateDbContext())
+        {
+            tables = db.InboxTables.ToArray();
+        }
 
-        await InboxSchema.EnsureCreatedAsync(db, tables, cancellationToken, pg);
+        await InboxSchema.EnsureCreatedAsync(contexts, tables, cancellationToken);
         log.LogInformation("Inbox schema is up to date ({Tables})", string.Join(", ", tables));
     }
 

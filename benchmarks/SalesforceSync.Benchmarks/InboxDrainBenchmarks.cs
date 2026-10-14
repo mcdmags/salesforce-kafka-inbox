@@ -4,7 +4,7 @@ using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Engines;
 using BenchmarkDotNet.Jobs;
-using Dapper;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -16,6 +16,7 @@ using SalesforceSync.Inbox;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
+using static SalesforceSync.Data.SqlCommands;
 
 namespace SalesforceSync.Benchmarks;
 
@@ -75,16 +76,26 @@ public abstract class DrainBenchmarkBase
     private const double RelationshipShare = 0.15;
 
     private NpgsqlDataSource _db = default!;
+    private IDbContextFactory<SyncDbContext> _contexts = default!;
     private FakeSalesforceStore _store = default!;
     private List<ServiceProvider> _pods = [];
-    private List<InboxRow> _events = [];
+    private List<IngestRow> _events = [];
     private Dictionary<(string Type, string Key), long> _expected = new();
     private Dictionary<string, (string Account, string Related)> _relationships = new();
 
-    private static readonly string[] InboxTables = [AccountSyncService.InboxTable, AccountRelationshipSyncService.InboxTable];
+    // The tables as the EF model names them (only the model is read: nothing connects to this address)
+    private static readonly string AccountTable = TableOf<AccountInboxRow>();
+    private static readonly string RelationshipTable = TableOf<AccountRelationshipInboxRow>();
+    private static readonly string[] InboxTables = [AccountTable, RelationshipTable];
+
+    private static string TableOf<TRow>() where TRow : InboxRow
+    {
+        using var model = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
+        return model.TableOf<TRow>();
+    }
 
     /// <summary>An event as the consumer stores it: the inbox table of its type, the entity's id and the raw payload.</summary>
-    private sealed record InboxRow(string Table, string EntityId, string Payload);
+    private sealed record IngestRow(string Table, string EntityId, string Payload);
 
     /// <summary>
     /// meta of version N of an entity: time = base time + N ms, so per-entity time order = version order; the first
@@ -102,9 +113,12 @@ public abstract class DrainBenchmarkBase
     public void GlobalSetup()
     {
         _db = NpgsqlDataSource.Create(BenchmarkDb.ConnectionString);
-        InboxSchema.EnsureCreatedAsync(_db, InboxTables).GetAwaiter().GetResult();
-        using (var conn = _db.OpenConnection())
-            conn.Execute(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "claim-audit.sql")));
+        _contexts = SyncDbContext.CreateFactory(_db);
+        InboxSchema.EnsureCreatedAsync(_contexts, InboxTables).GetAwaiter().GetResult();
+        using (var db = _contexts.CreateDbContext())
+        {
+            db.Database.ExecuteSqlRaw(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "claim-audit.sql")));
+        }
 
         _store = new FakeSalesforceStore(new FakeSalesforceOptions
         {
@@ -140,13 +154,15 @@ public abstract class DrainBenchmarkBase
     /// <summary>Inserts the events in small chunks, in per-account version order, as fast as possible (like the Kafka consumer).</summary>
     private async Task IngestAsync(CancellationToken ct)
     {
-        await using var conn = await _db.OpenConnectionAsync(ct);
+        await using var db = await _contexts.CreateDbContextAsync(ct);
         foreach (var chunk in _events.Chunk(IngestChunk))
         {
             foreach (var table in chunk.GroupBy(e => e.Table))
-                await conn.ExecuteAsync(new CommandDefinition(
-                    $"insert into {table.Key} (entity_id, payload) select e, p::jsonb from unnest(@e::text[], @p::text[]) as u(e, p)",
-                    new { e = table.Select(r => r.EntityId).ToArray(), p = table.Select(r => r.Payload).ToArray() }, cancellationToken: ct));
+            {
+                await db.Database.ExecuteAsync(
+                    $"insert into {table.Key} (entity_id, payload) select e, p::jsonb from unnest(@e::text[], @p::text[]) as u(e, p)", ct,
+                    Param("e", table.Select(r => r.EntityId).ToArray()), Param("p", table.Select(r => r.Payload).ToArray()));
+            }
         }
     }
 
@@ -169,10 +185,9 @@ public abstract class DrainBenchmarkBase
 
     private async Task<bool> HasPendingAsync(CancellationToken ct)
     {
-        await using var conn = await _db.OpenConnectionAsync(ct);
-        return await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-            string.Join(" or ", InboxTables.Select(t => $"exists (select 1 from {t} where status = 'pending')")).Insert(0, "select "),
-            cancellationToken: ct));
+        await using var db = await _contexts.CreateDbContextAsync(ct);
+        return await db.Database.QuerySingleAsync<bool>(
+            string.Join(" or ", InboxTables.Select(t => $"exists (select 1 from {t} where status = 'pending')")).Insert(0, "select "), ct);
     }
 
     // ---------- Setup ----------
@@ -214,19 +229,23 @@ public abstract class DrainBenchmarkBase
     {
         _store.Reset();
 
-        await using var conn = await _db.OpenConnectionAsync();
-        foreach (var table in InboxTables) await conn.ExecuteAsync($"truncate {table} restart identity");
-        await conn.ExecuteAsync("truncate sf_sync_state; truncate sf_api_usage; truncate sf_claim_audit");
+        await using var db = await _contexts.CreateDbContextAsync();
+        await db.Database.OpenConnectionAsync();
+        foreach (var table in InboxTables)
+        {
+            await db.Database.ExecuteAsync($"truncate {table} restart identity", default);
+        }
+        await db.Database.ExecuteAsync("truncate sf_sync_state; truncate sf_api_usage; truncate sf_claim_audit", default);
         // Effectively unlimited bucket and no daily budget: measure the pipeline, not the throttle
-        await conn.ExecuteAsync("""
+        await db.Database.ExecuteAsync("""
             update sf_rate_limit
             set tokens = 1e9, capacity = 1e9, base_refill_per_sec = 1e9, refill_per_sec = 1e9,
                 daily_budget = null, paused_until = null, updated_at = clock_timestamp()
             where name = 'salesforce'
-            """);
+            """, default);
 
         (_events, _expected) = Generate();
-        if (!StreamIngest) await PreloadAsync(conn);
+        if (!StreamIngest) await PreloadAsync((NpgsqlConnection)db.Database.GetDbConnection());
     }
 
     /// <summary>
@@ -234,12 +253,12 @@ public abstract class DrainBenchmarkBase
     /// a relationship between two accounts that already have an event (as in Kafka, the account event comes first,
     /// but a worker may still claim the relationship before the account has synced).
     /// </summary>
-    private (List<InboxRow> Events, Dictionary<(string, string), long> Newest) Generate()
+    private (List<IngestRow> Events, Dictionary<(string, string), long> Newest) Generate()
     {
         var random = new Random(42);
         var versions = new Dictionary<(string, string), long>();
         var seen = new List<string>();
-        var events = new List<InboxRow>(Events);
+        var events = new List<IngestRow>(Events);
         _relationships = new Dictionary<string, (string, string)>(StringComparer.Ordinal);
 
         while (events.Count < Events)
@@ -266,7 +285,7 @@ public abstract class DrainBenchmarkBase
                         ["isActive"] = true
                     }
                 };
-                events.Add(new InboxRow(AccountRelationshipSyncService.InboxTable, relKey, relPayload.ToJsonString()));
+                events.Add(new IngestRow(RelationshipTable, relKey, relPayload.ToJsonString()));
                 continue;
             }
 
@@ -289,7 +308,7 @@ public abstract class DrainBenchmarkBase
                         ["profile"] = new JsonObject { ["score"] = version }
                     }
                 };
-                events.Add(new InboxRow(AccountSyncService.InboxTable, key, payload.ToJsonString()));
+                events.Add(new IngestRow(AccountTable, key, payload.ToJsonString()));
             }
         }
 
@@ -339,18 +358,22 @@ public abstract class DrainBenchmarkBase
                 wrong.Add($"{acct}: expected v{expected}, account v{accountVersions.LastOrDefault()}, profile v{profileVersions.LastOrDefault()}");
         }
 
-        await using var conn = await _db.OpenConnectionAsync();
+        await using var db = await _contexts.CreateDbContextAsync();
+        async Task<long> Count(string sql)
+        {
+            return await db.Database.QuerySingleAsync<long>(sql, default);
+        }
         // One query over both inbox tables; "superseded" is a normal end for an older event claimed with a newer one
         var inbox = string.Join(" union all ", InboxTables.Select(t => $"select status, retry_count from {t}"));
-        var rows = await conn.ExecuteScalarAsync<long>($"select count(*) from ({inbox}) i");
-        var notDone = await conn.ExecuteScalarAsync<long>($"select count(*) from ({inbox}) i where status not in ('done', 'superseded')");
-        var superseded = await conn.ExecuteScalarAsync<long>($"select count(*) from ({inbox}) i where status = 'superseded'");
-        var claims = await conn.ExecuteScalarAsync<long>("select count(*) from sf_claim_audit");
-        var overlaps = await conn.ExecuteScalarAsync<long>("select count(*) from sf_claim_overlaps");
+        var rows = await Count($"select count(*) from ({inbox}) i");
+        var notDone = await Count($"select count(*) from ({inbox}) i where status not in ('done', 'superseded')");
+        var superseded = await Count($"select count(*) from ({inbox}) i where status = 'superseded'");
+        var claims = await Count("select count(*) from sf_claim_audit");
+        var overlaps = await Count("select count(*) from sf_claim_overlaps");
         // retry_count counts attempts (bumped at claim), so retries = attempts beyond the first. Mostly relationships
         // claimed before their Accounts were in the org (DEPENDENCY_NOT_SYNCED).
-        var retries = await conn.ExecuteScalarAsync<long>($"select coalesce(sum(greatest(retry_count - 1, 0)), 0) from ({inbox}) i");
-        var relationshipEvents = _events.Count(e => e.Table == AccountRelationshipSyncService.InboxTable);
+        var retries = await Count($"select coalesce(sum(greatest(retry_count - 1, 0)), 0) from ({inbox}) i");
+        var relationshipEvents = _events.Count(e => e.Table == RelationshipTable);
 
         var stats = _store.GetStats();
         Console.WriteLine(

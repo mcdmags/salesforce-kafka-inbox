@@ -6,7 +6,6 @@ namespace SalesforceSync.Inbox;
 /// <param name="Token">Identifies the lease; every outcome statement is conditional on it.</param>
 /// <param name="SyncedTimes">Entity id -> the time (microseconds since the epoch) of its newest synced event.</param>
 public sealed record InboxClaim(
-    string InboxTable,
     string EntityType,
     Guid Token,
     IReadOnlyList<InboxEvent> Events,

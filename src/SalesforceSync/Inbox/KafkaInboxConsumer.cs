@@ -1,6 +1,5 @@
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
-using SalesforceSync.Data;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Inbox;
@@ -16,7 +15,6 @@ namespace SalesforceSync.Inbox;
 /// </summary>
 public sealed class KafkaInboxConsumer(
     IConsumer<string, string> consumer,
-    PostgresExecutionStrategy pg,
     IServiceScopeFactory scopes,
     IConfiguration config,
     ILogger<KafkaInboxConsumer> log) : BackgroundService
@@ -48,7 +46,7 @@ public sealed class KafkaInboxConsumer(
 
         foreach (var topic in byTopic.Keys) await EnsureTopicAsync(topic);
         consumer.Subscribe(byTopic.Keys);
-        log.LogInformation("Consuming {Topics}", string.Join(", ", byTopic.Select(t => $"{t.Key} -> {t.Value.InboxTable}")));
+        log.LogInformation("Consuming {Topics}", string.Join(", ", byTopic.Select(t => $"{t.Key} -> {t.Value.EntityType}")));
 
         try
         {
@@ -86,7 +84,7 @@ public sealed class KafkaInboxConsumer(
         }
     }
 
-    /// <summary>Stores a valid event in its type's inbox table, then its offset; skips a message that can never be synced.</summary>
+    /// <summary>Stores a valid event in its type's inbox, then its offset; skips a message that can never be synced.</summary>
     private async Task IngestAsync(ConsumeResult<string, string> message, ISalesforceEntitySync sync, CancellationToken ct)
     {
         if (!sync.TryReadEvent(message.Message.Value, out var entityId, out var problem))
@@ -100,7 +98,7 @@ public sealed class KafkaInboxConsumer(
 
         try
         {
-            await pg.ExecuteAsync(InboxSql.For(sync.InboxTable).Insert, new { entityId, payload = message.Message.Value }, ct);
+            await sync.StoreEventAsync(entityId!, message.Message.Value, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
