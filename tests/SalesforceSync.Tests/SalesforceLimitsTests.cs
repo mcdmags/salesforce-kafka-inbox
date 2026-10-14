@@ -163,6 +163,45 @@ public sealed class SalesforceLimitsTests
             .DailyBudget.Should().Be(57_500, "it is half of 115,000");
 
     [Fact]
+    public void A_lower_allocation_reported_by_Salesforce_lowers_the_budget()
+    {
+        // Configured: 115,000 calls (100,000 + 15 x 1,000); Salesforce reports 5,000
+        var info = SalesforceLimitInfo.Parse("api-usage=25/5000;")!;
+
+        Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 }, new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 } })
+            .BudgetFor(info.ApiUsage!.Max).Should().Be(2_500, "it is half of the reported 5,000");
+    }
+
+    [Fact]
+    public void The_configured_allocation_is_the_maximum_whatever_Salesforce_reports()
+        => Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 }, new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 } })
+            .BudgetFor(1_000_000).Should().Be(57_500, "it is half of the configured 115,000");
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("api-usage=garbled")]
+    [InlineData("per-app-api-usage=17/250(appName=sync)")]
+    public void Without_a_reported_allocation_the_budget_follows_the_configuration(string? header)
+    {
+        var reported = SalesforceLimitInfo.Parse(header)?.ApiUsage?.Max;
+
+        reported.Should().BeNull();
+        Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 }, new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 } })
+            .BudgetFor(reported).Should().Be(57_500, "the configured allocation applies when the header is missing or unreadable");
+    }
+
+    [Fact]
+    public void The_limit_header_is_read_whatever_its_case()
+    {
+        using var response = new HttpResponseMessage();
+        response.Headers.TryAddWithoutValidation("SForce-Limit-Info", "api-usage=25/5000;");
+
+        response.Headers.TryGetValues(SalesforceRateLimitHandler.LimitInfoHeader, out var values).Should().BeTrue();
+        SalesforceLimitInfo.Parse(string.Join("; ", values!))!.ApiUsage.Should().Be(new LimitCounter(25, 5000));
+    }
+
+    [Fact]
     public void Own_usage_of_the_budget_slows_down_even_when_the_org_has_room()
     {
         var limiter = Limiter(new RateLimitOptions());

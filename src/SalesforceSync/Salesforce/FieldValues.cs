@@ -6,7 +6,8 @@ namespace SalesforceSync.Salesforce;
 /// <summary>
 /// Type-aware handling of field values, driven by sObject Describe. A desired value is first normalized to exactly
 /// what Salesforce stores for that field type (number rounded to the field's scale, checkbox null -> false,
-/// 15-character id -> 18, ...). The diff compares normalized values, and the normalized value is what gets sent, so
+/// 15-character id -> 18, date/time to the second, ...). Types and limits: Salesforce Object Reference, "Primitive
+/// Data Types" and "Field Types". The diff compares normalized values, and the normalized value is what gets sent, so
 /// a value Salesforce would store differently can't make the same field look changed on every event.
 /// </summary>
 public static class FieldValues
@@ -97,19 +98,25 @@ public static class FieldValues
         return true;
     }
 
-    /// <summary>Rounded to the field's scale (integers: 0), and within its precision.</summary>
+    /// <summary>
+    /// Rounded to the field's scale (integers: 0), and within its size: precision - scale digits left of the point for
+    /// numbers with decimals, and digits for int and long, which Describe gives no precision.
+    /// </summary>
     private static bool TryNumber(SalesforceField field, object value, out object? normalized, out FieldError error)
     {
         normalized = null;
         error = default;
         if (!TryDecimal(value, out var number)) return WrongType(field, value, "a number", out error);
 
-        var scale = field.Type is "int" or "long" ? 0 : field.Scale;
+        var isInteger = field.Type is "int" or "long";
+        var scale = isInteger ? 0 : field.Scale;
         number = Math.Round(number, scale, MidpointRounding.AwayFromZero);
-        var integerDigits = field.Precision - scale;
-        if (field.Precision > 0 && Math.Abs(number) >= Pow10(integerDigits))
+        var integerDigits = isInteger ? field.Digits : field.Precision - scale;
+        if ((isInteger ? field.Digits : field.Precision) > 0 && Math.Abs(number) >= Pow10(integerDigits))
+        {
             return Fail(field, "NUMBER_OUTSIDE_VALID_RANGE",
-                $"{number} doesn't fit {field.Precision} digits with {scale} decimal places", out error);
+                $"{number} doesn't fit {integerDigits} digits left of the decimal point", out error);
+        }
         normalized = number;
         return true;
     }
@@ -151,12 +158,20 @@ public static class FieldValues
 
     /// <summary>
     /// Salesforce ids are case-sensitive 15-character values; the API returns the 18-character form, whose last three
-    /// characters encode the case of the first 15. Returns null if <paramref name="id"/> isn't a valid id.
+    /// characters encode the case of the first 15. Returns null if <paramref name="id"/> isn't a valid id, including an
+    /// 18-character id whose case was changed: Salesforce rejects those too, because the suffix no longer matches.
     /// </summary>
     public static string? To18CharId(string id)
     {
-        if (id.Length == 18) return id.All(char.IsAsciiLetterOrDigit) ? id[..15] + id[15..].ToUpperInvariant() : null;
-        if (id.Length != 15 || !id.All(char.IsAsciiLetterOrDigit)) return null;
+        if (id.Length == 18)
+        {
+            var expected = To18CharId(id[..15]);
+            return expected is not null && id.EndsWith(expected[15..], StringComparison.Ordinal) ? id : null;
+        }
+        if (id.Length != 15 || !id.All(char.IsAsciiLetterOrDigit))
+        {
+            return null;
+        }
 
         const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
         Span<char> suffix = stackalloc char[3];
@@ -242,9 +257,10 @@ public static class FieldValues
                 return false;
         }
 
-        // Salesforce keeps milliseconds
+        // Salesforce keeps date/time values to the second ("full timestamps with a precision of one second",
+        // Object Reference, Primitive Data Types); time values keep milliseconds
         var utc = parsed.ToUniversalTime();
-        instant = new DateTimeOffset(utc.UtcTicks - utc.UtcTicks % TimeSpan.TicksPerMillisecond, TimeSpan.Zero);
+        instant = new DateTimeOffset(utc.UtcTicks - utc.UtcTicks % TimeSpan.TicksPerSecond, TimeSpan.Zero);
         return true;
     }
 
