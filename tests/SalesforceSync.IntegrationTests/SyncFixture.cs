@@ -90,7 +90,7 @@ public class SyncFixture : IAsyncLifetime
     protected Dictionary<string, string?> FakeOrgSettings { get; } = new()
     {
         ["FakeSalesforce:Latency"] = "00:00:00",
-        // Daily API allocation of an Enterprise org with 15 Salesforce licenses (100,000 + 15 x 1,000)
+        // The worker's SalesforceLimits:DailyApiAllocation (appsettings.json)
         ["FakeSalesforce:DailyApiLimit"] = "115000",
         ["Logging:LogLevel:Default"] = "Warning"
     };

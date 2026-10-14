@@ -46,7 +46,7 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (skipped because of another entity's record) → back to the inbox without spending a retry. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
 | Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` around a transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new transaction, change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
-| Rate limits | Configured from Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) and own usage slow everyone down at 80% and pause at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
+| Rate limits | Configured from the org's daily API allocation and Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) and own usage slow everyone down at 80% and pause at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
 
 ```
 Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per object type (Postgres: entity_id +
@@ -688,9 +688,9 @@ once the Accounts exist and the dead letter is re-queued.
 
 Rate limits (`RateLimitTests`, each with its own fixture, i.e. its own containers, org and pods):
 
-- **Daily budget across pods**: 3 pods share a budget of 30 calls (`DailyApiAllocation=60`,
-  `DailyBudgetShare=0.5`). Exactly 30 calls reach the org, then nothing more; the remaining events are deferred
-  until the budget frees up, without spending retries or being dead-lettered.
+- **Daily budget across pods**: 3 pods share a budget of 30 calls (`DailyApiAllocation=1000`, the mock org
+  reporting a limit of 60, `DailyBudgetShare=0.5`). Exactly 30 calls reach the org, then nothing more; the
+  remaining events are deferred until the budget frees up, without spending retries or being dead-lettered.
 - **Concurrent long-running limit**: the mock org allows 2 concurrent long-running calls while 12 workers send
   them. The `ConcurrentPerOrgLongTxn` rejections cause a short pause (not the long daily one) and every event
   still syncs, with no retries spent.
@@ -698,21 +698,22 @@ Rate limits (`RateLimitTests`, each with its own fixture, i.e. its own container
 ### Unit tests
 
 Unit tests (`dotnet test tests/SalesforceSync.Tests`, no Docker) run the Salesforce half of the engine with both
-strategies against the in-memory org: 2 calls per batch, the exact verbs, bodies and `allOrNone` flags sent, values Salesforce
-stores differently written once rather than on every event, a bad value failing only its own unit before any call, a validation error or a
-row lock costing only its own entity, an Account saved without its Profile, a create losing a race, a failed new
-Account taking down the reference subrequest without dead-lettering anyone else, more than 5 collections split over
-requests, failures without a cause spending a retry, create or update decided by what Salesforce has, relinking, relationships and missing dependencies
-(found by the read, or rejected by Salesforce), gzip, clearing fields that became empty. Also: each mapper (an AutoFixture payload in, the
-expected sObject out, nulls passed through), sObject → record (names from the attributes, nulls included, lookups
-and external id), the guard that every Salesforce name on an sObject class exists in the mock org's schema, the
-event mapping (account with and without a profile, relationships, missing Account ids, camelCase and PascalCase
-bodies), what the engine does with a claim (newest `meta.time` wins, ties, watermark, A → B → A, invalid rows alone),
-what the consumer admits (the typed read: id, time with offset, `meta.type`), the classification of failed writes
-(unknown outcome or not), inbox table names as plain identifiers, every normalization rule
-(including the documented 15 → 18-character id example), error classification, the Postgres execution strategy
-(retried, not retried, gives up), the allocation formula (including the documented Enterprise example of 115,000),
-startup validation and throttle decisions.
+strategies against the in-memory org: 2 calls per batch, the exact verbs, bodies and `allOrNone` flags sent, values
+Salesforce stores differently written once rather than on every event, a bad value failing only its own unit before
+any call, a validation error or a row lock costing only its own entity, an Account saved without its Profile, a
+create losing a race, a failed new Account taking down the reference subrequest without dead-lettering anyone else,
+more than 5 collections split over requests, failures without a cause spending a retry, create or update decided by
+what Salesforce has, relinking, relationships and missing dependencies (found by the read, or rejected by
+Salesforce), gzip, clearing fields that became empty. Also: each mapper (an AutoFixture payload in, the expected
+sObject out, nulls passed through), sObject → record (names from the attributes, nulls included, lookups and external
+id), the guard that every Salesforce name on an sObject class exists in the mock org's schema, the event mapping
+(account with and without a profile, relationships, missing Account ids, camelCase and PascalCase bodies), what the
+engine does with a claim (newest `meta.time` wins, ties, watermark, A → B → A, invalid rows alone), what the consumer
+admits (the typed read: id, time with offset, `meta.type`), the classification of failed writes (unknown outcome or
+not), inbox table names as plain identifiers, every normalization rule (including the documented 15 → 18-character id
+example), error classification, the Postgres execution strategy (retried, not retried, gives up), the daily budget
+(the configured allocation as the maximum, lowered by the one Salesforce reports), startup validation and throttle
+decisions.
 
 ### Concurrency: many threads, many pods, same accounts
 
@@ -792,19 +793,17 @@ Configured from "API Request Limits and Allocations" in the
 with the response header and status codes from the REST API Developer Guide
 ([Limit Info Header](https://developer.salesforce.com/docs/platform/api-rest/guide/headers-api-usage.html),
 [Composite](https://developer.salesforce.com/docs/platform/api-rest/guide/resources-composite-composite-post.html)).
-Describe the org and the limits are derived; the worker logs what it derived at startup and refuses to start on
-a configuration that can't work. The derived daily allocation is the maximum: Salesforce reports the org's real one
-on every REST response (`Sforce-Limit-Info: api-usage=25/5000`, a limit of 5,000), and when that is lower the budget
-follows it. A response without the header, or with one that can't be read, leaves the budget on the configuration.
+Set the org's daily API allocation (`DailyApiAllocation`, the number in Setup: System Overview, API Requests, Last
+24 Hours) and its type; the worker logs its limits at startup and refuses to start on a configuration that can't
+work, including a missing or non-positive `DailyApiAllocation`. The configured allocation is the maximum: Salesforce
+reports the org's real one on every REST response (`Sforce-Limit-Info: api-usage=25/5000`, a limit of 5,000), and
+when that is lower the budget follows it. A response without the header, or with one that can't be read, leaves the
+budget on the configuration.
 
 ```json
 "SalesforceLimits": {
-  "OrgType": "Production",          // Production | Sandbox | FullSandbox | DeveloperEdition | Trial
-  "Edition": "Enterprise",          // Enterprise | Professional | Unlimited | Performance
-  "Licenses": { "Salesforce": 15, "Partner Community": 200 },
-  "CallsPerLicense": {},            // add license types / override the built-in table
-  "PurchasedApiCalls": 0,           // API Call Add-Ons
-  "DailyApiAllocation": null,       // or copy the number from Setup; required for Sandbox, Trial and template-based Full Sandboxes
+  "OrgType": "Production",          // Production | Sandbox | DeveloperEdition | Trial: the default concurrent limit
+  "DailyApiAllocation": 115000,     // required: the org's calls per 24 hours, from Setup
   "ConcurrentLongRunningLimit": null,
   "LongRunningThreshold": "00:00:20",
   "RequestTimeout": "00:01:30"
@@ -822,7 +821,7 @@ follows it. A response without the header, or with one that can't be read, leave
 
 | Salesforce limit | How it's applied |
 |---|---|
-| **Total API requests per 24 hours**: Developer Edition 15,000; Full Sandbox 5,000,000 (unless created from a template); Enterprise, Professional with API access, Unlimited and Performance 100,000 + licenses × calls per license type (Enterprise/Professional: Salesforce 1,000, Platform 1,000, One App 200, Customer Community Plus 200, Partner Community 200, ...; Unlimited/Performance: Salesforce 5,000, Platform 5,000, ...) + purchased add-ons. No figure is published for other sandboxes or trial orgs | Computed from `SalesforceLimits` (or `DailyApiAllocation`, which startup requires for `Sandbox` and `Trial`) as the maximum, lowered to the limit in `Sforce-Limit-Info: api-usage` when Salesforce reports less. The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling 24 hours. When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
+| **Total API requests per 24 hours**: depends on the edition, licenses and add-ons (e.g. 115,000 for an Enterprise org with 15 Salesforce licenses); Setup shows the org's number | `SalesforceLimits:DailyApiAllocation` (required) as the maximum, lowered to the limit in `Sforce-Limit-Info: api-usage` when Salesforce reports less. The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling 24 hours. When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
 | **What a call is**: each HTTP request; a Composite request (and an sObject Collections request) counts as one call however many subrequests it holds | One token per HTTP request: a describe (cached), each query page and each Composite write. |
 | **Org-wide usage** (also other integrations): `Sforce-Limit-Info: api-usage=used/limit` on every REST response | `api-usage` and, when Salesforce sends it, `per-app-api-usage` (the connected app's quota): slow down at `DailySoftRatio`, pause at `DailyHardRatio`. The allocation Salesforce reports, the configured maximum and the resulting budget are logged when first seen and whenever Salesforce's changes. `api-bursts` appears in Salesforce's example of the header but isn't defined, so it is recorded in `sf_limit_status` and not acted on. |
 | **Requests per second**: Salesforce publishes no such limit, and none on concurrent requests shorter than 20 s | `MaxRequestsPerSecond` and `BurstCapacity` are this integration's own pacing, so it spreads its share of the daily allocation instead of spending it in bursts. |
@@ -903,8 +902,8 @@ where locktype = 'advisory' and classid = 0 and objid::bigint between 1397096448
    `Related_Account__c` lookups on the relationship.
 2. Set `Salesforce:UseFake=false` (the default outside Aspire) plus `InstanceUrl`, `TokenUrl`,
    `ClientId`, `ClientSecret` (OAuth client credentials).
-3. Describe the org in `SalesforceLimits` and choose this integration's `RateLimit:DailyBudgetShare`
-   (see [Salesforce API limits](#salesforce-api-limits)).
+3. Set the org's `SalesforceLimits:DailyApiAllocation` (and `OrgType`) and choose this integration's
+   `RateLimit:DailyBudgetShare` (see [Salesforce API limits](#salesforce-api-limits)).
 4. Adjust object and field names on the sObject classes (`Salesforce/SObjects/`, the only place they appear), and
    the payload classes and mappers if the events differ. Tune `Salesforce:PermanentErrorCodes`, `Sync:RetryBaseDelay` / `MaxRetryDelay` / `MaxRetries` and
    `Postgres:Retry` if needed. `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-100, ...)
