@@ -115,10 +115,6 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             {
                 await FailAsync(db, sql, outcomes.Failed, token, t);
             }
-            if (outcomes.Held.Count > 0)
-            {
-                await HoldAsync(db, Ids(outcomes.Held), token, outcomes.Held[0].Error, t);
-            }
         }, ct);
     }
 

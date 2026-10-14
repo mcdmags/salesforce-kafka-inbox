@@ -13,7 +13,7 @@ public interface IRepository<TEntity> where TEntity : InboxRow, new()
     /// <summary>Leases up to <see cref="SyncOptions.BatchSize"/> entities of the table; no events = nothing to do.</summary>
     Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct);
 
-    /// <summary>Records every entity's outcome in one transaction, including entities held on their own.</summary>
+    /// <summary>Records every entity's outcome in one transaction.</summary>
     Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct);
 
     /// <summary>
@@ -22,6 +22,9 @@ public interface IRepository<TEntity> where TEntity : InboxRow, new()
     /// </summary>
     Task HoldAsync(InboxClaim claim, string error, CancellationToken ct);
 
-    /// <summary>The batch failed as a whole before anything was written: every claimed row is retried with backoff.</summary>
+    /// <summary>
+    /// The batch failed as a whole (a Salesforce call failed that provably wasn't applied): every claimed row is
+    /// retried with backoff.
+    /// </summary>
     Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct);
 }

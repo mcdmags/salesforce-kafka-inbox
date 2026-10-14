@@ -102,46 +102,55 @@ public sealed class EngineFlowTests
     // ---------- A batch written in more than one call ----------
 
     [Fact]
-    public async Task A_later_call_that_provably_failed_costs_only_its_own_entities_a_retry()
+    public async Task A_later_call_that_provably_failed_retries_the_whole_batch_and_marks_nothing_done()
     {
         await CreateOldAsync();
         _http.FailWrite = (2, new HttpRequestException(HttpRequestError.ConnectionError, "refused"));
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim account", "record");
-        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
-        _inbox.Recorded.Failed.Should().ContainSingle().Which.Should().Be(new FailedEvent(2, "UNKNOWN_ERROR refused", "UNKNOWN_ERROR"));
-        _inbox.Recorded.Held.Should().BeEmpty();
+        _inbox.Calls.Should().Equal(["claim account", "fail all: refused ()"],
+            "every event is retried and none is marked done, not even NEW's, whose call succeeded");
     }
 
     [Fact]
-    public async Task A_later_call_whose_answer_is_lost_holds_only_its_own_entities()
+    public async Task The_retry_of_a_batch_whose_later_call_failed_finds_what_the_earlier_call_saved()
+    {
+        await CreateOldAsync();
+        _http.FailWrite = (2, new HttpRequestException(HttpRequestError.ConnectionError, "refused"));
+        await TwoCallBatchAsync();
+        _inbox.Calls.Clear();
+        _http.FailWrite = null;
+        _http.Writes = 0;
+
+        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
+
+        _http.Writes.Should().Be(1, "NEW is unchanged now: only OLD's change is written");
+        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().BeEquivalentTo(["NEW", "OLD"]);
+        _org.History("Account", "NEW").Should().ContainSingle("NEW was written once, not twice");
+    }
+
+    [Fact]
+    public async Task A_later_call_whose_answer_is_lost_holds_the_whole_batch()
     {
         await CreateOldAsync();
         _org.LoseResponsesFor("Account", "OLD", 1);
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim account", "record");
-        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
-        _inbox.Recorded.Held.Should().ContainSingle().Which.Should().Match<FailedEvent>(h => h.EventId == 2 && h.Code == UnknownOutcomeException.Code);
-        _inbox.Recorded.Failed.Should().BeEmpty();
+        _inbox.Calls.Should().Equal("claim account", "hold");
     }
 
     [Fact]
-    public async Task A_later_call_refused_with_REQUEST_LIMIT_EXCEEDED_costs_only_its_own_entities_a_retry()
+    public async Task A_later_call_refused_with_REQUEST_LIMIT_EXCEEDED_retries_the_whole_batch()
     {
         await CreateOldAsync();
-        _http.FailWrite = (2, new SalesforceResponseException(System.Net.HttpStatusCode.Forbidden,
-            /*lang=json,strict*/ """[{"errorCode":"REQUEST_LIMIT_EXCEEDED","message":"TotalRequests Limit exceeded."}]"""));
+        const string body = /*lang=json,strict*/ """[{"errorCode":"REQUEST_LIMIT_EXCEEDED","message":"TotalRequests Limit exceeded."}]""";
+        _http.FailWrite = (2, new SalesforceResponseException(System.Net.HttpStatusCode.Forbidden, body));
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim account", "record");
-        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
-        _inbox.Recorded.Failed.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.EventId == 2 && f.Code == "UNKNOWN_ERROR");
-        _inbox.Recorded.Held.Should().BeEmpty();
+        _inbox.Calls.Should().Equal("claim account", $"fail all: Salesforce 403: {body} ()");
     }
 
     // ---------- Failures of the read ----------
@@ -218,7 +227,7 @@ public sealed class EngineFlowTests
     /// three others (updates), so the two together take two Composite write calls (5 collections each at most).
     /// </summary>
     private static readonly UpsertStrategy<AccountEvent> ThreeObjects = new("account",
-        e => e.Account?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
+        e => e.Account?.ExternalId, e => e.Meta,
         (key, e) => new UpsertUnit(
         [
             new SObjectRecord("acct", "Account", "External_Id__c", key, new Dictionary<string, object?> { ["Name"] = e.Account!.Name }),

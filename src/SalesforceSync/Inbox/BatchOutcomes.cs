@@ -17,11 +17,4 @@ public sealed record BatchOutcomes(
     IReadOnlyList<long> Superseded,
     IReadOnlyList<long> Released,
     IReadOnlyList<FailedEvent> Dead,
-    IReadOnlyList<FailedEvent> Failed)
-{
-    /// <summary>
-    /// Sent in a write whose answer never came: held for <see cref="SyncOptions.UnknownOutcomeHold"/>, no retry spent.
-    /// Only a later write of a batch is held this way; when the first fails, the whole claim is held.
-    /// </summary>
-    public IReadOnlyList<FailedEvent> Held { get; init; } = [];
-}
+    IReadOnlyList<FailedEvent> Failed);

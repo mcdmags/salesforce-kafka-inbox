@@ -203,6 +203,42 @@ public sealed class WriteRulesTests
         (result.Outcome, result.PrimaryError?.Code).Should().Be((outcome, code), what);
     }
 
+    [Theory]
+    [InlineData(new[] { "UNABLE_TO_LOCK_ROW", "PROCESSING_HALTED" }, SyncOutcome.TransientFailure, "UNABLE_TO_LOCK_ROW")]
+    [InlineData(new[] { "REQUIRED_FIELD_MISSING", "PROCESSING_HALTED" }, SyncOutcome.PermanentFailure, "REQUIRED_FIELD_MISSING")]
+    [InlineData(new[] { "UNABLE_TO_LOCK_ROW", "REQUIRED_FIELD_MISSING" }, SyncOutcome.PermanentFailure, "REQUIRED_FIELD_MISSING")]
+    [InlineData(new[] { "SOMETHING_NEW" }, SyncOutcome.TransientFailure, "SOMETHING_NEW")]
+    public void A_records_own_errors_are_permanent_if_any_is_and_skipping_is_not_one_of_them(string[] codes, SyncOutcome outcome, string code)
+    {
+        var result = Interpret(Request(Account("A1", "Acme")), Failed("Account_create", codes)).Single();
+
+        (result.Outcome, result.PrimaryError?.Code).Should().Be((outcome, code));
+    }
+
+    [Fact]
+    public void A_record_only_skipped_because_of_another_records_failure_is_not_attempted()
+    {
+        var results = Interpret(Request(Account("A1", "Acme"), Account("A2", "Acme")), new CollectionResult("Account_create",
+        [
+            new RecordResult(false, null, [new SalesforceError(null, "UNABLE_TO_LOCK_ROW", "locked")]),
+            new RecordResult(false, null, [new SalesforceError(null, "PROCESSING_HALTED", "skipped")])
+        ], [])).ToDictionary(r => r.Key);
+
+        results["A1"].Outcome.Should().Be(SyncOutcome.TransientFailure);
+        results["A2"].Outcome.Should().Be(SyncOutcome.NotAttempted);
+    }
+
+    [Fact]
+    public void Permanent_codes_are_configurable()
+    {
+        var options = new SalesforceOptions { PermanentErrorCodes = ["UNABLE_TO_LOCK_ROW"] };
+
+        Interpret(options, Request(Account("A1", "Acme")), Failed("Account_create", "UNABLE_TO_LOCK_ROW")).Single().Outcome
+            .Should().Be(SyncOutcome.PermanentFailure);
+        Interpret(options, Request(Account("A1", "Acme")), Failed("Account_create", "REQUIRED_FIELD_MISSING")).Single().Outcome
+            .Should().Be(SyncOutcome.TransientFailure, "a code is permanent only when listed, and setting the list replaces the defaults");
+    }
+
     [Fact]
     public void A_record_deleted_between_the_read_and_the_update_is_retried_not_dead_lettered()
     {
@@ -301,7 +337,12 @@ public sealed class WriteRulesTests
 
     private static List<UpsertResult> Interpret(CompositeWrite request, params CollectionResult[] answers)
     {
-        return new WriteResultInterpreter(new SalesforceErrors(Options.Create(new SalesforceOptions()))).Interpret(request, answers);
+        return Interpret(new SalesforceOptions(), request, answers);
+    }
+
+    private static List<UpsertResult> Interpret(SalesforceOptions options, CompositeWrite request, params CollectionResult[] answers)
+    {
+        return new WriteResultInterpreter(new SalesforceErrors(Options.Create(options))).Interpret(request, answers);
     }
 
     private static CollectionResult Ok(string referenceId)
@@ -309,8 +350,8 @@ public sealed class WriteRulesTests
         return new(referenceId, [new RecordResult(true, AccountId, [])], []);
     }
 
-    private static CollectionResult Failed(string referenceId, string code)
+    private static CollectionResult Failed(string referenceId, params string[] codes)
     {
-        return new(referenceId, [new RecordResult(false, null, [new SalesforceError(null, code, "failed")])], []);
+        return new(referenceId, [new RecordResult(false, null, [.. codes.Select(code => new SalesforceError(null, code, "failed"))])], []);
     }
 }

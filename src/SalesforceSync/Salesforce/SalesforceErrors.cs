@@ -1,5 +1,4 @@
 using Microsoft.Extensions.Options;
-using SalesforceSync.Sync;
 
 namespace SalesforceSync.Salesforce;
 
@@ -49,14 +48,5 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     public bool IsPermanent(string code)
     {
         return _permanent.Contains(code);
-    }
-
-    /// <summary>Classifies the errors of one failed record.</summary>
-    public SyncOutcome Classify(IReadOnlyCollection<SalesforceError> errors)
-    {
-        var real = errors.Where(e => e.Code != ProcessingHalted).ToList();
-        return real.Count == 0
-            ? SyncOutcome.NotAttempted
-            : real.Any(e => IsPermanent(e.Code)) ? SyncOutcome.PermanentFailure : SyncOutcome.TransientFailure;
     }
 }

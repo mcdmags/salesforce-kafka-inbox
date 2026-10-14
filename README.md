@@ -374,9 +374,11 @@ collections (Account create / update, Profile create by reference / create with 
 more are split over further Composite requests, an entity's records always in the same one. The read is unchanged: one
 Composite request with up to 5 queries.
 
-When a batch needs more than one write request, each request's failure affects only its own entities; outcomes of the
-requests already sent are recorded normally. A later request that fails outright retries only its entities, one with an
-unknown outcome holds only its entities (and stops the batch: entities not yet sent are released). A failure of the first request applies to the whole batch.
+When a batch needs more than one write request and one of them fails as a whole (the call, not records in it), the
+batch stops and the failure applies to every event of the batch, as if the first request had failed: held if the
+request's outcome is unknown, otherwise retried with backoff (a 429 or `REQUEST_LIMIT_EXCEEDED` included). That is
+safe even though earlier requests may have saved their records: the retry reads Salesforce again and writes only what
+still differs, so those entities end `done` without being written twice.
 
 **`Sync:BatchSize`** is 1 to 100 entities (default 75). The bound comes from the read, not the write: a query takes
 100 external ids and a Composite request 5 queries, and a relationship needs up to three ids per entity (itself and
@@ -419,7 +421,7 @@ succeeded**. Until then Salesforce can show the new Account with the old or no P
 | a child not saved only because its parent in the same entity wasn't | whatever the parent's error says; the child's own "parent missing" error is ignored |
 | its whole subrequest went down because of another entity's record (`PROCESSING_HALTED` on a reference without a value) | released, no retry spent |
 | a subrequest that failed as a whole for any other reason | retried with backoff, never dead-lettered (it says nothing about one record's data) |
-| the call itself failed | as before: provably not applied (429 and `REQUEST_LIMIT_EXCEEDED` included) → retried; otherwise [unknown outcome](#unknown-outcomes) → held |
+| the call itself failed (any write request of the batch) | every event of the batch: provably not applied (429 and `REQUEST_LIMIT_EXCEEDED` included) → retried; otherwise [unknown outcome](#unknown-outcomes) → held |
 
 ### Linking a child to a parent created in the same request
 
@@ -515,9 +517,8 @@ public sealed class AccountRelationshipSyncService(
     public static UpsertStrategy<AccountRelationshipEvent> CreateStrategy(
         ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
         => new(Type,
-            EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id,
-            EventTime: e => e.Meta?.Timestamp(),                 // the time and the type are in the event
-            EventType: e => e.Meta?.Kind(),
+            EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id
+            Meta: e => e.Meta,                                  // and the meta (time and type) are in the event
             Map: (key, e) => Map(key, e, relationships),
             Queries: Queries);
 

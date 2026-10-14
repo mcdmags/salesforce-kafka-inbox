@@ -96,7 +96,6 @@ Median of the per-scenario medians, the slowest single run, and how many differe
 | Fail | 25.6 | 126 | 3 | 22.1 | 319 | 1 |
 | Dead | 13.0 | 152 | 3 | 11.7 | 131 | 1 |
 | Release | 19.3 | 94.0 | 2 | 19.3 | 203 | 1 |
-| Defer | 21.3 | 107 | 2 | 21.6 | 324 | 1 |
 | Hold | 24.1 | 133 | 2 | 24.1 | 192 | 1 |
 | ReleaseLostClaims | 21.3 | 179 | 6 | 18.6 | 162 | 1 |
 | Insert | 0.2 | 4.1 | 1 | 0.2 | 1.4 | 1 |
@@ -259,9 +258,6 @@ LockHeads (75 entities) and ClaimEntities: median of 5 and 3 runs, slowest run i
 | Release | 75 | 3.8 | Index Scan pkey (7), Bitmap Heap Scan (5) | 9.0 | Index Scan pkey (12) |
 | Release | 1,000 | 166 | Index Scan pkey (7), Bitmap Heap Scan (5) | 66.7 | Index Scan pkey (12) |
 | Release | 5,000 | 712 | Index Scan pkey (7), Bitmap Heap Scan (5) | 207 | Index Scan pkey (12) |
-| Defer | 75 | 3.0 | Index Scan pkey (7), Bitmap Heap Scan (5) | 2.2 | Index Scan pkey (12) |
-| Defer | 1,000 | 249 | Index Scan pkey (7), Bitmap Heap Scan (5) | 55.5 | Index Scan pkey (12) |
-| Defer | 5,000 | 757 | Index Scan pkey (7), Bitmap Heap Scan (5) | 420 | Index Scan pkey (12) |
 | Hold | 75 | 3.0 | Index Scan pkey (7), Bitmap Heap Scan (5) | 5.2 | Index Scan pkey (12) |
 | Hold | 1,000 | 119 | Index Scan pkey (7), Bitmap Heap Scan (5) | 74.7 | Index Scan pkey (12) |
 | Hold | 5,000 | 960 | Index Scan pkey (7), Bitmap Heap Scan (5) | 335 | Index Scan pkey (12) |

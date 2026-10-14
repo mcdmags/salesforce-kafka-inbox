@@ -14,8 +14,7 @@ internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, 
 
     /// <summary>
     /// What to record in the inbox once Salesforce has answered: saved or unchanged entities are done, entities not
-    /// attempted are released, permanent failures and invalid rows are dead-lettered, entities whose write has an
-    /// unknown outcome are held, the rest is retried.
+    /// attempted are released, permanent failures and invalid rows are dead-lettered, the rest is retried.
     /// </summary>
     /// <param name="results">The outcome of every entity in <see cref="Work"/>, by entity id.</param>
     public BatchOutcomes Outcomes(IReadOnlyDictionary<string, UpsertResult> results)
@@ -24,7 +23,6 @@ internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, 
         var released = new List<long>();
         var dead = Invalid.Select(i => new FailedEvent(i.Id, i.Error, SalesforceErrors.InvalidEvent)).ToList();
         var failed = new List<FailedEvent>();
-        var held = new List<FailedEvent>();
 
         foreach (var work in Work)
         {
@@ -34,11 +32,10 @@ internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, 
                 case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(new SyncedEntity(work.EntityId, work.Time, work.EventId)); break;
                 case SyncOutcome.NotAttempted: released.Add(work.EventId); break;
                 case SyncOutcome.PermanentFailure: dead.Add(Failure(work, result)); break;
-                case SyncOutcome.OutcomeUnknown: held.Add(Failure(work, result)); break;
                 default: failed.Add(Failure(work, result)); break;
             }
         }
-        return new BatchOutcomes(synced, SupersededIds, released, dead, failed) { Held = held };
+        return new BatchOutcomes(synced, SupersededIds, released, dead, failed);
     }
 
     private static FailedEvent Failure(Work work, UpsertResult result)

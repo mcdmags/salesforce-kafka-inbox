@@ -22,7 +22,8 @@ namespace SalesforceSync.Sync;
 /// <item>Writes the units to Salesforce in 2 API calls (<see cref="WriteToSalesforceAsync"/>), giving up before the
 /// lease runs out: one Composite request reads the current records, one writes what differs with sObject Collections.</item>
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
-/// next claim, retried with backoff, dead-lettered, or held because the write's outcome is unknown.</item>
+/// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
+/// every claimed event is held (the write's outcome is unknown) or retried.</item>
 /// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="BatchPreparer"/> and the
 /// ones in <c>Sync/Upsert</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
@@ -97,30 +98,18 @@ public sealed class SalesforceBatchUpsertService(
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // The request failed before anything was written (describe, the read, or a write Salesforce provably did
-            // not apply, such as a 429 or REQUEST_LIMIT_EXCEEDED): every entity may succeed on retry, with backoff.
-            // Shutdown (ct) is not caught: nothing was written, and the lease simply expires.
+            // A request failed that Salesforce provably did not apply (describe, the read or a write, a 429 or
+            // REQUEST_LIMIT_EXCEEDED included): every entity is retried with backoff. Records that earlier write
+            // requests of the batch saved are safe: the retry reads them and writes only what still differs. Shutdown
+            // (ct) is not caught: the failed request wrote nothing, and the lease simply expires.
             log.LogError(ex, "{Type} batch failed", strategy.EntityType);
             await inbox.FailAllAsync(claim, ex.Message, ex is SalesforceQueryException q ? q.Errors.FirstOrDefault()?.Code : null, ct);
             return claim.Events.Count;
         }
 
         // 4. Record every entity's outcome in the inbox
-        var outcomes = batch.Outcomes(results);
         LogFailures(strategy.EntityType, batch, results.Values);
-        if (outcomes.Held.Count == 0)
-        {
-            await inbox.RecordAsync(claim, outcomes, ct);
-        }
-        else
-        {
-            // Some entities are held (a later write's outcome is unknown): like a whole-claim hold, that must be
-            // recorded even on shutdown
-            using var recording = new CancellationTokenSource(HoldRecordingTimeout);
-            await inbox.RecordAsync(claim, outcomes, recording.Token);
-            ct.ThrowIfCancellationRequested();
-        }
-
+        await inbox.RecordAsync(claim, batch.Outcomes(results), ct);
         return claim.Events.Count;
     }
 
@@ -129,6 +118,11 @@ public sealed class SalesforceBatchUpsertService(
     /// records, one writes what differs with sObject Collections (more than 5 collections are split over further
     /// requests). Returns one outcome per unit. Nothing here touches the inbox.
     /// </summary>
+    /// <remarks>
+    /// A write request that fails as a whole (the call, not records in it) throws, and the caller fails or holds the
+    /// whole claim, even when earlier requests of the batch were saved: the retry diffs against Salesforce
+    /// again, so what they saved is not written twice.
+    /// </remarks>
     /// <param name="units">At most <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
     /// <param name="queries">The strategy's reads: the units' records and the records their lookups point at.</param>
     /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
@@ -166,53 +160,13 @@ public sealed class SalesforceBatchUpsertService(
         results.AddRange(plan.NotSent);
 
         // 5. Send: normally one Composite call. 6. Per-record results -> one outcome per unit.
-        for (var i = 0; i < plan.Requests.Count; i++)
+        foreach (var request in plan.Requests)
         {
-            var request = plan.Requests[i];
-            try
-            {
-                var answers = await SendAsync(request, ct);
-                results.AddRange(_interpreter.Interpret(request, answers));
-            }
-            // A failed first call fails the batch (the caller fails or holds the whole claim): nothing of it
-            // was written. A later call's failure costs only its own entities: the earlier calls' records are final.
-            catch (Exception ex) when (i > 0)
-            {
-                var stop = LaterCallFailed(ex, request, plan.Requests.Skip(i + 1), results);
-                if (stop)
-                {
-                    break;
-                }
-            }
+            var answers = await SendAsync(request, ct);
+            results.AddRange(_interpreter.Interpret(request, answers));
         }
 
         return results;
-    }
-
-    /// <summary>
-    /// The outcomes of a write call after the first that threw: its entities are held if its outcome is unknown
-    /// (and the calls after it are not sent), otherwise retried with backoff.
-    /// </summary>
-    /// <returns>True if no further call may be sent.</returns>
-    private static bool LaterCallFailed(Exception ex, CompositeWrite failed, IEnumerable<CompositeWrite> notSent, List<UpsertResult> results)
-    {
-        IEnumerable<UpsertResult> For(CompositeWrite request, SyncOutcome outcome, IReadOnlyList<SalesforceError> errors)
-        {
-            return request.Units.Select(u => new UpsertResult(u.Key, outcome, errors));
-        }
-
-        switch (ex)
-        {
-            case UnknownOutcomeException:
-                // Stop: nothing more is sent while Salesforce may still be applying this call
-                results.AddRange(For(failed, SyncOutcome.OutcomeUnknown, [new SalesforceError(null, UnknownOutcomeException.Code, ex.Message)]));
-                results.AddRange(notSent.SelectMany(r => For(r, SyncOutcome.NotAttempted, [])));
-                return true;
-            default:
-                // Salesforce provably did not apply it (a 429 or REQUEST_LIMIT_EXCEEDED included)
-                results.AddRange(For(failed, SyncOutcome.TransientFailure, [new SalesforceError(null, "UNKNOWN_ERROR", ex.Message)]));
-                return false;
-        }
     }
 
     private async Task<Dictionary<string, SObjectSchema>> DescribeAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
@@ -279,7 +233,7 @@ public sealed class SalesforceBatchUpsertService(
             log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", id, SalesforceErrors.InvalidEvent, error);
         }
 
-        foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure or SyncOutcome.OutcomeUnknown))
+        foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure))
         {
             log.LogWarning("{Type} {Key}: {Outcome} ({Code}) {Errors}", entityType, r.Key, r.Outcome,
                 r.PrimaryError?.Code, string.Join("; ", r.Errors));
