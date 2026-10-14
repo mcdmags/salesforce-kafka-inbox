@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Dapper;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
@@ -23,8 +22,9 @@ public sealed record InboxEvent(long Id, string Key, long Version, string Payloa
 /// <item>Claims up to <see cref="SyncOptions.BatchSize"/> entities of the strategy's type: per entity, the head row
 /// is locked with FOR UPDATE SKIP LOCKED and all its pending rows are leased, so no two workers in any pod ever
 /// process the same entity at once.</item>
-/// <item>Supersedes events at or below the entity's synced version (late or replayed), merges the rest in
-/// (version, id) order and maps them through the strategy; a payload that can't be mapped is dead-lettered on its own.</item>
+/// <item>Supersedes events at or below the entity's synced version (late or replayed), coalesces the rest to the
+/// newest one (events carry the full record) and maps it through the strategy; a payload that can't be mapped is
+/// dead-lettered on its own.</item>
 /// <item>Upserts the units through <see cref="SalesforceRecordUpserter"/> (2 API calls, rate limited), giving up
 /// before the lease runs out.</item>
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
@@ -40,7 +40,10 @@ public sealed class SalesforceBatchUpsertService(
     IOptions<SyncOptions> options,
     ILogger<SalesforceBatchUpsertService> log)
 {
-    /// <summary>How inbox payloads (whole event envelopes) are deserialized into a strategy's event type.</summary>
+    /// <summary>
+    /// How inbox payloads (whole event envelopes) are deserialized into a strategy's event type: camelCase JSON,
+    /// matched to the PascalCase CLR properties without regard to case.
+    /// </summary>
     public static readonly JsonSerializerOptions EventJson = new(JsonSerializerDefaults.Web);
 
     /// <summary>
@@ -75,7 +78,7 @@ public sealed class SalesforceBatchUpsertService(
         var claim = await ClaimAsync(strategy.EntityType, ct);
         if (claim.Events.Count == 0) return 0;
 
-        // 2. Supersede stale events, merge the rest per entity, map to Salesforce records
+        // 2. Supersede stale events, keep the newest of the rest per entity, map it to Salesforce records
         var batch = Prepare(strategy, claim);
 
         // 3. Salesforce (outside any transaction)
@@ -152,7 +155,7 @@ public sealed class SalesforceBatchUpsertService(
     }
 
     /// <summary>
-    /// Splits the claimed events into stale ones (at or below the entity's watermark), entities whose merged payload
+    /// Splits the claimed events into stale ones (at or below the entity's watermark), entities whose newest payload
     /// maps to a unit, and entities whose payload can't be read or mapped (dead-lettered on their own).
     /// </summary>
     private static PreparedBatch Prepare<TEvent>(UpsertStrategy<TEvent> strategy, Claim claim)
@@ -169,13 +172,13 @@ public sealed class SalesforceBatchUpsertService(
         var invalid = new List<(long[] Ids, string Error)>();
         foreach (var group in current.GroupBy(e => e.Key, StringComparer.Ordinal))
         {
-            // Two events of an entity with the same time are both kept; the one ingested later counts as newer
-            var ordered = group.OrderBy(e => e.Version).ThenBy(e => e.Id).ToList();
-            var ids = ordered.Select(e => e.Id).ToArray();
+            var events = group.ToList();
+            var ids = events.Select(e => e.Id).ToArray();
             try
             {
-                var payload = ReadPayload<TEvent>(ordered) ?? throw new JsonException("Payload is null");
-                work.Add(new Work(group.Key, strategy.Map(group.Key, payload), ordered[^1].Version, ids));
+                var newest = Coalesce(events);
+                var payload = JsonSerializer.Deserialize<TEvent>(newest.Payload, EventJson) ?? throw new JsonException("Payload is null");
+                work.Add(new Work(group.Key, strategy.Map(group.Key, payload), newest.Version, ids));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -233,36 +236,21 @@ public sealed class SalesforceBatchUpsertService(
         }, ct);
     }
 
-    /// <summary>The entity's events merged into one payload. A single event (the common case) needs no JSON DOM.</summary>
-    private static TEvent? ReadPayload<TEvent>(IReadOnlyList<InboxEvent> ordered)
-        => ordered.Count == 1
-            ? JsonSerializer.Deserialize<TEvent>(ordered[0].Payload, EventJson)
-            : Coalesce(ordered).Deserialize<TEvent>(EventJson);
-
     /// <summary>
-    /// Merges whole events (envelopes) in (version, id) order: later values win, nested objects are merged field by
-    /// field, so a field an event doesn't mention keeps the value of an earlier one (absent = unchanged, null = clear).
-    /// meta.time ends up as the newest event's.
+    /// An entity's pending events become one write: the newest event by (version, id). Every event carries the full
+    /// record, so the newest one is the whole desired state and the older ones add nothing (merging them in would
+    /// keep a field the newest event no longer has). Two events with the same time are both kept in the inbox; the
+    /// one ingested later counts as newer. All of the entity's events are completed with this one.
     /// </summary>
-    public static JsonObject Coalesce(IReadOnlyList<InboxEvent> ordered)
+    public static InboxEvent Coalesce(IReadOnlyList<InboxEvent> events)
     {
-        var merged = new JsonObject();
-        foreach (var e in ordered)
+        var newest = events[0];
+        for (var i = 1; i < events.Count; i++)
         {
-            var obj = JsonNode.Parse(e.Payload)?.AsObject()
-                      ?? throw new JsonException($"Inbox event {e.Id} has an empty payload");
-            Merge(merged, obj);
+            var e = events[i];
+            if (e.Version > newest.Version || (e.Version == newest.Version && e.Id > newest.Id)) newest = e;
         }
-        return merged;
-    }
-
-    private static void Merge(JsonObject target, JsonObject source)
-    {
-        foreach (var (key, value) in source)
-        {
-            if (value is JsonObject src && target[key] is JsonObject existing) Merge(existing, src);
-            else target[key] = value?.DeepClone();
-        }
+        return newest;
     }
 
     private object FailArgs(FailedRows rows, Guid token) => new

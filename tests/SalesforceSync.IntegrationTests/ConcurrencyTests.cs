@@ -26,8 +26,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         {
             foreach (var id in ids)
                 app.Publish(id, v,
-                    new JsonObject { ["Name"] = $"Concurrent {id}", ["Description"] = $"v{v}" },
-                    new JsonObject { ["Score__c"] = v });
+                    new JsonObject { ["name"] = $"Concurrent {id}", ["description"] = $"v{v}" },
+                    new JsonObject { ["score"] = v });
             app.Flush();
             await Task.Delay(150);
         }
@@ -145,8 +145,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             for (var v = 1; v <= versions; v++)
             {
                 foreach (var id in ids)
-                    app.Publish(id, v, new JsonObject { ["Name"] = $"Chaos {id}", ["Description"] = $"v{v}" },
-                        new JsonObject { ["Score__c"] = v });
+                    app.Publish(id, v, new JsonObject { ["name"] = $"Chaos {id}", ["description"] = $"v{v}" },
+                        new JsonObject { ["score"] = v });
                 app.Flush();
                 await Task.Delay(300);
             }

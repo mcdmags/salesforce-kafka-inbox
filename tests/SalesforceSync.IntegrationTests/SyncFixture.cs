@@ -181,7 +181,9 @@ public class SyncFixture : IAsyncLifetime
 
     /// <summary>
     /// The envelope of an account event: <c>{ "meta": { "time" }, "account": { "externalId", ...account, "profile":
-    /// { "externalId", ...profile } } }</c>. The caller's objects are copied, so they can be published again.
+    /// { "externalId", ...profile } } }</c>, with the payload's camelCase names (<c>name</c>, <c>rating</c>, <c>tier</c>,
+    /// ...). An event is the full record: what isn't given is empty. The caller's objects are copied, so they can be
+    /// published again.
     /// </summary>
     public static JsonObject AccountEvent(string accountExtId, long version, JsonObject account, JsonObject profile)
     {

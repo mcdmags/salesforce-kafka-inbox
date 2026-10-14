@@ -10,7 +10,8 @@ namespace SalesforceSync.LoadGenerator;
 /// Publishes account change events keyed by account external id (so Kafka keeps per-account order),
 /// including rapid bursts to the same account to exercise the ordering/coalescing logic, and relationship
 /// events between accounts (keyed by relationship id), which can arrive before their accounts are synced.
-/// Events use the real envelope: <c>{ "meta": { "time": ... }, "account" | "accountRelationship": { "externalId": ..., ... } }</c>.
+/// Events use the real envelope: <c>{ "meta": { "time": ... }, "account" | "accountRelationship": { "externalId": ..., ... } }</c>,
+/// with the source system's camelCase field names. Every event carries the full record.
 /// </summary>
 public sealed class AccountEventProducer(
     IProducer<string, string> producer,
@@ -65,8 +66,8 @@ public sealed class AccountEventProducer(
                             ["externalId"] = relKey,
                             ["accountExternalId"] = $"ACC-{a:D6}",
                             ["relatedAccountExternalId"] = $"ACC-{b:D6}",
-                            ["Type__c"] = RelationshipTypes[random.Next(RelationshipTypes.Length)],
-                            ["Active__c"] = random.NextDouble() < 0.9
+                            ["type"] = RelationshipTypes[random.Next(RelationshipTypes.Length)],
+                            ["isActive"] = random.NextDouble() < 0.9
                         }
                     };
                     producer.Produce(o.RelationshipTopic,
@@ -90,15 +91,35 @@ public sealed class AccountEventProducer(
 
     private JsonObject BuildEvent(string accountKey, long version, Random random)
     {
-        // Partial updates: each event carries a subset of fields, like a real change feed.
-        var account = new JsonObject { ["externalId"] = accountKey, ["Name"] = $"Account {accountKey}" };
-        if (random.NextDouble() < 0.7) account["Rating"] = Ratings[random.Next(Ratings.Length)];
-        if (random.NextDouble() < 0.5) account["Description"] = $"Updated to v{version}";
-
-        var profile = new JsonObject { ["externalId"] = accountKey.Replace("ACC-", "PRF-") };
-        if (random.NextDouble() < 0.8) profile["Tier__c"] = Tiers[random.Next(Tiers.Length)];
-        if (random.NextDouble() < 0.6) profile["Score__c"] = random.Next(0, 101);
-        account["profile"] = profile;
+        // Full records, like the source system sends them: every event carries every field, and most of them
+        // don't change from one event to the next (so the diff has something to skip).
+        var account = new JsonObject
+        {
+            ["externalId"] = accountKey,
+            ["name"] = $"Account {accountKey}",
+            ["rating"] = Ratings[random.Next(Ratings.Length)],
+            ["industry"] = "Technology",
+            ["description"] = $"Updated to v{version}",
+            ["annualRevenue"] = 1_000_000 + random.Next(0, 100) * 10_000,
+            ["numberOfEmployees"] = 250,
+            ["phone"] = "+1 555 0100",
+            ["website"] = "https://example.com",
+            ["isActive"] = true,
+            ["tags"] = new JsonArray("B2B", "Retail"),
+            ["customerSince"] = "2020-01-15",
+            ["lastContactedAt"] = null, // empty in the source: cleared in Salesforce if set there
+            ["profile"] = new JsonObject
+            {
+                ["externalId"] = accountKey.Replace("ACC-", "PRF-"),
+                ["name"] = $"Profile {accountKey}",
+                ["tier"] = Tiers[random.Next(Tiers.Length)],
+                ["score"] = random.Next(0, 101),
+                ["discountPercent"] = 12.5,
+                ["notes"] = null,
+                ["optIn"] = random.NextDouble() < 0.5,
+                ["startDate"] = "2020-02-01"
+            }
+        };
 
         return new JsonObject { ["meta"] = Meta(), ["account"] = account };
     }

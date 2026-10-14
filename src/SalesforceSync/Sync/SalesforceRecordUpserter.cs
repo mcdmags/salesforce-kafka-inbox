@@ -271,7 +271,7 @@ public sealed class SalesforceRecordUpserter(
     }
 
     /// <summary>
-    /// Fields to send: all of them for a new record, otherwise only those whose normalized value differs from
+    /// Fields to send: every non-empty one for a new record, otherwise only those whose normalized value differs from
     /// Salesforce. A field Salesforce won't let us set (not createable / updateable) is a problem only if it must
     /// actually be written.
     /// </summary>
@@ -281,6 +281,9 @@ public sealed class SalesforceRecordUpserter(
         var changes = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         foreach (var (field, value) in record.Fields)
         {
+            // A new record has no value to clear, and an explicit null would override the field's default
+            if (existing is null && value is null) continue;
+
             JsonElement now = default;
             if (existing is not null && existing.TryGetValue(field.Name, out now) && FieldValues.AreEqual(field, value, now))
                 continue;

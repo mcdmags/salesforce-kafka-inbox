@@ -2,7 +2,8 @@
 
 Kafka change events → Postgres inbox → Salesforce, with per-entity ordering, atomic multi-record upserts,
 type-aware change-only updates and a shared, limit-aware rate limiter. One generic engine syncs every object;
-each object only defines its mapping and queries. Written in C# / .NET 8.
+each object only defines its typed payload, its Salesforce sObject class, the mapper between them and its queries.
+Written in C# / .NET 8.
 
 ## The problem
 
@@ -33,11 +34,11 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 |---|---|
 | Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to a Postgres **inbox** (`sf_inbox.payload`) before storing its offset (committed in the background, so there is no broker round trip per message). Entity type, key and order are read from the JSON (see [Event format](#event-format)), so any subscribed topic (`Kafka:Topics`) can carry any type. A unique index on (type, key, time, `md5(payload)`) makes redelivery harmless. A message that isn't a valid event (see below) is logged with its offset and skipped, rather than blocking its partition. |
 | Ordering across parallel batches | Workers claim **entities, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each entity's *oldest pending* row, only for entities with nothing in flight. All pending events for a claimed entity are then leased (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same entity. |
-| Bursts of updates to one entity | Pending events for an entity are **coalesced** (whole events deep-merged in `meta.time` order, then by id; absent field = unchanged, `null` = clear), so five updates in five seconds become one Salesforce write with the newest data. |
+| Bursts of updates to one entity | Pending events for an entity are **coalesced**: every event carries the full record, so only the newest one (by `meta.time`, then by id) is written and the older ones are completed with it. Five updates in five seconds become one Salesforce write with the newest data. |
 | Late or replayed older events | **Sync watermark in Postgres**: `sf_sync_state` holds the newest version (`meta.time`) synced per entity, advanced in the same transaction that completes the events and only while the worker still holds the lease. A claimed event at or below the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. |
 | Records that must change together | **Composite Graph API**: one graph per unit (Account + Profile, or a relationship). A graph is all-or-nothing; other graphs in the same request are unaffected. New records are referenced with `@{ref.id}`; existing ones (e.g. a relationship's Accounts) by the Id read from Salesforce. |
-| Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field the coalesced inbox state sets. Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the millisecond, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event (a warning flags any field that still keeps differing). The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
+| Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the millisecond, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event (a warning flags any field that still keeps differing). The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
 | Batching and API calls | **2 calls per batch** of up to 75 units: one Composite request with all reads (≤5 queries), one Composite Graph with all writes (≤75 graphs / 500 nodes). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each graph's result decides per entity: **not attempted** (`PROCESSING_HALTED` after 14 failures, `ALL_OR_NONE_OPERATION_ROLLED_BACK`) → back to the inbox without spending a retry; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately. The code is stored in `sf_inbox.last_error_code`. |
@@ -50,11 +51,11 @@ Kafka (keyed by entity) ──► KafkaInboxConsumer ──► sf_inbox (Postgre
   account-relationship-changes                         │  claim entities: FOR UPDATE SKIP LOCKED on head row
                                                        ▼
                               InboxWorkerService ×N loops (any number of pods), round-robin over:
-                                AccountSyncService ─┐            (strategy: map + queries)
-                                AccountRelationshipSyncService ─┤
+                                AccountSyncService ─┐            (strategy: typed event → mapper →
+                                AccountRelationshipSyncService ─┤          sObject → records, + queries)
                                                                 ▼
                               SalesforceBatchUpsertService.UpsertBatchAsync<TEvent>(strategy)
-                                claim → supersede stale → coalesce → map → SalesforceRecordUpserter
+                                claim → supersede stale → coalesce (newest) → map → SalesforceRecordUpserter
                                 (describe → normalize → 1 composite read → diff + lookups → 1 composite graph)
                                 → record outcomes            all Postgres work via PostgresExecutionStrategy
                                                        │  token bucket + daily budget + concurrency slots
@@ -64,11 +65,20 @@ Kafka (keyed by entity) ──► KafkaInboxConsumer ──► sf_inbox (Postgre
 
 ## Event format
 
-The inbox stores only the raw Kafka message value. Every event is one entity object next to `meta`:
+The inbox stores only the raw Kafka message value. Every event is one entity object next to `meta`, in **camelCase**
+JSON with the source system's own field names (nothing in an event is a Salesforce name):
 
 ```json
-{ "meta": { "time": "2026-10-14T01:02:03.456Z" }, "account": { "externalId": "ACC-000001", "Name": "Acme", "profile": { "Tier__c": "Gold" } } }
-{ "meta": { "time": "2026-10-14T01:02:04.000Z" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-000001", "relatedAccountExternalId": "ACC-000002", "Type__c": "Parent" } }
+{ "meta": { "time": "2026-10-14T01:02:03.456Z" },
+  "account": { "externalId": "ACC-000001", "name": "Acme", "rating": "Hot", "industry": "Technology",
+               "description": null, "annualRevenue": 1250000.50, "numberOfEmployees": 250, "phone": "+1 555 0100",
+               "website": "https://example.com", "isActive": true, "tags": ["B2B", "Retail"],
+               "customerSince": "2020-01-15", "lastContactedAt": "2026-10-12T01:02:03Z",
+               "profile": { "name": "Acme profile", "tier": "Gold", "score": 87.5, "discountPercent": 12.5,
+                            "notes": null, "optIn": true, "startDate": "2020-02-01" } } }
+{ "meta": { "time": "2026-10-14T01:02:04.000Z" },
+  "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-000001", "relatedAccountExternalId": "ACC-000002",
+                           "name": "Acme / Globex", "type": "Parent", "startDate": "2026-01-31", "isActive": true } }
 ```
 
 - **Entity type**: the name of the single top-level object besides `meta` (`account`, `accountRelationship`). It
@@ -76,16 +86,61 @@ The inbox stores only the raw Kafka message value. Every event is one entity obj
 - **Entity key**: `<object>.externalId`, the record's Salesforce external id (`External_Id__c`).
 - **Order**: `meta.time`, an ISO-8601 time with an offset or `Z`. Events of one entity are processed in time order;
   two different events with the same time are both kept and ordered by when they were ingested (`id`).
+- **Casing**: the envelope keys (`meta`, `time`, `account`, `accountRelationship`, `externalId`) are read by the
+  consumer's check and by the SQL functions below, which match them exactly as written here. The other properties are
+  bound to the payload classes with `JsonSerializerDefaults.Web`: camelCase is the contract, and the match ignores
+  case (so `"Name"` binds too). A property the payload class doesn't have is ignored.
 
-Payload mapping (assumptions, documented on `AccountEvent` and `AccountRelationshipEvent`; change them there):
+### An event is the full record
 
-- **account**: every property of `account` except `externalId` and `profile` is an Account field, by its Salesforce API
-  name. The optional `account.profile` becomes the Account's `Profile__c`: its properties except `externalId` are
-  fields, and `profile.externalId` defaults to the account's `externalId`. Without a `profile`, only the Account is
-  written.
-- **accountRelationship**: `accountExternalId` and `relatedAccountExternalId` are the two Accounts (`Account__c`,
-  `Related_Account__c`, looked up by external id); every other property except `externalId` is an
-  `Account_Relationship__c` field. An event without both Account ids is dead-lettered (`INVALID_EVENT`).
+Every event carries the entity's complete current state. There is no "field not mentioned = leave it alone":
+
+- A property that is **`null` or absent** means *empty in the source*. If Salesforce has a value there, the field is
+  cleared. (A checkbox is never null in Salesforce, so an empty one becomes `false`.)
+- The diff still writes **only the fields that differ** from Salesforce, so a full record in which one field changed
+  is a one-field update, and an unchanged record writes nothing. A new record is created with its non-empty fields.
+- **Coalescing takes the newest event**, it doesn't merge: several pending events of an entity become one write of
+  the newest full record (by `meta.time`, then `id`). Merging would keep a field the newest event no longer has.
+- A required field must therefore be in every event: an account event without a `name` is dead-lettered
+  (`REQUIRED_FIELD_MISSING`), because it would empty `Account.Name`.
+- The one thing that isn't cleared by absence is a whole object: an account event **without a `profile`** writes
+  only the Account and leaves the Profile in Salesforce as it is.
+
+Other rules (in the strategies, `AccountSyncService` and `AccountRelationshipSyncService`):
+
+- **account**: `profile.externalId` defaults to the account's `externalId`, and the Profile always looks up the
+  event's account.
+- **accountRelationship**: `accountExternalId` and `relatedAccountExternalId` are the two Accounts (looked up by
+  external id). An event without both is dead-lettered (`INVALID_EVENT`), as is an event whose value has the wrong
+  type for its payload property (e.g. `"numberOfEmployees": "lots"`).
+
+## The three typed layers
+
+An event passes through three kinds of classes on its way to the generic engine. Each knows one thing:
+
+| Layer | Where | Knows |
+|---|---|---|
+| **Inbox payload** (`AccountPayload`, `ProfilePayload`, `AccountRelationshipPayload`, in the `AccountEvent` / `AccountRelationshipEvent` envelopes) | `src/SalesforceSync/Inbox/Payloads/` | The event as the source system sends it. PascalCase CLR properties, bound from camelCase JSON; no attributes, no Salesforce names. |
+| **Salesforce sObject** (`AccountSObject`, `ProfileSObject`, `AccountRelationshipSObject`) | `src/SalesforceSync/Salesforce/SObjects/` | The org. One flat class per object; `[SObject]` names the object and its external id field, `[JsonPropertyName]` names each field, `[SObjectLookup]` marks a lookup. |
+| **Mapper** (`AccountMapper`, `ProfileMapper`, `AccountRelationshipMapper` : `ISObjectMapper<TPayload, TSObject>`) | `src/SalesforceSync/Sync/Mapping/` | How one becomes the other: hand-written, one line per field, converting only where the types differ (the `tags` list becomes a `;`-separated multi-select value). Registered in `AddInboxSync`. |
+
+```
+raw event JSON ─► AccountEvent { AccountPayload { …, ProfilePayload } }     System.Text.Json (Web defaults)
+               ─► AccountMapper / ProfileMapper ─► AccountSObject, ProfileSObject
+               ─► SObjectRecord.From(referenceId, sobject) ─► SObjectRecord ─► engine (normalize, diff, graph)
+```
+
+**Salesforce API names live only on the sObject classes.** Nothing else in the sync spells a field or object name:
+the strategies' queries (`SoqlQuery.RecordsOf<AccountSObject>(units)`), the lookups and the records all read them
+from the attributes. Pointing the sync at an org whose fields are named differently (`LLC_BI__Active__c` instead of
+`Active__c`) means editing the attribute strings and nothing else.
+
+`SObjectRecord.From` turns any sObject instance into the engine's record: object, external id field and field names
+from the attributes, every property as a field (nulls included, see above), every `[SObjectLookup]` property as a
+lookup by the target's external id. The attributes are read by reflection once per class
+(`SObjectMetadata<TSObject>.Instance`, with compiled property getters), not per event; a class declared wrongly (a
+property without `[JsonPropertyName]`, no external id property) fails the first time it is used. A unit test checks
+every name on every sObject class against the mock org's schema (`FakeSchema`), which catches typos.
 
 **Ingest.** `KafkaInboxConsumer` checks each message before storing it: valid JSON, exactly one entity object besides
 `meta`, a type some registered `ISalesforceEntitySync` handles, a non-empty string `externalId`, and a `meta.time`
@@ -126,58 +181,95 @@ order by sf_event_version(payload), id;
 ## Adding a Salesforce object
 
 The engine (`SalesforceBatchUpsertService.UpsertBatchAsync<TEvent>`) owns claiming, ordering, coalescing, rate
-limits, batching, normalization, diffing, lookups, retries and dead-lettering. An object only supplies an
-`UpsertStrategy<TEvent>` (or the same three things as delegates):
+limits, batching, normalization, diffing, lookups, retries and dead-lettering. An object supplies four small things:
+a payload class, an sObject class, a mapper and a strategy.
 
 ```csharp
-// The event envelope: { "meta": {...}, "accountRelationship": { "externalId": ..., ... } }
-public sealed record AccountRelationshipEvent(AccountRelationshipData? AccountRelationship);
+// 1. Payload: the event as the source sends it  { "meta": {...}, "accountRelationship": { "externalId": ..., ... } }
+public sealed record AccountRelationshipEvent(AccountRelationshipPayload? AccountRelationship);
 
-public sealed record AccountRelationshipData
+public sealed class AccountRelationshipPayload
 {
-    public string? ExternalId { get; init; }
-    public string? AccountExternalId { get; init; }
-    public string? RelatedAccountExternalId { get; init; }
-    [JsonExtensionData] public Dictionary<string, JsonElement>? Fields { get; init; }  // every other property
+    public string? ExternalId { get; set; }
+    public string? AccountExternalId { get; set; }
+    public string? RelatedAccountExternalId { get; set; }
+    public string? Type { get; set; }
+    public bool? IsActive { get; set; }
 }
 
-public sealed class AccountRelationshipSyncService(SalesforceBatchUpsertService upsert) : ISalesforceEntitySync
+// 2. sObject: the only place with Salesforce API names
+[SObject("Account_Relationship__c", ExternalIdField = "External_Id__c")]
+public sealed class AccountRelationshipSObject
 {
-    public static readonly UpsertStrategy<AccountRelationshipEvent> Strategy = new("accountRelationship", Map, Queries);
+    [JsonPropertyName("External_Id__c")] public string? ExternalId { get; set; }
+
+    // A lookup holds the external id of the record it points at; the target class knows its object and id field
+    [JsonPropertyName("Account__c"), SObjectLookup(typeof(AccountSObject))]
+    public string? AccountExternalId { get; set; }
+
+    [JsonPropertyName("Related_Account__c"), SObjectLookup(typeof(AccountSObject))]
+    public string? RelatedAccountExternalId { get; set; }
+
+    [JsonPropertyName("Type__c")] public string? Type { get; set; }
+    [JsonPropertyName("Active__c")] public bool? Active { get; set; }
+}
+
+// 3. Mapper: explicit, one line per field
+public sealed class AccountRelationshipMapper : ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject>
+{
+    public AccountRelationshipSObject Map(AccountRelationshipPayload payload) => new()
+    {
+        ExternalId = payload.ExternalId,
+        AccountExternalId = payload.AccountExternalId,
+        RelatedAccountExternalId = payload.RelatedAccountExternalId,
+        Type = payload.Type,
+        Active = payload.IsActive
+    };
+}
+
+// 4. Strategy: typed event -> mapper -> records to write together (one graph), and what to read
+public sealed class AccountRelationshipSyncService(
+    SalesforceBatchUpsertService upsert,
+    ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships) : ISalesforceEntitySync
+{
+    private readonly UpsertStrategy<AccountRelationshipEvent> _strategy =
+        new("accountRelationship", (key, e) => Map(key, e, relationships), Queries);
 
     public string EntityType => "accountRelationship";  // the event's entity object name
-    public Task<int> SyncBatchAsync(CancellationToken ct) => upsert.UpsertBatchAsync(Strategy, ct);
+    public Task<int> SyncBatchAsync(CancellationToken ct) => upsert.UpsertBatchAsync(_strategy, ct);
 
-    // Inbox event (the entity's events merged) -> the records to write together (one graph).
-    // Throwing dead-letters the event (INVALID_EVENT).
-    public static UpsertUnit Map(string key, AccountRelationshipEvent e)
+    // Throwing dead-letters the event (INVALID_EVENT)
+    public static UpsertUnit Map(string key, AccountRelationshipEvent e,
+        ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
     {
-        var rel = e.AccountRelationship;
-        if (string.IsNullOrWhiteSpace(rel?.AccountExternalId) || string.IsNullOrWhiteSpace(rel.RelatedAccountExternalId))
+        var payload = e.AccountRelationship;
+        if (string.IsNullOrWhiteSpace(payload?.AccountExternalId) || string.IsNullOrWhiteSpace(payload.RelatedAccountExternalId))
             throw new ArgumentException("accountExternalId and relatedAccountExternalId are required");
 
-        return new UpsertUnit(
-        [
-            new SObjectRecord("rel", "Account_Relationship__c", "External_Id__c", key, SObjectFields.From(rel.Fields),
-            [
-                new SObjectLookup("Account__c", "Account", "External_Id__c", rel.AccountExternalId),
-                new SObjectLookup("Related_Account__c", "Account", "External_Id__c", rel.RelatedAccountExternalId)
-            ])
-        ]);
+        return new UpsertUnit([SObjectRecord.From("rel", relationships.Map(payload))]);
     }
 
-    // What to read: the relationships themselves (to diff) and the Accounts they point at (for their Ids)
+    // The relationships themselves (to diff) and the Accounts they point at (for their Ids)
     public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units) =>
     [
-        new SoqlQuery("Account_Relationship__c", "External_Id__c", SoqlQuery.ExternalIdsOf(units, "Account_Relationship__c")),
-        new SoqlQuery("Account", "External_Id__c", SoqlQuery.LookupIdsOf(units, "Account"))
+        SoqlQuery.RecordsOf<AccountRelationshipSObject>(units),
+        SoqlQuery.LookupTargetsOf<AccountSObject>(units)
     ];
 }
 ```
 
-Register it (`AddTransient<ISalesforceEntitySync, ...>()` in `AddInboxSync`); from then on the consumer admits events
-whose entity object has that name. If they come on a new topic, add it to `Kafka:Topics`. A lookup whose target isn't in Salesforce yet (`DEPENDENCY_NOT_SYNCED`) is retried with backoff,
-so related objects can arrive in any order.
+Register the mapper and the strategy in `AddInboxSync`:
+
+```csharp
+services.AddSingleton<ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject>, AccountRelationshipMapper>();
+services.AddTransient<ISalesforceEntitySync, AccountRelationshipSyncService>();
+```
+
+From then on the consumer admits events whose entity object has that name. If they come on a new topic, add it to
+`Kafka:Topics`. A lookup whose target isn't in Salesforce yet (`DEPENDENCY_NOT_SYNCED`) is retried with backoff, so
+related objects can arrive in any order. `UpsertBatchAsync` also takes the strategy's three parts as delegates, and a
+strategy may build `SObjectRecord`s by hand; the typed layers are how the built-in objects do it, not something the
+engine requires.
 
 **Why `SemaphoreSlim` isn't used for parallel batches:** it limits concurrency within one process, while
 Salesforce's limits are org-wide. Parallelism comes from competing worker loops in every pod pulling from the
@@ -188,8 +280,10 @@ does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers
 
 ```
 src/
-  SalesforceSync/                 Worker: Kafka consumer, sync engine + strategies (Sync/), Salesforce client,
-                                  rate limiting, Postgres execution strategy (Data/)
+  SalesforceSync/                 Worker: Kafka consumer and event payload classes (Inbox/, Inbox/Payloads/), sync
+                                  engine + strategies + mappers (Sync/, Sync/Mapping/), Salesforce client and
+                                  sObject classes (Salesforce/, Salesforce/SObjects/), rate limiting, Postgres
+                                  execution strategy (Data/)
   SalesforceSync.FakeSalesforce/  In-memory Salesforce (describe, query, composite, composite graph, Salesforce-like
                                   value storage, error injection, write history, Sforce-Limit-Info)
   SalesforceSync.FakeSalesforce.Server/  The in-memory org as an HTTP service (+ /__fake inspection API)
@@ -226,8 +320,8 @@ The dashboard shows:
   `POST /__fake/faults`
 - **salesforce-sync**: consumes `account-changes` and `account-relationship-changes` into `sf_inbox` and syncs
   to `fake-salesforce` through the real OAuth + REST client
-- **load-generator**: 20k account events over 500 accounts at 200/s, including bursts to the same account, plus
-  relationship events between accounts
+- **load-generator**: 20k account events (full records) over 500 accounts at 200/s, including bursts to the same
+  account, plus relationship events between accounts
 - **benchmarks**: explicit start (click ▶), runs the inbox drain benchmark against `benchdb`
 
 ## Tests
@@ -271,9 +365,10 @@ org (`FakeSalesforce:Latency`, `LongRunningThreshold`, `ConcurrentLongRunningLim
 with `Eventually`; the only fixed delay checks that nothing more happens once the daily budget is used up. Tests
 publish to Kafka and assert on the records in the mock org and the `sf_inbox` status.
 
-Covered: create Account + linked Profile, partial update (only the differing field is sent), the diff
+Covered: create Account + linked Profile, a full record in which one field changed (only that field is sent), a
+field that becomes null or absent being cleared, an event without a profile leaving the Profile alone, the diff
 being taken against the record in Salesforce (a direct edit in Salesforce is corrected by the next event),
-bursts coalesced to the newest state, stale versions superseded without a write, unchanged events skip the
+bursts coalesced to the newest full record, stale versions superseded without a write, unchanged events skip the
 write, exactly 2 API calls per batch, a redelivered event stored once (and a time without an offset skipped), the
 schema being reapplied on restart, and an old-format inbox kept aside as `sf_inbox_legacy`. Tests publish version N
 as `meta.time` = a fixed base time + N ms, and read it back the same way. Relationships
@@ -296,8 +391,11 @@ Rate limits (`RateLimitTests`, each with its own fixture, i.e. its own container
 Unit tests (`dotnet test tests/SalesforceSync.Tests`, no Docker) run the Salesforce half of the engine with both
 strategies against the in-memory org: 2 calls per batch, values written once instead of flapping, a bad value
 failing only its own unit before any call, validation / lock / halted outcomes, relinking, relationships and
-missing dependencies, gzip. Also: the event mapping (account with and without a profile, relationships, missing
-Account ids), merging whole events, what the consumer admits (`InboxEventEnvelope`), every normalization rule
+missing dependencies, gzip, clearing fields that became empty. Also: each mapper (an AutoFixture payload in, the
+expected sObject out, nulls passed through), sObject → record (names from the attributes, nulls included, lookups
+and external id), the guard that every Salesforce name on an sObject class exists in the mock org's schema, the
+event mapping (account with and without a profile, relationships, missing Account ids, camelCase and PascalCase
+bodies), coalescing to the newest event, what the consumer admits (`InboxEventEnvelope`), every normalization rule
 (including the documented 15 → 18-character id example), error classification, the Postgres execution strategy
 (retried, not retried, gives up), the allocation formula (including the documented Enterprise example of 115,000),
 startup validation and throttle decisions.
@@ -339,6 +437,10 @@ export ConnectionStrings__benchdb="Host=localhost;Port=5432;Database=benchdb;Use
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*InboxDrain*'
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*Micro*'
 ```
+
+The micro benchmarks need no database: header parsing, coalescing, the typed mapping (`MapAccountEvent`: event JSON →
+payload → sObjects → records; `MapPayloadToSObject` and `MapSObjectToRecord` for its two halves) and the type-aware
+diff.
 
 Both drain benchmarks run P **pods** (independent service providers: own connection pool, rate limiter and
 HTTP client, like separate processes) x W worker loops against one Postgres inbox and one org. Each iteration
@@ -470,8 +572,8 @@ where locktype = 'advisory' and classid = 0 and objid::bigint between 1397096448
    `ClientId`, `ClientSecret` (OAuth client credentials).
 3. Describe the org in `SalesforceLimits` and choose this integration's `RateLimit:DailyBudgetShare`
    (see [Salesforce API limits](#salesforce-api-limits)).
-4. Adjust object and field names in the strategies (`AccountSyncService`, `AccountRelationshipSyncService`),
-   and tune `Salesforce:PermanentErrorCodes`, `Sync:RetryBaseDelay` / `MaxRetryDelay` / `MaxRetries` and
+4. Adjust object and field names on the sObject classes (`Salesforce/SObjects/`, the only place they appear), and
+   the payload classes and mappers if the events differ. Tune `Salesforce:PermanentErrorCodes`, `Sync:RetryBaseDelay` / `MaxRetryDelay` / `MaxRetries` and
    `Postgres:Retry` if needed. `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-75, ...)
    and a missing `Salesforce:InstanceUrl` fail startup.
 
