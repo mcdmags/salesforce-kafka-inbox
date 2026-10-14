@@ -1,5 +1,4 @@
 using System.Text.Json;
-using SalesforceSync.Inbox;
 using SalesforceSync.Salesforce;
 
 namespace SalesforceSync.Sync.Upsert;
@@ -7,47 +6,25 @@ namespace SalesforceSync.Sync.Upsert;
 /// <summary>What to do with a batch after the read.</summary>
 /// <param name="Requests">The Composite requests to send, each with its units and their writes by collection.</param>
 /// <param name="NotSent">The units that won't be sent, with their outcome: unchanged, rejected, too large, or waiting for a lookup target.</param>
-/// <param name="TypeMismatches">Units whose event type disagrees with Salesforce.</param>
-/// <param name="MismatchHandling">What was done about them (<see cref="SyncOptions.EventTypeMismatch"/>).</param>
-/// <param name="Rewrites">Every value that differs from an existing record's, for the flapping check.</param>
-internal sealed record WritePlan(
-    IReadOnlyList<CompositeWrite> Requests,
-    IReadOnlyList<UpsertResult> NotSent,
-    IReadOnlyList<(string Key, string? Message)> TypeMismatches,
-    EventTypeMismatch MismatchHandling,
-    IReadOnlyList<FieldWrite> Rewrites);
+internal sealed record WritePlan(IReadOnlyList<CompositeWrite> Requests, IReadOnlyList<UpsertResult> NotSent);
 
 /// <summary>
 /// Turns units and Salesforce's current records into the collection requests to send. Whether a record is created or
-/// updated is decided by what the read found; the event's type is checked against it
-/// (<see cref="SyncOptions.EventTypeMismatch"/>). A lookup becomes a literal Id, a reference to a create in the same
-/// request or a link by external id (<see cref="SalesforceOptions.ParentLink"/>). No I/O.
+/// updated is decided by what the read found. A lookup becomes a literal Id, or a reference to a create in the same
+/// request (<c>@{Account_create[3].id}</c>). No I/O.
 /// </summary>
-internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOptions)
+internal static class WritePlanner
 {
-    public WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current,
-        IReadOnlyDictionary<string, SObjectSchema> schemas)
+    public static WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current)
     {
         var planned = new List<PlannedUnit>();
         var decided = new List<UpsertResult>();
-        var mismatches = new List<(string, string?)>();
-        var rewrites = new List<FieldWrite>();
 
         foreach (var unit in units)
         {
-            if (EventTypeCheck.Mismatch(unit, current) is { } mismatch)
-            {
-                mismatches.Add((unit.Key, mismatch.Message));
-                if (syncOptions.EventTypeMismatch == EventTypeMismatch.DeadLetter)
-                {
-                    decided.Add(new(unit.Key, SyncOutcome.PermanentFailure, [mismatch]));
-                    continue;
-                }
-            }
-
             var problems = new List<SalesforceError>();
             var missing = new List<SalesforceError>();
-            var writes = PlanUnit(unit, current, schemas, problems, missing, rewrites);
+            var writes = PlanUnit(unit, current, problems, missing);
 
             if (problems.Count > 0)
             {
@@ -69,7 +46,7 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
 
         var (requests, tooLarge) = CompositeWrite.Pack(planned);
         decided.AddRange(tooLarge);
-        return new WritePlan(requests, decided, mismatches, syncOptions.EventTypeMismatch, rewrites);
+        return new WritePlan(requests, decided);
     }
 
     /// <summary>
@@ -79,9 +56,8 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
     /// </summary>
     /// <param name="problems">Receives what Salesforce would reject (a field that can't be written).</param>
     /// <param name="missing">Receives the lookups whose target is neither in Salesforce nor in the unit.</param>
-    private List<PlannedWrite> PlanUnit(NormalizedUnit unit, CurrentRecords current,
-        IReadOnlyDictionary<string, SObjectSchema> schemas, List<SalesforceError> problems, List<SalesforceError> missing,
-        List<FieldWrite> rewrites)
+    private static List<PlannedWrite> PlanUnit(NormalizedUnit unit, CurrentRecords current, List<SalesforceError> problems,
+        List<SalesforceError> missing)
     {
         var writes = new List<PlannedWrite>();
         // The unit's records so far, by (sobject, external id), for the later records that look them up
@@ -90,14 +66,8 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
         foreach (var record in unit.Records)
         {
             var existing = current.Find(record.Record);
-            var sent = new List<FieldWrite>();
-            var changes = RecordDiffer.Changes(record, existing, sent, problems);
-            if (existing is not null)
-            {
-                rewrites.AddRange(sent);
-            }
-
-            var links = new List<NewParentLink>();
+            var changes = RecordDiffer.Changes(record, existing, problems);
+            var links = new List<ParentReference>();
             var depth = 0;
 
             foreach (var lookup in record.Lookups)
@@ -127,11 +97,11 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
                 }
                 else
                 {
-                    links.Add(LinkTo(target.Create, lookup, schemas));
+                    links.Add(new ParentReference(lookup.Field, target.Create));
                 }
             }
 
-            var write = Write(record, existing, changes, links, sent, depth);
+            var write = Write(record, existing, changes, links, depth);
             if (write is not null)
             {
                 writes.Add(write);
@@ -167,17 +137,9 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
                 : null;
     }
 
-    /// <summary>By external id only if the lookup can be addressed that way; a reference always can.</summary>
-    private NewParentLink LinkTo(PlannedWrite parent, NormalizedLookup lookup, IReadOnlyDictionary<string, SObjectSchema> schemas)
-    {
-        var byExternalId = options.ParentLink == ParentLink.ExternalId && lookup.Field.RelationshipName is not null;
-        return new NewParentLink(lookup.Field, parent, lookup.Target.ExternalId,
-            byExternalId ? schemas[lookup.Target.SObject].Find(lookup.Target.ExternalIdField)!.Name : null);
-    }
-
     /// <summary>A create for a new record (with its external id), an update if anything differs, else null.</summary>
     private static PlannedWrite? Write(NormalizedRecord record, CurrentRecord? existing, Dictionary<string, object?> changes,
-        List<NewParentLink> links, List<FieldWrite> sent, int depth)
+        List<ParentReference> links, int depth)
     {
         if (existing is not null && changes.Count == 0 && links.Count == 0)
         {
@@ -185,7 +147,7 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
         }
 
         var lookupFields = record.Lookups.Where(l => changes.ContainsKey(l.Field.Name)).Select(l => l.Field.Name)
-            .Concat(links.SelectMany(l => new[] { l.Field.Name, l.Field.RelationshipName ?? l.Field.Name }))
+            .Concat(links.Select(l => l.Field.Name))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         if (existing is null)
@@ -193,6 +155,6 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
             changes[record.Schema.Find(record.Record.ExternalIdField)!.Name] = record.Record.ExternalId;
         }
 
-        return new PlannedWrite(record, existing?.Id, changes, links, lookupFields, sent, depth);
+        return new PlannedWrite(record, existing?.Id, changes, links, lookupFields, depth);
     }
 }

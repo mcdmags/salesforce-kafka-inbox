@@ -8,5 +8,5 @@ public sealed record UpsertResult(string Key, SyncOutcome Outcome, IReadOnlyList
 {
     /// <summary>The error that decided the outcome (errors are ordered most significant first).</summary>
     public SalesforceError? PrimaryError =>
-        Errors.FirstOrDefault(e => !SalesforceErrors.NotAttemptedCodes.Contains(e.Code)) ?? Errors.FirstOrDefault();
+        Errors.FirstOrDefault(e => e.Code != SalesforceErrors.ProcessingHalted) ?? Errors.FirstOrDefault();
 }

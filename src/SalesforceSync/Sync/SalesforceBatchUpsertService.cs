@@ -35,7 +35,6 @@ public sealed class SalesforceBatchUpsertService(
     SalesforceRestClient salesforce,
     SalesforceSchemaCache schemaCache,
     SalesforceErrors errors,
-    WriteEchoTracker echoTracker,
     IOptions<SalesforceOptions> salesforceOptions,
     IOptions<SyncOptions> options,
     ILogger<SalesforceBatchUpsertService> log)
@@ -57,7 +56,6 @@ public sealed class SalesforceBatchUpsertService(
 
     private readonly SyncOptions _opt = options.Value;
     private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
-    private readonly WritePlanner _planner = new(salesforceOptions.Value, options.Value);
     private readonly WriteResultInterpreter _interpreter = new(errors);
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
@@ -177,22 +175,19 @@ public sealed class SalesforceBatchUpsertService(
         // 3. Read: one Composite call with the strategy's queries
         var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas), schemas.Keys, ct);
 
-        // 4. Decide per record: unchanged, create or update (checked against the event's type), and how each lookup
-        // is linked; the writes are grouped into collections and Composite requests
-        var plan = _planner.Plan(normalized, current, schemas);
+        // 4. Decide per record: unchanged, create or update (by what the read found), and how each lookup is linked;
+        // the writes are grouped into collections and Composite requests
+        var plan = WritePlanner.Plan(normalized, current);
         results.AddRange(plan.NotSent);
-        WarnAboutFlappingFields(plan.Rewrites);
-        LogTypeMismatches(plan, normalized.Count);
 
         // 5. Send: normally one Composite call. 6. Per-record results -> one outcome per unit.
-        var saved = new List<WriteEcho>();
         for (var i = 0; i < plan.Requests.Count; i++)
         {
             var request = plan.Requests[i];
             try
             {
                 var answers = await SendAsync(request, ct);
-                results.AddRange(_interpreter.Interpret(request, answers, saved));
+                results.AddRange(_interpreter.Interpret(request, answers));
             }
             // A failed first call fails the batch (the caller fails, holds or defers the whole claim): nothing of it
             // was written. A later call's failure costs only its own entities: the earlier calls' records are final.
@@ -205,7 +200,6 @@ public sealed class SalesforceBatchUpsertService(
                 }
             }
         }
-        echoTracker.Record(saved);
 
         return results;
     }
@@ -286,50 +280,13 @@ public sealed class SalesforceBatchUpsertService(
     {
         try
         {
-            return await salesforce.SendCollectionsAsync(request.BuildRequests(), _salesforceOpt.AllOrNone, ct);
+            return await salesforce.SendCollectionsAsync(request.BuildRequests(), ct);
         }
         catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
         {
             // Everything before this point only read from Salesforce, so its failures are safe to retry. From here
             // on Salesforce may have the write, and may still apply it after we stop waiting.
             throw new UnknownOutcomeException(ex);
-        }
-    }
-
-    private void LogTypeMismatches(WritePlan plan, int total)
-    {
-        if (plan.TypeMismatches.Count == 0)
-        {
-            return;
-        }
-
-        var deadLettered = plan.MismatchHandling == EventTypeMismatch.DeadLetter;
-        if (!deadLettered)
-        {
-            foreach (var (key, message) in plan.TypeMismatches)
-            {
-                log.LogDebug("{Key}: {Mismatch}; going by Salesforce", key, message);
-            }
-        }
-
-        log.LogInformation(
-            "{Count} of {Total} events had a type that disagrees with Salesforce (inserted but the record exists, or updated but it does not): {Action}",
-            plan.TypeMismatches.Count, total, deadLettered ? "dead-lettered" : "reconciled with Salesforce");
-    }
-
-    /// <summary>Warns about a field that still differs after the same value was written to it before (<see cref="WriteEchoTracker"/>).</summary>
-    private void WarnAboutFlappingFields(IReadOnlyList<FieldWrite> rewrites)
-    {
-        foreach (var (echo, stored, fieldType) in rewrites)
-        {
-            if (echoTracker.IsFlapping(echo, stored!))
-            {
-                log.LogWarning(
-                    "{Object}.{Field} on {ExternalId} keeps differing after it is written: sent {Sent}, Salesforce stores {Stored}. " +
-                    "Every event rewrites this field: org automation (a trigger or flow) changes the value, or FieldValues " +
-                    "is missing a normalization rule for '{Type}' fields.",
-                    echo.Object, echo.Field, echo.ExternalId, echo.Value, stored, fieldType);
-            }
         }
     }
 

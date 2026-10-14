@@ -5,7 +5,7 @@ namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
 /// In-memory Salesforce org: sObject Describe, SOQL "WHERE field IN (...)" queries, and Composite requests with
-/// sObject Collections create/update subrequests (per-record results, allOrNone both ways, references between
+/// sObject Collections create/update subrequests (per-record results with allOrNone false, references between
 /// subrequests). Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
 /// values are stored the way Salesforce stores them. Every committed create/update is kept in a per-record write
 /// history (stored values), so tests can check what reached the org and in which order. Errors can be injected per
@@ -117,10 +117,7 @@ public sealed class FakeSalesforceStore
         }
     }
 
-    /// <summary>
-    /// Field values of every committed create/update of the record, oldest first (rolled-back writes excluded),
-    /// or null if the record does not exist.
-    /// </summary>
+    /// <summary>Field values of every committed create/update of the record, oldest first, or null if the record does not exist.</summary>
     public IReadOnlyList<JsonObject>? History(string sobject, string externalId, string extField = ExternalIdField)
     {
         lock (_gate)
@@ -261,12 +258,8 @@ public sealed class FakeSalesforceStore
     /// Composite: the subrequests run one after another and the whole request is one API call. Supported subrequests:
     /// SOQL queries (GET .../query) and sObject Collections create (POST .../composite/sobjects) and update (PATCH
     /// .../composite/sobjects, each record with its id). A later subrequest can use an earlier one's result as
-    /// <c>@{referenceId.field}</c> or <c>@{referenceId[i].field}</c> (case-sensitive).
-    /// <para>
-    /// allOrNone: on a collection, false lets each record succeed or fail on its own; true rolls the collection back
-    /// if any record fails (the others report ALL_OR_NONE_OPERATION_ROLLED_BACK). On the composite request, true
-    /// overrides the subrequests: any failure rolls back everything and halts the subrequests after it.
-    /// </para>
+    /// <c>@{referenceId.field}</c> or <c>@{referenceId[i].field}</c> (case-sensitive). Every record succeeds or fails
+    /// on its own (allOrNone false: the sync never sends true, so that mode is not modelled).
     /// </summary>
     public JsonObject ExecuteComposite(JsonObject payload)
     {
@@ -283,11 +276,8 @@ public sealed class FakeSalesforceStore
                 $"A maximum of {MaxCompositeCollectionsAndQueries} query and sObject Collections subrequests is allowed");
         }
 
-        var allOrNone = payload["allOrNone"]?.GetValue<bool>() ?? false;
         var responses = new JsonArray();
         var results = new Dictionary<string, JsonNode?>(StringComparer.Ordinal); // referenceId -> response body
-        var undo = new List<Action>();
-        var failed = false;
         bool lost;
 
         lock (_gate)
@@ -302,25 +292,12 @@ public sealed class FakeSalesforceStore
             foreach (var sub in subrequests)
             {
                 var referenceId = sub!["referenceId"]!.GetValue<string>();
-                if (allOrNone && failed)
-                {
-                    responses.Add(SubResponse(referenceId, 400, Errors("PROCESSING_HALTED",
-                        "The transaction was rolled back since another operation in the same transaction failed.")));
-                    continue;
-                }
-
-                var (status, body, anyFailed) = ExecuteSubrequest(sub.AsObject(), results, undo);
+                var (status, body) = ExecuteSubrequest(sub.AsObject(), results);
                 responses.Add(SubResponse(referenceId, status, body));
                 results[referenceId] = body;
-                failed |= anyFailed;
             }
 
-            if (allOrNone && failed)
-            {
-                RollBack(undo, responses);
-            }
-
-            lost = _faults.LoseResponse && !(allOrNone && failed);
+            lost = _faults.LoseResponse;
         }
 
         // Everything above is committed; only the answer goes missing
@@ -337,26 +314,6 @@ public sealed class FakeSalesforceStore
         }
     }
 
-    /// <summary>Undoes every write of the request; records that had succeeded are reported as rolled back, the ones that failed keep their own error.</summary>
-    private void RollBack(List<Action> undo, JsonArray responses)
-    {
-        for (var i = undo.Count - 1; i >= 0; i--)
-        {
-            undo[i]();
-        }
-
-        foreach (var response in responses)
-        {
-            if (response!["httpStatusCode"]!.GetValue<int>() < 400 && response["body"] is JsonArray records)
-            {
-                foreach (var record in records.Where(r => r?["success"]?.GetValue<bool>() == true))
-                {
-                    _collections.MarkRolledBack(record!.AsObject());
-                }
-            }
-        }
-    }
-
     private static bool IsQuery(JsonNode? sub)
     {
         return (sub?["url"]?.GetValue<string>() ?? "").Contains("/query", StringComparison.OrdinalIgnoreCase);
@@ -367,7 +324,7 @@ public sealed class FakeSalesforceStore
         return (sub?["url"]?.GetValue<string>() ?? "").TrimEnd('/').EndsWith("/composite/sobjects", StringComparison.OrdinalIgnoreCase);
     }
 
-    private (int Status, JsonNode? Body, bool Failed) ExecuteSubrequest(JsonObject sub, Dictionary<string, JsonNode?> results, List<Action> undo)
+    private (int Status, JsonNode? Body) ExecuteSubrequest(JsonObject sub, Dictionary<string, JsonNode?> results)
     {
         var method = sub["method"]!.GetValue<string>().ToUpperInvariant();
         var url = new Uri(new Uri("https://fake"), sub["url"]!.GetValue<string>());
@@ -376,7 +333,7 @@ public sealed class FakeSalesforceStore
             if (method == "GET" && IsQuery(sub))
             {
                 return (200, Query(System.Web.HttpUtility.ParseQueryString(url.Query)["q"]
-                                   ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q")), false);
+                                   ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q")));
             }
 
             if (IsCollection(sub) && method is "POST" or "PATCH")
@@ -386,18 +343,17 @@ public sealed class FakeSalesforceStore
                 if (CompositeReferences.Resolve(body, results) is { } unresolved)
                 {
                     // Closest to what Composite answers for a reference it can't resolve; verify against a real org
-                    return (400, Errors("PROCESSING_HALTED", $"Invalid reference specified. No value for {unresolved} found."), true);
+                    return (400, Errors("PROCESSING_HALTED", $"Invalid reference specified. No value for {unresolved} found."));
                 }
 
-                var records = _collections.Execute(method == "POST", body, undo);
-                return (200, records, records.Any(r => !r!["success"]!.GetValue<bool>()));
+                return (200, _collections.Execute(method == "POST", body));
             }
 
             throw new FakeSalesforceException(400, "NOT_SUPPORTED", $"Fake composite does not support {method} {url.AbsolutePath}");
         }
         catch (FakeSalesforceException ex)
         {
-            return (ex.Status, Errors(ex.ErrorCode, ex.Message), true);
+            return (ex.Status, Errors(ex.ErrorCode, ex.Message));
         }
     }
 }

@@ -56,38 +56,22 @@ internal sealed class FakeRecords
         return id + new string(suffix);
     }
 
-    /// <returns>How to take the record out again (allOrNone rollback).</returns>
-    public Action Insert(string sobject, string id, JsonObject record, JsonObject storedValues)
+    public void Insert(string sobject, string id, JsonObject record, JsonObject storedValues)
     {
-        var table = Table(sobject);
-        table[id] = record;
+        Table(sobject)[id] = record;
         _history[id] = [storedValues];
-        return () =>
-        {
-            table.Remove(id);
-            _history.Remove(id);
-        };
     }
 
-    /// <returns>How to put the record back as it was (allOrNone rollback).</returns>
-    public Action Update(string sobject, string id, JsonObject storedValues)
+    public void Update(string sobject, string id, JsonObject storedValues)
     {
-        var table = Table(sobject);
-        var existing = table[id];
-        var before = existing.DeepClone().AsObject();
+        var existing = Table(sobject)[id];
         foreach (var (k, v) in storedValues)
         {
             existing[k] = v?.DeepClone();
         }
 
         existing["LastModifiedDate"] = FakeSchema.FormatDateTime(DateTimeOffset.UtcNow);
-        var history = _history[id];
-        history.Add(storedValues);
-        return () =>
-        {
-            table[id] = before;
-            history.RemoveAt(history.Count - 1);
-        };
+        _history[id].Add(storedValues);
     }
 
     public void Clear()

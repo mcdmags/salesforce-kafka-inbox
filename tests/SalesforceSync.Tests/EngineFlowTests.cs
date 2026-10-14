@@ -278,7 +278,7 @@ public sealed class EngineFlowTests
         _http.InnerHandler ??= new FakeSalesforceHandler(_org);
         var http = new HttpClient(_http) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
         return new SalesforceBatchUpsertService(_gate, new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
-            new SalesforceErrors(options), new WriteEchoTracker(), options, Options.Create(new SyncOptions()),
+            new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
             NullLogger<SalesforceBatchUpsertService>.Instance);
     }
 

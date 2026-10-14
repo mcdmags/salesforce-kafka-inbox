@@ -10,8 +10,8 @@ namespace SalesforceSync.RateLimiting;
 /// Token bucket + limit guard stored in Postgres, shared by every worker in every process.
 /// The bucket's speed is adjusted from the Sforce-Limit-Info header Salesforce returns on each call, and every
 /// call is counted against this integration's share of the org's daily allocation over a rolling 24 hours. The
-/// allocation is the lower of the configured one (<see cref="SalesforceLimitsOptions"/>, the maximum) and the limit
-/// Salesforce reports in that header (<c>api-usage=25/5000</c>: 5,000).
+/// allocation is the lower of the configured one (<see cref="SalesforceLimitsOptions.DailyApiAllocation"/>, the
+/// maximum) and the limit Salesforce reports in that header (<c>api-usage=25/5000</c>: 5,000).
 /// </summary>
 public sealed class SalesforceRateLimiter(
     IDbContextFactory<SyncDbContext> contexts,
@@ -36,7 +36,7 @@ public sealed class SalesforceRateLimiter(
     /// </summary>
     public long BudgetFor(long? reportedAllocation)
     {
-        var allocation = _limits.EffectiveDailyApiAllocation;
+        var allocation = _limits.DailyApiAllocation;
         if (reportedAllocation is > 0 and var reported && reported < allocation)
         {
             allocation = reported;
@@ -56,9 +56,9 @@ public sealed class SalesforceRateLimiter(
             Param("budget", DailyBudget), Param("share", _opt.DailyBudgetShare)), ct);
 
         log.LogInformation(
-            "Salesforce limits: {OrgType} {Edition} org, at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls/24h " +
+            "Salesforce limits: {OrgType} org, at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls/24h " +
             "for this integration ({Share:P0}), {Rate} calls/s, burst {Burst}, max {Concurrent} concurrent long-running requests",
-            _limits.OrgType, _limits.Edition, _limits.EffectiveDailyApiAllocation, DailyBudget, _opt.DailyBudgetShare,
+            _limits.OrgType, _limits.DailyApiAllocation, DailyBudget, _opt.DailyBudgetShare,
             _opt.MaxRequestsPerSecond, _opt.BurstCapacity, _limits.EffectiveConcurrentLongRunningLimit);
     }
 
@@ -166,7 +166,7 @@ public sealed class SalesforceRateLimiter(
         {
             return;
         }
-        var configured = _limits.EffectiveDailyApiAllocation;
+        var configured = _limits.DailyApiAllocation;
         log.LogInformation(
             "Salesforce reports a daily API allocation of {Reported} calls, {Section} allows at most {Configured}: " +
             "the budget is {Budget} calls/24h ({Share:P0} of {Allocation})",

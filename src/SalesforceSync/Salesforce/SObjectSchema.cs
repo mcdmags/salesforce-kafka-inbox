@@ -2,7 +2,6 @@ namespace SalesforceSync.Salesforce;
 
 /// <summary>Salesforce field metadata from sObject Describe (only what the diff and validation need).</summary>
 /// <param name="Precision">Numbers with decimals: total digits; digits left of the point = Precision - Scale.</param>
-/// <param name="RelationshipName">For a lookup: the name it is set by through the target's external id, e.g. Account__r.</param>
 /// <param name="Digits">int and long fields: the maximum number of digits (they have no precision).</param>
 public sealed record SalesforceField(
     string Name,
@@ -13,7 +12,6 @@ public sealed record SalesforceField(
     bool Createable,
     bool Updateable,
     bool Nillable,
-    string? RelationshipName = null,
     int Digits = 0);
 
 /// <summary>Fields of one sObject, keyed case-insensitively like Salesforce API names.</summary>

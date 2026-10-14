@@ -39,14 +39,14 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 | Late or replayed older events | **Sync watermark in Postgres**: `sf_sync_state` holds the newest `meta.time` synced per entity, advanced in the same transaction that completes the events and only while the worker still holds the lease. A claimed event at or before the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement and the watermark are conditional on its `lock_token`. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
-| Records that belong together | **One Composite request of sObject Collections** creates and updates: Accounts first, then their Profiles. Each record is saved or rejected on its own (`allOrNone: false`, configurable); the entity is done, and its watermark advanced, only when all of its records are in. A new Profile points at its new Account by reference (`@{Account_create[i].id}`) or by the Account's external id (`Salesforce:ParentLink`); existing records (e.g. a relationship's Accounts) are linked by the Id read from Salesforce. See [Writing to Salesforce](#writing-to-salesforce). |
-| Create or update | Decided by the read, checked against the event's `meta.type`: a mismatch (`inserted` but the record exists, `updated` but it doesn't) is reconciled by default, or dead-lettered (`Sync:EventTypeMismatch`). |
-| Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the second and time to the millisecond, int/long within their `digits`, 18-character ids checked against their case suffix, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event (a warning flags any field that still keeps differing). The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
+| Records that belong together | **One Composite request of sObject Collections** creates and updates: Accounts first, then their Profiles. Each record is saved or rejected on its own (`allOrNone: false`); the entity is done, and its watermark advanced, only when all of its records are in. A new Profile points at its new Account by reference (`@{Account_create[i].id}`); existing records (e.g. a relationship's Accounts) are linked by the Id read from Salesforce. See [Writing to Salesforce](#writing-to-salesforce). |
+| Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. The event's `meta.type` is not consulted. |
+| Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the second and time to the millisecond, int/long within their `digits`, 18-character ids checked against their case suffix, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event. The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
 | Batching and API calls | **2 calls per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries), one Composite request with all writes (≤5 collections of ≤200 records; more are split over further requests). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
-| Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (rolled back or skipped because of another entity's record) → back to the inbox without spending a retry. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
+| Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (skipped because of another entity's record) → back to the inbox without spending a retry. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
 | Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` around a transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new transaction, change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
-| Rate limits | Configured from Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) and own usage slow everyone down at 80% and pause at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
+| Rate limits | Configured from the org's daily API allocation and Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) and own usage slow everyone down at 80% and pause at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
 
 ```
 Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per object type (Postgres: entity_id +
@@ -76,7 +76,7 @@ The sync is three layers, each with one job:
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryonStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
 | **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | `BatchPreparer` (coalesce, watermark, map), `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `EventTypeCheck` (`meta.type` against existence), `RecordDiffer` (changed fields), `WritePlanner` (create / update / unchanged, lookups by Id, reference or external id, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
+| **Rules, no I/O** | `BatchPreparer` (coalesce, watermark, map), `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `RecordDiffer` (changed fields), `WritePlanner` (create / update / unchanged, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`); the schema
 stays `sql/schema.sql` (partial indexes, the table template, views, autovacuum settings: not expressible as migrations),
@@ -89,8 +89,7 @@ the watermarks); the claim, `ReleaseLostClaims`, `MarkSynced`, fail and dead-let
 the SQL texts of `InboxSql` and `RateLimitSql` run unchanged through `Database.SqlQueryRaw` / `ExecuteSqlRaw` with named
 `NpgsqlParameter`s, since a recursive CTE with `FOR UPDATE SKIP LOCKED` or `UPDATE ... RETURNING` has no LINQ form.
 
-Describe results are cached by `SalesforceSchemaCache` and written values remembered by `WriteEchoTracker` (to warn
-about a field that is rewritten on every event).
+Describe results are cached by `SalesforceSchemaCache`.
 
 ## Event format
 
@@ -120,9 +119,9 @@ JSON with the source system's own field names (nothing in an event is a Salesfor
   the newest `meta.time` wins; an event that is not newer than what was already synced is superseded. This relies on
   the source's clock. Two events of an entity with the same time: the one stored later wins if they are claimed
   together, otherwise the first one synced stays.
-- **Type**: `meta.type`, `"inserted"` or `"updated"` (any case), is required. It is parsed and validated at ingest
-  and travels with the event; a missing or other value (`deleted`, ...) makes the event invalid. Deletes are out of
-  scope.
+- **Type**: `meta.type`, `"inserted"` or `"updated"` (any case), is required. It is validated at ingest, where a
+  missing or other value (`deleted`, ...) makes the event invalid. Deletes are out of scope. It does not decide
+  whether a record is created or updated: Salesforce's current state does.
 - **Casing**: camelCase is the contract. Events are bound to the typed classes with `JsonSerializerDefaults.Web`,
   which ignores case (so `"Name"` binds too), for the envelope (`meta`, `time`, `type`, `account`, `externalId`) as
   much as for the fields. A property the classes don't have is ignored.
@@ -288,8 +287,7 @@ not attempted and unknown outcomes don't spend a retry.
 **A relationship that arrives before its Accounts** waits this way: the read doesn't find the Account, the event
 fails with `DEPENDENCY_NOT_SYNCED` before anything is sent, and it is retried on the schedule above until the
 account sync has created the Account; no manual step is needed. If Salesforce itself rejects the lookup at write time
-(`INVALID_CROSS_REFERENCE_KEY` or `ENTITY_IS_DELETED` on the lookup field, or `Foreign key external ID: … not
-found`), that is recorded as the same `DEPENDENCY_NOT_SYNCED` and retried the same way, not dead-lettered. Only an
+(`INVALID_CROSS_REFERENCE_KEY` or `ENTITY_IS_DELETED` on the lookup field), that is recorded as the same `DEPENDENCY_NOT_SYNCED` and retried the same way, not dead-lettered. Only an
 Account that never arrives within `MaxRetries` ends as a dead letter, with `DEPENDENCY_NOT_SYNCED` kept as the cause.
 
 To re-queue dead letters once the cause is fixed (e.g. the missing Account now exists):
@@ -386,41 +384,32 @@ rate limited defers its entities and the ones not yet sent. A failure of the fir
 100 external ids and a Composite request 5 queries, and a relationship needs up to three ids per entity (itself and
 two Accounts).
 
-### Create or update: `meta.type` against what Salesforce has
+### Create or update: decided by what Salesforce has
 
-Which verb a record gets is decided by the read; the event's `meta.type` is checked against it:
+Which verb a record gets is decided by the read alone; the event's `meta.type` is not consulted:
 
-| `meta.type` | In Salesforce | What happens |
-|---|---|---|
-| `inserted` | no | **create** |
-| `updated` | yes | **update** with the fields that differ; nothing differs → no write (`done`) |
-| `inserted` | yes | mismatch → **update** with what differs (a redelivered insert writes nothing and creates no duplicate) |
-| `updated` | no | mismatch → **create** from the full record |
+| In Salesforce | What happens |
+|---|---|
+| no | **create** from the full record |
+| yes | **update** with the fields that differ; nothing differs → no write (`done`) |
 
-`Sync:EventTypeMismatch` = `Reconcile` (default: the two mismatch rows as above, counted in one log line per batch)
-or `DeadLetter` (`last_error_code = 'EVENT_TYPE_MISMATCH'`). The check is made on the entity's main record (the
-Account of an account event); a Profile is created or updated by what Salesforce has, whatever the type. An
-`inserted` and an `updated` event pending together are coalesced first, so they become one create with the newest
+A redelivered insert therefore writes nothing and creates no duplicate, and an `updated` event for a record that
+isn't in Salesforce (its insert was lost or dead-lettered, or the record was deleted there) creates it. An
+`inserted` and an `updated` event pending together are coalesced first, so they become one write of the newest
 data. A create that Salesforce answers with `DUPLICATE_VALUE` (someone created the record between the read and the
 write) is retried, and the retry's read turns it into an update.
 
-### `allOrNone`
+### `allOrNone: false`
 
-`Salesforce:AllOrNone` is sent explicitly on the Composite request and on every collection in it.
+`allOrNone: false` is sent explicitly on the Composite request and on every collection in it: every record is saved
+or rejected on its own. A record with a validation error fails alone; the other 99 entities of the batch are saved
+in the same call. If records fail but none of them names a cause (each reports `PROCESSING_HALTED`, or has no
+answer), the entities spend a retry and back off, so a request can't be repeated forever.
 
-- **`false` (default)**: every record is saved or rejected on its own. A record with a validation error fails
-  alone; the other 99 entities of the batch are saved in the same call.
-- **`true`**: any failing record rolls back the whole request (the Composite setting overrides the collections').
-  The record that failed reports its own error and its entity is dead-lettered or backs off; every other record
-  reports `ALL_OR_NONE_OPERATION_ROLLED_BACK` and its entity goes back to the inbox without spending a retry, to be
-  written by the next claim. One bad record therefore costs the whole batch an extra round trip. If records fail
-  but none of them names a cause, the entities spend a retry and back off instead, so a request can't be repeated
-  forever.
-
-**Not atomic.** With the default, an Account can be saved while its Profile is rejected (or the reverse). The
-entity is then not done: it is retried (or dead-lettered, by the failing record's error), the retry's read finds
-the record that is already in and writes only what is missing, and **the watermark advances only when every record
-of the entity has succeeded**. Until then Salesforce can show the new Account with the old or no Profile.
+**Not atomic.** An Account can be saved while its Profile is rejected (or the reverse). The entity is then not
+done: it is retried (or dead-lettered, by the failing record's error), the retry's read finds the record that is
+already in and writes only what is missing, and **the watermark advances only when every record of the entity has
+succeeded**. Until then Salesforce can show the new Account with the old or no Profile.
 
 ### Per-record results → what happens to the entity
 
@@ -430,34 +419,32 @@ of the entity has succeeded**. Until then Salesforce can show the new Account wi
 | any record with a permanent error (`Salesforce:PermanentErrorCodes`) | dead-lettered at once, alone |
 | any record with another error (row lock, `DUPLICATE_VALUE` on create, lookup target missing, unknown code) | retried with backoff |
 | a child not saved only because its parent in the same entity wasn't | whatever the parent's error says; the child's own "parent missing" error is ignored |
-| rolled back with others (`ALL_OR_NONE_OPERATION_ROLLED_BACK`), or its whole subrequest went down because of another entity's record | released, no retry spent |
+| its whole subrequest went down because of another entity's record (`PROCESSING_HALTED` on a reference without a value) | released, no retry spent |
 | a subrequest that failed as a whole for any other reason | retried with backoff, never dead-lettered (it says nothing about one record's data) |
 | the call itself failed | as before: rate-limited → deferred; provably not applied → retried; otherwise [unknown outcome](#unknown-outcomes) → held |
 
 ### Linking a child to a parent created in the same request
 
-`Salesforce:ParentLink` chooses how a new Profile points at an Account that is created in the same request:
+A new Profile points at an Account that is created in the same request by a Composite reference to the parent's
+create result, `"Account__c": "@{Account_create[3].id}"`: the parent's position in its collection's response.
+Children that link this way get a collection of their own (`Profile__c_create_ref`). If a parent fails, its
+reference has no value, which fails the **whole subrequest** of children that use references (`PROCESSING_HALTED`).
+The other entities' parents are in, so their children go back to the inbox without spending a retry and are written
+by the next claim, with a literal Id. Children of existing parents are in a separate subrequest and are not affected.
 
-| | `ReferenceId` (default) | `ExternalId` |
-|---|---|---|
-| Sent as | `"Account__c": "@{Account_create[3].id}"`: the parent's position in its collection's response | `"Account__r": { "External_Id__c": "ACC-1" }` (the relationship name comes from Describe) |
-| A parent fails | Its reference has no value, which fails the **whole subrequest** of children that use references. The other entities' parents are in, so their children are simply written by the next claim, with a literal Id. Children of existing parents are in a separate subrequest and are not affected. | Only that parent's own child fails (`Foreign key external ID … not found`); everyone else is saved in the same call. |
-| Needs | Composite references into a collection's response array | The lookup's target to have an external id field (it does: it is how the sync finds records) |
-
-In both modes a child whose parent **already exists** gets the parent's 18-character Id from the read, and a parent
-that exists and has nothing to change is not written at all. A parent that is neither in Salesforce nor in the same
-entity fails the entity with `DEPENDENCY_NOT_SYNCED` before anything is sent.
+A child whose parent **already exists** gets the parent's 18-character Id from the read, and a parent that exists
+and has nothing to change is not written at all. A parent that is neither in Salesforce nor in the same entity
+fails the entity with `DEPENDENCY_NOT_SYNCED` before anything is sent.
 
 A **relationship** is its own event, inbox and request, separate from the account sync, so its two Accounts are
-always literal Ids from the read; `ParentLink` doesn't apply to it.
+always literal Ids from the read.
 
-> **Verify in a sandbox before relying on `ReferenceId`.** Salesforce documents `@{referenceId.field}` references
-> between Composite subrequests, with `[]` indexing into arrays, and that sObject Collections can be Composite
-> subrequests. That a reference may index into a collection's *response array* (`@{Account_create[0].id}`) is not
-> spelled out, and neither is what Composite answers for a reference without a value. The mock org implements both
-> the way this client expects. If a real org rejects such a subrequest, nothing is lost: a subrequest-level failure
-> is retried, never dead-lettered, and the retry links the child by the Id it now reads; but every new account
-> would then take two rounds, and `ExternalId` is the mode to use.
+> **Verify in a sandbox.** Salesforce documents `@{referenceId.field}` references between Composite subrequests,
+> with `[]` indexing into arrays, and that sObject Collections can be Composite subrequests. That a reference may
+> index into a collection's *response array* (`@{Account_create[0].id}`) is not spelled out, and neither is what
+> Composite answers for a reference without a value. The mock org implements both the way this client expects. If a
+> real org rejects such a subrequest, nothing is lost: a subrequest-level failure is retried, never dead-lettered,
+> and the retry links the child by the Id it now reads; but every new account would then take two rounds.
 
 ## Adding a Salesforce object
 
@@ -651,7 +638,7 @@ literal), and **Testcontainers** (`Testcontainers.PostgreSql`, `Testcontainers.K
 
 ### Integration tests
 
-Each xUnit collection fixture (`SyncFixture`, `MultiPodFixture`, `AlternativeSettingsFixture`, `DailyBudgetFixture`,
+Each xUnit collection fixture (`SyncFixture`, `MultiPodFixture`, `FewRetriesFixture`, `DailyBudgetFixture`,
 `ConcurrentLimitFixture`)
 starts its own environment once, shared by the tests in that collection:
 
@@ -695,17 +682,15 @@ The write itself (`CollectionsWriteTests`): a new Account and Profile in one req
 Profile's reference to its Account; an Account saved while its Profile failed being retried with the watermark
 unmoved until both are in; a failing Account dead-lettered alone, without its Profile, while another account is
 saved; `inserted` and `updated` pending together becoming one create; a later `inserted` for an existing record
-updating only what differs. `AlternativeSettingsTests` run the non-default settings from configuration
-(`Salesforce:ParentLink=ExternalId`, `Salesforce:AllOrNone=true`, `Sync:EventTypeMismatch=DeadLetter`,
-`Sync:MaxRetries=3`): the link through `Account__r`, both type mismatches dead-lettered, and a relationship whose
-Account never arrives dead-lettered after `MaxRetries` with `DEPENDENCY_NOT_SYNCED`, then synced once the Accounts
-exist and the dead letter is re-queued.
+updating only what differs. `DeadLetterTests` (`FewRetriesFixture`, `Sync:MaxRetries=3` from configuration): a
+relationship whose Account never arrives dead-lettered after `MaxRetries` with `DEPENDENCY_NOT_SYNCED`, then synced
+once the Accounts exist and the dead letter is re-queued.
 
 Rate limits (`RateLimitTests`, each with its own fixture, i.e. its own containers, org and pods):
 
-- **Daily budget across pods**: 3 pods share a budget of 30 calls (`DailyApiAllocation=60`,
-  `DailyBudgetShare=0.5`). Exactly 30 calls reach the org, then nothing more; the remaining events are deferred
-  until the budget frees up, without spending retries or being dead-lettered.
+- **Daily budget across pods**: 3 pods share a budget of 30 calls (`DailyApiAllocation=1000`, the mock org
+  reporting a limit of 60, `DailyBudgetShare=0.5`). Exactly 30 calls reach the org, then nothing more; the
+  remaining events are deferred until the budget frees up, without spending retries or being dead-lettered.
 - **Concurrent long-running limit**: the mock org allows 2 concurrent long-running calls while 12 workers send
   them. The `ConcurrentPerOrgLongTxn` rejections cause a short pause (not the long daily one) and every event
   still syncs, with no retries spent.
@@ -714,21 +699,21 @@ Rate limits (`RateLimitTests`, each with its own fixture, i.e. its own container
 
 Unit tests (`dotnet test tests/SalesforceSync.Tests`, no Docker) run the Salesforce half of the engine with both
 strategies against the in-memory org: 2 calls per batch, the exact verbs, bodies and `allOrNone` flags sent, values
-written once instead of flapping, a bad value failing only its own unit before any call, a validation error or a
-row lock costing only its own entity, an Account saved without its Profile, a create losing a race, a failed new
-Account taking down the reference subrequest without dead-lettering anyone else, both `ParentLink` modes, more than
-5 collections split over requests, `allOrNone: true` (rollback, and failures without a cause spending a retry),
-every row of the `meta.type` table in both mismatch modes, relinking, relationships and missing dependencies
-(found by the read, or rejected by Salesforce), gzip, clearing fields that became empty. Also: each mapper (an AutoFixture payload in, the
-expected sObject out, nulls passed through), sObject → record (names from the attributes, nulls included, lookups
-and external id), the guard that every Salesforce name on an sObject class exists in the mock org's schema, the
-event mapping (account with and without a profile, relationships, missing Account ids, camelCase and PascalCase
-bodies), what the engine does with a claim (newest `meta.time` wins, ties, watermark, A → B → A, invalid rows alone),
-what the consumer admits (the typed read: id, time with offset, `meta.type`), the classification of failed writes
-(unknown outcome or not), inbox table names as plain identifiers, every normalization rule
-(including the documented 15 → 18-character id example), error classification, the Postgres execution strategy
-(retried, not retried, gives up), the allocation formula (including the documented Enterprise example of 115,000),
-startup validation and throttle decisions.
+Salesforce stores differently written once rather than on every event, a bad value failing only its own unit before
+any call, a validation error or a row lock costing only its own entity, an Account saved without its Profile, a
+create losing a race, a failed new Account taking down the reference subrequest without dead-lettering anyone else,
+more than 5 collections split over requests, failures without a cause spending a retry, create or update decided by
+what Salesforce has, relinking, relationships and missing dependencies (found by the read, or rejected by
+Salesforce), gzip, clearing fields that became empty. Also: each mapper (an AutoFixture payload in, the expected
+sObject out, nulls passed through), sObject → record (names from the attributes, nulls included, lookups and external
+id), the guard that every Salesforce name on an sObject class exists in the mock org's schema, the event mapping
+(account with and without a profile, relationships, missing Account ids, camelCase and PascalCase bodies), what the
+engine does with a claim (newest `meta.time` wins, ties, watermark, A → B → A, invalid rows alone), what the consumer
+admits (the typed read: id, time with offset, `meta.type`), the classification of failed writes (unknown outcome or
+not), inbox table names as plain identifiers, every normalization rule (including the documented 15 → 18-character id
+example), error classification, the Postgres execution strategy (retried, not retried, gives up), the daily budget
+(the configured allocation as the maximum, lowered by the one Salesforce reports), startup validation and throttle
+decisions.
 
 ### Concurrency: many threads, many pods, same accounts
 
@@ -808,19 +793,17 @@ Configured from "API Request Limits and Allocations" in the
 with the response header and status codes from the REST API Developer Guide
 ([Limit Info Header](https://developer.salesforce.com/docs/platform/api-rest/guide/headers-api-usage.html),
 [Composite](https://developer.salesforce.com/docs/platform/api-rest/guide/resources-composite-composite-post.html)).
-Describe the org and the limits are derived; the worker logs what it derived at startup and refuses to start on
-a configuration that can't work. The derived daily allocation is the maximum: Salesforce reports the org's real one
-on every REST response (`Sforce-Limit-Info: api-usage=25/5000`, a limit of 5,000), and when that is lower the budget
-follows it. A response without the header, or with one that can't be read, leaves the budget on the configuration.
+Set the org's daily API allocation (`DailyApiAllocation`, the number in Setup: System Overview, API Requests, Last
+24 Hours) and its type; the worker logs its limits at startup and refuses to start on a configuration that can't
+work, including a missing or non-positive `DailyApiAllocation`. The configured allocation is the maximum: Salesforce
+reports the org's real one on every REST response (`Sforce-Limit-Info: api-usage=25/5000`, a limit of 5,000), and
+when that is lower the budget follows it. A response without the header, or with one that can't be read, leaves the
+budget on the configuration.
 
 ```json
 "SalesforceLimits": {
-  "OrgType": "Production",          // Production | Sandbox | FullSandbox | DeveloperEdition | Trial
-  "Edition": "Enterprise",          // Enterprise | Professional | Unlimited | Performance
-  "Licenses": { "Salesforce": 15, "Partner Community": 200 },
-  "CallsPerLicense": {},            // add license types / override the built-in table
-  "PurchasedApiCalls": 0,           // API Call Add-Ons
-  "DailyApiAllocation": null,       // or copy the number from Setup; required for Sandbox, Trial and template-based Full Sandboxes
+  "OrgType": "Production",          // Production | Sandbox | DeveloperEdition | Trial: the default concurrent limit
+  "DailyApiAllocation": 115000,     // required: the org's calls per 24 hours, from Setup
   "ConcurrentLongRunningLimit": null,
   "LongRunningThreshold": "00:00:20",
   "RequestTimeout": "00:01:30"
@@ -838,7 +821,7 @@ follows it. A response without the header, or with one that can't be read, leave
 
 | Salesforce limit | How it's applied |
 |---|---|
-| **Total API requests per 24 hours**: Developer Edition 15,000; Full Sandbox 5,000,000 (unless created from a template); Enterprise, Professional with API access, Unlimited and Performance 100,000 + licenses × calls per license type (Enterprise/Professional: Salesforce 1,000, Platform 1,000, One App 200, Customer Community Plus 200, Partner Community 200, ...; Unlimited/Performance: Salesforce 5,000, Platform 5,000, ...) + purchased add-ons. No figure is published for other sandboxes or trial orgs | Computed from `SalesforceLimits` (or `DailyApiAllocation`, which startup requires for `Sandbox` and `Trial`) as the maximum, lowered to the limit in `Sforce-Limit-Info: api-usage` when Salesforce reports less. The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling 24 hours. When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
+| **Total API requests per 24 hours**: depends on the edition, licenses and add-ons (e.g. 115,000 for an Enterprise org with 15 Salesforce licenses); Setup shows the org's number | `SalesforceLimits:DailyApiAllocation` (required) as the maximum, lowered to the limit in `Sforce-Limit-Info: api-usage` when Salesforce reports less. The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling 24 hours. When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
 | **What a call is**: each HTTP request; a Composite request (and an sObject Collections request) counts as one call however many subrequests it holds | One token per HTTP request: a describe (cached), each query page and each Composite write. |
 | **Org-wide usage** (also other integrations): `Sforce-Limit-Info: api-usage=used/limit` on every REST response | `api-usage` and, when Salesforce sends it, `per-app-api-usage` (the connected app's quota): slow down at `DailySoftRatio`, pause at `DailyHardRatio`. The allocation Salesforce reports, the configured maximum and the resulting budget are logged when first seen and whenever Salesforce's changes. `api-bursts` appears in Salesforce's example of the header but isn't defined, so it is recorded in `sf_limit_status` and not acted on. |
 | **Requests per second**: Salesforce publishes no such limit, and none on concurrent requests shorter than 20 s | `MaxRequestsPerSecond` and `BurstCapacity` are this integration's own pacing, so it spreads its share of the daily allocation instead of spending it in bursts. |
@@ -919,8 +902,8 @@ where locktype = 'advisory' and classid = 0 and objid::bigint between 1397096448
    `Related_Account__c` lookups on the relationship.
 2. Set `Salesforce:UseFake=false` (the default outside Aspire) plus `InstanceUrl`, `TokenUrl`,
    `ClientId`, `ClientSecret` (OAuth client credentials).
-3. Describe the org in `SalesforceLimits` and choose this integration's `RateLimit:DailyBudgetShare`
-   (see [Salesforce API limits](#salesforce-api-limits)).
+3. Set the org's `SalesforceLimits:DailyApiAllocation` (and `OrgType`) and choose this integration's
+   `RateLimit:DailyBudgetShare` (see [Salesforce API limits](#salesforce-api-limits)).
 4. Adjust object and field names on the sObject classes (`Salesforce/SObjects/`, the only place they appear), and
    the payload classes and mappers if the events differ. Tune `Salesforce:PermanentErrorCodes`, `Sync:RetryBaseDelay` / `MaxRetryDelay` / `MaxRetries` and
    `Postgres:Retry` if needed. `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-100, ...)

@@ -44,7 +44,7 @@ public sealed class SalesforceRestClient(HttpClient http)
         var body = await res.Content.ReadFromJsonAsync<DescribeBody>(Json, ct)
                    ?? throw new InvalidOperationException($"Empty describe response for {sobject}");
         return new DescribeResult(new SObjectSchema(body.Name, body.Fields.Select(f => new SalesforceField(
-            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable, f.RelationshipName, f.Digits))));
+            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable, f.Digits))));
     }
 
     /// <summary>
@@ -99,12 +99,12 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// <summary>
     /// Sends up to 5 sObject Collections creates/updates as the subrequests of one Composite request (one API call),
     /// in the given order; a later one may refer to an earlier one's results (<c>@{referenceId[i].id}</c>).
-    /// <paramref name="allOrNone"/> is sent on the composite request and on every collection: false lets every record
-    /// succeed or fail on its own, true rolls everything back when any record fails.
+    /// <c>allOrNone: false</c> is sent on the composite request and on every collection: every record succeeds or
+    /// fails on its own.
     /// </summary>
     /// <returns>One result per subrequest Salesforce answered (HTTP 200 does not mean any record was saved).</returns>
     public async Task<IReadOnlyList<CollectionResult>> SendCollectionsAsync(IReadOnlyList<CollectionRequest> collections,
-        bool allOrNone, CancellationToken ct)
+        CancellationToken ct)
     {
         if (collections.Count is 0 or > MaxCompositeCollections)
         {
@@ -119,13 +119,13 @@ public sealed class SalesforceRestClient(HttpClient http)
 
         var payload = new
         {
-            allOrNone,
+            allOrNone = false,
             compositeRequest = collections.Select(c => new
             {
                 method = c.Create ? "POST" : "PATCH",
                 url = $"{DataPath}/composite/sobjects",
                 referenceId = c.ReferenceId,
-                body = new { allOrNone, records = c.Records }
+                body = new { allOrNone = false, records = c.Records }
             })
         };
 
@@ -210,7 +210,7 @@ public sealed class SalesforceRestClient(HttpClient http)
 
     private sealed record DescribeBody(string Name, List<DescribeField> Fields);
     private sealed record DescribeField(string Name, string Type, int Length, int Precision, int Scale,
-        bool Createable, bool Updateable, bool Nillable, string? RelationshipName, int Digits);
+        bool Createable, bool Updateable, bool Nillable, int Digits);
     private sealed record CompositeBody(List<SubResponse> CompositeResponse);
     private sealed record QueryPage(List<JsonElement> Records, string? NextRecordsUrl);
     private sealed record SubResponse(string ReferenceId, int HttpStatusCode, JsonElement Body);

@@ -127,7 +127,7 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Salesforce REST client and what the engine's Salesforce step needs (Describe cache, flapping check, error classification).
+    /// Salesforce REST client and what the engine's Salesforce step needs (Describe cache, error classification).
     /// Handler order: gzip -> (auth and primary handler, added by the caller); <see cref="AddSalesforceRateLimiting"/>
     /// puts the rate limiter in front.
     /// </summary>
@@ -135,7 +135,6 @@ public static class SyncServiceCollectionExtensions
     {
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<SalesforceSchemaCache>(); // Describe results, shared by all workers in the process
-        services.AddSingleton<WriteEchoTracker>();
         services.AddSingleton<SalesforceErrors>();
         services.AddTransient<GzipRequestHandler>();
 

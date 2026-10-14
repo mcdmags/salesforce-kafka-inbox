@@ -1,4 +1,3 @@
-using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 using SalesforceSync.Sync.Upsert;
@@ -7,7 +6,7 @@ namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The pure steps of <see cref="SalesforceBatchUpsertService"/>'s Salesforce step on their own: normalizing against the schema, building the
-/// read, checking the event type and packing writes into Composite requests. No org, no HTTP.
+/// read and packing writes into Composite requests. No org, no HTTP.
 /// </summary>
 public sealed class UpsertStepsTests
 {
@@ -22,7 +21,7 @@ public sealed class UpsertStepsTests
     [
         new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
         new SalesforceField("External_Id__c", "string", 255, 0, 0, true, true, true),
-        new SalesforceField("Account__c", "reference", 18, 0, 0, true, true, true, "Account__r")
+        new SalesforceField("Account__c", "reference", 18, 0, 0, true, true, true)
     ]);
 
     private static readonly Dictionary<string, SObjectSchema> Schemas = new(StringComparer.OrdinalIgnoreCase)
@@ -34,16 +33,15 @@ public sealed class UpsertStepsTests
     // ---------- RecordNormalizer ----------
 
     [Fact]
-    public void A_unit_Salesforce_would_accept_has_no_problems_and_keeps_its_event_type()
+    public void A_unit_Salesforce_would_accept_has_no_problems()
     {
-        var unit = new UpsertUnit([AccountRecord("A1", "Acme")], EventType.Updated);
+        var unit = new UpsertUnit([AccountRecord("A1", "Acme")]);
 
         var normalized = RecordNormalizer.Normalize("A1", unit, Schemas, out var problems);
 
         problems.Should().BeEmpty();
         normalized.Key.Should().Be("A1");
-        normalized.EventType.Should().Be(EventType.Updated);
-        normalized.MainRecord.Should().BeSameAs(unit.Records[0]);
+        normalized.Records[0].Record.Should().BeSameAs(unit.Records[0]);
         normalized.Records[0].Fields.Should().ContainSingle().Which.Key.Name.Should().Be("Name");
     }
 
@@ -99,33 +97,6 @@ public sealed class UpsertStepsTests
             [new SoqlQuery("Account", "External_Id__c", ids)], Schemas);
 
         build.Should().Throw<InvalidOperationException>().WithMessage("*6 SOQL queries*Sync:BatchSize*");
-    }
-
-    // ---------- EventTypeCheck ----------
-
-    [Theory]
-    [InlineData(EventType.Inserted, false, null)]
-    [InlineData(EventType.Updated, true, null)]
-    [InlineData(EventType.Inserted, true, "the event says inserted, but Account External_Id__c=A1 is already in Salesforce")]
-    [InlineData(EventType.Updated, false, "the event says updated, but Account External_Id__c=A1 is not in Salesforce")]
-    [InlineData(null, true, null)]
-    [InlineData(null, false, null)]
-    public void The_event_type_is_checked_against_whether_the_main_record_exists(EventType? type, bool exists, string? mismatch)
-    {
-        var unit = Normalized(new UpsertUnit([AccountRecord("A1", "Acme")], type))[0];
-        var current = exists ? Current(("Account", "A1", "001000000000001AAA")) : CurrentRecords.None;
-
-        var result = EventTypeCheck.Mismatch(unit, current);
-
-        result?.Message.Should().Be(mismatch);
-        if (mismatch is null)
-        {
-            result.Should().BeNull();
-        }
-        else
-        {
-            result!.Code.Should().Be(SalesforceErrors.EventTypeMismatch);
-        }
     }
 
     // ---------- CompositeWrite.Pack ----------
@@ -198,18 +169,12 @@ public sealed class UpsertStepsTests
         return [normalized];
     }
 
-    private static CurrentRecords Current(params (string SObject, string ExternalId, string Id)[] rows)
-    {
-        return new(rows.Select(r => (r.SObject, new CurrentRecord(System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, System.Text.Json.JsonElement>>(
-                $$"""{"Id":"{{r.Id}}","External_Id__c":"{{r.ExternalId}}"}""")!))));
-    }
-
     private static PlannedWrite Write(string sobject, bool create, int depth = 0)
     {
         var record = new NormalizedRecord(
             new SObjectRecord("r", sobject, "External_Id__c", "X", new Dictionary<string, object?>()),
             new SObjectSchema(sobject, []), new Dictionary<SalesforceField, object?>(), []);
         return new PlannedWrite(record, create ? null : "001000000000001AAA", new Dictionary<string, object?>(), [],
-            new HashSet<string>(), [], depth);
+            new HashSet<string>(), depth);
     }
 }

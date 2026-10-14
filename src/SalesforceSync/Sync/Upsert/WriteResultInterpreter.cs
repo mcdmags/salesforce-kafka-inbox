@@ -8,17 +8,17 @@ namespace SalesforceSync.Sync.Upsert;
 /// </summary>
 internal sealed class WriteResultInterpreter(SalesforceErrors errors)
 {
-    /// <param name="saved">Receives the values of every record that was saved.</param>
-    public List<UpsertResult> Interpret(CompositeWrite request, IReadOnlyList<CollectionResult> answers, List<WriteEcho> saved)
+    public List<UpsertResult> Interpret(CompositeWrite request, IReadOnlyList<CollectionResult> answers)
     {
         // Parents were sent first, so a child is classified after its parent
         foreach (var (referenceId, _, writes) in request.Collections)
         {
-            ClassifyCollection(referenceId, writes, answers.FirstOrDefault(a => a.ReferenceId == referenceId), saved);
+            ClassifyCollection(referenceId, writes, answers.FirstOrDefault(a => a.ReferenceId == referenceId));
         }
 
-        // Records failed, but none says why (every one of them reports being rolled back because of another): handing
-        // the units straight back would repeat the same request forever, so they spend a retry and back off instead.
+        // Records failed, but none says why (every one of them reports being skipped because of another, or has no
+        // answer): handing the units straight back would repeat the same request forever, so they spend a retry and
+        // back off instead.
         var all = request.Units.SelectMany(u => u.Writes).ToList();
         var causeUnknown = all.Any(w => w.Status != WriteStatus.Saved)
                            && !all.Any(w => w.Status is WriteStatus.Transient or WriteStatus.Permanent);
@@ -27,11 +27,11 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     }
 
     /// <summary>Sets the status and errors of every record of one collection from its subrequest's answer.</summary>
-    private void ClassifyCollection(string referenceId, List<PlannedWrite> writes, CollectionResult? answer, List<WriteEcho> saved)
+    private void ClassifyCollection(string referenceId, List<PlannedWrite> writes, CollectionResult? answer)
     {
         var subrequestErrors = SubrequestErrors(referenceId, writes.Count, answer);
         // A reference to a parent that wasn't saved has no value, which fails every record of the subrequest
-        var brokenReference = writes.Any(w => w.Links.Any(l => l.ByReference && l.Parent.Status != WriteStatus.Saved));
+        var brokenReference = writes.Any(w => w.Links.Any(l => l.Parent.Status != WriteStatus.Saved));
 
         for (var i = 0; i < writes.Count; i++)
         {
@@ -40,7 +40,6 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
             if (result is { Success: true })
             {
                 write.Status = WriteStatus.Saved;
-                saved.AddRange(write.Echoes);
                 continue;
             }
 
@@ -78,7 +77,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
             return WriteStatus.ParentNotSaved;
         }
 
-        var ownErrors = write.Errors.Where(e => !SalesforceErrors.NotAttemptedCodes.Contains(e.Code)).ToList();
+        var ownErrors = write.Errors.Where(e => e.Code != SalesforceErrors.ProcessingHalted).ToList();
         if (ownErrors.Count == 0 || (!hasOwnResult && brokenReference))
         {
             return WriteStatus.NotAttempted;
@@ -114,17 +113,15 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     }
 
     /// <summary>
-    /// Salesforce rejecting a lookup because its target isn't there (the target was deleted after the read, or the
-    /// external id it is addressed by doesn't exist) is the same situation as the read not finding it: the target is
-    /// expected to arrive through its own sync, so the record waits for it rather than being dead-lettered.
+    /// Salesforce rejecting a lookup because its target isn't there (the target was deleted after the read) is the
+    /// same situation as the read not finding it: the target is expected to arrive through its own sync, so the record
+    /// waits for it rather than being dead-lettered.
     /// </summary>
     private static SalesforceError Translate(PlannedWrite write, SalesforceError e)
     {
-        var targetMissing =
-            e.Message?.Contains("Foreign key external ID", StringComparison.OrdinalIgnoreCase) == true
-            || (e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED"
-                && write.LookupFields.Count > 0
-                && (e.Fields is not { Count: > 0 } || e.Fields.Any(write.LookupFields.Contains)));
+        var targetMissing = e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED"
+                            && write.LookupFields.Count > 0
+                            && (e.Fields is not { Count: > 0 } || e.Fields.Any(write.LookupFields.Contains));
         return targetMissing
             ? new SalesforceError(write.ReferenceId, SalesforceErrors.DependencyNotSynced, $"{e.Code}: {e.Message}", e.Fields)
             : e with { ReferenceId = write.ReferenceId };

@@ -13,10 +13,10 @@ namespace SalesforceSync.Tests;
 /// </summary>
 internal static class SalesforceStep
 {
-    public static SalesforceBatchUpsertService Service(HttpClient http, IOptions<SalesforceOptions> options, SyncOptions? sync = null)
+    public static SalesforceBatchUpsertService Service(HttpClient http, IOptions<SalesforceOptions> options)
     {
         return new(new NoDatabase(), new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
-                new SalesforceErrors(options), new WriteEchoTracker(), options, Options.Create(sync ?? new SyncOptions()),
+                new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
                 NullLogger<SalesforceBatchUpsertService>.Instance);
     }
 

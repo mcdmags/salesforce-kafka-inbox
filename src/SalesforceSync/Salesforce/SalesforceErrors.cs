@@ -16,17 +16,10 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     public const string InvalidEvent = "INVALID_EVENT";
 
     /// <summary>
-    /// Our own code: the event's meta.type disagrees with Salesforce (inserted but the record exists, updated but it
-    /// doesn't) and <see cref="Inbox.SyncOptions.EventTypeMismatch"/> says to dead-letter rather than reconcile.
+    /// A subrequest skipped because an earlier one it refers to failed: the record itself was fine but was not saved,
+    /// because of another record in the request.
     /// </summary>
-    public const string EventTypeMismatch = "EVENT_TYPE_MISMATCH";
-
-    /// <summary>The record itself was fine but was not saved, because of another record in the request.</summary>
-    public static readonly IReadOnlySet<string> NotAttemptedCodes = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "PROCESSING_HALTED",                  // a subrequest skipped or undone because an earlier one failed
-        "ALL_OR_NONE_OPERATION_ROLLED_BACK"   // allOrNone: rolled back because another record failed
-    };
+    public const string ProcessingHalted = "PROCESSING_HALTED";
 
     /// <summary>Errors in the data or the org's configuration: retrying the same data fails the same way.</summary>
     public static readonly IReadOnlyList<string> DefaultPermanentCodes =
@@ -61,7 +54,7 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     /// <summary>Classifies the errors of one failed record.</summary>
     public SyncOutcome Classify(IReadOnlyCollection<SalesforceError> errors)
     {
-        var real = errors.Where(e => !NotAttemptedCodes.Contains(e.Code)).ToList();
+        var real = errors.Where(e => e.Code != ProcessingHalted).ToList();
         return real.Count == 0
             ? SyncOutcome.NotAttempted
             : real.Any(e => IsPermanent(e.Code)) ? SyncOutcome.PermanentFailure : SyncOutcome.TransientFailure;

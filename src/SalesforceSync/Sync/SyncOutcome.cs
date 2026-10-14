@@ -8,7 +8,7 @@ public enum SyncOutcome
     /// <summary>The differing fields were written.</summary>
     Saved,
 
-    /// <summary>Not saved because of another entity's record (rolled back or skipped with it): retry now, no retry spent.</summary>
+    /// <summary>Not saved because of another entity's record (skipped with it): retry now, no retry spent.</summary>
     NotAttempted,
 
     /// <summary>May succeed later (lock contention, outage, a lookup target not synced yet): retry with backoff.</summary>

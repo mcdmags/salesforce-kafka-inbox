@@ -160,7 +160,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
                 .SetProperty(r => r.LastErrorCode, (string?)null), ct);
     }
 
-    /// <summary>Not attempted (rolled back or skipped because of another entity's record): hand back for the next claim, no retry spent.</summary>
+    /// <summary>Not attempted (skipped because of another entity's record): hand back for the next claim, no retry spent.</summary>
     private static Task<int> ReleaseAsync(SyncDbContext db, long[] ids, Guid token, CancellationToken ct)
     {
         return Leased(db, ids, token).ExecuteUpdateAsync(u => u

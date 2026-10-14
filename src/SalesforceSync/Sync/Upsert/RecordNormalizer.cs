@@ -35,7 +35,7 @@ internal static class RecordNormalizer
     {
         var found = problems = [];
         var records = unit.Records.Select(r => Normalize(r, schemas, found)).ToList();
-        return new NormalizedUnit(key, records, unit.EventType);
+        return new NormalizedUnit(key, records);
     }
 
     private static NormalizedRecord Normalize(SObjectRecord record, IReadOnlyDictionary<string, SObjectSchema> schemas,
