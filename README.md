@@ -76,7 +76,7 @@ The sync is three layers, each with one job:
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`); `InboxRepository` (`IInboxRepository`: claim, record, hold, defer, fail, over `InboxSql` and `PostgresExecutionStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
 | **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | `BatchPreparer` (coalesce, watermark, map), `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `EventTypeCheck` (`meta.type` against existence), `RecordDiffer` (changed fields), `WritePlanner` (create / update / unchanged, lookups by Id, reference or external id, `DEPENDENCY_NOT_SYNCED`) with `CompositeWritePacker` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
+| **Rules, no I/O** | `BatchPreparer` (coalesce, watermark, map), `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `EventTypeCheck` (`meta.type` against existence), `RecordDiffer` (changed fields), `WritePlanner` (create / update / unchanged, lookups by Id, reference or external id, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
 
 Describe results are cached by `SalesforceSchemaCache` and written values remembered by `WriteEchoTracker` (to warn
 about a field that is rewritten on every event).
@@ -345,6 +345,11 @@ Composite request of which **5** may be collections or queries. An account batch
 collections (Account create / update, Profile create by reference / create with an Id / update). Units that need
 more are split over further Composite requests, an entity's records always in the same one. The read is unchanged: one
 Composite request with up to 5 queries.
+
+When a batch needs more than one write request, each request's failure affects only its own entities; outcomes of the
+requests already sent are recorded normally. A later request that fails outright retries only its entities, one with an
+unknown outcome holds only its entities (and stops the batch: entities not yet sent are released), and one that is
+rate limited defers its entities and the ones not yet sent. A failure of the first request applies to the whole batch.
 
 **`Sync:BatchSize`** is 1 to 100 entities (default 75). The bound comes from the read, not the write: a query takes
 100 external ids and a Composite request 5 queries, and a relationship needs up to three ids per entity (itself and
