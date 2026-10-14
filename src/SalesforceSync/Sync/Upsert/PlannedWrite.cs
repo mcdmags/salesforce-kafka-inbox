@@ -28,14 +28,12 @@ internal enum WriteStatus
 /// <summary>One record to create (<paramref name="id"/> null) or update, and what came of it.</summary>
 /// <param name="changes">The fields to send, by API name.</param>
 /// <param name="lookupFields">The lookups this write sets, by field name.</param>
-/// <param name="sent">The values sent, remembered once the write is saved (<see cref="WriteEchoTracker"/>).</param>
 internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnlyDictionary<string, object?> changes,
-    IReadOnlyList<NewParentLink> links, IReadOnlySet<string> lookupFields, IReadOnlyList<FieldWrite> sent, int depth)
+    IReadOnlyList<NewParentLink> links, IReadOnlySet<string> lookupFields, int depth)
 {
     public bool Create => id is null;
     public string ReferenceId => record.ReferenceId;
     public IReadOnlyList<NewParentLink> Links => links;
-    public IEnumerable<WriteEcho> Echoes => sent.Select(s => s.Echo);
     public IReadOnlySet<string> LookupFields => lookupFields;
 
     public CollectionKey Collection { get; } = new(depth, record.Schema.Name, id is null, links.Count > 0);

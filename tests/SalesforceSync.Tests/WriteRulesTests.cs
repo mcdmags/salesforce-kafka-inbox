@@ -52,14 +52,11 @@ public sealed class WriteRulesTests
     public void Only_fields_whose_normalized_value_differs_are_sent(string what, object? name, string stored, string[] expected)
     {
         var record = Normalized(Account("A1", name, active: null)).Records[0];
-        var sent = new List<FieldWrite>();
         var problems = new List<SalesforceError>();
 
-        var changes = RecordDiffer.Changes(record, Current(stored), sent, problems);
+        var changes = RecordDiffer.Changes(record, Current(stored), problems);
 
         changes.Keys.Should().BeEquivalentTo(expected, what);
-        sent.Select(s => s.Echo.Field).Should().BeEquivalentTo(expected);
-        sent.Should().NotContain(s => s.StoredBefore == null, "every value replaces one that is in Salesforce");
         problems.Should().BeEmpty();
     }
 
@@ -67,12 +64,10 @@ public sealed class WriteRulesTests
     public void A_new_record_gets_its_non_empty_fields_and_a_checkbox_is_sent_as_false()
     {
         var record = Normalized(Account("A1", "Acme", active: null)).Records[0];
-        var sent = new List<FieldWrite>();
 
-        var changes = RecordDiffer.Changes(record, null, sent, []);
+        var changes = RecordDiffer.Changes(record, null, []);
 
         changes.Should().BeEquivalentTo(new Dictionary<string, object?> { ["Name"] = "Acme", ["Active__c"] = false });
-        sent.Should().OnlyContain(s => s.StoredBefore == null);
     }
 
     [Fact]
@@ -81,10 +76,10 @@ public sealed class WriteRulesTests
         var record = Normalized(Account("A1", "Acme", locked: "new")).Records[0];
         var problems = new List<SalesforceError>();
 
-        RecordDiffer.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"new"}"""), [], problems);
+        RecordDiffer.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"new"}"""), problems);
         problems.Should().BeEmpty();
 
-        RecordDiffer.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"old"}"""), [], problems);
+        RecordDiffer.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"old"}"""), problems);
         problems.Should().ContainSingle().Which.Code.Should().Be("INVALID_FIELD_FOR_INSERT_UPDATE");
     }
 
@@ -174,15 +169,13 @@ public sealed class WriteRulesTests
     // ---------- WriteResultInterpreter ----------
 
     [Fact]
-    public void Every_record_saved_means_the_unit_is_saved_and_its_values_are_remembered()
+    public void Every_record_saved_means_the_unit_is_saved()
     {
         var request = Request(AccountWithProfile("A1"));
-        var saved = new List<WriteEcho>();
 
-        var results = Interpret(request, saved, Ok("Account_create"), Ok("Profile__c_create_ref"));
+        var results = Interpret(request, Ok("Account_create"), Ok("Profile__c_create_ref"));
 
         results.Single().Outcome.Should().Be(SyncOutcome.Saved);
-        saved.Select(e => (e.Object, e.Field)).Should().Contain([("Account", "Name"), ("Profile__c", "Tier__c")]);
     }
 
     public static TheoryData<string, CollectionResult[], SyncOutcome, string> SingleRecordResults()
@@ -205,7 +198,7 @@ public sealed class WriteRulesTests
     [Theory, MemberData(nameof(SingleRecordResults))]
     public void A_records_result_decides_its_units_outcome(string what, CollectionResult[] answers, SyncOutcome outcome, string code)
     {
-        var result = Interpret(Request(Account("A1", "Acme")), [], answers).Single();
+        var result = Interpret(Request(Account("A1", "Acme")), answers).Single();
 
         (result.Outcome, result.PrimaryError?.Code).Should().Be((outcome, code), what);
     }
@@ -216,7 +209,7 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","External_Id__c":"A1","Name":"Old","Active__c":false}"""));
         var request = WritePlanner.Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
 
-        var result = Interpret(request, [], Failed("Account_update", "ENTITY_IS_DELETED")).Single();
+        var result = Interpret(request, Failed("Account_update", "ENTITY_IS_DELETED")).Single();
 
         result.Outcome.Should().Be(SyncOutcome.TransientFailure, "the next read finds it gone and creates it");
     }
@@ -226,7 +219,7 @@ public sealed class WriteRulesTests
     {
         var request = Request(AccountWithProfile("A1"), AccountWithProfile("A2"));
 
-        var results = Interpret(request, [],
+        var results = Interpret(request,
             new CollectionResult("Account_create",
             [
                 new RecordResult(false, null, [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "bad")]),
@@ -247,7 +240,7 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","External_Id__c":"A1","Name":"Acme","Active__c":false}"""));
         var request = WritePlanner.Plan([Normalized(new UpsertUnit([Profile("P1", "Gold", "A1")]))], current).Requests.Single();
 
-        var result = Interpret(request, [], new CollectionResult("Profile__c_create",
+        var result = Interpret(request, new CollectionResult("Profile__c_create",
             [new RecordResult(false, null, [new SalesforceError(null, "INVALID_CROSS_REFERENCE_KEY", "invalid cross reference id", ["Account__c"])])], [])).Single();
 
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced));
@@ -306,9 +299,9 @@ public sealed class WriteRulesTests
         return WritePlanner.Plan([.. units.Select(Normalized)], CurrentRecords.None).Requests.Single();
     }
 
-    private static List<UpsertResult> Interpret(CompositeWrite request, List<WriteEcho> saved, params CollectionResult[] answers)
+    private static List<UpsertResult> Interpret(CompositeWrite request, params CollectionResult[] answers)
     {
-        return new WriteResultInterpreter(new SalesforceErrors(Options.Create(new SalesforceOptions()))).Interpret(request, answers, saved);
+        return new WriteResultInterpreter(new SalesforceErrors(Options.Create(new SalesforceOptions()))).Interpret(request, answers);
     }
 
     private static CollectionResult Ok(string referenceId)

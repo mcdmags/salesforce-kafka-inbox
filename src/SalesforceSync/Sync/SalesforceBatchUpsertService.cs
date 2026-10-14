@@ -35,7 +35,6 @@ public sealed class SalesforceBatchUpsertService(
     SalesforceRestClient salesforce,
     SalesforceSchemaCache schemaCache,
     SalesforceErrors errors,
-    WriteEchoTracker echoTracker,
     IOptions<SalesforceOptions> salesforceOptions,
     IOptions<SyncOptions> options,
     ILogger<SalesforceBatchUpsertService> log)
@@ -180,17 +179,15 @@ public sealed class SalesforceBatchUpsertService(
         // the writes are grouped into collections and Composite requests
         var plan = WritePlanner.Plan(normalized, current);
         results.AddRange(plan.NotSent);
-        WarnAboutFlappingFields(plan.Rewrites);
 
         // 5. Send: normally one Composite call. 6. Per-record results -> one outcome per unit.
-        var saved = new List<WriteEcho>();
         for (var i = 0; i < plan.Requests.Count; i++)
         {
             var request = plan.Requests[i];
             try
             {
                 var answers = await SendAsync(request, ct);
-                results.AddRange(_interpreter.Interpret(request, answers, saved));
+                results.AddRange(_interpreter.Interpret(request, answers));
             }
             // A failed first call fails the batch (the caller fails, holds or defers the whole claim): nothing of it
             // was written. A later call's failure costs only its own entities: the earlier calls' records are final.
@@ -203,7 +200,6 @@ public sealed class SalesforceBatchUpsertService(
                 }
             }
         }
-        echoTracker.Record(saved);
 
         return results;
     }
@@ -291,22 +287,6 @@ public sealed class SalesforceBatchUpsertService(
             // Everything before this point only read from Salesforce, so its failures are safe to retry. From here
             // on Salesforce may have the write, and may still apply it after we stop waiting.
             throw new UnknownOutcomeException(ex);
-        }
-    }
-
-    /// <summary>Warns about a field that still differs after the same value was written to it before (<see cref="WriteEchoTracker"/>).</summary>
-    private void WarnAboutFlappingFields(IReadOnlyList<FieldWrite> rewrites)
-    {
-        foreach (var (echo, stored, fieldType) in rewrites)
-        {
-            if (echoTracker.IsFlapping(echo, stored!))
-            {
-                log.LogWarning(
-                    "{Object}.{Field} on {ExternalId} keeps differing after it is written: sent {Sent}, Salesforce stores {Stored}. " +
-                    "Every event rewrites this field: org automation (a trigger or flow) changes the value, or FieldValues " +
-                    "is missing a normalization rule for '{Type}' fields.",
-                    echo.Object, echo.Field, echo.ExternalId, echo.Value, stored, fieldType);
-            }
         }
     }
 

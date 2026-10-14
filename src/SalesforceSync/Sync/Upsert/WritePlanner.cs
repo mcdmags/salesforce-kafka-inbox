@@ -6,11 +6,7 @@ namespace SalesforceSync.Sync.Upsert;
 /// <summary>What to do with a batch after the read.</summary>
 /// <param name="Requests">The Composite requests to send, each with its units and their writes by collection.</param>
 /// <param name="NotSent">The units that won't be sent, with their outcome: unchanged, rejected, too large, or waiting for a lookup target.</param>
-/// <param name="Rewrites">Every value that differs from an existing record's, for the flapping check.</param>
-internal sealed record WritePlan(
-    IReadOnlyList<CompositeWrite> Requests,
-    IReadOnlyList<UpsertResult> NotSent,
-    IReadOnlyList<FieldWrite> Rewrites);
+internal sealed record WritePlan(IReadOnlyList<CompositeWrite> Requests, IReadOnlyList<UpsertResult> NotSent);
 
 /// <summary>
 /// Turns units and Salesforce's current records into the collection requests to send. Whether a record is created or
@@ -23,13 +19,12 @@ internal static class WritePlanner
     {
         var planned = new List<PlannedUnit>();
         var decided = new List<UpsertResult>();
-        var rewrites = new List<FieldWrite>();
 
         foreach (var unit in units)
         {
             var problems = new List<SalesforceError>();
             var missing = new List<SalesforceError>();
-            var writes = PlanUnit(unit, current, problems, missing, rewrites);
+            var writes = PlanUnit(unit, current, problems, missing);
 
             if (problems.Count > 0)
             {
@@ -51,7 +46,7 @@ internal static class WritePlanner
 
         var (requests, tooLarge) = CompositeWrite.Pack(planned);
         decided.AddRange(tooLarge);
-        return new WritePlan(requests, decided, rewrites);
+        return new WritePlan(requests, decided);
     }
 
     /// <summary>
@@ -62,7 +57,7 @@ internal static class WritePlanner
     /// <param name="problems">Receives what Salesforce would reject (a field that can't be written).</param>
     /// <param name="missing">Receives the lookups whose target is neither in Salesforce nor in the unit.</param>
     private static List<PlannedWrite> PlanUnit(NormalizedUnit unit, CurrentRecords current, List<SalesforceError> problems,
-        List<SalesforceError> missing, List<FieldWrite> rewrites)
+        List<SalesforceError> missing)
     {
         var writes = new List<PlannedWrite>();
         // The unit's records so far, by (sobject, external id), for the later records that look them up
@@ -71,13 +66,7 @@ internal static class WritePlanner
         foreach (var record in unit.Records)
         {
             var existing = current.Find(record.Record);
-            var sent = new List<FieldWrite>();
-            var changes = RecordDiffer.Changes(record, existing, sent, problems);
-            if (existing is not null)
-            {
-                rewrites.AddRange(sent);
-            }
-
+            var changes = RecordDiffer.Changes(record, existing, problems);
             var links = new List<NewParentLink>();
             var depth = 0;
 
@@ -112,7 +101,7 @@ internal static class WritePlanner
                 }
             }
 
-            var write = Write(record, existing, changes, links, sent, depth);
+            var write = Write(record, existing, changes, links, depth);
             if (write is not null)
             {
                 writes.Add(write);
@@ -150,7 +139,7 @@ internal static class WritePlanner
 
     /// <summary>A create for a new record (with its external id), an update if anything differs, else null.</summary>
     private static PlannedWrite? Write(NormalizedRecord record, CurrentRecord? existing, Dictionary<string, object?> changes,
-        List<NewParentLink> links, List<FieldWrite> sent, int depth)
+        List<NewParentLink> links, int depth)
     {
         if (existing is not null && changes.Count == 0 && links.Count == 0)
         {
@@ -166,6 +155,6 @@ internal static class WritePlanner
             changes[record.Schema.Find(record.Record.ExternalIdField)!.Name] = record.Record.ExternalId;
         }
 
-        return new PlannedWrite(record, existing?.Id, changes, links, lookupFields, sent, depth);
+        return new PlannedWrite(record, existing?.Id, changes, links, lookupFields, depth);
     }
 }

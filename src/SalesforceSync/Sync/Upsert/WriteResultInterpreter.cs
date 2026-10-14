@@ -8,13 +8,12 @@ namespace SalesforceSync.Sync.Upsert;
 /// </summary>
 internal sealed class WriteResultInterpreter(SalesforceErrors errors)
 {
-    /// <param name="saved">Receives the values of every record that was saved.</param>
-    public List<UpsertResult> Interpret(CompositeWrite request, IReadOnlyList<CollectionResult> answers, List<WriteEcho> saved)
+    public List<UpsertResult> Interpret(CompositeWrite request, IReadOnlyList<CollectionResult> answers)
     {
         // Parents were sent first, so a child is classified after its parent
         foreach (var (referenceId, _, writes) in request.Collections)
         {
-            ClassifyCollection(referenceId, writes, answers.FirstOrDefault(a => a.ReferenceId == referenceId), saved);
+            ClassifyCollection(referenceId, writes, answers.FirstOrDefault(a => a.ReferenceId == referenceId));
         }
 
         // Records failed, but none says why (every one of them reports being skipped because of another, or has no
@@ -28,7 +27,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     }
 
     /// <summary>Sets the status and errors of every record of one collection from its subrequest's answer.</summary>
-    private void ClassifyCollection(string referenceId, List<PlannedWrite> writes, CollectionResult? answer, List<WriteEcho> saved)
+    private void ClassifyCollection(string referenceId, List<PlannedWrite> writes, CollectionResult? answer)
     {
         var subrequestErrors = SubrequestErrors(referenceId, writes.Count, answer);
         // A reference to a parent that wasn't saved has no value, which fails every record of the subrequest
@@ -41,7 +40,6 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
             if (result is { Success: true })
             {
                 write.Status = WriteStatus.Saved;
-                saved.AddRange(write.Echoes);
                 continue;
             }
 

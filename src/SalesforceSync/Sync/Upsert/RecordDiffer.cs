@@ -1,11 +1,6 @@
-using System.Text.Json;
 using SalesforceSync.Salesforce;
 
 namespace SalesforceSync.Sync.Upsert;
-
-/// <summary>A field value to send, and what Salesforce holds in its place now.</summary>
-/// <param name="StoredBefore">The current value as JSON; null for a record that doesn't exist yet.</param>
-internal sealed record FieldWrite(WriteEcho Echo, string? StoredBefore, string FieldType);
 
 /// <summary>Compares a record's normalized values with what Salesforce has.</summary>
 internal static class RecordDiffer
@@ -16,9 +11,7 @@ internal static class RecordDiffer
     /// actually be written.
     /// </summary>
     /// <param name="existing">The record in Salesforce, or null if it is new.</param>
-    /// <param name="sent">Receives each value to send, as sent.</param>
-    public static Dictionary<string, object?> Changes(NormalizedRecord record, CurrentRecord? existing, List<FieldWrite> sent,
-        List<SalesforceError> problems)
+    public static Dictionary<string, object?> Changes(NormalizedRecord record, CurrentRecord? existing, List<SalesforceError> problems)
     {
         var changes = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         foreach (var (field, value) in record.Fields)
@@ -29,8 +22,7 @@ internal static class RecordDiffer
                 continue;
             }
 
-            JsonElement stored = default;
-            if (existing is not null && existing.TryGetValue(field.Name, out stored) && FieldValues.AreEqual(field, value, stored))
+            if (existing is not null && existing.TryGetValue(field.Name, out var stored) && FieldValues.AreEqual(field, value, stored))
             {
                 continue;
             }
@@ -41,11 +33,7 @@ internal static class RecordDiffer
                 continue;
             }
 
-            var wire = FieldValues.ToWire(value);
-            changes[field.Name] = wire;
-            var echo = new WriteEcho(record.Schema.Name, record.Record.ExternalId, field.Name, JsonSerializer.Serialize(wire));
-            var storedJson = stored.ValueKind == JsonValueKind.Undefined ? "null" : stored.GetRawText();
-            sent.Add(new FieldWrite(echo, existing is null ? null : storedJson, field.Type));
+            changes[field.Name] = FieldValues.ToWire(value);
         }
         return changes;
     }

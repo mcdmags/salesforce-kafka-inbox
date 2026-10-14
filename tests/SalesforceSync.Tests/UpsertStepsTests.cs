@@ -175,6 +175,6 @@ public sealed class UpsertStepsTests
             new SObjectRecord("r", sobject, "External_Id__c", "X", new Dictionary<string, object?>()),
             new SObjectSchema(sobject, []), new Dictionary<SalesforceField, object?>(), []);
         return new PlannedWrite(record, create ? null : "001000000000001AAA", new Dictionary<string, object?>(), [],
-            new HashSet<string>(), [], depth);
+            new HashSet<string>(), depth);
     }
 }
