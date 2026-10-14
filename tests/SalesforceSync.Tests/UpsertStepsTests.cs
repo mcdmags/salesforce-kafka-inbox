@@ -122,12 +122,12 @@ public sealed class UpsertStepsTests
         else result!.Code.Should().Be(SalesforceErrors.EventTypeMismatch);
     }
 
-    // ---------- CompositeWritePacker / CompositeWrite ----------
+    // ---------- CompositeWrite.Pack ----------
 
     [Fact]
     public void Units_that_need_the_same_collections_share_one_request_parents_and_creates_first()
     {
-        var packed = CompositeWritePacker.Pack(
+        var packed = CompositeWrite.Pack(
         [
             new PlannedUnit("NEW", [Write("Account", create: true), Write("Profile__c", create: true, depth: 1)]),
             new PlannedUnit("OLD", [Write("Account", create: false), Write("Profile__c", create: false, depth: 1)]),
@@ -144,7 +144,7 @@ public sealed class UpsertStepsTests
     [Fact]
     public void A_unit_that_does_not_fit_the_requests_so_far_starts_another_and_stays_whole()
     {
-        var packed = CompositeWritePacker.Pack(
+        var packed = CompositeWrite.Pack(
         [
             new PlannedUnit("A", [Write("Account", true), Write("Account", false), Write("Profile__c", true, 1), Write("Profile__c", false, 1)]),
             new PlannedUnit("B", [Write("Account_Relationship__c", true), Write("Account_Relationship__c", false)]),
@@ -161,7 +161,7 @@ public sealed class UpsertStepsTests
         var units = Enumerable.Range(0, SalesforceRestClient.MaxCollectionRecords + 1)
             .Select(i => new PlannedUnit($"A{i}", [Write("Account", create: true)])).ToList();
 
-        var packed = CompositeWritePacker.Pack(units);
+        var packed = CompositeWrite.Pack(units);
 
         packed.Requests.Select(r => r.Units.Count).Should().Equal(SalesforceRestClient.MaxCollectionRecords, 1);
     }
@@ -171,7 +171,7 @@ public sealed class UpsertStepsTests
     {
         var tooMany = Enumerable.Range(0, SalesforceRestClient.MaxCompositeCollections + 1).Select(depth => Write("Account", true, depth)).ToList();
 
-        var packed = CompositeWritePacker.Pack([new PlannedUnit("BIG", tooMany), new PlannedUnit("OK", [Write("Account", true)])]);
+        var packed = CompositeWrite.Pack([new PlannedUnit("BIG", tooMany), new PlannedUnit("OK", [Write("Account", true)])]);
 
         var failed = packed.TooLarge.Should().ContainSingle().Subject;
         (failed.Key, failed.Outcome, failed.PrimaryError!.Code).Should().Be(("BIG", SyncOutcome.PermanentFailure, "LIMIT_EXCEEDED"));

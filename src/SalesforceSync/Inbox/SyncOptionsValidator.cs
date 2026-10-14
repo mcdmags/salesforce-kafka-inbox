@@ -1,5 +1,5 @@
 using Microsoft.Extensions.Options;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Sync.Upsert;
 
 namespace SalesforceSync.Inbox;
 
@@ -23,8 +23,8 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
 
         AtLeastOne(nameof(o.Workers), o.Workers);
         AtLeastOne(nameof(o.MaxConcurrentRequests), o.MaxConcurrentRequests);
-        if (o.BatchSize is < 1 or > SalesforceRestClient.MaxEntitiesPerBatch)
-            errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {SalesforceRestClient.MaxEntitiesPerBatch} " +
+        if (o.BatchSize is < 1 or > ReadQueryBuilder.MaxEntitiesPerBatch)
+            errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {ReadQueryBuilder.MaxEntitiesPerBatch} " +
                        "(a batch is read with one Composite request: 5 queries of 100 external ids).");
         AtLeastOne(nameof(o.MaxEventsPerEntity), o.MaxEventsPerEntity);
         Positive(nameof(o.Lease), o.Lease);

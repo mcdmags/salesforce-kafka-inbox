@@ -62,18 +62,6 @@ public sealed class SalesforceBatchUpsertService(
     private readonly WritePlanner _planner = new(salesforceOptions.Value, options.Value);
     private readonly WriteResultInterpreter _interpreter = new(errors);
 
-    /// <summary>Same as the strategy overload, with the strategy's parts passed as delegates.</summary>
-    public Task<int> UpsertBatchAsync<TEvent>(
-        string entityType,
-        string inboxTable,
-        Func<TEvent, string?> entityId,
-        Func<TEvent, DateTimeOffset?> eventTime,
-        Func<TEvent, EventType?> eventType,
-        Func<string, TEvent, UpsertUnit> map,
-        Func<IReadOnlyCollection<UpsertUnit>, IEnumerable<SoqlQuery>> queries,
-        CancellationToken ct)
-        => UpsertBatchAsync(new UpsertStrategy<TEvent>(entityType, inboxTable, entityId, eventTime, eventType, map, queries), ct);
-
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
     public async Task<int> UpsertBatchAsync<TEvent>(UpsertStrategy<TEvent> strategy, CancellationToken ct)
@@ -141,14 +129,14 @@ public sealed class SalesforceBatchUpsertService(
     /// records, one writes what differs with sObject Collections (more than 5 collections are split over further
     /// requests). Returns one outcome per unit. Nothing here touches the inbox.
     /// </summary>
-    /// <param name="units">At most <see cref="SalesforceRestClient.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
+    /// <param name="units">At most <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
     /// <param name="queries">The strategy's reads: the units' records and the records their lookups point at.</param>
     /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
     internal async Task<List<UpsertResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
         IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
     {
-        if (units.Count > SalesforceRestClient.MaxEntitiesPerBatch)
-            throw new ArgumentOutOfRangeException(nameof(units), $"At most {SalesforceRestClient.MaxEntitiesPerBatch} units per call");
+        if (units.Count > ReadQueryBuilder.MaxEntitiesPerBatch)
+            throw new ArgumentOutOfRangeException(nameof(units), $"At most {ReadQueryBuilder.MaxEntitiesPerBatch} units per call");
 
         var results = new List<UpsertResult>(units.Count);
         if (units.Count == 0) return results;
@@ -167,9 +155,9 @@ public sealed class SalesforceBatchUpsertService(
         // 4. Decide per record: unchanged, create or update (checked against the event's type), and how each lookup
         // is linked; the writes are grouped into collections and Composite requests
         var plan = _planner.Plan(normalized, current, schemas);
-        results.AddRange(plan.Decided);
-        LogTypeMismatches(plan.TypeMismatches, normalized.Count);
+        results.AddRange(plan.NotSent);
         WarnAboutFlappingFields(plan.Rewrites);
+        LogTypeMismatches(plan, normalized.Count);
 
         // 5. Send: normally one Composite call. Each call's records are final once it returns, so a later call that
         // fails outright only costs its own entities a retry (the earlier ones then read back as unchanged).
@@ -231,16 +219,17 @@ public sealed class SalesforceBatchUpsertService(
         }
     }
 
-    private void LogTypeMismatches(IReadOnlyList<(string Key, string? Message)> mismatches, int total)
+    private void LogTypeMismatches(WritePlan plan, int total)
     {
-        if (mismatches.Count == 0) return;
+        if (plan.TypeMismatches.Count == 0) return;
 
-        if (!_planner.DeadLettersTypeMismatches)
-            foreach (var (key, message) in mismatches)
+        var deadLettered = plan.MismatchHandling == EventTypeMismatch.DeadLetter;
+        if (!deadLettered)
+            foreach (var (key, message) in plan.TypeMismatches)
                 log.LogDebug("{Key}: {Mismatch}; going by Salesforce", key, message);
         log.LogInformation(
             "{Count} of {Total} events had a type that disagrees with Salesforce (inserted but the record exists, or updated but it does not): {Action}",
-            mismatches.Count, total, _planner.DeadLettersTypeMismatches ? "dead-lettered" : "reconciled with Salesforce");
+            plan.TypeMismatches.Count, total, deadLettered ? "dead-lettered" : "reconciled with Salesforce");
     }
 
     /// <summary>Warns about a field that still differs after the same value was written to it before (<see cref="WriteEchoTracker"/>).</summary>

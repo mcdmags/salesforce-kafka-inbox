@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
+using SalesforceSync.Sync.Upsert;
 
 namespace SalesforceSync.Inbox;
 
@@ -38,7 +39,7 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
             var entityIds = (await conn.QueryAsync<string>(Command(sql.LockHeads, new
             {
                 window = InboxSql.ClaimWindow,
-                batchSize = Math.Min(_opt.BatchSize, SalesforceRestClient.MaxEntitiesPerBatch)
+                batchSize = Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)
             }))).ToArray();
             if (entityIds.Length == 0) return new InboxClaim(inboxTable, entityType, token, [], new Dictionary<string, long>());
 

@@ -6,13 +6,15 @@ namespace SalesforceSync.Sync.Upsert;
 
 /// <summary>What to do with a batch after the read.</summary>
 /// <param name="Requests">The Composite requests to send, each with its units and their writes by collection.</param>
-/// <param name="Decided">The units that need no call: unchanged, rejected, or waiting for a lookup target.</param>
-/// <param name="TypeMismatches">Units whose event type disagrees with Salesforce (reconciled or dead-lettered).</param>
+/// <param name="NotSent">The units that won't be sent, with their outcome: unchanged, rejected, too large, or waiting for a lookup target.</param>
+/// <param name="TypeMismatches">Units whose event type disagrees with Salesforce.</param>
+/// <param name="MismatchHandling">What was done about them (<see cref="SyncOptions.EventTypeMismatch"/>).</param>
 /// <param name="Rewrites">Every value that differs from an existing record's, for the flapping check.</param>
 internal sealed record WritePlan(
     IReadOnlyList<CompositeWrite> Requests,
-    IReadOnlyList<UpsertResult> Decided,
+    IReadOnlyList<UpsertResult> NotSent,
     IReadOnlyList<(string Key, string? Message)> TypeMismatches,
+    EventTypeMismatch MismatchHandling,
     IReadOnlyList<FieldWrite> Rewrites);
 
 /// <summary>
@@ -23,8 +25,6 @@ internal sealed record WritePlan(
 /// </summary>
 internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOptions)
 {
-    public bool DeadLettersTypeMismatches => syncOptions.EventTypeMismatch == EventTypeMismatch.DeadLetter;
-
     public WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current,
         IReadOnlyDictionary<string, SObjectSchema> schemas)
     {
@@ -38,7 +38,7 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
             if (EventTypeCheck.Mismatch(unit, current) is { } mismatch)
             {
                 mismatches.Add((unit.Key, mismatch.Message));
-                if (DeadLettersTypeMismatches)
+                if (syncOptions.EventTypeMismatch == EventTypeMismatch.DeadLetter)
                 {
                     decided.Add(new(unit.Key, SyncOutcome.PermanentFailure, [mismatch]));
                     continue;
@@ -55,9 +55,9 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
             else planned.Add(new PlannedUnit(unit.Key, writes));
         }
 
-        var packed = CompositeWritePacker.Pack(planned);
-        decided.AddRange(packed.TooLarge);
-        return new WritePlan(packed.Requests, decided, mismatches, rewrites);
+        var (requests, tooLarge) = CompositeWrite.Pack(planned);
+        decided.AddRange(tooLarge);
+        return new WritePlan(requests, decided, mismatches, syncOptions.EventTypeMismatch, rewrites);
     }
 
     /// <summary>

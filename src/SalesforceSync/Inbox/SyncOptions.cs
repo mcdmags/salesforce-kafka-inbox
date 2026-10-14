@@ -1,4 +1,4 @@
-using SalesforceSync.Salesforce;
+using SalesforceSync.Sync.Upsert;
 
 namespace SalesforceSync.Inbox;
 
@@ -13,7 +13,7 @@ public sealed class SyncOptions
     public int MaxConcurrentRequests { get; set; } = 6;
 
     /// <summary>
-    /// Entities per batch, 1 to <see cref="SalesforceRestClient.MaxEntitiesPerBatch"/> (100): a batch is read with one
+    /// Entities per batch, 1 to <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/> (100): a batch is read with one
     /// Composite request, which carries 5 queries of 100 external ids.
     /// </summary>
     public int BatchSize { get; set; } = 75;

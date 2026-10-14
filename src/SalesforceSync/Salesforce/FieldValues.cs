@@ -44,8 +44,12 @@ public static class FieldValues
             return TryText(field, string.Join(';', SplitMultiPicklist(AsString(value))), out normalized, out error);
 
         if (type is "id" or "reference")
-            return (normalized = To18CharId(AsString(value))) is not null
-                   || Fail(field, "MALFORMED_ID", $"'{value}' is not a Salesforce id", out error);
+        {
+            var id = To18CharId(AsString(value));
+            if (id is null) return Fail(field, "MALFORMED_ID", $"'{value}' is not a Salesforce id", out error);
+            normalized = id;
+            return true;
+        }
 
         if (isBoolean)
         {

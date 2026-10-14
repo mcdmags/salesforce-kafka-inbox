@@ -4,8 +4,6 @@ using SalesforceSync.Data;
 
 namespace SalesforceSync.RateLimiting;
 
-using Sql = RateLimitSql;
-
 /// <summary>
 /// Token bucket + limit guard stored in Postgres, shared by every worker in every process.
 /// The bucket's speed is adjusted from the Sforce-Limit-Info header Salesforce returns on each call, and every
@@ -34,7 +32,7 @@ public sealed class SalesforceRateLimiter(
     /// </summary>
     public async Task ApplyConfigurationAsync(CancellationToken ct)
     {
-        await pg.ExecuteAsync(Sql.ApplyConfiguration, new
+        await pg.ExecuteAsync(RateLimitSql.ApplyConfiguration, new
         {
             rate = _opt.MaxRequestsPerSecond,
             capacity = _opt.BurstCapacity,
@@ -59,9 +57,9 @@ public sealed class SalesforceRateLimiter(
             // retry after an unknown commit can only over-count usage, the safe direction.
             (bool granted, double waitSeconds, double used24h, double? budget) r = await pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
             {
-                await conn.ExecuteAsync(new CommandDefinition(Sql.Lock, transaction: tx, cancellationToken: t));
+                await conn.ExecuteAsync(new CommandDefinition(RateLimitSql.Lock, transaction: tx, cancellationToken: t));
                 return await conn.QuerySingleAsync<(bool, double, double, double?)>(
-                    new CommandDefinition(Sql.Acquire, new { n = (double)permits }, tx, cancellationToken: t));
+                    new CommandDefinition(RateLimitSql.Acquire, new { n = (double)permits }, tx, cancellationToken: t));
             }, ct);
             if (r.budget > 0) Volatile.Write(ref _ownDailyRatio, r.used24h / r.budget.Value);
             if (r.granted) return;
@@ -73,9 +71,9 @@ public sealed class SalesforceRateLimiter(
         }
     }
 
-    public Task<bool> IsPausedAsync(CancellationToken ct) => pg.ExecuteScalarAsync<bool>(Sql.IsPaused, null, ct);
+    public Task<bool> IsPausedAsync(CancellationToken ct) => pg.ExecuteScalarAsync<bool>(RateLimitSql.IsPaused, null, ct);
 
-    public Task PauseAsync(TimeSpan duration, CancellationToken ct) => pg.ExecuteAsync(Sql.Pause, new { duration }, ct);
+    public Task PauseAsync(TimeSpan duration, CancellationToken ct) => pg.ExecuteAsync(RateLimitSql.Pause, new { duration }, ct);
 
     /// <summary>
     /// Records the limits Salesforce reported and adjusts the shared bucket:
@@ -98,7 +96,7 @@ public sealed class SalesforceRateLimiter(
             _lastReportUtc = now;
         }
 
-        await pg.ExecuteAsync(Sql.ReportLimits, new
+        await pg.ExecuteAsync(RateLimitSql.ReportLimits, new
         {
             apiUsed = info.ApiUsage?.Used,
             apiMax = info.ApiUsage?.Max,

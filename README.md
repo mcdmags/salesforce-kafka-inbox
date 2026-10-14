@@ -522,8 +522,7 @@ services.AddTransient<ISalesforceEntitySync, AccountRelationshipSyncService>();
 
 From then on the object's inbox table is created at startup, the consumer subscribes to its topic and stores its
 events there, and the worker loops sync it. A lookup whose target isn't in Salesforce yet (`DEPENDENCY_NOT_SYNCED`) is retried with backoff, so
-related objects can arrive in any order. `UpsertBatchAsync` also takes the strategy's three parts as delegates, and a
-strategy may build `SObjectRecord`s by hand; the typed layers are how the built-in objects do it, not something the
+related objects can arrive in any order. A strategy may build `SObjectRecord`s by hand; the typed layers are how the built-in objects do it, not something the
 engine requires.
 
 **Why `SemaphoreSlim` isn't used for parallel batches:** it limits concurrency within one process, while

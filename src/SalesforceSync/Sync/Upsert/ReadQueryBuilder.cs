@@ -14,6 +14,13 @@ internal static class ReadQueryBuilder
     /// <summary>External ids per query; with 5 queries per Composite request this is what bounds Sync:BatchSize.</summary>
     internal const int MaxValuesPerQuery = 100;
 
+    /// <summary>
+    /// Entities per batch. Not a Salesforce limit of its own: the batch's read must fit one Composite request, i.e. 5
+    /// queries of <see cref="MaxValuesPerQuery"/> external ids each, and an entity can need up to 3 ids per 100 (a
+    /// relationship: itself and two Accounts). The write side would allow more (5 collections of 200 records).
+    /// </summary>
+    internal const int MaxEntitiesPerBatch = MaxValuesPerQuery;
+
     /// <summary>One query per chunk of values, named q0, q1, ...</summary>
     /// <exception cref="InvalidOperationException">More queries than a Composite request takes.</exception>
     public static List<ReadQuery> Build(IReadOnlyList<NormalizedUnit> units, IReadOnlyList<SoqlQuery> queries,

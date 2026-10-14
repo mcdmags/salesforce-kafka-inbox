@@ -22,13 +22,6 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// <summary>sObject Collections: max records in one create or update.</summary>
     public const int MaxCollectionRecords = 200;
 
-    /// <summary>
-    /// Entities per batch. Not a Salesforce limit of its own: the batch's read must fit one Composite request, i.e. 5
-    /// queries of 100 external ids each, and an entity can need up to 3 ids per 100 (a relationship: itself and two
-    /// Accounts). The write side would allow more (5 collections of 200 records).
-    /// </summary>
-    public const int MaxEntitiesPerBatch = 100;
-
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
     /// <summary>sObject Describe; with <paramref name="ifModifiedSince"/>, returns a null schema on 304 Not Modified.</summary>

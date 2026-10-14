@@ -12,7 +12,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     public List<UpsertResult> Interpret(CompositeWrite request, IReadOnlyList<CollectionResult> answers, List<WriteEcho> saved)
     {
         // Parents were sent first, so a child is classified after its parent
-        foreach (var (referenceId, writes) in request.Collections)
+        foreach (var (referenceId, _, writes) in request.Collections)
             ClassifyCollection(referenceId, writes, answers.FirstOrDefault(a => a.ReferenceId == referenceId), saved);
 
         // Records failed, but none says why (every one of them reports being rolled back because of another): handing
