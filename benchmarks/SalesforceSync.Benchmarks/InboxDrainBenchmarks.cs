@@ -116,9 +116,10 @@ public abstract class DrainBenchmarkBase
         _db = NpgsqlDataSource.Create(BenchmarkDb.ConnectionString);
         _contexts = SyncDbContext.CreateFactory(_db);
         InboxSchema.EnsureCreatedAsync(_contexts, InboxTables).GetAwaiter().GetResult();
-        using (var db = _contexts.CreateDbContext())
+        // A plain command: EF's raw SQL formats {...} as parameter placeholders, and the script has JSON literals
+        using (var audit = _db.CreateCommand(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "claim-audit.sql"))))
         {
-            db.Database.ExecuteSqlRaw(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "claim-audit.sql")));
+            audit.ExecuteNonQuery();
         }
 
         _store = new FakeSalesforceStore(new FakeSalesforceOptions
@@ -240,6 +241,8 @@ public abstract class DrainBenchmarkBase
             o.MaxRetries = 50;
         });
         services.Configure<RateLimitOptions>(_ => { });
+        // Required by the limiter (0 is a budget of nothing); the budget is then the mock org's reported limit
+        services.Configure<SalesforceLimitsOptions>(o => o.DailyApiAllocation = 1_000_000_000);
 
         services.AddSalesforceClient()
             .AddSalesforceRateLimiting() // the bucket is opened up per iteration (SetupAsync)
