@@ -99,8 +99,11 @@ public sealed partial class InboxSql
     public static class Template
     {
         /// <summary>
-        /// Picks up to @batchSize entities to process and locks each one's head (its oldest pending row). Locking the
-        /// head, with SKIP LOCKED, is what keeps two workers from claiming the same entity.
+        /// Picks up to @batchSize entities to process: locks each one's head (its oldest pending row) and takes the
+        /// entity's claim lock, an advisory lock on (table, entity) held until the claim transaction ends. The claim
+        /// lock, not the head row lock, is what keeps two workers from claiming the same entity; see
+        /// <see cref="ClaimEntities"/> for why. An entity whose claim lock another worker holds is skipped
+        /// (pg_try_advisory_xact_lock does not wait).
         /// <list type="number">
         /// <item><c>w</c>: the first @window claimable rows, oldest first, straight off the ready index. "Due" is checked
         /// after the LIMIT, not as a range condition: the rows come in next_attempt_at order either way, and without
@@ -153,6 +156,8 @@ public sealed partial class InboxSql
                 and not exists (select 1 from {inbox} p
                                 where p.entity_id = c.entity_id and p.locked_until > now())
               for update skip locked) l
+            cross join lateral (
+              select 1 where pg_try_advisory_xact_lock(hashtext('{inbox}'), hashtext(l.entity_id))) claim_lock
             limit @batchSize
             """;
 
@@ -162,6 +167,18 @@ public sealed partial class InboxSql
         /// of a deep backlog only the newest event will be written, so leasing and returning all of it would cost a
         /// write and a payload per row for nothing. The rest is picked up by later claims and superseded by the
         /// watermark unless newer. Bumps retry_count; next_attempt_at becomes the end of the lease.
+        /// <para>
+        /// An entity on which another worker holds a live lease gets nothing, and so is not claimed: this check, made
+        /// while holding the entity's claim lock (LockHeads), is the guarantee that one worker at a time holds an
+        /// entity. Why it is safe under READ COMMITTED: a worker leases an entity only inside a transaction that holds
+        /// the entity's claim lock until it commits. This statement runs after LockHeads took that lock, so its
+        /// snapshot is taken after every earlier claim of the entity committed, and it sees their leases; a later
+        /// claim can't take the lock before this one commits. The head row lock alone is not enough: the head is
+        /// whatever row a worker's snapshot shows as oldest, and an event committed out of id order (two consumers
+        /// storing events of one entity) makes it a different row for two workers. Then neither row lock conflicts,
+        /// LockHeads' own lease check reads a snapshot from before the other worker's commit, and both leased the
+        /// entity (ClaimRaceTests).
+        /// </para>
         /// </summary>
         public const string ClaimEntities = """
             update {inbox} u
@@ -171,6 +188,9 @@ public sealed partial class InboxSql
             cross join lateral (
               select o.id from {inbox} o
               where o.entity_id = e.entity_id and o.status = 'pending'
+                and not exists (select 1 from {inbox} p
+                                where p.entity_id = e.entity_id and p.locked_until > now()
+                                  and p.lock_token is distinct from @token)
               order by o.id limit @maxPerEntity) r
             where u.id = r.id
             returning u.id as Id, u.entity_id as EntityId, u.payload::text as Payload, u.retry_count as RetryCount
