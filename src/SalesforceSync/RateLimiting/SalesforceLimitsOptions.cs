@@ -38,7 +38,8 @@ public sealed class SalesforceLimitsOptions
 
     /// <summary>
     /// The org's total calls per rolling 24 hours, if you'd rather copy it from Setup (System Overview) than describe
-    /// licenses. Required for sandboxes created from a template, whose limits come from the template.
+    /// licenses. Required for Sandbox and Trial orgs, whose allocation Salesforce doesn't publish, and for a Full
+    /// Sandbox created from a template, whose limits come from the template.
     /// </summary>
     public long? DailyApiAllocation { get; set; }
 
@@ -63,19 +64,28 @@ public sealed class SalesforceLimitsOptions
         _ => 25
     };
 
-    /// <summary>Total calls per rolling 24 hours for the whole org (all integrations and users together).</summary>
+    /// <summary>
+    /// Total calls per rolling 24 hours for the whole org (all integrations and users together): Developer Edition
+    /// 15,000; Full Sandbox 5,000,000; production orgs 100,000 + licenses x calls per license type + add-ons.
+    /// </summary>
     public long EffectiveDailyApiAllocation
     {
         get
         {
-            if (DailyApiAllocation is { } fixedAllocation) return fixedAllocation;
+            if (DailyApiAllocation is { } fixedAllocation)
+            {
+                return fixedAllocation;
+            }
             return OrgType switch
             {
                 SalesforceOrgType.DeveloperEdition => DeveloperEditionDailyAllocation,
                 SalesforceOrgType.FullSandbox => FullSandboxDailyAllocation,
-                _ => BaseDailyAllocation
-                     + Licenses.Sum(l => (long)l.Value * CallsPerLicenseFor(l.Key))
-                     + PurchasedApiCalls
+                SalesforceOrgType.Production => BaseDailyAllocation
+                                                + Licenses.Sum(l => (long)l.Value * CallsPerLicenseFor(l.Key))
+                                                + PurchasedApiCalls,
+                _ => throw new InvalidOperationException(
+                    $"Salesforce doesn't publish the daily API allocation of {OrgType} orgs. Set {Section}:DailyApiAllocation " +
+                    "to the number in Setup (System Overview, API Requests, Last 24 Hours).")
             };
         }
     }
