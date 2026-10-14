@@ -9,7 +9,9 @@ public sealed class StatsLogger(FakeSalesforceStore store, ILogger<StatsLogger> 
         try
         {
             while (await timer.WaitForNextTickAsync(stoppingToken))
+            {
                 log.LogInformation("Fake Salesforce: {Stats}", store.GetStats());
+            }
         }
         catch (OperationCanceledException)
         {

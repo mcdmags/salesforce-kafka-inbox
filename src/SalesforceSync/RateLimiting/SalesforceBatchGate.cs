@@ -13,7 +13,10 @@ public sealed class SalesforceBatchGate(SalesforceConcurrencySlots slots, Salesf
     public async Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct)
     {
         var slot = await slots.TryAcquireAsync(ct);
-        if (slot is null) return null;
+        if (slot is null)
+        {
+            return null;
+        }
 
         bool paused;
         try
@@ -25,7 +28,10 @@ public sealed class SalesforceBatchGate(SalesforceConcurrencySlots slots, Salesf
             await slot.DisposeAsync();
             throw;
         }
-        if (!paused) return slot;
+        if (!paused)
+        {
+            return slot;
+        }
 
         await slot.DisposeAsync();
         return null;

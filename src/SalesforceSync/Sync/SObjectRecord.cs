@@ -25,14 +25,17 @@ public sealed record SObjectRecord(
         var meta = SObjectMetadata<TSObject>.Instance;
         var externalId = meta.ExternalIdOf(sobject);
         if (string.IsNullOrWhiteSpace(externalId))
+        {
             throw new ArgumentException($"{meta.SObject}.{meta.ExternalIdField} is required");
+        }
 
         List<SObjectLookup>? lookups = null;
         foreach (var (lookup, targetId) in meta.LookupsOf(sobject))
         {
             if (string.IsNullOrWhiteSpace(targetId))
+            {
                 throw new ArgumentException($"{meta.SObject}.{lookup.Field} needs the external id of the {lookup.TargetSObject} it points at");
-            (lookups ??= []).Add(new SObjectLookup(lookup.Field, lookup.TargetSObject, lookup.TargetExternalIdField, targetId));
+            } (lookups ??= []).Add(new SObjectLookup(lookup.Field, lookup.TargetSObject, lookup.TargetExternalIdField, targetId));
         }
         return new SObjectRecord(referenceId, meta.SObject, meta.ExternalIdField, externalId, meta.FieldsOf(sobject), lookups);
     }

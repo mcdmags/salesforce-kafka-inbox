@@ -10,7 +10,7 @@ internal sealed record Work(string EntityId, UpsertUnit Unit, long Time, long Ev
 internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, List<(long Id, string Error)> Invalid)
 {
     /// <summary>The units to write, keyed by entity id, as the Salesforce step takes them.</summary>
-    public List<(string Key, UpsertUnit Unit)> Units => Work.Select(w => (w.EntityId, w.Unit)).ToList();
+    public List<(string Key, UpsertUnit Unit)> Units => [.. Work.Select(w => (w.EntityId, w.Unit))];
 
     /// <summary>
     /// What to record in the inbox once Salesforce has answered: saved or unchanged entities are done, entities not
@@ -48,5 +48,7 @@ internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, 
     }
 
     private static FailedEvent Failure(Work work, UpsertResult result)
-        => new(work.EventId, string.Join("; ", result.Errors), result.PrimaryError?.Code);
+    {
+        return new(work.EventId, string.Join("; ", result.Errors), result.PrimaryError?.Code);
+    }
 }

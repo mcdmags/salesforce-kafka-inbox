@@ -53,13 +53,17 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     private readonly HashSet<string> _permanent = new(
         options.Value.PermanentErrorCodes ?? DefaultPermanentCodes, StringComparer.Ordinal);
 
-    public bool IsPermanent(string code) => _permanent.Contains(code);
+    public bool IsPermanent(string code)
+    {
+        return _permanent.Contains(code);
+    }
 
     /// <summary>Classifies the errors of one failed record.</summary>
     public SyncOutcome Classify(IReadOnlyCollection<SalesforceError> errors)
     {
         var real = errors.Where(e => !NotAttemptedCodes.Contains(e.Code)).ToList();
-        if (real.Count == 0) return SyncOutcome.NotAttempted;
-        return real.Any(e => IsPermanent(e.Code)) ? SyncOutcome.PermanentFailure : SyncOutcome.TransientFailure;
+        return real.Count == 0
+            ? SyncOutcome.NotAttempted
+            : real.Any(e => IsPermanent(e.Code)) ? SyncOutcome.PermanentFailure : SyncOutcome.TransientFailure;
     }
 }

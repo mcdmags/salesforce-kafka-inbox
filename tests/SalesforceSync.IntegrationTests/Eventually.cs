@@ -13,17 +13,27 @@ public static class Eventually
         while (true)
         {
             last = await probe();
-            if (done(last)) return last;
+            if (done(last))
+            {
+                return last;
+            }
+
             if (DateTime.UtcNow > deadline)
+            {
                 throw new TimeoutException($"Timed out after {(timeout ?? DefaultTimeout).TotalSeconds}s waiting for {what}. Last value: {Describe(last)}");
+            }
+
             await Task.Delay(Interval);
         }
     }
 
-    private static string Describe<T>(T value) => value switch
+    private static string Describe<T>(T value)
     {
-        null => "null",
-        System.Collections.IEnumerable items and not string => "[" + string.Join(", ", items.Cast<object?>()) + "]",
-        _ => value.ToString() ?? ""
-    };
+        return value switch
+        {
+            null => "null",
+            System.Collections.IEnumerable items and not string => "[" + string.Join(", ", items.Cast<object?>()) + "]",
+            _ => value.ToString() ?? ""
+        };
+    }
 }

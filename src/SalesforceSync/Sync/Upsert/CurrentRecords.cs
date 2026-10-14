@@ -14,7 +14,10 @@ internal sealed class CurrentRecord(Dictionary<string, JsonElement> fields)
 
     public IEnumerable<KeyValuePair<string, JsonElement>> Fields => fields;
 
-    public bool TryGetValue(string field, out JsonElement value) => fields.TryGetValue(field, out value);
+    public bool TryGetValue(string field, out JsonElement value)
+    {
+        return fields.TryGetValue(field, out value);
+    }
 }
 
 /// <summary>Rows read from Salesforce, indexed by every text field that was selected (external ids, Id).</summary>
@@ -22,7 +25,7 @@ internal sealed class CurrentRecords
 {
     public static readonly CurrentRecords None = new([]);
 
-    private readonly Dictionary<(string SObject, string Field, string Value), CurrentRecord> _index = new();
+    private readonly Dictionary<(string SObject, string Field, string Value), CurrentRecord> _index = [];
 
     /// <summary>The rows of a Composite read (by query reference id), each query's rows belonging to one object.</summary>
     public static CurrentRecords From(IReadOnlyDictionary<string, List<JsonElement>> rowsByQuery, IEnumerable<ReadQuery> queries)
@@ -39,17 +42,29 @@ internal sealed class CurrentRecords
         {
             var sobjectKey = sobject.ToLowerInvariant();
             foreach (var (field, value) in record.Fields)
+            {
                 if (value.ValueKind == JsonValueKind.String)
+                {
                     _index.TryAdd((sobjectKey, field.ToLowerInvariant(), value.GetString()!), record);
+                }
+            }
         }
     }
 
     public CurrentRecord? Find(string sobject, string field, string value)
-        => _index.GetValueOrDefault((sobject.ToLowerInvariant(), field.ToLowerInvariant(), value));
+    {
+        return _index.GetValueOrDefault((sobject.ToLowerInvariant(), field.ToLowerInvariant(), value));
+    }
 
     /// <summary>The record as Salesforce has it, or null if it doesn't exist yet.</summary>
-    public CurrentRecord? Find(SObjectRecord record) => Find(record.SObject, record.ExternalIdField, record.ExternalId);
+    public CurrentRecord? Find(SObjectRecord record)
+    {
+        return Find(record.SObject, record.ExternalIdField, record.ExternalId);
+    }
 
     /// <summary>The record a lookup points at, or null if it isn't in Salesforce.</summary>
-    public CurrentRecord? Find(SObjectLookup lookup) => Find(lookup.SObject, lookup.ExternalIdField, lookup.ExternalId);
+    public CurrentRecord? Find(SObjectLookup lookup)
+    {
+        return Find(lookup.SObject, lookup.ExternalIdField, lookup.ExternalId);
+    }
 }

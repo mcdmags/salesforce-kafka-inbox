@@ -9,7 +9,6 @@ using Microsoft.Extensions.Options;
 using Npgsql;
 using SalesforceSync.Data;
 using SalesforceSync.Inbox;
-using SalesforceSync.Sync;
 using SalesforceSync.IntegrationTests.Hosting;
 using Testcontainers.Kafka;
 using Testcontainers.PostgreSql;
@@ -109,7 +108,10 @@ public class SyncFixture : IAsyncLifetime
     public IReadOnlyList<WorkerPod> RunningPods => _pods;
 
     /// <summary>Runs once the inbox schema exists, before any test.</summary>
-    protected virtual Task OnStartedAsync() => Task.CompletedTask;
+    protected virtual Task OnStartedAsync()
+    {
+        return Task.CompletedTask;
+    }
 
     public async Task InitializeAsync()
     {
@@ -160,40 +162,62 @@ public class SyncFixture : IAsyncLifetime
         await Task.WhenAll(_pods.Select(p => p.DisposeAsync().AsTask()));
         _producer?.Dispose();
         Salesforce?.Dispose();
-        if (_db is not null) await _db.DisposeAsync();
-        if (_org is not null) await _org.DisposeAsync();
+        if (_db is not null)
+        {
+            await _db.DisposeAsync();
+        }
+
+        if (_org is not null)
+        {
+            await _org.DisposeAsync();
+        }
+
         await Task.WhenAll(_kafka.DisposeAsync().AsTask(), _postgres.DisposeAsync().AsTask());
     }
 
     /// <summary>Publishes an account change event, keyed by account like the real upstream.</summary>
     public async Task PublishAsync(string accountExtId, long version, JsonObject account, JsonObject profile)
-        => await _producer!.ProduceAsync(Topic, Event(accountExtId, version, account, profile));
+    {
+        await _producer!.ProduceAsync(Topic, Event(accountExtId, version, account, profile));
+    }
 
     /// <summary>
     /// Publishes a raw message value as it is, under any Kafka key (or none) and on either topic. The sync must not
     /// depend on the key, so tests use this to scatter one entity's events over partitions.
     /// </summary>
     public async Task PublishRawAsync(string? key, string value, string topic = Topic)
-        => await _producer!.ProduceAsync(topic, new Message<string, string> { Key = key!, Value = value });
+    {
+        await _producer!.ProduceAsync(topic, new Message<string, string> { Key = key!, Value = value });
+    }
 
     /// <summary>Fire-and-forget produce for bulk loads; call <see cref="Flush"/> afterwards.</summary>
     public void Publish(string accountExtId, long version, JsonObject account, JsonObject profile)
-        => _producer!.Produce(Topic, Event(accountExtId, version, account, profile), report =>
-        {
-            if (report.Error.IsError) throw new InvalidOperationException($"Produce failed: {report.Error.Reason}");
-        });
+    {
+        _producer!.Produce(Topic, Event(accountExtId, version, account, profile), report =>
+            {
+                if (report.Error.IsError)
+                {
+                    throw new InvalidOperationException($"Produce failed: {report.Error.Reason}");
+                }
+            });
+    }
 
     public void Flush()
     {
         if (_producer!.Flush(TimeSpan.FromSeconds(30)) > 0)
+        {
             throw new TimeoutException("Kafka producer did not flush all messages");
+        }
     }
 
-    private static Message<string, string> Event(string accountExtId, long version, JsonObject account, JsonObject profile) => new()
+    private static Message<string, string> Event(string accountExtId, long version, JsonObject account, JsonObject profile)
     {
-        Key = accountExtId,
-        Value = AccountEvent(accountExtId, version, account, profile).ToJsonString()
-    };
+        return new()
+        {
+            Key = accountExtId,
+            Value = AccountEvent(accountExtId, version, account, profile).ToJsonString()
+        };
+    }
 
     /// <summary>
     /// The envelope of an account event: <c>{ "meta": { "time" }, "account": { "externalId", ...account, "profile":
@@ -224,51 +248,76 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>meta of version N: its time, and by default "inserted" for version 1 and "updated" for every later one.</summary>
-    public static JsonObject Meta(long version, string? type = null) => new()
+    public static JsonObject Meta(long version, string? type = null)
     {
-        ["time"] = BaseTime.AddMilliseconds(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
-        ["type"] = type ?? (version == 1 ? "inserted" : "updated")
-    };
+        return new()
+        {
+            ["time"] = BaseTime.AddMilliseconds(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+            ["type"] = type ?? (version == 1 ? "inserted" : "updated")
+        };
+    }
 
     private static JsonObject Body(string externalId, JsonObject fields)
     {
         var body = new JsonObject { ["externalId"] = externalId };
-        foreach (var (name, value) in fields) body[name] = value?.DeepClone();
+        foreach (var (name, value) in fields)
+        {
+            body[name] = value?.DeepClone();
+        }
+
         return body;
     }
 
     /// <summary>A fresh account external id, so tests don't interfere through shared state.</summary>
-    public static string NewAccountId() => Any.String("E2E-");
+    public static string NewAccountId()
+    {
+        return Any.String("E2E-");
+    }
 
-    public static string NewRelationshipId() => Any.String("REL-");
+    public static string NewRelationshipId()
+    {
+        return Any.String("REL-");
+    }
 
-    public static string ProfileIdFor(string accountExtId) => accountExtId.Replace("E2E-", "PRF-");
+    public static string ProfileIdFor(string accountExtId)
+    {
+        return accountExtId.Replace("E2E-", "PRF-");
+    }
 
     /// <summary>Record from the mock org by external id, or null if it does not exist (yet).</summary>
     public async Task<JsonObject?> GetRecordAsync(string sobject, string externalId)
     {
         using var res = await Salesforce.GetAsync($"/__fake/records/{sobject}/{Uri.EscapeDataString(externalId)}");
-        if (res.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
+        if (res.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
         res.EnsureSuccessStatusCode();
         return await res.Content.ReadFromJsonAsync<JsonObject>();
     }
 
     /// <summary>Field values of every write the mock org applied to the record, oldest first (the create first).</summary>
     public async Task<List<JsonObject>> GetHistoryAsync(string sobject, string externalId)
-        => await Salesforce.GetFromJsonAsync<List<JsonObject>>(
-               $"/__fake/history/{sobject}/{Uri.EscapeDataString(externalId)}")
-           ?? throw new InvalidOperationException("Empty history response");
+    {
+        return await Salesforce.GetFromJsonAsync<List<JsonObject>>(
+                   $"/__fake/history/{sobject}/{Uri.EscapeDataString(externalId)}")
+               ?? throw new InvalidOperationException("Empty history response");
+    }
 
-    public async Task<JsonElement> GetStatsAsync() => await Salesforce.GetFromJsonAsync<JsonElement>("/__fake/stats");
+    public async Task<JsonElement> GetStatsAsync()
+    {
+        return await Salesforce.GetFromJsonAsync<JsonElement>("/__fake/stats");
+    }
 
     /// <summary>
     /// The composite write requests the mock org received (the most recent ones, oldest first) that mention any of
     /// <paramref name="texts"/>: a create carries the record's external id, an update only its Id.
     /// </summary>
     public async Task<List<JsonObject>> GetWriteRequestsAsync(params string[] texts)
-        => (await Salesforce.GetFromJsonAsync<List<JsonObject>>("/__fake/requests") ?? [])
-            .Where(r => r.ToJsonString() is var json && texts.Any(t => json.Contains(t, StringComparison.Ordinal)))
-            .ToList();
+    {
+        return [.. (await Salesforce.GetFromJsonAsync<List<JsonObject>>("/__fake/requests") ?? []).Where(r => r.ToJsonString() is var json && texts.Any(t => json.Contains(t, StringComparison.Ordinal)))];
+    }
 
     /// <summary>Makes the mock org reject the next <paramref name="times"/> writes of one record with a Salesforce error code.</summary>
     public async Task InjectFaultAsync(string sobject, string externalId, string errorCode, int times)
@@ -287,17 +336,13 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>The account inbox through the worker's own repository, to play a worker by hand.</summary>
-    public IRepository<AccountInboxRow> AccountInbox
-    {
-        get
-        {
-            return new InboxRepository<AccountInboxRow>(Contexts, Options.Create(new SyncOptions()));
-        }
-    }
+    public IRepository<AccountInboxRow> AccountInbox => new InboxRepository<AccountInboxRow>(Contexts, Options.Create(new SyncOptions()));
 
     /// <summary>(version, status) of every inbox row for the entity, by version then arrival (version N = meta.time BaseTime + N ms).</summary>
     public async Task<IReadOnlyList<(long Version, string Status)>> GetInboxAsync(string key, string entityType = Accounts)
-        => (await GetInboxRowsAsync(key, entityType)).Select(r => (r.Version, r.Status)).ToList();
+    {
+        return [.. (await GetInboxRowsAsync(key, entityType)).Select(r => (r.Version, r.Status))];
+    }
 
     /// <summary>
     /// The entity's inbox rows. The table has no event columns, so the version is read here from the stored payload,
@@ -311,10 +356,9 @@ public class SyncFixture : IAsyncLifetime
             select id, payload::text, status, retry_count, last_error_code, locked_until, lock_token
             from {InboxTable(entityType)} where entity_id = @key order by id
             """, new { key });
-        return rows
+        return [.. rows
             .Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.RetryCount, r.ErrorCode, r.LockedUntil, r.LockToken))
-            .OrderBy(r => r.Version).ThenBy(r => r.Id)
-            .ToList();
+            .OrderBy(r => r.Version).ThenBy(r => r.Id)];
     }
 
     private static long VersionOf(string payload)
@@ -341,14 +385,18 @@ public class SyncFixture : IAsyncLifetime
     /// <summary>Polls until every expected inbox row exists and none is pending, then returns them (by version, then arrival).</summary>
     public Task<IReadOnlyList<(long Version, string Status)>> WaitForInboxSettledAsync(string key, int expectedRows,
         string entityType = Accounts)
-        => Eventually.ValueAsync(
-            () => GetInboxAsync(key, entityType),
-            rows => rows.Count == expectedRows && rows.All(r => r.Status != "pending"),
-            $"inbox rows for {entityType} {key} to settle");
+    {
+        return Eventually.ValueAsync(
+                () => GetInboxAsync(key, entityType),
+                rows => rows.Count == expectedRows && rows.All(r => r.Status != "pending"),
+                $"inbox rows for {entityType} {key} to settle");
+    }
 
     /// <summary>librdkafka wants host:port; Testcontainers reports a URI (PLAINTEXT://host:port/).</summary>
     private static string BootstrapServers(string address)
-        => Uri.TryCreate(address, UriKind.Absolute, out var uri) ? $"{uri.Host}:{uri.Port}" : address;
+    {
+        return Uri.TryCreate(address, UriKind.Absolute, out var uri) ? $"{uri.Host}:{uri.Port}" : address;
+    }
 
     /// <summary>Creates both topics up front (6 partitions, like production), so pods never race to auto-create them.</summary>
     private static async Task EnsureTopicsAsync(string bootstrap)

@@ -58,7 +58,10 @@ public sealed class InboxWorkerService(
         var syncs = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().ToList();
         var processed = 0;
         for (var i = 0; i < syncs.Count; i++)
+        {
             processed += await syncs[(rotation + i) % syncs.Count].SyncBatchAsync(ct);
+        }
+
         return processed;
     }
 }

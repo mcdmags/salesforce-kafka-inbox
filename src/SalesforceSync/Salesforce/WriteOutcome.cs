@@ -15,19 +15,22 @@ public static class WriteOutcome
     /// the request may have left, 502/503/504 from something in front of Salesforce, or a response that can't be read.</item>
     /// </list>
     /// </summary>
-    public static bool IsUnknown(Exception ex) => !IsMarkedNotSent(ex) && ex switch
+    public static bool IsUnknown(Exception ex)
     {
-        RateLimitedException limited => limited.MayHaveBeenProcessed,
-        SalesforceResponseException r => (int)r.StatusCode! >= 500 && !r.IsSalesforceError,
-        HttpRequestException { StatusCode: { } status } => (int)status >= 500,
-        HttpRequestException
+        return !IsMarkedNotSent(ex) && ex switch
         {
-            HttpRequestError: HttpRequestError.ConnectionError or HttpRequestError.NameResolutionError
-                or HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError
-        } => false,
-        ArgumentException => false, // refused by the client before anything was sent (too many collections or records)
-        _ => true
-    };
+            RateLimitedException limited => limited.MayHaveBeenProcessed,
+            SalesforceResponseException r => (int)r.StatusCode! >= 500 && !r.IsSalesforceError,
+            HttpRequestException { StatusCode: { } status } => (int)status >= 500,
+            HttpRequestException
+            {
+                HttpRequestError: HttpRequestError.ConnectionError or HttpRequestError.NameResolutionError
+                    or HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError
+            } => false,
+            ArgumentException => false, // refused by the client before anything was sent (too many collections or records)
+            _ => true
+        };
+    }
 
     private const string NotSentKey = "SalesforceSync.NotSent";
 
@@ -36,12 +39,21 @@ public static class WriteOutcome
     /// token, fetching the OAuth token), so it is never taken for a write that may have been applied. The exception
     /// keeps its type; rethrow it.
     /// </summary>
-    public static void MarkNotSent(Exception ex) => ex.Data[NotSentKey] = true;
+    public static void MarkNotSent(Exception ex)
+    {
+        ex.Data[NotSentKey] = true;
+    }
 
     private static bool IsMarkedNotSent(Exception? ex)
     {
         for (; ex is not null; ex = ex.InnerException)
-            if (ex.Data.Contains(NotSentKey)) return true;
+        {
+            if (ex.Data.Contains(NotSentKey))
+            {
+                return true;
+            }
+        }
+
         return false;
     }
 }

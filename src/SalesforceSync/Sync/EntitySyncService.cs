@@ -25,7 +25,13 @@ public abstract class EntitySyncService<TEvent, TRow>(
         return ok;
     }
 
-    public Task StoreEventAsync(string entityId, string json, CancellationToken ct) => inbox.AddAsync(entityId, json, ct);
+    public Task StoreEventAsync(string entityId, string json, CancellationToken ct)
+    {
+        return inbox.AddAsync(entityId, json, ct);
+    }
 
-    public Task<int> SyncBatchAsync(CancellationToken ct) => engine.UpsertBatchAsync(strategy, inbox, ct);
+    public Task<int> SyncBatchAsync(CancellationToken ct)
+    {
+        return engine.UpsertBatchAsync(strategy, inbox, ct);
+    }
 }

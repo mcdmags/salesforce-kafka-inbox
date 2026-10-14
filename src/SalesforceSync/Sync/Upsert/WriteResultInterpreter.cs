@@ -13,7 +13,9 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     {
         // Parents were sent first, so a child is classified after its parent
         foreach (var (referenceId, _, writes) in request.Collections)
+        {
             ClassifyCollection(referenceId, writes, answers.FirstOrDefault(a => a.ReferenceId == referenceId), saved);
+        }
 
         // Records failed, but none says why (every one of them reports being rolled back because of another): handing
         // the units straight back would repeat the same request forever, so they spend a retry and back off instead.
@@ -21,7 +23,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
         var causeUnknown = all.Any(w => w.Status != WriteStatus.Saved)
                            && !all.Any(w => w.Status is WriteStatus.Transient or WriteStatus.Permanent);
 
-        return request.Units.Select(unit => UnitResult(unit, causeUnknown)).ToList();
+        return [.. request.Units.Select(unit => UnitResult(unit, causeUnknown))];
     }
 
     /// <summary>Sets the status and errors of every record of one collection from its subrequest's answer.</summary>
@@ -42,9 +44,11 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
                 continue;
             }
 
-            write.Errors = (result?.Errors ?? subrequestErrors!).Select(e => Translate(write, e)).ToList();
+            write.Errors = [.. (result?.Errors ?? subrequestErrors!).Select(e => Translate(write, e))];
             if (result is not null && write.Errors.Count == 0)
+            {
                 write.Errors.Add(new SalesforceError(write.ReferenceId, "UNKNOWN_ERROR", "The record failed without error details"));
+            }
 
             write.Status = FailureStatus(write, hasOwnResult: result is not null, brokenReference);
         }
@@ -55,7 +59,8 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     /// each record has a result of its own.
     /// </summary>
     private static IReadOnlyList<SalesforceError>? SubrequestErrors(string referenceId, int sent, CollectionResult? answer)
-        => answer switch
+    {
+        return answer switch
         {
             null => [],   // not in the response: never processed
             { Records: null } => answer.Errors,
@@ -63,14 +68,21 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
                 [new SalesforceError(referenceId, "UNKNOWN_ERROR", $"{records.Count} results for {sent} records")],
             _ => null
         };
+    }
 
     /// <param name="hasOwnResult">False when the record's subrequest failed as a whole.</param>
     private WriteStatus FailureStatus(PlannedWrite write, bool hasOwnResult, bool brokenReference)
     {
-        if (write.Links.Any(l => l.Parent.Status != WriteStatus.Saved)) return WriteStatus.ParentNotSaved;
+        if (write.Links.Any(l => l.Parent.Status != WriteStatus.Saved))
+        {
+            return WriteStatus.ParentNotSaved;
+        }
 
         var ownErrors = write.Errors.Where(e => !SalesforceErrors.NotAttemptedCodes.Contains(e.Code)).ToList();
-        if (ownErrors.Count == 0 || (!hasOwnResult && brokenReference)) return WriteStatus.NotAttempted;
+        if (ownErrors.Count == 0 || (!hasOwnResult && brokenReference))
+        {
+            return WriteStatus.NotAttempted;
+        }
 
         // A subrequest that failed as a whole says nothing about any one record's data, so it never
         // dead-letters: the records are retried, and by then a child finds its parent by the read
@@ -120,5 +132,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
 
     /// <summary>The record was deleted between the read and the update: the next read finds it gone and creates it.</summary>
     private static bool IsStaleUpdate(PlannedWrite write, SalesforceError e)
-        => !write.Create && e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED";
+    {
+        return !write.Create && e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED";
+    }
 }

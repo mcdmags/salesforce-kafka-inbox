@@ -24,11 +24,16 @@ internal static class RecordDiffer
         foreach (var (field, value) in record.Fields)
         {
             // A new record has no value to clear, and an explicit null would override the field's default
-            if (existing is null && value is null) continue;
+            if (existing is null && value is null)
+            {
+                continue;
+            }
 
             JsonElement stored = default;
             if (existing is not null && existing.TryGetValue(field.Name, out stored) && FieldValues.AreEqual(field, value, stored))
+            {
                 continue;
+            }
 
             if (NotWritable(record, field, existing) is { } problem)
             {
@@ -49,8 +54,9 @@ internal static class RecordDiffer
     public static SalesforceError? NotWritable(NormalizedRecord record, SalesforceField field, CurrentRecord? existing)
     {
         var creating = existing is null;
-        if (creating ? field.Createable : field.Updateable) return null;
-        return new SalesforceError(record.ReferenceId, "INVALID_FIELD_FOR_INSERT_UPDATE",
-            $"{record.Schema.Name}.{field.Name} is not {(creating ? "createable" : "updateable")}");
+        return (creating ? field.Createable : field.Updateable)
+            ? null
+            : new SalesforceError(record.ReferenceId, "INVALID_FIELD_FOR_INSERT_UPDATE",
+                $"{record.Schema.Name}.{field.Name} is not {(creating ? "createable" : "updateable")}");
     }
 }

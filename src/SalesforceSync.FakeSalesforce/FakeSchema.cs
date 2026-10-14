@@ -85,31 +85,39 @@ public static class FakeSchema
     };
 
     /// <summary>Custom objects without a prefix of their own share one.</summary>
-    public static string KeyPrefixOf(string sobject) => KeyPrefixes.GetValueOrDefault(sobject, "a01");
+    public static string KeyPrefixOf(string sobject)
+    {
+        return KeyPrefixes.GetValueOrDefault(sobject, "a01");
+    }
 
     public static FakeField? Find(string sobject, string field)
-        => Objects.TryGetValue(sobject, out var fields)
-            ? fields.FirstOrDefault(f => f.Name.Equals(field, StringComparison.OrdinalIgnoreCase))
-            : null;
-
-    public static JsonObject Describe(string sobject) => new()
     {
-        ["name"] = Objects.Keys.First(k => k.Equals(sobject, StringComparison.OrdinalIgnoreCase)),
-        ["fields"] = new JsonArray(Objects[sobject].Select(f => (JsonNode)new JsonObject
+        return Objects.TryGetValue(sobject, out var fields)
+                ? fields.FirstOrDefault(f => f.Name.Equals(field, StringComparison.OrdinalIgnoreCase))
+                : null;
+    }
+
+    public static JsonObject Describe(string sobject)
+    {
+        return new()
         {
-            ["name"] = f.Name,
-            ["type"] = f.Type,
-            ["length"] = f.Length,
-            ["precision"] = f.Precision,
-            ["scale"] = f.Scale,
-            ["digits"] = f.Digits,
-            ["createable"] = f.Createable,
-            ["updateable"] = f.Updateable,
-            ["nillable"] = f.Nillable,
-            ["referenceTo"] = f.ReferenceTo is null ? new JsonArray() : new JsonArray(f.ReferenceTo),
-            ["relationshipName"] = f.RelationshipName
-        }).ToArray())
-    };
+            ["name"] = Objects.Keys.First(k => k.Equals(sobject, StringComparison.OrdinalIgnoreCase)),
+            ["fields"] = new JsonArray([.. Objects[sobject].Select(f => (JsonNode)new JsonObject
+            {
+                ["name"] = f.Name,
+                ["type"] = f.Type,
+                ["length"] = f.Length,
+                ["precision"] = f.Precision,
+                ["scale"] = f.Scale,
+                ["digits"] = f.Digits,
+                ["createable"] = f.Createable,
+                ["updateable"] = f.Updateable,
+                ["nillable"] = f.Nillable,
+                ["referenceTo"] = f.ReferenceTo is null ? [] : new JsonArray(f.ReferenceTo),
+                ["relationshipName"] = f.RelationshipName
+            })])
+        };
+    }
 
     /// <summary>The value Salesforce would store, or an error (code, message) it would return.</summary>
     public static (JsonNode? Stored, string? Code, string? Message) Store(FakeField field, JsonNode? value)
@@ -118,26 +126,47 @@ public static class FakeSchema
         var text = kind == JsonValueKind.String ? value!.GetValue<string>() : null;
         if (kind == JsonValueKind.Null || text == "")
         {
-            if (field.Type == "boolean") return (false, null, null);
+            if (field.Type == "boolean")
+            {
+                return (false, null, null);
+            }
+
             return field.Nillable ? (null, null, null) : (null, "REQUIRED_FIELD_MISSING", $"Required fields are missing: [{field.Name}]");
         }
 
         switch (field.Type)
         {
             case "int" or "double" or "currency" or "percent":
-            {
-                decimal number;
-                if (kind == JsonValueKind.Number) number = decimal.Parse(value!.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
-                else if (text is not null && decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)) number = parsed;
-                else return Invalid(field, value);
-                number = Math.Round(number, field.Type == "int" ? 0 : field.Scale, MidpointRounding.AwayFromZero);
-                return (JsonValue.Create(number), null, null);
-            }
+                {
+                    decimal number;
+                    if (kind == JsonValueKind.Number)
+                    {
+                        number = decimal.Parse(value!.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
+                    }
+                    else if (text is not null && decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+                    {
+                        number = parsed;
+                    }
+                    else
+                    {
+                        return Invalid(field, value);
+                    }
+
+                    number = Math.Round(number, field.Type == "int" ? 0 : field.Scale, MidpointRounding.AwayFromZero);
+                    return (JsonValue.Create(number), null, null);
+                }
             case "boolean":
-                if (kind is JsonValueKind.True or JsonValueKind.False) return (value!.DeepClone(), null, null);
+                if (kind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    return (value!.DeepClone(), null, null);
+                }
+
                 return text is not null && bool.TryParse(text, out var b) ? (b, null, null) : Invalid(field, value);
             case "multipicklist":
-                if (text is null) return Invalid(field, value);
+                if (text is null)
+                {
+                    return Invalid(field, value);
+                }
                 // Salesforce returns the selected values in the picklist's defined order; here: alphabetical
                 var ordered = string.Join(';', text.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
                     .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
@@ -149,27 +178,33 @@ public static class FakeSchema
             case "datetime":
                 // Stored to the second, like Salesforce's date/time fields
                 return text is not null && DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var t)
-                    ? (FormatDateTime(new DateTimeOffset(t.UtcTicks - t.UtcTicks % TimeSpan.TicksPerSecond, TimeSpan.Zero)), null, null)
+                    ? (FormatDateTime(new DateTimeOffset(t.UtcTicks - (t.UtcTicks % TimeSpan.TicksPerSecond), TimeSpan.Zero)), null, null)
                     : Invalid(field, value);
             case "id" or "reference":
                 return text is { Length: 15 or 18 } ? (text, null, null) : (null, "MALFORMED_ID", $"{field.Name}: id value of incorrect type: {text}");
             default:
-            {
-                var s = text ?? value!.ToJsonString();
-                return TooLong(field, s) ?? (s, null, null);
-            }
+                {
+                    var s = text ?? value!.ToJsonString();
+                    return TooLong(field, s) ?? (s, null, null);
+                }
         }
     }
 
     /// <summary>Salesforce's date/time format, e.g. 2026-10-13T01:02:03.000+0000.</summary>
     public static string FormatDateTime(DateTimeOffset t)
-        => t.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'+0000'", CultureInfo.InvariantCulture);
+    {
+        return t.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'+0000'", CultureInfo.InvariantCulture);
+    }
 
     private static (JsonNode?, string?, string?)? TooLong(FakeField field, string text)
-        => field.Length > 0 && text.Length > field.Length
-            ? (null, "STRING_TOO_LONG", $"{field.Name}: data value too large: {text[..Math.Min(20, text.Length)]}... (max length={field.Length})")
-            : null;
+    {
+        return field.Length > 0 && text.Length > field.Length
+                ? (null, "STRING_TOO_LONG", $"{field.Name}: data value too large: {text[..Math.Min(20, text.Length)]}... (max length={field.Length})")
+                : null;
+    }
 
     private static (JsonNode?, string?, string?) Invalid(FakeField field, JsonNode? value)
-        => (null, "INVALID_TYPE_ON_FIELD_IN_RECORD", $"{field.Name}: value not of required type: {value?.ToJsonString()}");
+    {
+        return (null, "INVALID_TYPE_ON_FIELD_IN_RECORD", $"{field.Name}: value not of required type: {value?.ToJsonString()}");
+    }
 }

@@ -1,5 +1,4 @@
 using System.IO.Compression;
-using System.Net.Http.Headers;
 using Microsoft.Extensions.Options;
 
 namespace SalesforceSync.Salesforce;
@@ -21,11 +20,16 @@ public sealed class GzipRequestHandler(IOptions<SalesforceOptions> options) : De
             {
                 using var buffer = new MemoryStream();
                 await using (var gzip = new GZipStream(buffer, CompressionLevel.Fastest, leaveOpen: true))
+                {
                     await gzip.WriteAsync(bytes, ct);
+                }
 
                 var compressed = new ByteArrayContent(buffer.ToArray());
                 foreach (var header in content.Headers.Where(h => h.Key != "Content-Length"))
+                {
                     compressed.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                }
+
                 compressed.Headers.ContentEncoding.Add("gzip");
                 request.Content = compressed;
             }
@@ -34,7 +38,10 @@ public sealed class GzipRequestHandler(IOptions<SalesforceOptions> options) : De
                 // Already buffered; resend the same bytes
                 var plain = new ByteArrayContent(bytes);
                 foreach (var header in content.Headers.Where(h => h.Key != "Content-Length"))
+                {
                     plain.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                }
+
                 request.Content = plain;
             }
             content.Dispose();

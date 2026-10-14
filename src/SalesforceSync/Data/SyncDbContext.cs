@@ -25,15 +25,16 @@ public class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(
     public DbSet<SyncStateRow> SyncState => Set<SyncStateRow>();
 
     /// <summary>The tables of all inbox row types, as the model names them.</summary>
-    public IReadOnlyList<string> InboxTables => Model.GetEntityTypes()
+    public IReadOnlyList<string> InboxTables => [.. Model.GetEntityTypes()
         .Where(e => e.ClrType.IsAssignableTo(typeof(InboxRow)))
-        .Select(e => e.GetTableName()!)
-        .ToList();
+        .Select(e => e.GetTableName()!)];
 
     /// <summary>The inbox table of a row type: the model is the one place that names it.</summary>
     public string TableOf<TRow>() where TRow : InboxRow
-        => Model.FindEntityType(typeof(TRow))?.GetTableName()
-           ?? throw new InvalidOperationException($"{typeof(TRow).Name} is not mapped in {nameof(SyncDbContext)}");
+    {
+        return Model.FindEntityType(typeof(TRow))?.GetTableName()
+               ?? throw new InvalidOperationException($"{typeof(TRow).Name} is not mapped in {nameof(SyncDbContext)}");
+    }
 
     /// <summary>The factory the worker, the benchmarks and the tests share: contexts pooled over <paramref name="db"/>.</summary>
     public static IDbContextFactory<SyncDbContext> CreateFactory(NpgsqlDataSource db, PostgresRetryOptions? retry = null)

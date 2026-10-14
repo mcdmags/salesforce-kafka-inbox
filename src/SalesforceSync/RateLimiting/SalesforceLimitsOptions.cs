@@ -69,31 +69,27 @@ public sealed class SalesforceLimitsOptions
     /// Total calls per rolling 24 hours for the whole org (all integrations and users together): Developer Edition
     /// 15,000; Full Sandbox 5,000,000; production orgs 100,000 + licenses x calls per license type + add-ons.
     /// </summary>
-    public long EffectiveDailyApiAllocation
-    {
-        get
-        {
-            if (DailyApiAllocation is { } fixedAllocation)
-            {
-                return fixedAllocation;
-            }
-            return OrgType switch
-            {
-                SalesforceOrgType.DeveloperEdition => DeveloperEditionDailyAllocation,
-                SalesforceOrgType.FullSandbox => FullSandboxDailyAllocation,
-                SalesforceOrgType.Production => BaseDailyAllocation
-                                                + Licenses.Sum(l => (long)l.Value * CallsPerLicenseFor(l.Key))
-                                                + PurchasedApiCalls,
-                _ => throw new InvalidOperationException(
-                    $"Salesforce doesn't publish the daily API allocation of {OrgType} orgs. Set {Section}:DailyApiAllocation " +
-                    "to the number in Setup (System Overview, API Requests, Last 24 Hours).")
-            };
-        }
-    }
+    public long EffectiveDailyApiAllocation => DailyApiAllocation is { } fixedAllocation
+                ? fixedAllocation
+                : OrgType switch
+                {
+                    SalesforceOrgType.DeveloperEdition => DeveloperEditionDailyAllocation,
+                    SalesforceOrgType.FullSandbox => FullSandboxDailyAllocation,
+                    SalesforceOrgType.Production => BaseDailyAllocation
+                                                    + Licenses.Sum(l => (long)l.Value * CallsPerLicenseFor(l.Key))
+                                                    + PurchasedApiCalls,
+                    _ => throw new InvalidOperationException(
+                        $"Salesforce doesn't publish the daily API allocation of {OrgType} orgs. Set {Section}:DailyApiAllocation " +
+                        "to the number in Setup (System Overview, API Requests, Last 24 Hours).")
+                };
 
     public int CallsPerLicenseFor(string licenseType)
     {
-        if (CallsPerLicense.TryGetValue(licenseType, out var custom)) return custom;
+        if (CallsPerLicense.TryGetValue(licenseType, out var custom))
+        {
+            return custom;
+        }
+
         var table = Edition is SalesforceEdition.Unlimited or SalesforceEdition.Performance
             ? UnlimitedPerformanceCalls
             : EnterpriseProfessionalCalls;
@@ -143,7 +139,10 @@ public sealed class SalesforceLimitsValidator(IOptions<SyncOptions> sync, IOptio
 
         try
         {
-            if (o.EffectiveDailyApiAllocation <= 0) errors.Add("The daily API allocation must be positive.");
+            if (o.EffectiveDailyApiAllocation <= 0)
+            {
+                errors.Add("The daily API allocation must be positive.");
+            }
         }
         catch (InvalidOperationException ex)
         {
@@ -152,28 +151,45 @@ public sealed class SalesforceLimitsValidator(IOptions<SyncOptions> sync, IOptio
 
         var concurrent = o.EffectiveConcurrentLongRunningLimit;
         if (sync.Value.MaxConcurrentRequests > concurrent)
+        {
             errors.Add($"Sync:MaxConcurrentRequests ({sync.Value.MaxConcurrentRequests}) exceeds the org's limit of " +
                        $"{concurrent} concurrent long-running requests ({o.OrgType}). Other integrations share that " +
                        "limit, so keep it well below.");
+        }
 
         if (o.RequestTimeout <= TimeSpan.Zero || o.RequestTimeout > SalesforceLimitsOptions.MaxApiTimeout)
+        {
             errors.Add($"{SalesforceLimitsOptions.Section}:RequestTimeout ({o.RequestTimeout}) must be > 0 and at most " +
                        $"the Salesforce API timeout of {SalesforceLimitsOptions.MaxApiTimeout}.");
+        }
+
         if (sync.Value.Lease <= o.RequestTimeout)
+        {
             errors.Add($"{SyncOptions.Section}:Lease ({sync.Value.Lease}) must be longer than {SalesforceLimitsOptions.Section}:" +
                        $"RequestTimeout ({o.RequestTimeout}), so a call that is merely slow can't outlive the lease on the entities it writes.");
+        }
+
         if (o.RequestTimeout <= rate.Value.MaxWait)
+        {
             errors.Add($"{SalesforceLimitsOptions.Section}:RequestTimeout ({o.RequestTimeout}) must be longer than " +
                        $"{RateLimitOptions.Section}:MaxWait ({rate.Value.MaxWait}), which it includes.");
+        }
 
         if (rate.Value.MaxRequestsPerSecond <= 0)
+        {
             errors.Add($"{RateLimitOptions.Section}:MaxRequestsPerSecond must be positive.");
+        }
+
         if (rate.Value.BurstCapacity < 1)
+        {
             errors.Add($"{RateLimitOptions.Section}:BurstCapacity must be at least 1.");
+        }
 
         var share = rate.Value.DailyBudgetShare;
         if (share is <= 0 or > 1)
+        {
             errors.Add($"{RateLimitOptions.Section}:DailyBudgetShare ({share}) must be in (0, 1].");
+        }
 
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);
     }

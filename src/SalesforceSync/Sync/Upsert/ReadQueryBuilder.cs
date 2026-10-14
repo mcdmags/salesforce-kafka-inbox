@@ -41,10 +41,10 @@ internal static class ReadQueryBuilder
             }
         }
 
-        if (composite.Count > SalesforceRestClient.MaxCompositeQueries)
-            throw new InvalidOperationException(
-                $"The strategy's queries need {composite.Count} SOQL queries; a Composite request allows {SalesforceRestClient.MaxCompositeQueries}. Use a smaller Sync:BatchSize.");
-        return composite;
+        return composite.Count > SalesforceRestClient.MaxCompositeQueries
+            ? throw new InvalidOperationException(
+                $"The strategy's queries need {composite.Count} SOQL queries; a Composite request allows {SalesforceRestClient.MaxCompositeQueries}. Use a smaller Sync:BatchSize.")
+            : composite;
     }
 
     /// <summary>
@@ -61,11 +61,10 @@ internal static class ReadQueryBuilder
             .Where(l => target.Name.Equals(l.SObject, StringComparison.OrdinalIgnoreCase))
             .Select(l => l.ExternalIdField);
 
-        return ownFields.Concat(lookedUpBy)
+        return [.. ownFields.Concat(lookedUpBy)
             .Append(query.WhereField)
             .Append("Id")
             .Select(f => target.Find(f)?.Name ?? f)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+            .Distinct(StringComparer.OrdinalIgnoreCase)];
     }
 }

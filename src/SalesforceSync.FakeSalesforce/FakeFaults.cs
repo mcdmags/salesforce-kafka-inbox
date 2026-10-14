@@ -13,23 +13,30 @@ internal sealed class FakeFaults
         public int Remaining { get; set; } = times;
     }
 
-    private readonly Dictionary<(string, string), Fault> _faults = new();
-    private readonly Dictionary<(string, string), int> _lostResponses = new(); // (sobject, external id) -> times left
+    private readonly Dictionary<(string, string), Fault> _faults = [];
+    private readonly Dictionary<(string, string), int> _lostResponses = []; // (sobject, external id) -> times left
 
     /// <summary>Set when the request being executed wrote a record whose response is to be lost.</summary>
     public bool LoseResponse { get; set; }
 
     public void Inject(string sobject, string externalId, string code, string message, int times)
-        => _faults[Key(sobject, externalId)] = new Fault(code, message, times);
+    {
+        _faults[Key(sobject, externalId)] = new Fault(code, message, times);
+    }
 
     public void LoseResponsesFor(string sobject, string externalId, int times)
-        => _lostResponses[Key(sobject, externalId)] = times;
+    {
+        _lostResponses[Key(sobject, externalId)] = times;
+    }
 
     /// <summary>The injected error for this write, if one is left.</summary>
     public (string Code, string Message)? Take(string sobject, string? externalId)
     {
         if (externalId is null || !_faults.TryGetValue(Key(sobject, externalId), out var fault) || fault.Remaining <= 0)
+        {
             return null;
+        }
+
         fault.Remaining--;
         return (fault.Code, fault.Message);
     }
@@ -37,7 +44,11 @@ internal sealed class FakeFaults
     /// <summary>Called for every record written: marks the current request's response as lost if asked to.</summary>
     public void NoteWrite(string sobject, string? externalId)
     {
-        if (externalId is null || !_lostResponses.TryGetValue(Key(sobject, externalId), out var left) || left <= 0) return;
+        if (externalId is null || !_lostResponses.TryGetValue(Key(sobject, externalId), out var left) || left <= 0)
+        {
+            return;
+        }
+
         _lostResponses[Key(sobject, externalId)] = left - 1;
         LoseResponse = true;
     }
@@ -48,5 +59,8 @@ internal sealed class FakeFaults
         _lostResponses.Clear();
     }
 
-    private static (string, string) Key(string sobject, string externalId) => (sobject.ToLowerInvariant(), externalId);
+    private static (string, string) Key(string sobject, string externalId)
+    {
+        return (sobject.ToLowerInvariant(), externalId);
+    }
 }

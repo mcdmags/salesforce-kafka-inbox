@@ -40,9 +40,12 @@ public static class FakeSalesforceServer
         app.Use(async (ctx, next) =>
         {
             if (ctx.Request.Path.StartsWithSegments("/services/data"))
+            {
                 ctx.RequestServices.GetRequiredService<ClientLog>().RecordRequest(
                     gzipBody: ctx.Request.Headers.ContentEncoding.ToString().Contains("gzip", StringComparison.OrdinalIgnoreCase),
                     acceptsGzip: ctx.Request.Headers.AcceptEncoding.ToString().Contains("gzip", StringComparison.OrdinalIgnoreCase));
+            }
+
             await next();
         });
         app.UseRequestDecompression();

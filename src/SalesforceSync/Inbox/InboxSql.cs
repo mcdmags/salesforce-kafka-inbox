@@ -27,16 +27,21 @@ public sealed partial class InboxSql
 
     /// <summary>The statements for <paramref name="table"/>, built once per table.</summary>
     /// <exception cref="ArgumentException">The name is not a plain lower-case identifier.</exception>
-    public static InboxSql For(string table) => Cache.GetOrAdd(table, static t => new InboxSql(RequireIdentifier(t)));
+    public static InboxSql For(string table)
+    {
+        return Cache.GetOrAdd(table, static t => new InboxSql(RequireIdentifier(t)));
+    }
 
     /// <summary>
     /// Table names are spliced into SQL text (identifiers can't be parameters), so only plain identifiers are
     /// accepted. They come from code constants, never from configuration or events.
     /// </summary>
     public static string RequireIdentifier(string table)
-        => PlainIdentifier().IsMatch(table)
-            ? table
-            : throw new ArgumentException($"'{table}' is not a valid inbox table name (lower-case letters, digits and _)", nameof(table));
+    {
+        return PlainIdentifier().IsMatch(table)
+                ? table
+                : throw new ArgumentException($"'{table}' is not a valid inbox table name (lower-case letters, digits and _)", nameof(table));
+    }
 
     private InboxSql(string table)
     {

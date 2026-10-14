@@ -55,16 +55,28 @@ internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnl
     public IReadOnlyDictionary<string, object?> Body()
     {
         var body = new Dictionary<string, object?> { ["attributes"] = new Dictionary<string, object?> { ["type"] = record.Schema.Name } };
-        if (id is not null) body["id"] = id;
-        foreach (var (field, value) in changes) body[field] = value;
+        if (id is not null)
+        {
+            body["id"] = id;
+        }
+
+        foreach (var (field, value) in changes)
+        {
+            body[field] = value;
+        }
+
         foreach (var link in links)
         {
             if (link.ExternalIdField is not null)
+            {
                 body[link.Field.RelationshipName!] = new Dictionary<string, object?> { [link.ExternalIdField] = link.ExternalId };
+            }
             else
+            {
                 // The parent's row in its collection's response. Composite documents @{referenceId.field} with []
                 // indexing; indexing into an sObject Collections response is not confirmed: verify in a sandbox.
                 body[link.Field.Name] = $"@{{{link.Parent.CollectionReferenceId}[{link.Parent.IndexInCollection}].id}}";
+            }
         }
         return body;
     }

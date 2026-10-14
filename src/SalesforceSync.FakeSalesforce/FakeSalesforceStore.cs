@@ -48,13 +48,19 @@ public sealed class FakeSalesforceStore
 
     // ---------- Limits and stats ----------
 
-    public long CountApiCall() => _counters.CountApiCall();
+    public long CountApiCall()
+    {
+        return _counters.CountApiCall();
+    }
 
     /// <summary>Takes one of the org's concurrent long-running request slots, or returns null when all are in use.</summary>
     public IDisposable? TryStartLongRunning()
     {
         if (Interlocked.Increment(ref _longRunningInFlight) <= Options.ConcurrentLongRunningLimit)
+        {
             return new LongRunningSlot(this);
+        }
+
         Interlocked.Decrement(ref _longRunningInFlight);
         _counters.CountConcurrencyRejection();
         return null;
@@ -66,13 +72,19 @@ public sealed class FakeSalesforceStore
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _disposed, 1) == 0) Interlocked.Decrement(ref store._longRunningInFlight);
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                Interlocked.Decrement(ref store._longRunningInFlight);
+            }
         }
     }
 
     public FakeSalesforceStats GetStats()
     {
-        lock (_gate) return _counters.Snapshot(_records.Count);
+        lock (_gate)
+        {
+            return _counters.Snapshot(_records.Count);
+        }
     }
 
     public void Reset()
@@ -91,12 +103,18 @@ public sealed class FakeSalesforceStore
     /// <summary>Returns a copy of the record with the given external id, or null.</summary>
     public JsonObject? FindByExternalId(string sobject, string externalId, string extField = ExternalIdField)
     {
-        lock (_gate) return _records.Find(sobject, extField, externalId)?.DeepClone().AsObject();
+        lock (_gate)
+        {
+            return _records.Find(sobject, extField, externalId)?.DeepClone().AsObject();
+        }
     }
 
     public IReadOnlyList<JsonObject> All(string sobject)
     {
-        lock (_gate) return _records.Table(sobject).Values.Select(r => r.DeepClone().AsObject()).ToList();
+        lock (_gate)
+        {
+            return [.. _records.Table(sobject).Values.Select(r => r.DeepClone().AsObject())];
+        }
     }
 
     /// <summary>
@@ -117,7 +135,10 @@ public sealed class FakeSalesforceStore
     {
         get
         {
-            lock (_gate) return _recordedWrites.Select(r => r.DeepClone().AsObject()).ToList();
+            lock (_gate)
+            {
+                return [.. _recordedWrites.Select(r => r.DeepClone().AsObject())];
+            }
         }
     }
 
@@ -127,13 +148,21 @@ public sealed class FakeSalesforceStore
         lock (_gate)
         {
             var record = _records.Find(sobject, extField, externalId);
-            if (record is null) return false;
+            if (record is null)
+            {
+                return false;
+            }
+
             var stored = new JsonObject();
             foreach (var (k, v) in fields)
             {
                 var field = FakeSchema.Find(sobject, k) ?? throw new FakeSalesforceException(400, "INVALID_FIELD", k);
                 var (value, code, message) = FakeSchema.Store(field, v);
-                if (code is not null) throw new FakeSalesforceException(400, code, message!);
+                if (code is not null)
+                {
+                    throw new FakeSalesforceException(400, code, message!);
+                }
+
                 record[field.Name] = value?.DeepClone();
                 stored[field.Name] = value;
             }
@@ -149,7 +178,10 @@ public sealed class FakeSalesforceStore
     /// </summary>
     public void InjectFault(string sobject, string externalId, string code, string message, int times)
     {
-        lock (_gate) _faults.Inject(sobject, externalId, code, message, times);
+        lock (_gate)
+        {
+            _faults.Inject(sobject, externalId, code, message, times);
+        }
     }
 
     /// <summary>
@@ -159,7 +191,10 @@ public sealed class FakeSalesforceStore
     /// </summary>
     public void LoseResponsesFor(string sobject, string externalId, int times)
     {
-        lock (_gate) _faults.LoseResponsesFor(sobject, externalId, times);
+        lock (_gate)
+        {
+            _faults.LoseResponsesFor(sobject, externalId, times);
+        }
     }
 
     // ---------- Describe ----------
@@ -168,7 +203,9 @@ public sealed class FakeSalesforceStore
     public (int Status, JsonNode? Body) Describe(string sobject, DateTimeOffset? ifModifiedSince)
     {
         if (!FakeSchema.Objects.ContainsKey(sobject))
+        {
             throw new FakeSalesforceException(404, "NOT_FOUND", $"The requested resource does not exist: {sobject}");
+        }
 
         lock (_gate)
         {
@@ -195,7 +232,10 @@ public sealed class FakeSalesforceStore
             foreach (var record in _records.Table(query.SObject).Values)
             {
                 var key = Str(record[query.WhereField]);
-                if (key is null || !query.Values.Contains(key)) continue;
+                if (key is null || !query.Values.Contains(key))
+                {
+                    continue;
+                }
 
                 var row = new JsonObject { ["attributes"] = new JsonObject { ["type"] = query.SObject } };
                 foreach (var f in query.Fields)
@@ -233,10 +273,15 @@ public sealed class FakeSalesforceStore
         var subrequests = payload["compositeRequest"]?.AsArray()
                           ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing 'compositeRequest'");
         if (subrequests.Count > MaxCompositeSubrequests)
+        {
             throw new FakeSalesforceException(400, "LIMIT_EXCEEDED", $"A maximum of {MaxCompositeSubrequests} subrequests is allowed");
+        }
+
         if (subrequests.Count(r => IsQuery(r) || IsCollection(r)) > MaxCompositeCollectionsAndQueries)
+        {
             throw new FakeSalesforceException(400, "LIMIT_EXCEEDED",
                 $"A maximum of {MaxCompositeCollectionsAndQueries} query and sObject Collections subrequests is allowed");
+        }
 
         var allOrNone = payload["allOrNone"]?.GetValue<bool>() ?? false;
         var responses = new JsonArray();
@@ -249,7 +294,10 @@ public sealed class FakeSalesforceStore
         {
             _faults.LoseResponse = false;
             _counters.CompositeRequests++;
-            if (subrequests.Any(IsCollection)) RecordWriteRequest(payload);
+            if (subrequests.Any(IsCollection))
+            {
+                RecordWriteRequest(payload);
+            }
 
             foreach (var sub in subrequests)
             {
@@ -267,37 +315,57 @@ public sealed class FakeSalesforceStore
                 failed |= anyFailed;
             }
 
-            if (allOrNone && failed) RollBack(undo, responses);
+            if (allOrNone && failed)
+            {
+                RollBack(undo, responses);
+            }
+
             lost = _faults.LoseResponse && !(allOrNone && failed);
         }
 
         // Everything above is committed; only the answer goes missing
-        if (lost) throw new FakeResponseLostException();
-        return new JsonObject { ["compositeResponse"] = responses };
+        return lost ? throw new FakeResponseLostException() : new JsonObject { ["compositeResponse"] = responses };
     }
 
     private void RecordWriteRequest(JsonObject payload)
     {
         _counters.WriteRequests++;
         _recordedWrites.Add(payload.DeepClone().AsObject());
-        if (_recordedWrites.Count > MaxRecordedWrites) _recordedWrites.RemoveAt(0);
+        if (_recordedWrites.Count > MaxRecordedWrites)
+        {
+            _recordedWrites.RemoveAt(0);
+        }
     }
 
     /// <summary>Undoes every write of the request; records that had succeeded are reported as rolled back, the ones that failed keep their own error.</summary>
     private void RollBack(List<Action> undo, JsonArray responses)
     {
-        for (var i = undo.Count - 1; i >= 0; i--) undo[i]();
+        for (var i = undo.Count - 1; i >= 0; i--)
+        {
+            undo[i]();
+        }
+
         foreach (var response in responses)
+        {
             if (response!["httpStatusCode"]!.GetValue<int>() < 400 && response["body"] is JsonArray records)
+            {
                 foreach (var record in records.Where(r => r?["success"]?.GetValue<bool>() == true))
+                {
                     _collections.MarkRolledBack(record!.AsObject());
+                }
+            }
+        }
     }
 
     private static bool IsQuery(JsonNode? sub)
-        => (sub?["url"]?.GetValue<string>() ?? "").Contains("/query", StringComparison.OrdinalIgnoreCase);
+    {
+        return (sub?["url"]?.GetValue<string>() ?? "").Contains("/query", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static bool IsCollection(JsonNode? sub)
-        => (sub?["url"]?.GetValue<string>() ?? "").TrimEnd('/').EndsWith("/composite/sobjects", StringComparison.OrdinalIgnoreCase);
+    {
+        return (sub?["url"]?.GetValue<string>() ?? "").TrimEnd('/').EndsWith("/composite/sobjects", StringComparison.OrdinalIgnoreCase);
+    }
 
     private (int Status, JsonNode? Body, bool Failed) ExecuteSubrequest(JsonObject sub, Dictionary<string, JsonNode?> results, List<Action> undo)
     {
@@ -306,18 +374,23 @@ public sealed class FakeSalesforceStore
         try
         {
             if (method == "GET" && IsQuery(sub))
+            {
                 return (200, Query(System.Web.HttpUtility.ParseQueryString(url.Query)["q"]
                                    ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q")), false);
+            }
 
             if (IsCollection(sub) && method is "POST" or "PATCH")
             {
                 var body = sub["body"] as JsonObject ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing body");
                 body = body.DeepClone().AsObject();
                 if (CompositeReferences.Resolve(body, results) is { } unresolved)
+                {
                     // Closest to what Composite answers for a reference it can't resolve; verify against a real org
                     return (400, Errors("PROCESSING_HALTED", $"Invalid reference specified. No value for {unresolved} found."), true);
+                }
+
                 var records = _collections.Execute(method == "POST", body, undo);
-                return (200, records, records.Any(r => r!["success"]!.GetValue<bool>() == false));
+                return (200, records, records.Any(r => !r!["success"]!.GetValue<bool>()));
             }
 
             throw new FakeSalesforceException(400, "NOT_SUPPORTED", $"Fake composite does not support {method} {url.AbsolutePath}");

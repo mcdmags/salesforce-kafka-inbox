@@ -22,18 +22,31 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     {
         var sent = body["records"]?.AsArray() ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing 'records'");
         if (sent.Count > MaxRecords)
+        {
             throw new FakeSalesforceException(400, "LIMIT_EXCEEDED", $"A maximum of {MaxRecords} records is allowed per request");
+        }
+
         var allOrNone = body["allOrNone"]?.GetValue<bool>() ?? false;
 
         var results = new JsonArray();
         var undo = new List<Action>();
-        foreach (var record in sent) results.Add(Write(create, record!.DeepClone().AsObject(), undo));
+        foreach (var record in sent)
+        {
+            results.Add(Write(create, record!.DeepClone().AsObject(), undo));
+        }
 
-        var failed = results.Count(r => r!["success"]!.GetValue<bool>() == false);
+        var failed = results.Count(r => !r!["success"]!.GetValue<bool>());
         if (allOrNone && failed > 0)
         {
-            for (var i = undo.Count - 1; i >= 0; i--) undo[i]();
-            foreach (var result in results.Where(r => r!["success"]!.GetValue<bool>())) MarkRolledBack(result!.AsObject());
+            for (var i = undo.Count - 1; i >= 0; i--)
+            {
+                undo[i]();
+            }
+
+            foreach (var result in results.Where(r => r!["success"]!.GetValue<bool>()))
+            {
+                MarkRolledBack(result!.AsObject());
+            }
         }
         else
         {
@@ -65,15 +78,23 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
 
         (int Status, JsonNode? Body) outcome;
         if (sobject is null || !FakeSchema.Objects.ContainsKey(sobject))
+        {
             outcome = (400, Errors("INVALID_TYPE", $"sObject type '{sobject}' is not supported."));
+        }
         else if (!create && id is null)
+        {
             outcome = (400, Errors("MISSING_ARGUMENT", "Id not specified in an update call"));
+        }
         else if (create && id is not null)
+        {
             outcome = (400, Errors("INVALID_FIELD_FOR_INSERT_UPDATE", "cannot specify Id in an insert call", "Id"));
-        else if (ResolveRelationships(sobject, record) is { } missing)
-            outcome = (400, missing);
+        }
         else
-            outcome = create ? Create(sobject, record, undo) : Update(sobject, id!, record, undo);
+        {
+            outcome = ResolveRelationships(sobject, record) is { } missing
+                ? ((int Status, JsonNode? Body))(400, missing)
+                : ((int Status, JsonNode? Body))(create ? Create(sobject, record, undo) : Update(sobject, id!, record, undo));
+        }
 
         var ok = outcome.Status < 400;
         return new JsonObject
@@ -81,25 +102,39 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             ["id"] = ok ? (outcome.Body?["id"]?.GetValue<string>() ?? id) : null,
             ["success"] = ok,
             ["errors"] = ok
-                ? new JsonArray()
-                : new JsonArray(outcome.Body!.AsArray().Select(e => (JsonNode)new JsonObject
+                ? []
+                : new JsonArray([.. outcome.Body!.AsArray().Select(e => (JsonNode)new JsonObject
                 {
                     ["statusCode"] = e!["errorCode"]!.GetValue<string>(),
                     ["message"] = e["message"]?.GetValue<string>(),
                     ["fields"] = e["fields"]?.DeepClone() ?? new JsonArray()
-                }).ToArray())
+                })])
         };
     }
 
     private (int, JsonNode?) Create(string sobject, JsonObject body, List<Action> undo)
     {
         var extId = Str(body[ExternalIdField]);
-        if (faults.Take(sobject, extId) is { } fault) return (400, Errors(fault.Code, fault.Message));
+        if (faults.Take(sobject, extId) is { } fault)
+        {
+            return (400, Errors(fault.Code, fault.Message));
+        }
+
         var (stored, error) = StoredValues(sobject, body, creating: true);
-        if (stored is null) return (400, error);
-        if (MissingLookupTarget(sobject, stored) is { } missingTarget) return (400, missingTarget);
+        if (stored is null)
+        {
+            return (400, error);
+        }
+
+        if (MissingLookupTarget(sobject, stored) is { } missingTarget)
+        {
+            return (400, missingTarget);
+        }
+
         if (extId is not null && records.Find(sobject, ExternalIdField, extId) is not null)
+        {
             return (400, Errors("DUPLICATE_VALUE", $"duplicate value found: {ExternalIdField} duplicates value {extId}"));
+        }
 
         faults.NoteWrite(sobject, extId);
         var id = records.NewId(sobject);
@@ -122,13 +157,26 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     private (int, JsonNode?) Update(string sobject, string id, JsonObject body, List<Action> undo)
     {
         if (!records.Table(sobject).TryGetValue(id, out var existing))
+        {
             return (400, Errors("INVALID_CROSS_REFERENCE_KEY", $"invalid cross reference id: {id}", "Id"));
+        }
 
         var extId = Str(existing[ExternalIdField]);
-        if (faults.Take(sobject, extId) is { } fault) return (400, Errors(fault.Code, fault.Message));
+        if (faults.Take(sobject, extId) is { } fault)
+        {
+            return (400, Errors(fault.Code, fault.Message));
+        }
+
         var (stored, error) = StoredValues(sobject, body, creating: false);
-        if (stored is null) return (400, error);
-        if (MissingLookupTarget(sobject, stored) is { } missingTarget) return (400, missingTarget);
+        if (stored is null)
+        {
+            return (400, error);
+        }
+
+        if (MissingLookupTarget(sobject, stored) is { } missingTarget)
+        {
+            return (400, missingTarget);
+        }
 
         faults.NoteWrite(sobject, extId);
         var restore = records.Update(sobject, id, stored);
@@ -150,16 +198,25 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     {
         foreach (var (name, value) in record.ToList())
         {
-            if (value is not JsonObject reference) continue;
+            if (value is not JsonObject reference)
+            {
+                continue;
+            }
+
             var field = FakeSchema.Objects[sobject].FirstOrDefault(f => name.Equals(f.RelationshipName, StringComparison.OrdinalIgnoreCase));
             if (field?.ReferenceTo is null)
+            {
                 return Errors("INVALID_FIELD", $"No such relationship '{name}' on {sobject}", name);
+            }
 
             var (externalField, externalValue) = reference.Where(kv => kv.Key != "attributes").Select(kv => (kv.Key, Str(kv.Value))).FirstOrDefault();
             var target = externalField is null ? null : records.Find(field.ReferenceTo, externalField, externalValue);
             if (target is null)
+            {
                 return Errors("INVALID_FIELD",
                     $"Foreign key external ID: {externalValue} not found for field {externalField} in entity {field.ReferenceTo}");
+            }
+
             record.Remove(name);
             record[field.Name] = target["Id"]!.GetValue<string>();
         }
@@ -171,9 +228,15 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     {
         foreach (var (name, value) in stored)
         {
-            if (Str(value) is not { } id || FakeSchema.Find(sobject, name) is not { Type: "reference", ReferenceTo: { } target }) continue;
+            if (Str(value) is not { } id || FakeSchema.Find(sobject, name) is not { Type: "reference", ReferenceTo: { } target })
+            {
+                continue;
+            }
+
             if (!records.Table(target).ContainsKey(id))
+            {
                 return Errors("INVALID_CROSS_REFERENCE_KEY", $"invalid cross reference id: {id}", name);
+            }
         }
         return null;
     }
@@ -185,13 +248,22 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         foreach (var (name, value) in body)
         {
             if (FakeSchema.Find(sobject, name) is not { } field)
+            {
                 return (null, Errors("INVALID_FIELD", $"No such column '{name}' on sobject of type {sobject}"));
+            }
+
             if (creating ? !field.Createable : !field.Updateable)
+            {
                 return (null, Errors("INVALID_FIELD_FOR_INSERT_UPDATE",
                     $"Unable to create/update fields: {field.Name}. Please check the security settings of this field."));
+            }
 
             var (v, code, message) = FakeSchema.Store(field, value);
-            if (code is not null) return (null, Errors(code, message!));
+            if (code is not null)
+            {
+                return (null, Errors(code, message!));
+            }
+
             stored[field.Name] = v;
         }
         return (stored, null);

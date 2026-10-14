@@ -21,11 +21,11 @@ public sealed class LeaseTests(SyncFixture app)
         var token = Guid.NewGuid();
         // "A worker" claims v1 the instant it is stored and then takes its time
         var claimed = await InsertAndClaimAsync(acct, token, TimeSpan.FromMinutes(1),
-            SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, new JsonObject()));
+            SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []));
         claimed.Should().ContainSingle();
 
         // A newer event arrives meanwhile, through Kafka like any other
-        await app.PublishAsync(acct, 2, new JsonObject { ["name"] = "v2" }, new JsonObject());
+        await app.PublishAsync(acct, 2, new JsonObject { ["name"] = "v2" }, []);
         await Eventually.ValueAsync(() => app.GetInboxRowsAsync(acct), rows => rows.Count == 2, "v2 to be stored");
 
         // The pods poll every second or faster; none of them may touch the account while it is leased
@@ -52,7 +52,7 @@ public sealed class LeaseTests(SyncFixture app)
         var stale = Guid.NewGuid();
         // "A worker" claims v1 with a lease that runs out before it finishes
         var claimed = await InsertAndClaimAsync(acct, stale, TimeSpan.FromSeconds(1),
-            SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, new JsonObject()));
+            SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []));
 
         // A real worker takes the entity over once the lease has expired, and syncs it
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
@@ -89,7 +89,7 @@ public sealed class LeaseTests(SyncFixture app)
     {
         var acct = SyncFixture.NewAccountId();
         var events = Enumerable.Range(1, 65)
-            .Select(v => SyncFixture.AccountEvent(acct, v, new JsonObject { ["name"] = $"v{v}", ["description"] = $"v{v}" }, new JsonObject()))
+            .Select(v => SyncFixture.AccountEvent(acct, v, new JsonObject { ["name"] = $"v{v}", ["description"] = $"v{v}" }, []))
             .ToArray();
 
         await app.InsertIntoInboxAsync(acct, events);
@@ -114,12 +114,12 @@ public sealed class LeaseTests(SyncFixture app)
         var rows = (await conn.QueryAsync<InboxEvent>(Sql.ClaimEntities,
             new { entityIds = new[] { acct }, token, lease, maxPerEntity = 20 }, tx)).ToList();
         await tx.CommitAsync();
-        return rows.Select(r => r.Id).ToArray();
+        return [.. rows.Select(r => r.Id)];
     }
 
     private static InboxClaim ClaimOf(string acct, Guid token, long[] ids)
     {
-        return new InboxClaim(AccountSyncService.Type, token, ids.Select(id => new InboxEvent(id, acct, "{}", 1)).ToList(), new Dictionary<string, long>());
+        return new InboxClaim(AccountSyncService.Type, token, [.. ids.Select(id => new InboxEvent(id, acct, "{}", 1))], new Dictionary<string, long>());
     }
 
     private static BatchOutcomes Outcomes(long[] released)

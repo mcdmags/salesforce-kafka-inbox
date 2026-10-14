@@ -48,8 +48,12 @@ public sealed class SObjectRecordTests
     {
         var record = SObjectRecord.From("acct", new AccountSObject
         {
-            ExternalId = "ACC-1", AnnualRevenue = 10.5m, NumberOfEmployees = 3, Active = true,
-            CustomerSince = new DateOnly(2020, 1, 15), LastContacted = DateTimeOffset.UnixEpoch
+            ExternalId = "ACC-1",
+            AnnualRevenue = 10.5m,
+            NumberOfEmployees = 3,
+            Active = true,
+            CustomerSince = new DateOnly(2020, 1, 15),
+            LastContacted = DateTimeOffset.UnixEpoch
         });
 
         record.Fields["AnnualRevenue"].Should().BeOfType<decimal>();
@@ -97,14 +101,20 @@ public sealed class SObjectRecordTests
     public static TheoryData<Type> SObjectTypes()
     {
         var data = new TheoryData<Type>();
-        foreach (var type in SObjectMetadata.TypesIn(typeof(AccountSObject).Assembly)) data.Add(type);
+        foreach (var type in SObjectMetadata.TypesIn(typeof(AccountSObject).Assembly))
+        {
+            data.Add(type);
+        }
+
         return data;
     }
 
     [Fact]
     public void Every_synced_object_has_an_sObject_class()
-        => SObjectMetadata.TypesIn(typeof(AccountSObject).Assembly).Select(t => SObjectMetadata.For(t).SObject)
-            .Should().BeEquivalentTo(FakeSchema.Objects.Keys);
+    {
+        SObjectMetadata.TypesIn(typeof(AccountSObject).Assembly).Select(t => SObjectMetadata.For(t).SObject)
+                .Should().BeEquivalentTo(FakeSchema.Objects.Keys);
+    }
 
     [Theory, MemberData(nameof(SObjectTypes))]
     public void Every_Salesforce_name_on_an_sObject_class_exists_in_the_org(Type sobjectType)
@@ -117,8 +127,10 @@ public sealed class SObjectRecordTests
         names.Should().NotContainNulls("every property names its Salesforce field");
         names.Should().OnlyHaveUniqueItems();
         foreach (var name in names)
+        {
             FakeSchema.Find(meta.SObject, name!).Should().NotBeNull("{0}.{1} must be a field of the org", meta.SObject, name)
                 .And.Match<FakeField>(f => f.Name == name, "API names are written exactly as the org has them");
+        }
 
         FakeSchema.Find(meta.SObject, meta.ExternalIdField).Should().NotBeNull();
         foreach (var lookup in meta.Lookups)

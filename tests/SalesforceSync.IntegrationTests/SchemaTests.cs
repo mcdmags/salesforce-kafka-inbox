@@ -2,7 +2,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Npgsql;
 using SalesforceSync.Inbox;
-using SalesforceSync.Sync;
 
 namespace SalesforceSync.IntegrationTests;
 
@@ -32,9 +31,12 @@ public sealed class SchemaTests(SyncFixture app)
     public async Task Both_inboxes_have_the_same_columns_and_none_for_the_event()
     {
         await using var conn = await app.Db.OpenConnectionAsync();
-        async Task<List<string>> Columns(string table) => (await conn.QueryAsync<string>(
+        async Task<List<string>> Columns(string table)
+        {
+            return [.. await conn.QueryAsync<string>(
             "select column_name::text || ' ' || data_type from information_schema.columns where table_schema = current_schema() and table_name = @table order by ordinal_position",
-            new { table })).ToList();
+            new { table })];
+        }
 
         var account = await Columns(SyncFixture.InboxTable());
         account.Select(c => c.Split(' ')[0]).Should().Equal(
@@ -134,7 +136,9 @@ public sealed class SchemaTests(SyncFixture app)
     }
 
     private static async Task<List<string>> TablesAndIndexesAsync(NpgsqlConnection conn, NpgsqlTransaction? tx)
-        => (await conn.QueryAsync<string>(
-            "select c.relname::text from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = current_schema() and c.relkind in ('r', 'i') order by 1",
-            transaction: tx)).ToList();
+    {
+        return [.. await conn.QueryAsync<string>(
+                "select c.relname::text from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = current_schema() and c.relkind in ('r', 'i') order by 1",
+                transaction: tx)];
+    }
 }

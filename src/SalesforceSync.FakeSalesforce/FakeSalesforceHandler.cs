@@ -21,7 +21,10 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
         var options = store.Options;
         var longRunning = options.Latency > TimeSpan.Zero && options.Latency >= options.LongRunningThreshold
                           && !IsTokenRequest(request); // OAuth is not an API request
-        if (!longRunning) return await HandleAsync(request, ct);
+        if (!longRunning)
+        {
+            return await HandleAsync(request, ct);
+        }
 
         // Salesforce refuses new requests while the org already has the maximum of long-running ones in flight
         using var slot = store.TryStartLongRunning();
@@ -37,7 +40,10 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
     private async Task<HttpResponseMessage> HandleAsync(HttpRequestMessage request, CancellationToken ct)
     {
         var options = store.Options;
-        if (options.Latency > TimeSpan.Zero) await Task.Delay(options.Latency, ct);
+        if (options.Latency > TimeSpan.Zero)
+        {
+            await Task.Delay(options.Latency, ct);
+        }
 
         var uri = request.RequestUri ?? throw new InvalidOperationException("Request has no URI");
         var path = uri.AbsolutePath;
@@ -73,17 +79,13 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
                         : Json(request, (HttpStatusCode)status, body);
                     res.Content.Headers.LastModified = store.SchemaLastModified;
                 }
-                else if (request.Method == HttpMethod.Get && path.EndsWith("/query", StringComparison.OrdinalIgnoreCase))
-                {
-                    res = Json(request, HttpStatusCode.OK, store.Query(QueryOf(uri)));
-                }
-                else if (request.Method == HttpMethod.Post && path.EndsWith("/composite", StringComparison.OrdinalIgnoreCase))
-                {
-                    res = Json(request, HttpStatusCode.OK, store.ExecuteComposite(await ReadJsonAsync(request, ct)));
-                }
                 else
                 {
-                    res = Json(request, HttpStatusCode.NotFound,
+                    res = request.Method == HttpMethod.Get && path.EndsWith("/query", StringComparison.OrdinalIgnoreCase)
+                        ? Json(request, HttpStatusCode.OK, store.Query(QueryOf(uri)))
+                        : request.Method == HttpMethod.Post && path.EndsWith("/composite", StringComparison.OrdinalIgnoreCase)
+                        ? Json(request, HttpStatusCode.OK, store.ExecuteComposite(await ReadJsonAsync(request, ct)))
+                        : Json(request, HttpStatusCode.NotFound,
                         FakeJson.Errors("NOT_FOUND", $"Fake does not support {request.Method} {path}"));
                 }
             }
@@ -98,12 +100,18 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
     }
 
     private static string QueryOf(Uri uri)
-        => HttpUtility.ParseQueryString(uri.Query)["q"] ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q");
+    {
+        return HttpUtility.ParseQueryString(uri.Query)["q"] ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q");
+    }
 
     /// <summary>Request body as JSON; gzip bodies (Content-Encoding: gzip) are decompressed like Salesforce does.</summary>
     private static async Task<JsonObject> ReadJsonAsync(HttpRequestMessage request, CancellationToken ct)
     {
-        if (request.Content is null) throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Empty body");
+        if (request.Content is null)
+        {
+            throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Empty body");
+        }
+
         await using var stream = await request.Content.ReadAsStreamAsync(ct);
         await using var body = request.Content.Headers.ContentEncoding.Contains("gzip")
             ? new GZipStream(stream, CompressionMode.Decompress)
@@ -115,11 +123,16 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
     }
 
     private static bool IsTokenRequest(HttpRequestMessage request)
-        => request.RequestUri?.AbsolutePath.EndsWith("/services/oauth2/token", StringComparison.OrdinalIgnoreCase) == true;
-
-    private static HttpResponseMessage Json(HttpRequestMessage request, HttpStatusCode status, JsonNode body) => new(status)
     {
-        RequestMessage = request,
-        Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json")
-    };
+        return request.RequestUri?.AbsolutePath.EndsWith("/services/oauth2/token", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static HttpResponseMessage Json(HttpRequestMessage request, HttpStatusCode status, JsonNode body)
+    {
+        return new(status)
+        {
+            RequestMessage = request,
+            Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json")
+        };
+    }
 }

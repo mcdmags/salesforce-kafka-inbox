@@ -6,11 +6,18 @@ var testMode = bool.TryParse(builder.Configuration["AppHost:TestMode"], out var 
 
 // Infrastructure
 var postgres = builder.AddPostgres("postgres");
-if (!testMode) postgres.WithDataVolume().WithPgAdmin();
+if (!testMode)
+{
+    postgres.WithDataVolume().WithPgAdmin();
+}
+
 var inboxDb = postgres.AddDatabase("inboxdb");
 
 var kafka = builder.AddKafka("kafka");
-if (!testMode) kafka.WithKafkaUI();
+if (!testMode)
+{
+    kafka.WithKafkaUI();
+}
 
 // Mock Salesforce org (HTTP service; inspect it at /__fake/stats and /__fake/records/{sobject})
 var salesforce = builder.AddProject<Projects.SalesforceSync_FakeSalesforce_Server>("fake-salesforce")

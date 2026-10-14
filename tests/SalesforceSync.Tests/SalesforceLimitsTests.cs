@@ -39,7 +39,9 @@ public sealed class SalesforceLimitsTests
     [InlineData(SalesforceEdition.Unlimited, 5_000)]
     [InlineData(SalesforceEdition.Performance, 5_000)]
     public void Calls_per_Salesforce_license_depend_on_the_edition(SalesforceEdition edition, int calls)
-        => new SalesforceLimitsOptions { Edition = edition }.CallsPerLicenseFor("salesforce").Should().Be(calls);
+    {
+        new SalesforceLimitsOptions { Edition = edition }.CallsPerLicenseFor("salesforce").Should().Be(calls);
+    }
 
     [Theory]
     [InlineData(SalesforceOrgType.DeveloperEdition, 15_000)]
@@ -89,13 +91,17 @@ public sealed class SalesforceLimitsTests
     [InlineData(SalesforceOrgType.DeveloperEdition, 5)]
     [InlineData(SalesforceOrgType.Trial, 5)]
     public void Concurrent_long_running_limit_depends_on_the_org_type(SalesforceOrgType type, int limit)
-        => new SalesforceLimitsOptions { OrgType = type }.EffectiveConcurrentLongRunningLimit.Should().Be(limit);
+    {
+        new SalesforceLimitsOptions { OrgType = type }.EffectiveConcurrentLongRunningLimit.Should().Be(limit);
+    }
 
     // ---------- Startup validation ----------
 
     [Fact]
     public void Defaults_are_valid()
-        => Validate(new SalesforceLimitsOptions()).Succeeded.Should().BeTrue();
+    {
+        Validate(new SalesforceLimitsOptions()).Succeeded.Should().BeTrue();
+    }
 
     [Fact]
     public void More_concurrent_requests_than_the_org_allows_fails_startup()
@@ -129,38 +135,52 @@ public sealed class SalesforceLimitsTests
     [InlineData(0)]
     [InlineData(1.5)]
     public void Daily_budget_share_must_be_a_fraction(double share)
-        => Validate(new SalesforceLimitsOptions(), rate: new RateLimitOptions { DailyBudgetShare = share }).Failed.Should().BeTrue();
+    {
+        Validate(new SalesforceLimitsOptions(), rate: new RateLimitOptions { DailyBudgetShare = share }).Failed.Should().BeTrue();
+    }
 
     // ---------- REQUEST_LIMIT_EXCEEDED ----------
 
     [Fact]
     public void Concurrent_long_running_limit_error_is_recognised()
-        => SalesforceRateLimitHandler.Classify(
-                """[{"message":"ConcurrentPerOrgLongTxn Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")
-            .Should().Be(SalesforceRateLimitHandler.LimitExceeded.ConcurrentLongRunning);
+    {
+        SalesforceRateLimitHandler.Classify(
+                                         /*lang=json,strict*/
+                                         """[{"message":"ConcurrentPerOrgLongTxn Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")
+                .Should().Be(SalesforceRateLimitHandler.LimitExceeded.ConcurrentLongRunning);
+    }
 
     [Fact]
     public void Total_requests_limit_error_is_recognised()
-        => SalesforceRateLimitHandler.Classify(
-                """[{"message":"TotalRequests Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")
-            .Should().Be(SalesforceRateLimitHandler.LimitExceeded.TotalRequests);
+    {
+        SalesforceRateLimitHandler.Classify(
+                                         /*lang=json,strict*/
+                                         """[{"message":"TotalRequests Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")
+                .Should().Be(SalesforceRateLimitHandler.LimitExceeded.TotalRequests);
+    }
 
     [Theory, AutoData]
     public void Unknown_limit_error_is_treated_as_the_daily_limit(string message)
-        => SalesforceRateLimitHandler.Classify(
-                new JsonArray(new JsonObject { ["message"] = message, ["errorCode"] = "REQUEST_LIMIT_EXCEEDED" }).ToJsonString())
-            .Should().Be(SalesforceRateLimitHandler.LimitExceeded.TotalRequests, "the safer assumption for an unknown variant");
+    {
+        SalesforceRateLimitHandler.Classify(
+                    new JsonArray(new JsonObject { ["message"] = message, ["errorCode"] = "REQUEST_LIMIT_EXCEEDED" }).ToJsonString())
+                .Should().Be(SalesforceRateLimitHandler.LimitExceeded.TotalRequests, "the safer assumption for an unknown variant");
+    }
 
     [Fact]
     public void Other_403s_are_not_limit_errors()
-        => SalesforceRateLimitHandler.Classify("""[{"errorCode":"INSUFFICIENT_ACCESS"}]""").Should().BeNull();
+    {
+        SalesforceRateLimitHandler.Classify(/*lang=json,strict*/ """[{"errorCode":"INSUFFICIENT_ACCESS"}]""").Should().BeNull();
+    }
 
     // ---------- Throttle decisions ----------
 
     [Fact]
     public void Daily_budget_is_the_share_of_the_org_allocation()
-        => Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 }, new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 } })
-            .DailyBudget.Should().Be(57_500, "it is half of 115,000");
+    {
+        Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 }, new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 } })
+                .DailyBudget.Should().Be(57_500, "it is half of 115,000");
+    }
 
     [Fact]
     public void A_lower_allocation_reported_by_Salesforce_lowers_the_budget()
@@ -174,8 +194,10 @@ public sealed class SalesforceLimitsTests
 
     [Fact]
     public void The_configured_allocation_is_the_maximum_whatever_Salesforce_reports()
-        => Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 }, new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 } })
-            .BudgetFor(1_000_000).Should().Be(57_500, "it is half of the configured 115,000");
+    {
+        Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 }, new SalesforceLimitsOptions { Licenses = { ["Salesforce"] = 15 } })
+                .BudgetFor(1_000_000).Should().Be(57_500, "it is half of the configured 115,000");
+    }
 
     [Theory]
     [InlineData(null)]
@@ -254,12 +276,16 @@ public sealed class SalesforceLimitsTests
 
     private static ValidateOptionsResult Validate(SalesforceLimitsOptions limits, SyncOptions? sync = null,
         RateLimitOptions? rate = null)
-        => new SalesforceLimitsValidator(Options.Create(sync ?? new SyncOptions()), Options.Create(rate ?? new RateLimitOptions()))
-            .Validate(null, limits);
+    {
+        return new SalesforceLimitsValidator(Options.Create(sync ?? new SyncOptions()), Options.Create(rate ?? new RateLimitOptions()))
+                .Validate(null, limits);
+    }
 
     private static readonly NpgsqlDataSource Db = NpgsqlDataSource.Create("Host=unused");
 
     private static SalesforceRateLimiter Limiter(RateLimitOptions rate, SalesforceLimitsOptions? limits = null)
-        => new(SyncDbContext.CreateFactory(Db), Options.Create(rate),
-            Options.Create(limits ?? new SalesforceLimitsOptions()), NullLogger<SalesforceRateLimiter>.Instance);
+    {
+        return new(SyncDbContext.CreateFactory(Db), Options.Create(rate),
+                Options.Create(limits ?? new SalesforceLimitsOptions()), NullLogger<SalesforceRateLimiter>.Instance);
+    }
 }

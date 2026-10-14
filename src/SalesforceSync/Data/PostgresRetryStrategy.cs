@@ -51,7 +51,7 @@ public sealed class PostgresRetryStrategy(
 
         var exponential = options.BaseDelay.TotalMilliseconds * Math.Pow(2, retry);
         var capped = Math.Min(exponential, options.MaxRetryDelay.TotalMilliseconds);
-        return TimeSpan.FromMilliseconds(capped * (0.5 + Random.Shared.NextDouble() / 2));
+        return TimeSpan.FromMilliseconds(capped * (0.5 + (Random.Shared.NextDouble() / 2)));
     }
 
     /// <summary>

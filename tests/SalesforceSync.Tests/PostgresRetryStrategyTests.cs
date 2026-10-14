@@ -16,14 +16,16 @@ public sealed class PostgresRetryStrategyTests
     {
         var options = new PostgresRetryOptions
         {
-            MaxRetryCount = maxRetries, BaseDelay = TimeSpan.FromMilliseconds(1), MaxRetryDelay = TimeSpan.FromMilliseconds(5)
+            MaxRetryCount = maxRetries,
+            BaseDelay = TimeSpan.FromMilliseconds(1),
+            MaxRetryDelay = TimeSpan.FromMilliseconds(5)
         };
         var db = SyncDbContext.CreateFactory(Db, options).CreateDbContext();
         return db.Database.CreateExecutionStrategy();
     }
 
-    public static TheoryData<Exception> Transient => new()
-    {
+    public static TheoryData<Exception> Transient =>
+    [
         new NpgsqlException("connection reset", new IOException("broken pipe")),
         new PostgresException("could not serialize access", "ERROR", "ERROR", "40001"),
         new PostgresException("deadlock detected", "ERROR", "ERROR", "40P01"),
@@ -31,7 +33,7 @@ public sealed class PostgresRetryStrategyTests
         new PostgresException("the database system is starting up", "FATAL", "FATAL", "57P03"),
         new PostgresException("connection failure", "FATAL", "FATAL", "08006"),
         new TimeoutException("timeout")
-    };
+    ];
 
     [Theory]
     [MemberData(nameof(Transient))]

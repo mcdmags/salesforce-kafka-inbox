@@ -66,8 +66,8 @@ public sealed class AlternativeSettingsTests(AlternativeSettingsFixture app)
         (await app.GetRecordAsync("Account_Relationship__c", rel)).Should().BeNull();
 
         // The Accounts arrive after all; the dead letter is re-queued by hand (the statement from the README)
-        await app.PublishAsync(parent, 1, new JsonObject { ["name"] = Any.String("Late parent ") }, new JsonObject());
-        await app.PublishAsync(child, 1, new JsonObject { ["name"] = Any.String("Late child ") }, new JsonObject());
+        await app.PublishAsync(parent, 1, new JsonObject { ["name"] = Any.String("Late parent ") }, []);
+        await app.PublishAsync(child, 1, new JsonObject { ["name"] = Any.String("Late child ") }, []);
         await app.WaitForInboxSettledAsync(parent, 1);
         await app.WaitForInboxSettledAsync(child, 1);
         await app.ExecuteSqlAsync("""
@@ -87,15 +87,15 @@ public sealed class AlternativeSettingsTests(AlternativeSettingsFixture app)
         var (missing, existing) = (SyncFixture.NewAccountId(), SyncFixture.NewAccountId());
 
         // "updated", but Salesforce has no such Account
-        await app.PublishAsync(missing, 2, new JsonObject { ["name"] = "v2" }, new JsonObject());
+        await app.PublishAsync(missing, 2, new JsonObject { ["name"] = "v2" }, []);
         (await app.WaitForInboxSettledAsync(missing, expectedRows: 1)).Should().Equal((2L, "dead"));
         (await app.GetInboxRowsAsync(missing))[0].ErrorCode.Should().Be("EVENT_TYPE_MISMATCH");
         (await app.GetRecordAsync("Account", missing)).Should().BeNull();
 
         // "inserted", but the Account is already there
-        await app.PublishAsync(existing, 1, new JsonObject { ["name"] = "v1" }, new JsonObject());
+        await app.PublishAsync(existing, 1, new JsonObject { ["name"] = "v1" }, []);
         await app.WaitForInboxSettledAsync(existing, expectedRows: 1);
-        var again = SyncFixture.AccountEvent(existing, 2, new JsonObject { ["name"] = "v2" }, new JsonObject());
+        var again = SyncFixture.AccountEvent(existing, 2, new JsonObject { ["name"] = "v2" }, []);
         again["meta"] = SyncFixture.Meta(2, "inserted");
         await app.PublishRawAsync(existing, again.ToJsonString());
 
