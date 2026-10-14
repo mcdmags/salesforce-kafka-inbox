@@ -171,6 +171,27 @@ public sealed class SalesforceLimitsTests
         limiter.Decide(orgAt85Percent, ownDailyRatio: 0.1).Speed.Should().Be(0.25, "the org is past DailySoftRatio");
     }
 
+    [Fact]
+    public void Lease_must_outlast_the_request_timeout()
+    {
+        // A call that is merely slow must end (or be given up on) while its entities are still leased
+        Validate(new SalesforceLimitsOptions { RequestTimeout = TimeSpan.FromSeconds(90) }, new SyncOptions { Lease = TimeSpan.FromSeconds(90) })
+            .FailureMessage.Should().Contain("Sync:Lease");
+        Validate(new SalesforceLimitsOptions { RequestTimeout = TimeSpan.FromSeconds(90) }, new SyncOptions { Lease = TimeSpan.FromSeconds(91) })
+            .Succeeded.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Unknown_outcome_hold_defaults_to_the_Salesforce_api_timeout_and_must_be_positive()
+    {
+        new SyncOptions().UnknownOutcomeHold.Should().Be(SalesforceLimitsOptions.MaxApiTimeout);
+        new SyncOptionsValidator().Validate(null, new SyncOptions { UnknownOutcomeHold = TimeSpan.Zero })
+            .FailureMessage.Should().Contain("UnknownOutcomeHold");
+        new SyncOptionsValidator().Validate(null, new SyncOptions { MaxEventsPerEntity = 0 })
+            .FailureMessage.Should().Contain("MaxEventsPerEntity");
+        new SyncOptionsValidator().Validate(null, new SyncOptions()).Succeeded.Should().BeTrue();
+    }
+
     private static ValidateOptionsResult Validate(SalesforceLimitsOptions limits, SyncOptions? sync = null,
         RateLimitOptions? rate = null)
         => new SalesforceLimitsValidator(Options.Create(sync ?? new SyncOptions()), Options.Create(rate ?? new RateLimitOptions()))

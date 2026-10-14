@@ -28,6 +28,7 @@ public sealed class AccountEventProducer(
     {
         var o = options.Value;
         var versions = new long[o.Accounts];
+        var relationships = new HashSet<string>(StringComparer.Ordinal);
         var random = new Random(42);
         var interval = TimeSpan.FromSeconds(1.0 / Math.Max(1, o.EventsPerSecond));
         var sent = 0L;
@@ -60,7 +61,7 @@ public sealed class AccountEventProducer(
                     var relKey = $"REL-{a:D6}-{b:D6}";
                     var relationship = new JsonObject
                     {
-                        ["meta"] = Meta(),
+                        ["meta"] = Meta(inserted: relationships.Add(relKey)),
                         ["accountRelationship"] = new JsonObject
                         {
                             ["externalId"] = relKey,
@@ -121,21 +122,23 @@ public sealed class AccountEventProducer(
             }
         };
 
-        return new JsonObject { ["meta"] = Meta(), ["account"] = account };
+        return new JsonObject { ["meta"] = Meta(inserted: version == 1), ["account"] = account };
     }
 
     /// <summary>
     /// meta.time: now, but always later than the previous event's (to the microsecond Postgres keeps), so events
     /// produced within the same clock tick still have a distinct order.
     /// </summary>
-    private JsonObject Meta()
+    private JsonObject Meta(bool inserted)
     {
         var ticks = Math.Max(DateTimeOffset.UtcNow.Ticks, _lastTimeTicks + TimeSpan.TicksPerMicrosecond);
         ticks -= ticks % TimeSpan.TicksPerMicrosecond;
         _lastTimeTicks = ticks;
         return new JsonObject
         {
-            ["time"] = new DateTimeOffset(ticks, TimeSpan.Zero).ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture)
+            ["time"] = new DateTimeOffset(ticks, TimeSpan.Zero).ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture),
+            // The first event of an entity is its insert, every later one an update
+            ["type"] = inserted ? "inserted" : "updated"
         };
     }
 }

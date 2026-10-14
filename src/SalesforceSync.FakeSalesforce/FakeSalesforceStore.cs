@@ -21,6 +21,8 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
 
     private long _idCounter;
     private readonly Dictionary<(string, string), Fault> _faults = new();
+    private readonly Dictionary<(string, string), int> _lostResponses = new(); // (sobject, external id) -> times left
+    private bool _loseResponse;
 
     private long _apiCalls, _queries, _graphRequests, _graphsSucceeded, _graphsFailed, _graphsHalted, _creates, _updates,
         _concurrencyRejections, _describes, _describesNotModified, _compositeRequests;
@@ -80,6 +82,7 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
             _tables.Clear();
             _history.Clear();
             _faults.Clear();
+            _lostResponses.Clear();
             _idCounter = 0;
             _apiCalls = _queries = _graphRequests = _graphsSucceeded = _graphsFailed = _graphsHalted = _creates = _updates = 0;
             _describes = _describesNotModified = _compositeRequests = 0;
@@ -151,6 +154,24 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
     public void InjectFault(string sobject, string externalId, string code, string message, int times)
     {
         lock (_gate) _faults[(sobject.ToLowerInvariant(), externalId)] = new Fault(code, message, times);
+    }
+
+    /// <summary>
+    /// The next <paramref name="times"/> requests that write the record with this external id are applied, but their
+    /// response never reaches the client (<see cref="FakeResponseLostException"/>): the timeout or dropped connection
+    /// after which a client can't know whether its write went through.
+    /// </summary>
+    public void LoseResponsesFor(string sobject, string externalId, int times)
+    {
+        lock (_gate) _lostResponses[(sobject.ToLowerInvariant(), externalId)] = times;
+    }
+
+    /// <summary>Called for every record written (under the lock): marks the current request's response as lost if asked to.</summary>
+    private void NoteWrite(string sobject, string? externalId)
+    {
+        if (externalId is null || !_lostResponses.TryGetValue((sobject.ToLowerInvariant(), externalId), out var left) || left <= 0) return;
+        _lostResponses[(sobject.ToLowerInvariant(), externalId)] = left - 1;
+        _loseResponse = true;
     }
 
     // ---------- Describe ----------
@@ -249,9 +270,11 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
 
         var results = new JsonArray();
         var failures = 0;
+        bool lost;
 
         lock (_gate)
         {
+            _loseResponse = false;
             _graphRequests++;
             foreach (var g in graphs)
             {
@@ -262,8 +285,11 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
                 if (!result["isSuccessful"]!.GetValue<bool>()) failures++;
                 results.Add(result);
             }
+            lost = _loseResponse;
         }
 
+        // Everything above is committed; only the answer goes missing
+        if (lost) throw new FakeResponseLostException();
         return new JsonObject { ["graphs"] = results };
     }
 
@@ -351,6 +377,7 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
         if (extId is not null && table.Values.Any(r => Str(r[ExternalIdField]) == extId))
             return (400, Errors("DUPLICATE_VALUE", $"duplicate value found: {ExternalIdField} duplicates value {extId}"));
 
+        NoteWrite(sobject, extId);
         var id = NewId(sobject);
         var record = stored.DeepClone().AsObject();
         record["Id"] = id;
@@ -381,6 +408,7 @@ public sealed partial class FakeSalesforceStore(FakeSalesforceOptions options)
         var (stored, error) = StoredValues(sobject, body, creating: false);
         if (stored is null) return error;
 
+        NoteWrite(sobject, Str(existing[ExternalIdField]));
         var before = existing.DeepClone().AsObject();
         foreach (var (k, v) in stored) existing[k] = v?.DeepClone();
         existing["LastModifiedDate"] = FakeSchema.FormatDateTime(DateTimeOffset.UtcNow);

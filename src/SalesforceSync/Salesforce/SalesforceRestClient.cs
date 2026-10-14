@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -161,9 +160,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     private static async Task EnsureSuccessAsync(HttpResponseMessage res, CancellationToken ct)
     {
         if (res.IsSuccessStatusCode) return;
-        var body = await res.Content.ReadAsStringAsync(ct);
-        throw new HttpRequestException(
-            string.Create(CultureInfo.InvariantCulture, $"Salesforce {(int)res.StatusCode}: {body}"), null, res.StatusCode);
+        throw new SalesforceResponseException(res.StatusCode, await res.Content.ReadAsStringAsync(ct));
     }
 
     // ---------- DTOs ----------

@@ -13,8 +13,6 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class InboxEventTests
 {
-    private static readonly HashSet<string> Types = [AccountSyncService.Type, AccountRelationshipSyncService.Type];
-
     private static readonly UpsertStrategy<AccountEvent> Accounts =
         AccountSyncService.CreateStrategy(new AccountMapper(), new ProfileMapper());
 
@@ -28,7 +26,7 @@ public sealed class InboxEventTests
     {
         var unit = Accounts.Map(key, Read<AccountEvent>(new JsonObject
         {
-            ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z" },
+            ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z", ["type"] = "updated" },
             ["account"] = new JsonObject
             {
                 ["externalId"] = key, ["name"] = name, ["rating"] = null, ["tags"] = new JsonArray("B2B", "Retail"),
@@ -68,7 +66,7 @@ public sealed class InboxEventTests
     {
         var unit = Accounts.Map(key, Read<AccountEvent>(new JsonObject
         {
-            ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z" },
+            ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z", ["type"] = "updated" },
             ["account"] = new JsonObject { ["externalId"] = key, ["name"] = name }
         }));
 
@@ -80,7 +78,7 @@ public sealed class InboxEventTests
     {
         var unit = Relationships.Map(key, Read<AccountRelationshipEvent>(new JsonObject
         {
-            ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z" },
+            ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z", ["type"] = "updated" },
             ["accountRelationship"] = new JsonObject
             {
                 ["externalId"] = key, ["accountExternalId"] = account, ["relatedAccountExternalId"] = related,
@@ -102,7 +100,7 @@ public sealed class InboxEventTests
     [Theory]
     [InlineData("""{ "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-1" } }""")]
     [InlineData("""{ "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-1", "relatedAccountExternalId": "" } }""")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03.456Z" } }""")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" } }""")]
     public void Relationship_without_both_accounts_cannot_be_mapped(string json)
     {
         var map = () => Relationships.Map("REL-1", Read<AccountRelationshipEvent>(json));
@@ -114,11 +112,11 @@ public sealed class InboxEventTests
     public void CamelCase_is_the_contract_but_a_PascalCase_body_binds_to_the_same_sObject()
     {
         const string camel = """
-            { "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": "ACC-1", "name": "Acme", "isActive": true,
+            { "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "Acme", "isActive": true,
               "annualRevenue": 12.5, "customerSince": "2020-01-15", "profile": { "tier": "Gold", "discountPercent": 5 } } }
             """;
         const string pascal = """
-            { "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "ExternalId": "ACC-1", "Name": "Acme", "IsActive": true,
+            { "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "ExternalId": "ACC-1", "Name": "Acme", "IsActive": true,
               "AnnualRevenue": 12.5, "CustomerSince": "2020-01-15", "Profile": { "Tier": "Gold", "DiscountPercent": 5 } } }
             """;
 
@@ -139,76 +137,246 @@ public sealed class InboxEventTests
         read.Should().Throw<JsonException>("the engine dead-letters an event it can't deserialize (INVALID_EVENT)");
     }
 
-    // ---------- Coalescing ----------
+    // ---------- Coalescing: an entity's claimed rows -> one write ----------
 
     [Fact]
-    public void Pending_events_coalesce_to_the_newest_by_time_then_by_id()
+    public void Claimed_events_coalesce_to_the_newest_event_time_whatever_order_they_arrived_in()
     {
-        var events = new[]
-        {
-            new InboxEvent(Id: 7, "ACC-1", Version: 20, """{ "account": { "externalId": "ACC-1", "name": "newest time, ingested first" } }""", 1),
-            new InboxEvent(Id: 5, "ACC-1", Version: 10, """{ "account": { "externalId": "ACC-1", "name": "older" } }""", 1),
-            new InboxEvent(Id: 9, "ACC-1", Version: 20, """{ "account": { "externalId": "ACC-1", "name": "newest time, ingested last" } }""", 1),
-            new InboxEvent(Id: 12, "ACC-1", Version: 15, """{ "account": { "externalId": "ACC-1", "name": "ingested last, but older" } }""", 1)
-        };
+        var batch = Prepare(
+            Row(7, Account("ACC-1", "newest, but stored first", time: "2026-10-14T03:00:00Z")),
+            Row(8, Account("ACC-1", "older", time: "2026-10-14T01:00:00Z")),
+            Row(9, Account("ACC-1", "oldest, stored last", time: "2026-10-14T00:00:00Z")));
 
-        SalesforceBatchUpsertService.Coalesce(events).Id.Should().Be(9, "the newest time wins; of two with the same time, the one ingested later");
+        var work = batch.Work.Should().ContainSingle().Subject;
+        work.EventId.Should().Be(7);
+        work.Time.Should().Be(Micros("2026-10-14T03:00:00Z"));
+        work.Unit.Records[0].Fields.Should().Contain("Name", "newest, but stored first");
+        batch.SupersededIds.Should().BeEquivalentTo([8L, 9L]);
+        batch.Invalid.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Of_two_events_with_the_same_time_the_one_stored_later_wins()
+    {
+        var batch = Prepare(
+            Row(4, Account("ACC-1", "second", time: "2026-10-14T01:00:00+00:00")),
+            Row(3, Account("ACC-1", "first", time: "2026-10-14T03:00:00+02:00"))); // the same instant
+
+        batch.Work.Should().ContainSingle().Which.EventId.Should().Be(4);
+        batch.SupersededIds.Should().Equal(3L);
     }
 
     [Fact]
     public void The_newest_full_record_replaces_older_events_rather_than_merging_with_them()
     {
-        var newest = SalesforceBatchUpsertService.Coalesce(
-        [
-            Row(1, """{ "meta": { "time": "2026-10-14T01:00:00Z" }, "account": { "externalId": "ACC-1", "name": "Acme", "rating": "Hot", "profile": { "tier": "Gold" } } }"""),
-            Row(2, """{ "meta": { "time": "2026-10-14T02:00:00Z" }, "account": { "externalId": "ACC-1", "name": "Acme Ltd", "profile": { "score": 9 } } }""")
-        ]);
+        var batch = Prepare(
+            Row(1, """{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "Acme", "rating": "Hot", "profile": { "tier": "Gold" } } }"""),
+            Row(2, """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "Acme Ltd", "profile": { "score": 9 } } }"""));
 
-        var unit = Accounts.Map("ACC-1", Read<AccountEvent>(newest.Payload));
+        var unit = batch.Work.Should().ContainSingle().Subject.Unit;
         unit.Records[0].Fields.Should().Contain("Name", "Acme Ltd").And.Contain("Rating", null, "the newest record has no rating any more");
         unit.Records[1].Fields.Should().Contain("Score__c", 9m).And.Contain("Tier__c", null, "nor a tier");
     }
 
-    // ---------- What the consumer admits ----------
+    [Theory]
+    [InlineData("2026-10-14T01:00:00Z", "the same time: a redelivery")]
+    [InlineData("2026-10-14T00:59:59.999999Z", "an older event that arrived late")]
+    public void An_event_not_newer_than_what_is_synced_is_superseded_without_a_write(string time, string because)
+    {
+        var synced = new Dictionary<string, long> { ["ACC-1"] = Micros("2026-10-14T01:00:00Z") };
+
+        var batch = Prepare(synced, Row(5, Account("ACC-1", "late", time)), Row(6, Account("ACC-2", "other entity", time)));
+
+        batch.SupersededIds.Should().Equal([5L], because);
+        batch.Work.Should().ContainSingle().Which.EntityId.Should().Be("ACC-2", "watermarks are per entity");
+    }
+
+    [Fact]
+    public void An_event_newer_than_what_is_synced_is_written_even_by_a_microsecond()
+    {
+        var synced = new Dictionary<string, long> { ["ACC-1"] = Micros("2026-10-14T01:00:00Z") };
+
+        Prepare(synced, Row(5, Account("ACC-1", "newer", "2026-10-14T01:00:00.000001Z"))).Work.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void A_then_B_then_A_ends_at_A()
+    {
+        // The last event equals the first; only its time tells them apart, and it is the newest
+        var batch = Prepare(
+            Row(1, Account("ACC-1", "A", "2026-10-14T01:00:00Z")),
+            Row(2, Account("ACC-1", "B", "2026-10-14T02:00:00Z")),
+            Row(3, Account("ACC-1", "A", "2026-10-14T03:00:00Z")));
+
+        var work = batch.Work.Should().ContainSingle().Subject;
+        work.EventId.Should().Be(3);
+        work.Unit.Records[0].Fields.Should().Contain("Name", "A");
+    }
+
+    [Fact]
+    public void An_unreadable_event_is_invalid_on_its_own_and_the_entity_still_syncs()
+    {
+        var batch = Prepare(
+            Row(1, Account("ACC-1", "good", "2026-10-14T01:00:00Z")),
+            Row(2, "not json"),
+            Row(3, """{ "meta": { "time": "2026-10-14T05:00:00", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "no offset" } }"""),
+            Row(4, """{ "meta": { "time": "2026-10-14T05:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "x", "numberOfEmployees": "lots" } }"""));
+
+        batch.Invalid.Select(i => i.Id).Should().Equal(2L, 3L, 4L);
+        batch.Work.Should().ContainSingle().Which.EventId.Should().Be(1);
+        batch.SupersededIds.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void An_event_stored_under_another_entity_than_it_is_about_is_never_written()
+    {
+        // The lease is on the row's entity_id; writing ACC-2 under ACC-1's lease would bypass ACC-2's own
+        var batch = Prepare(new InboxEvent(1, "ACC-1", Account("ACC-2", "mismatch", "2026-10-14T01:00:00Z"), 1));
+
+        batch.Work.Should().BeEmpty();
+        batch.Invalid.Should().ContainSingle().Which.Error.Should().Contain("ACC-2").And.Contain("ACC-1");
+    }
+
+    [Fact]
+    public void A_newest_event_that_cannot_be_mapped_is_invalid_and_the_older_ones_stay_superseded()
+    {
+        var batch = SalesforceBatchUpsertService.Prepare(Relationships,
+        [
+            new InboxEvent(1, "REL-1", """{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A", "relatedAccountExternalId": "B" } }""", 1),
+            new InboxEvent(2, "REL-1", """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""", 1)
+        ], new Dictionary<string, long>());
+
+        batch.Invalid.Should().ContainSingle().Which.Id.Should().Be(2);
+        batch.SupersededIds.Should().Equal([1L], "the newest event is the entity's state; an older one is not written in its place");
+        batch.Work.Should().BeEmpty();
+    }
+
+    // ---------- What the consumer admits (the same typed read the engine uses) ----------
 
     [Theory]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03.456Z" }, "account": { "externalId": "ACC-1" } }""", "account", "ACC-1", 456)]
-    [InlineData("""{ "accountRelationship": { "externalId": "REL-1" }, "meta": { "time": "2026-10-14T03:02:03+02:00" } }""", "accountRelationship", "REL-1", 0)]
-    public void Valid_event_yields_its_type_key_and_time(string json, string type, string key, int millisecond)
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "ACC-1", 456)]
+    [InlineData("""{ "account": { "externalId": "ACC-2" }, "meta": { "time": "2026-10-14T03:02:03+02:00", "type": "updated" } }""", "ACC-2", 0)]
+    [InlineData("""{ "Meta": { "Time": "2026-10-14T01:02:03Z", "Type": "INSERTED" }, "Account": { "ExternalId": "ACC-3" }, "somethingElse": 1 }""", "ACC-3", 0)]
+    public void Valid_event_yields_its_entity_id_and_time(string json, string entityId, int millisecond)
     {
-        InboxEventEnvelope.TryRead(json, Types, out var header, out var problem).Should().BeTrue("the event is valid, but: {0}", problem);
-        (header!.EntityType, header.Key).Should().Be((type, key));
-        header.Time.Should().Be(new DateTimeOffset(2026, 10, 14, 1, 2, 3, millisecond, TimeSpan.Zero), "it is the same instant");
+        Accounts.TryRead(json, out var read, out var problem).Should().BeTrue("the event is valid, but: {0}", problem);
+        read!.EntityId.Should().Be(entityId);
+        read.Time.Should().Be(new DateTimeOffset(2026, 10, 14, 1, 2, 3, millisecond, TimeSpan.Zero), "it is the same instant");
     }
 
     [Theory]
-    [InlineData("not json", "")]
-    [InlineData("[1, 2]", "not a JSON object")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z" } }""", "exactly one entity object")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": "A" }, "accountRelationship": { "externalId": "R" } }""", "exactly one entity object")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z" }, "contact": { "externalId": "C-1" } }""", "No sync handles entity type \"contact\"")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": "ACC-1" }""", "is not an object")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "Name": "Acme" } }""", "account.externalId")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": " " } }""", "account.externalId")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": 17 } }""", "account.externalId")]
-    [InlineData("""{ "account": { "externalId": "ACC-1" } }""", "meta.time")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03" }, "account": { "externalId": "ACC-1" } }""", "meta.time")]
-    [InlineData("""{ "meta": { "time": "2026-10-14 01:02:03Z" }, "account": { "externalId": "ACC-1" } }""", "meta.time")]
-    [InlineData("""{ "meta": { "time": "now" }, "account": { "externalId": "ACC-1" } }""", "meta.time")]
-    [InlineData("""{ "meta": { "time": "2026-13-14T01:02:03Z" }, "account": { "externalId": "ACC-1" } }""", "meta.time")]
-    [InlineData("""{ "meta": { "time": 1791939723456 }, "account": { "externalId": "ACC-1" } }""", "meta.time")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": "A" }, "account": { "externalId": "B" } }""", "")]
+    [InlineData("inserted", EventType.Inserted)]
+    [InlineData("updated", EventType.Updated)]
+    [InlineData("Inserted", EventType.Inserted)]
+    [InlineData("UPDATED", EventType.Updated)]
+    public void Event_type_is_read_without_regard_to_case_and_travels_with_the_newest_event(string type, EventType expected)
+    {
+        var older = $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "account": { "externalId": "ACC-1" } }""";
+        var newer = $$"""{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "{{type}}" }, "account": { "externalId": "ACC-1" } }""";
+        Accounts.TryRead(older, out var first, out _).Should().BeTrue();
+        Accounts.TryRead(newer, out var second, out _).Should().BeTrue();
+
+        var newest = SalesforceBatchUpsertService.Coalesce<AccountEvent>([(new InboxEvent(1, "ACC-1", newer, 1), second!), (new InboxEvent(2, "ACC-1", older, 1), first!)]);
+
+        newest.Read.Type.Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData("not json", "Not a valid account event")]
+    [InlineData("[1, 2]", "Not a valid account event")]
+    [InlineData("null", "null")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" } }""", "entity object")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "accountRelationship": { "externalId": "R" } }""", "entity object")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": "ACC-1" }""", "Not a valid account event")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "name": "Acme" } }""", "non-empty id")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": " " } }""", "non-empty id")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": 17 } }""", "Not a valid account event")]
+    [InlineData("""{ "account": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData("""{ "meta": { "time": "2026-10-14 01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData("""{ "meta": { "time": "now", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData("""{ "meta": { "time": "2026-13-14T01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData("""{ "meta": { "time": 1791939723456, "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "Not a valid account event")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": "ACC-1" } }""", "event type")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": null }, "account": { "externalId": "ACC-1" } }""", "event type")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "deleted" }, "account": { "externalId": "ACC-1" } }""", "event type")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "upsert" }, "account": { "externalId": "ACC-1" } }""", "event type")]
+    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": 1 }, "account": { "externalId": "ACC-1" } }""", "Not a valid account event")]
     public void Invalid_event_is_rejected_with_the_reason(string json, string reason)
     {
-        InboxEventEnvelope.TryRead(json, Types, out var header, out var problem).Should().BeFalse();
-        header.Should().BeNull();
-        problem.Should().NotBeNullOrEmpty();
-        if (reason.Length > 0) problem.Should().Contain(reason);
+        Accounts.TryRead(json, out var read, out var problem).Should().BeFalse();
+        read.Should().BeNull();
+        problem.Should().Contain(reason);
     }
+
+    [Fact]
+    public void Each_entity_type_reads_only_its_own_events()
+    {
+        const string account = """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""";
+
+        Relationships.TryRead(account, out _, out var problem).Should().BeFalse("an account event on the relationship topic is skipped at ingest");
+        problem.Should().Contain("accountRelationship");
+    }
+
+    [Theory]
+    [InlineData("sf_account_inbox", true)]
+    [InlineData("sf_x1_inbox", true)]
+    [InlineData("sf_inbox; drop table x", false)]
+    [InlineData("Sf_Inbox", false)]
+    [InlineData("\"sf_inbox\"", false)]
+    [InlineData("public.sf_inbox", false)]
+    [InlineData("", false)]
+    public void Inbox_table_names_must_be_plain_identifiers(string table, bool valid)
+    {
+        var use = () => InboxSql.For(table);
+
+        if (valid) use.Should().NotThrow().Which.Insert.Should().Contain($"insert into {table} ");
+        else use.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void Schema_script_has_one_inbox_per_table_and_no_placeholder_left()
+    {
+        var script = InboxSchema.Script([AccountSyncService.InboxTable, AccountRelationshipSyncService.InboxTable]);
+
+        script.Should().Contain("create table if not exists sf_account_inbox (")
+            .And.Contain("create table if not exists sf_account_relationship_inbox (")
+            .And.Contain("create index if not exists sf_account_inbox_ready on sf_account_inbox")
+            .And.NotContain("{inbox}");
+        script.Should().NotContain("->", "no statement reads inside the payload");
+        var bad = () => InboxSchema.Script(["sf_inbox; drop table sf_sync_state"]);
+        bad.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void No_inbox_statement_reads_inside_the_payload()
+    {
+        var sql = InboxSql.For(AccountSyncService.InboxTable);
+        string[] claimAndOutcomes = [sql.LockHeads, sql.ClaimEntities, sql.ReleaseLostClaims, sql.MarkSynced, sql.Complete, sql.Release, sql.Defer, sql.Hold, sql.Insert];
+
+        claimAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
+    }
+
+    private static string Account(string id, string name, string time)
+        => new JsonObject
+        {
+            ["meta"] = new JsonObject { ["time"] = time, ["type"] = "updated" },
+            ["account"] = new JsonObject { ["externalId"] = id, ["name"] = name }
+        }.ToJsonString();
+
+    private static SalesforceBatchUpsertService.PreparedBatch Prepare(params InboxEvent[] rows)
+        => SalesforceBatchUpsertService.Prepare(Accounts, rows, new Dictionary<string, long>());
+
+    private static SalesforceBatchUpsertService.PreparedBatch Prepare(Dictionary<string, long> synced, params InboxEvent[] rows)
+        => SalesforceBatchUpsertService.Prepare(Accounts, rows, synced);
+
+    private static long Micros(string time) => SalesforceBatchUpsertService.ToMicroseconds(DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>A claimed row of the entity its payload names.</summary>
+    private static InboxEvent Row(long id, string payload)
+        => new(id, Accounts.TryRead(payload, out var read, out _) ? read.EntityId : "ACC-1", payload, 1);
 
     private static TEvent Read<TEvent>(string json) => JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchUpsertService.EventJson)!;
 
     private static TEvent Read<TEvent>(JsonObject json) => json.Deserialize<TEvent>(SalesforceBatchUpsertService.EventJson)!;
-
-    private static InboxEvent Row(long id, string payload) => new(id, "ACC-1", id, payload, 1);
 }

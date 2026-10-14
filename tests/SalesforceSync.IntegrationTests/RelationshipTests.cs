@@ -69,5 +69,7 @@ public sealed class RelationshipTests(SyncFixture app)
         var rows = await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships);
         rows[0].Status.Should().Be("dead");
         (await app.GetInboxRowsAsync(rel, SyncFixture.Relationships))[0].ErrorCode.Should().Be("INVALID_EVENT");
+        rows.Should().ContainSingle("it is stored in the relationship inbox, not the account one");
+        (await app.GetInboxAsync(rel)).Should().BeEmpty();
     }
 }

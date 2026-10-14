@@ -148,6 +148,9 @@ public sealed class SalesforceLimitsValidator(IOptions<SyncOptions> sync, IOptio
         if (o.RequestTimeout <= TimeSpan.Zero || o.RequestTimeout > SalesforceLimitsOptions.MaxApiTimeout)
             errors.Add($"{SalesforceLimitsOptions.Section}:RequestTimeout ({o.RequestTimeout}) must be > 0 and at most " +
                        $"the Salesforce API timeout of {SalesforceLimitsOptions.MaxApiTimeout}.");
+        if (sync.Value.Lease <= o.RequestTimeout)
+            errors.Add($"{SyncOptions.Section}:Lease ({sync.Value.Lease}) must be longer than {SalesforceLimitsOptions.Section}:" +
+                       $"RequestTimeout ({o.RequestTimeout}), so a call that is merely slow can't outlive the lease on the entities it writes.");
         if (o.RequestTimeout <= rate.Value.MaxWait)
             errors.Add($"{SalesforceLimitsOptions.Section}:RequestTimeout ({o.RequestTimeout}) must be longer than " +
                        $"{RateLimitOptions.Section}:MaxWait ({rate.Value.MaxWait}), which it includes.");

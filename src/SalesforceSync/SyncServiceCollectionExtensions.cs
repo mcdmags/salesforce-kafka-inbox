@@ -154,8 +154,8 @@ public static class SyncServiceCollectionExtensions
 
     /// <summary>
     /// Inbox -> Salesforce: the Postgres execution strategy, one engine, and per synced object its mappers (payload ->
-    /// sObject) and its strategy. Register a new object's mapper and <see cref="ISalesforceEntitySync"/> here and the
-    /// worker loops pick it up.
+    /// sObject) and its strategy. Register a new object's mapper and <see cref="ISalesforceEntitySync"/> here: its inbox
+    /// table is created at startup, the consumer subscribes to its topic and the worker loops pick it up.
     /// </summary>
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {

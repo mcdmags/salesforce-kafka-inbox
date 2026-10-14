@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Kafka -> KafkaInboxConsumer -> sf_inbox (Postgres) -> InboxWorker -> mock Salesforce, with Postgres and Kafka in
+/// Kafka -> KafkaInboxConsumer -> sf_account_inbox (Postgres) -> InboxWorker -> mock Salesforce, with Postgres and Kafka in
 /// containers and the worker and mock org in-process. Each test uses its own account ids (AutoFixture) so tests don't
 /// interfere through shared state.
 /// </summary>
@@ -171,7 +171,9 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishAsync(acct, 5, new JsonObject { ["name"] = name, ["rating"] = "Cold", ["description"] = "from v5" }, new JsonObject { ["tier"] = "Gold", ["score"] = 99 });
 
         var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 5);
-        inbox.Should().OnlyContain(r => r.Status == "done");
+        inbox.Should().OnlyContain(r => r.Status == "done" || r.Status == "superseded",
+            "an event claimed together with a newer one of its account is superseded, the rest are written");
+        inbox[^1].Should().Be((5L, "done"));
 
         // Exactly the v5 record, however the five events were batched: nothing of an older event survives
         var account = await app.GetRecordAsync("Account", acct);
@@ -215,33 +217,116 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Redelivered_event_is_stored_once_and_an_event_without_a_time_offset_is_skipped()
+    public async Task Redelivered_event_is_stored_again_and_changes_nothing()
+    {
+        var acct = SyncFixture.NewAccountId();
+        var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme "), ["rating"] = "Hot" }, new JsonObject());
+
+        await app.PublishRawAsync(acct, v1.ToJsonString());
+        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.PublishRawAsync(acct, v1.ToJsonString());            // Kafka redelivery, after the first was synced
+        await app.PublishRawAsync(acct, v1.ToJsonString());            // and again
+
+        // Nothing makes a row unique, so each delivery is a row; none is newer than what was synced
+        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 3);
+        inbox.Should().Equal((1L, "done"), (1L, "superseded"), (1L, "superseded"));
+        (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("a redelivery must not write to Salesforce");
+    }
+
+    [Fact]
+    public async Task Redelivery_claimed_together_with_the_original_is_written_once()
+    {
+        var acct = SyncFixture.NewAccountId();
+        var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, new JsonObject());
+
+        await app.InsertIntoInboxAsync(acct, v1, v1);
+
+        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
+        inbox.Select(r => r.Status).Should().BeEquivalentTo(["done", "superseded"]);
+        (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Event_without_a_time_offset_or_a_valid_type_or_for_another_entity_type_is_skipped_at_ingest()
     {
         var acct = SyncFixture.NewAccountId();
         var name = Any.String("Acme ");
-        var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = name, ["rating"] = "Hot" }, new JsonObject());
-        var sameTime = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = name, ["rating"] = "Warm" }, new JsonObject());
-        var noOffset = (JsonObject)v1.DeepClone();
-        noOffset["meta"]!["time"] = ((string)v1["meta"]!["time"]!).TrimEnd('Z');
-        var description = Any.String("v2 ");
+        var valid = SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = name }, new JsonObject());
+        var noOffset = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "never stored" }, new JsonObject());
+        noOffset["meta"]!["time"] = ((string)noOffset["meta"]!["time"]!).TrimEnd('Z');
+        var relationship = new JsonObject
+        {
+            ["meta"] = SyncFixture.Meta(1),
+            ["accountRelationship"] = new JsonObject { ["externalId"] = acct, ["accountExternalId"] = "A", ["relatedAccountExternalId"] = "B" }
+        };
 
-        await app.PublishRawAsync(acct, v1.ToJsonString());
-        await app.PublishRawAsync(acct, v1.ToJsonString());            // Kafka redelivery
-        await app.PublishRawAsync(acct, sameTime.ToJsonString());      // another event with the same time: kept
-        await app.PublishRawAsync(acct, noOffset.ToJsonString());      // logged and skipped
-        await app.PublishAsync(acct, 2, new JsonObject { ["name"] = name, ["description"] = description }, new JsonObject());
+        // All under one key, so one partition: by the time the valid event is stored, the others have been handled
+        await app.PublishRawAsync(acct, noOffset.ToJsonString());      // no explicit offset
+        await app.PublishRawAsync(acct, relationship.ToJsonString());  // a relationship event on the account topic
+        await app.PublishRawAsync(acct, "not json");
+        await app.PublishRawAsync(acct, WithType(valid, null).ToJsonString());       // no meta.type
+        await app.PublishRawAsync(acct, WithType(valid, "deleted").ToJsonString());  // deletes are not synced
+        await app.PublishRawAsync(acct, valid.ToJsonString());
 
-        // Same partition, so by the time v2 is in the inbox every earlier message has been handled
+        (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((2L, "done"));
+        (await app.GetInboxAsync(acct, SyncFixture.Relationships)).Should().BeEmpty("a topic's events are read as that topic's type only");
+        ((string?)(await app.GetRecordAsync("Account", acct))!["Name"]).Should().Be(name);
+    }
+
+    [Fact]
+    public async Task The_Kafka_key_is_not_used_and_arrival_order_does_not_matter()
+    {
+        var acct = SyncFixture.NewAccountId();
+        JsonObject Version(int v) => SyncFixture.AccountEvent(acct, v, new JsonObject { ["name"] = $"v{v}", ["description"] = $"v{v}" }, new JsonObject { ["score"] = v });
+
+        // One account's events under different keys and none (so on different partitions), newest neither first nor last
+        await app.PublishRawAsync(Any.String("other-key-"), Version(2).ToJsonString());
+        await app.PublishRawAsync(null, Version(5).ToJsonString());
+        await app.PublishRawAsync(Any.String("other-key-"), Version(1).ToJsonString());
+        await app.PublishRawAsync(acct, Version(4).ToJsonString());
+        await app.PublishRawAsync(null, Version(3).ToJsonString());
+
+        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 5);
+        inbox.Should().OnlyContain(r => r.Status == "done" || r.Status == "superseded");
+        inbox[^1].Should().Be((5L, "done"), "the newest meta.time is the one that must be written");
+
+        ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v5");
+        var written = (await app.GetHistoryAsync("Account", acct)).Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+        written.Should().BeInAscendingOrder().And.OnlyHaveUniqueItems("an older event must never be written after a newer one");
+        ((decimal?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Score__c"]).Should().Be(5m);
+    }
+
+    [Fact]
+    public async Task Older_event_claimed_together_with_a_newer_one_is_superseded_in_the_same_claim()
+    {
+        var acct = SyncFixture.NewAccountId();
+        var newer = SyncFixture.AccountEvent(acct, 9, new JsonObject { ["name"] = "newer" }, new JsonObject());
+        var older = SyncFixture.AccountEvent(acct, 4, new JsonObject { ["name"] = "older" }, new JsonObject());
+
+        // The newer event is stored first, the older one after it; one claim takes both
+        await app.InsertIntoInboxAsync(acct, newer, older);
+
+        (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().Equal((4L, "superseded"), (9L, "done"));
+        (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("only the newest event of a claim is written")
+            .Which["Name"]!.GetValue<string>().Should().Be("newer");
+    }
+
+    [Fact]
+    public async Task A_then_B_then_A_ends_at_A()
+    {
+        var acct = SyncFixture.NewAccountId();
+        var a = new JsonObject { ["name"] = "A", ["rating"] = "Hot" };
+        var b = new JsonObject { ["name"] = "B", ["rating"] = "Cold" };
+
+        await app.PublishAsync(acct, 1, a, new JsonObject());
+        await app.PublishAsync(acct, 2, b, new JsonObject());
+        await app.PublishAsync(acct, 3, (JsonObject)a.DeepClone(), new JsonObject()); // the same content as the first event
+
         var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 3);
-        inbox.Select(r => r.Version).Should().Equal(1L, 1L, 2L);
-        inbox.Take(2).Should().OnlyContain(r => r.Status == "done" || r.Status == "superseded",
-            "the same-time event is done when coalesced with the first, superseded if the first had already synced");
-        inbox[2].Status.Should().Be("done");
-
+        inbox.Should().OnlyContain(r => r.Status == "done" || r.Status == "superseded", "the third event must not be dropped as a duplicate of the first");
+        inbox[^1].Should().Be((3L, "done"));
         var account = await app.GetRecordAsync("Account", acct);
-        account.Should().NotBeNull();
-        ((string?)account!["Description"]).Should().Be(description);
-        account["Rating"].Should().BeNull("v2, the newest full record, has no rating");
+        ((string?)account!["Name"], (string?)account["Rating"]).Should().Be(("A", "Hot"));
     }
 
     [Fact]
@@ -287,5 +372,14 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         var transport = await app.Salesforce.GetFromJsonAsync<JsonObject>("/__fake/transport");
         ((long)transport!["acceptGzip"]!).Should().BePositive("the worker accepts compressed responses");
+    }
+
+    /// <summary>A copy of the event with another meta.type (null = none).</summary>
+    private static JsonObject WithType(JsonObject evt, string? type)
+    {
+        var copy = (JsonObject)evt.DeepClone();
+        if (type is null) copy["meta"]!.AsObject().Remove("type");
+        else copy["meta"]!["type"] = type;
+        return copy;
     }
 }

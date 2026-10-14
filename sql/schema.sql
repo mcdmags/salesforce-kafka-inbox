@@ -1,89 +1,84 @@
--- Event accessors. sf_inbox stores only the raw Kafka message value; an event's entity type, key and order are
--- read from it by these functions, so the JSON paths live here and nowhere else:
---   { "meta": { "time": "2026-10-14T01:02:03.456Z" }, "account": { "externalId": "ACC-000001", ... } }
--- type = the single top-level key besides "meta" ('account'), key = <type>.externalId ('ACC-000001'),
--- version = meta.time in microseconds since the epoch (the order of an entity's events).
--- Every claim query uses exactly these calls, so the planner can match them to the expression indexes below.
--- SQL-standard bodies (Postgres 14+) are bound when the function is created, so they work under the restricted
--- search_path Postgres 17 uses while building an index.
+-- The sync's Postgres schema, applied at worker startup by InboxSchema (idempotent, under an advisory lock).
+-- No statement here or in InboxSql reads inside an event: the payload is opaque jsonb, and everything the SQL needs
+-- (which entity a row belongs to) is a plain column filled by the worker from its typed event classes.
 
--- The top-level key other than "meta". KafkaInboxConsumer only admits events with exactly one; a single jsonpath
--- expression (rather than a subquery over jsonb_object_keys) can be inlined and is about 4x cheaper per row,
--- which matters because the claim evaluates it for every pending row it considers.
-create or replace function sf_event_type(event jsonb) returns text
-language sql immutable strict parallel safe
-return jsonb_path_query_first(event, '$.keyvalue() ? (@.key != "meta").key') #>> '{}';
-
-create or replace function sf_event_key(event jsonb) returns text
-language sql immutable strict parallel safe
-return event -> sf_event_type(event) ->> 'externalId';
-
--- Declared immutable although a text -> timestamptz cast is only stable: the cast depends on the session's TimeZone
--- (only for a time without an offset) and DateStyle (only for ambiguous formats like 01/02/03). KafkaInboxConsumer
--- admits only ISO-8601 times with an explicit offset or Z, for which neither setting matters, so the result never
--- changes and the function can back the indexes below. Do not insert events with any other time format.
-create or replace function sf_event_version(event jsonb) returns bigint
-language sql immutable strict parallel safe
-return (extract(epoch from (event -> 'meta' ->> 'time')::timestamptz) * 1000000)::bigint;
-
--- A database created when the inbox had entity_type / entity_key / version columns (or the older account_ext_id):
--- keep its rows for inspection as sf_inbox_legacy and create the new table. Its indexes and id sequence keep their
--- names on a rename, so they are renamed too; otherwise "if not exists" would skip creating the new ones.
+-- An inbox from before there was one table per object type (any earlier shape: event columns, or only the raw
+-- payload read by sf_event_* functions): keep it for inspection as sf_inbox_legacy, rows unmigrated. Its indexes and
+-- id sequence keep their names on a rename, so they are renamed too.
 do $$
 declare
+  legacy text := 'sf_inbox_legacy';
+  n int := 1;
   idx text;
 begin
-  if exists (select 1 from information_schema.columns
-             where table_schema = current_schema() and table_name = 'sf_inbox'
-               and column_name in ('entity_key', 'account_ext_id')) then
+  if to_regclass(format('%I.sf_inbox', current_schema())) is not null then
+    while to_regclass(format('%I.%I', current_schema(), legacy)) is not null loop
+      n := n + 1;
+      legacy := 'sf_inbox_legacy_' || n;
+    end loop;
     for idx in select c.relname from pg_index i join pg_class c on c.oid = i.indexrelid
                where i.indrelid = format('%I.sf_inbox', current_schema())::regclass loop
-      execute format('alter index %I rename to %I', idx, 'sf_inbox_legacy' || substr(idx, length('sf_inbox') + 1));
+      execute format('alter index %I rename to %I', idx, legacy || substr(idx, length('sf_inbox') + 1));
     end loop;
-    alter sequence if exists sf_inbox_id_seq rename to sf_inbox_legacy_id_seq;
-    alter table sf_inbox rename to sf_inbox_legacy;
+    execute format('alter sequence if exists sf_inbox_id_seq rename to %I', legacy || '_id_seq');
+    execute format('alter table sf_inbox rename to %I', legacy);
   end if;
 end $$;
 
--- Inbox of raw Kafka change events (one row per event) plus their processing state. Events are ordered and
--- processed per (sf_event_type, sf_event_key): e.g. ('account', 'ACC-000001') or ('accountRelationship', 'REL-1'),
--- by (sf_event_version, id).
-create table if not exists sf_inbox (
+-- The functions that used to read the entity type, key and time out of the payload. Cascade: the legacy inbox's
+-- expression indexes were built on them.
+drop function if exists sf_event_version(jsonb) cascade;
+drop function if exists sf_event_key(jsonb) cascade;
+drop function if exists sf_event_type(jsonb) cascade;
+
+-- Newest event time synced to Salesforce per entity. Lets a late or replayed older event be recognised as stale
+-- without storing anything in Salesforce. Only advanced by the worker holding the entity's lease.
+create table if not exists sf_sync_state (
+  entity_type     text        not null,          -- the strategy's entity type, e.g. 'account'
+  entity_id       text        not null,
+  synced_time     bigint      not null,          -- the newest synced event's time, microseconds since the epoch (from C#)
+  synced_at       timestamptz not null default now(),
+  constraint sf_sync_state_pkey primary key (entity_type, entity_id)
+);
+
+-- Upgrade in place: the same values under their earlier names, so watermarks survive.
+do $$
+begin
+  if exists (select 1 from information_schema.columns
+             where table_schema = current_schema() and table_name = 'sf_sync_state' and column_name = 'entity_key') then
+    alter table sf_sync_state rename column entity_key to entity_id;
+    alter table sf_sync_state rename column synced_version to synced_time;
+  end if;
+end $$;
+
+-- >>> inbox table template
+-- Applied once per synced object type, with {inbox} replaced by that type's table name (a code constant, e.g.
+-- sf_account_inbox, sf_account_relationship_inbox). Every inbox has the same shape: one row per Kafka event plus its
+-- processing state. Rows of one entity_id are claimed together and never by two workers at once.
+create table if not exists {inbox} (
   id              bigserial   primary key,
-  payload         jsonb       not null,          -- the Kafka message value, unchanged
+  entity_id       text        not null,          -- the Kafka message key (the entity's id); set by the consumer
+  payload         jsonb       not null,          -- the Kafka message value, unchanged; never read by SQL
   status          text        not null default 'pending',  -- pending | done | superseded | dead
   retry_count     int         not null default 0,
   last_updated    timestamptz not null default now(),
   last_error      text,
   last_error_code text,                          -- e.g. FIELD_CUSTOM_VALIDATION_EXCEPTION, to query dead letters by cause
-  next_attempt_at timestamptz not null default now(),
+  next_attempt_at timestamptz not null default now(),  -- not claimable before; while leased, the end of the lease
   locked_until    timestamptz,                   -- lease while a worker processes the row
   lock_token      uuid,                          -- which worker holds the lease
   received_at     timestamptz not null default now()
 );
 
--- Newest event version synced to Salesforce per entity. Lets a late or replayed older event be recognised as
--- stale without storing anything in Salesforce. Only advanced by the worker holding the entity's lease.
-create table if not exists sf_sync_state (
-  entity_type     text        not null,
-  entity_key      text        not null,
-  synced_version  bigint      not null,          -- sf_event_version of the newest synced event
-  synced_at       timestamptz not null default now(),
-  constraint sf_sync_state_pkey primary key (entity_type, entity_key)
-);
-
-create index if not exists sf_inbox_pending_key
-  on sf_inbox (sf_event_type(payload), sf_event_key(payload), sf_event_version(payload)) where status = 'pending';
-create index if not exists sf_inbox_ready
-  on sf_inbox (sf_event_type(payload), next_attempt_at) where status = 'pending';
-create index if not exists sf_inbox_leased_key
-  on sf_inbox (sf_event_type(payload), sf_event_key(payload)) where locked_until is not null;
-
--- Idempotent ingest: a Kafka redelivery of the same event is ignored. The hash tells apart two different events
--- for the same entity at the same time, which are both kept (and ordered by id). jsonb::text is canonical, so the
--- same JSON with other whitespace or key order counts as the same event.
-create unique index if not exists sf_inbox_event_unique
-  on sf_inbox (sf_event_type(payload), sf_event_key(payload), sf_event_version(payload), md5(payload::text));
+-- The claim's lookups, all on plain columns (InboxSql.LockHeads):
+-- rows that may be claimed now, oldest first. Leased rows have next_attempt_at at the end of their lease, so they are
+-- beyond the range the claim scans, and re-enter it if the lease expires;
+create index if not exists {inbox}_ready on {inbox} (next_attempt_at, id) where status = 'pending';
+-- an entity's pending rows in arrival order: its head, the rows to lease, and the walk over all pending entities;
+create index if not exists {inbox}_pending on {inbox} (entity_id, id) where status = 'pending';
+-- an entity's leased rows: is it in flight, and does this worker still hold it.
+create index if not exists {inbox}_leased on {inbox} (entity_id, locked_until) where locked_until is not null;
+-- <<< inbox table template
 
 -- Shared token bucket + daily budget guard
 create table if not exists sf_rate_limit (
@@ -140,6 +135,3 @@ where name = 'salesforce';
 insert into sf_rate_limit (name, tokens, capacity, base_refill_per_sec, refill_per_sec)
 values ('salesforce', 5, 5, 2, 2)
 on conflict (name) do nothing;
-
--- Ingest (Kafka consumer):
--- insert into sf_inbox (payload) values (@payload::jsonb) on conflict do nothing;
