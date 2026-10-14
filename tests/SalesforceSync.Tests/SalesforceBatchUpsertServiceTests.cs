@@ -16,7 +16,7 @@ namespace SalesforceSync.Tests;
 /// driven by the real Account and AccountRelationship strategies and mappers, against the in-memory org. Events are
 /// written as the source sends them (camelCase payload names, full records); assertions read Salesforce names.
 /// </summary>
-public sealed class SalesforceRecordUpserterTests
+public sealed class SalesforceBatchUpsertServiceTests
 {
     private static readonly UpsertStrategy<AccountEvent> AccountStrategy =
         AccountSyncService.CreateStrategy(new AccountMapper(), new ProfileMapper());
@@ -26,21 +26,19 @@ public sealed class SalesforceRecordUpserterTests
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly Fixture _any = new();
-    private readonly SalesforceRecordUpserter _upserter;
+    private readonly SalesforceBatchUpsertService _upserter;
 
-    public SalesforceRecordUpserterTests() => _upserter = Upserter();
+    public SalesforceBatchUpsertServiceTests() => _upserter = Upserter();
 
     /// <summary>An upserter on the same org and its own caches, with the given settings.</summary>
-    private SalesforceRecordUpserter Upserter(SalesforceOptions? salesforce = null, SyncOptions? sync = null)
+    private SalesforceBatchUpsertService Upserter(SalesforceOptions? salesforce = null, SyncOptions? sync = null)
     {
         var options = Options.Create(salesforce ?? new SalesforceOptions());
         var http = new HttpClient(new GzipRequestHandler(options) { InnerHandler = new FakeSalesforceHandler(_org) })
         {
             BaseAddress = new Uri("https://fake.my.salesforce.com")
         };
-        return new SalesforceRecordUpserter(new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
-            new SalesforceErrors(options), new WriteEchoTracker(), options, Options.Create(sync ?? new SyncOptions()),
-            NullLogger<SalesforceRecordUpserter>.Instance);
+        return SalesforceStep.Service(http, options, sync);
     }
 
     // ---------- Accounts ----------
@@ -184,7 +182,7 @@ public sealed class SalesforceRecordUpserterTests
             ("BAD", RawAccount("BAD", new() { ["Name"] = "Bad", [field] = value })),
             ("GOOD", RawAccount("GOOD", new() { ["Name"] = "Good" }))
         };
-        var results = await _upserter.UpsertAsync(units,
+        var results = await _upserter.WriteToSalesforceAsync(units,
             AccountSyncService.Queries(units.Select(u => u.Unit).ToList()).ToList(), CancellationToken.None);
 
         var bad = results.Should().ContainSingle(r => r.Key == "BAD").Subject;
@@ -251,7 +249,7 @@ public sealed class SalesforceRecordUpserterTests
         var lost = await Account("A1", new() { ["name"] = "Ours" }, new());
         lost.Outcome.Should().Be(SyncOutcome.TransientFailure);
         (lost.PrimaryError?.Code).Should().Be("DUPLICATE_VALUE");
-        await Upserter().UpsertAsync([("A1", RawAccount("A1", new() { ["Name"] = "Theirs" }))],
+        await Upserter().WriteToSalesforceAsync([("A1", RawAccount("A1", new() { ["Name"] = "Theirs" }))],
             [new SoqlQuery("Account", "External_Id__c", ["A1"])], CancellationToken.None);
 
         (await Account("A1", new() { ["name"] = "Ours" }, new())).Outcome.Should().Be(SyncOutcome.Saved);
@@ -389,7 +387,7 @@ public sealed class SalesforceRecordUpserterTests
             new SObjectRecord("rel", "Account_Relationship__c", "External_Id__c", $"R-{key}", new Dictionary<string, object?> { ["Type__c"] = name },
                 [new SObjectLookup("Account__c", "Account", "External_Id__c", key), new SObjectLookup("Related_Account__c", "Account", "External_Id__c", key)])
         ]);
-        Task<List<UpsertResult>> Send(params (string Key, UpsertUnit Unit)[] units) => _upserter.UpsertAsync(units,
+        Task<List<UpsertResult>> Send(params (string Key, UpsertUnit Unit)[] units) => _upserter.WriteToSalesforceAsync(units,
         [
             new SoqlQuery("Account", "External_Id__c", units.Select(u => u.Key).ToList()),
             new SoqlQuery("Profile__c", "External_Id__c", units.Select(u => $"P-{u.Key}").ToList()),
@@ -627,7 +625,7 @@ public sealed class SalesforceRecordUpserterTests
     private Task<List<UpsertResult>> Accounts(params (string Key, JsonObject Event)[] items) => Accounts(_upserter, null, items);
 
     /// <summary>Profiles are keyed "P-{account}" unless the event says otherwise.</summary>
-    private Task<List<UpsertResult>> Accounts(SalesforceRecordUpserter upserter, EventType? type, params (string Key, JsonObject Event)[] items)
+    private Task<List<UpsertResult>> Accounts(SalesforceBatchUpsertService upserter, EventType? type, params (string Key, JsonObject Event)[] items)
         => Upsert(upserter, AccountStrategy, type, items.Select(i =>
         {
             var account = i.Event["account"]!.AsObject();
@@ -650,11 +648,11 @@ public sealed class SalesforceRecordUpserterTests
         => Upsert(_upserter, strategy, null, items);
 
     /// <summary>What the engine does with a strategy, minus the inbox: map (with the event's type), query, upsert.</summary>
-    private static Task<List<UpsertResult>> Upsert<TEvent>(SalesforceRecordUpserter upserter, UpsertStrategy<TEvent> strategy,
+    private static Task<List<UpsertResult>> Upsert<TEvent>(SalesforceBatchUpsertService upserter, UpsertStrategy<TEvent> strategy,
         EventType? type, params (string Key, TEvent Event)[] items)
     {
         var units = items.Select(i => (i.Key, strategy.Map(i.Key, i.Event) with { EventType = type })).ToList();
-        return upserter.UpsertAsync(units, strategy.Queries(units.Select(u => u.Item2).ToList()).ToList(), CancellationToken.None);
+        return upserter.WriteToSalesforceAsync(units, strategy.Queries(units.Select(u => u.Item2).ToList()).ToList(), CancellationToken.None);
     }
 
     private static JsonObject WithoutProfile(string key, string name)

@@ -107,20 +107,19 @@ public sealed class WriteOutcomeTests
         (await upsert.Should().ThrowAsync<UnknownOutcomeException>()).WithInnerException<OperationCanceledException>();
     }
 
-    private static Task<List<UpsertResult>> Upsert(SalesforceRecordUpserter upserter, string key)
+    private static Task<List<UpsertResult>> Upsert(SalesforceBatchUpsertService upserter, string key)
     {
         var unit = new UpsertUnit([new SObjectRecord("acct", "Account", "External_Id__c", key, new Dictionary<string, object?> { ["Name"] = "Acme" })]);
-        return upserter.UpsertAsync([(key, unit)], AccountSyncService.Queries([unit]).ToList(), CancellationToken.None);
+        return upserter.WriteToSalesforceAsync([(key, unit)], AccountSyncService.Queries([unit]).ToList(), CancellationToken.None);
     }
 
-    private static (SalesforceRecordUpserter, FakeSalesforceStore, FailingHandler) Upserter()
+    private static (SalesforceBatchUpsertService, FakeSalesforceStore, FailingHandler) Upserter()
     {
         var org = new FakeSalesforceStore(new FakeSalesforceOptions { EnforceDailyLimit = false });
         var options = Options.Create(new SalesforceOptions { CompressRequestsLargerThan = 0 });
         var failing = new FailingHandler { InnerHandler = new FakeSalesforceHandler(org) };
         var http = new HttpClient(failing) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
-        return (new SalesforceRecordUpserter(new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
-            new SalesforceErrors(options), new WriteEchoTracker(), options, Options.Create(new SyncOptions()), NullLogger<SalesforceRecordUpserter>.Instance), org, failing);
+        return (SalesforceStep.Service(http, options), org, failing);
     }
 
     /// <summary>Fails the composite read or the composite write (the one with sObject Collections) before it reaches the org.</summary>

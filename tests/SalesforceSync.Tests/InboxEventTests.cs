@@ -240,7 +240,7 @@ public sealed class InboxEventTests
     [Fact]
     public void A_newest_event_that_cannot_be_mapped_is_invalid_and_the_older_ones_stay_superseded()
     {
-        var batch = SalesforceBatchUpsertService.Prepare(Relationships,
+        var batch = BatchPreparer.Prepare(Relationships,
         [
             new InboxEvent(1, "REL-1", """{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A", "relatedAccountExternalId": "B" } }""", 1),
             new InboxEvent(2, "REL-1", """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""", 1)
@@ -276,7 +276,7 @@ public sealed class InboxEventTests
         Accounts.TryRead(older, out var first, out _).Should().BeTrue();
         Accounts.TryRead(newer, out var second, out _).Should().BeTrue();
 
-        var newest = SalesforceBatchUpsertService.Coalesce<AccountEvent>([(new InboxEvent(1, "ACC-1", newer, 1), second!), (new InboxEvent(2, "ACC-1", older, 1), first!)]);
+        var newest = BatchPreparer.Coalesce<AccountEvent>([(new InboxEvent(1, "ACC-1", newer, 1), second!), (new InboxEvent(2, "ACC-1", older, 1), first!)]);
 
         newest.Read.Type.Should().Be(expected);
     }
@@ -364,13 +364,13 @@ public sealed class InboxEventTests
             ["account"] = new JsonObject { ["externalId"] = id, ["name"] = name }
         }.ToJsonString();
 
-    private static SalesforceBatchUpsertService.PreparedBatch Prepare(params InboxEvent[] rows)
-        => SalesforceBatchUpsertService.Prepare(Accounts, rows, new Dictionary<string, long>());
+    private static PreparedBatch Prepare(params InboxEvent[] rows)
+        => BatchPreparer.Prepare(Accounts, rows, new Dictionary<string, long>());
 
-    private static SalesforceBatchUpsertService.PreparedBatch Prepare(Dictionary<string, long> synced, params InboxEvent[] rows)
-        => SalesforceBatchUpsertService.Prepare(Accounts, rows, synced);
+    private static PreparedBatch Prepare(Dictionary<string, long> synced, params InboxEvent[] rows)
+        => BatchPreparer.Prepare(Accounts, rows, synced);
 
-    private static long Micros(string time) => SalesforceBatchUpsertService.ToMicroseconds(DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
+    private static long Micros(string time) => BatchPreparer.ToMicroseconds(DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
 
     /// <summary>A claimed row of the entity its payload names.</summary>
     private static InboxEvent Row(long id, string payload)

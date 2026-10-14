@@ -1,0 +1,32 @@
+namespace SalesforceSync.Inbox;
+
+/// <summary>An entity whose newest event (row <paramref name="EventId"/>) is in Salesforce; its watermark moves to <paramref name="EventTime"/>.</summary>
+public sealed record SyncedEntity(string EntityId, long EventTime, long EventId);
+
+/// <summary>An inbox row with the error to store on it.</summary>
+public sealed record FailedEvent(long EventId, string Error, string? Code);
+
+/// <summary>What to record for the rows of a claim, by kind of outcome.</summary>
+/// <param name="Synced">Done; the entity's watermark advances.</param>
+/// <param name="Superseded">Not written: an event of the same entity is newer, or as new was already synced.</param>
+/// <param name="Released">Back to the inbox for the next claim, no retry spent.</param>
+/// <param name="Dead">Dead-lettered at once.</param>
+/// <param name="Failed">Retried with backoff, dead-lettered after <see cref="SyncOptions.MaxRetries"/>.</param>
+public sealed record BatchOutcomes(
+    IReadOnlyList<SyncedEntity> Synced,
+    IReadOnlyList<long> Superseded,
+    IReadOnlyList<long> Released,
+    IReadOnlyList<FailedEvent> Dead,
+    IReadOnlyList<FailedEvent> Failed)
+{
+    /// <summary>
+    /// Sent in a write whose answer never came: held for <see cref="SyncOptions.UnknownOutcomeHold"/>, no retry spent.
+    /// Only a later write of a batch is held this way; when the first fails, the whole claim is held.
+    /// </summary>
+    public IReadOnlyList<FailedEvent> Held { get; init; } = [];
+
+    /// <summary>Not sent because of a rate limit: handed back for <see cref="DeferFor"/>, no retry spent.</summary>
+    public IReadOnlyList<long> Deferred { get; init; } = [];
+
+    public TimeSpan DeferFor { get; init; }
+}

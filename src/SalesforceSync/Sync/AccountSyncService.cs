@@ -9,30 +9,14 @@ namespace SalesforceSync.Sync;
 /// Typed event -> mappers -> sObjects -> records. An event without a <c>profile</c> writes only the Account.
 /// </summary>
 public sealed class AccountSyncService(
-    SalesforceBatchUpsertService upsert,
+    SalesforceBatchUpsertService engine,
     ISObjectMapper<AccountPayload, AccountSObject> accounts,
-    ISObjectMapper<ProfilePayload, ProfileSObject> profiles) : ISalesforceEntitySync
+    ISObjectMapper<ProfilePayload, ProfileSObject> profiles)
+    : EntitySyncService<AccountEvent>(engine, CreateStrategy(accounts, profiles), DefaultTopic)
 {
     public const string Type = "account";
     public const string InboxTable = "sf_account_inbox";
     public const string DefaultTopic = "account-changes";
-
-    private readonly UpsertStrategy<AccountEvent> _strategy = CreateStrategy(accounts, profiles);
-
-    public string EntityType => Type;
-
-    string ISalesforceEntitySync.InboxTable => InboxTable;
-
-    public string Topic => DefaultTopic;
-
-    public bool TryReadEvent(string json, out string? entityId, out string? problem)
-    {
-        var ok = _strategy.TryRead(json, out var read, out problem);
-        entityId = read?.EntityId;
-        return ok;
-    }
-
-    public Task<int> SyncBatchAsync(CancellationToken ct) => upsert.UpsertBatchAsync(_strategy, ct);
 
     /// <summary>The strategy the engine runs, with the mappers it maps through (injected, so built per instance).</summary>
     public static UpsertStrategy<AccountEvent> CreateStrategy(

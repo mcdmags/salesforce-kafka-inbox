@@ -85,11 +85,11 @@ public class MicroBenchmarks
 
     /// <summary>Ten claimed events of one entity, already read -> the one to write (the newest by event time).</summary>
     [Benchmark]
-    public long CoalesceTenEvents() => SalesforceBatchUpsertService.Coalesce(_tenRead).Row.Id;
+    public long CoalesceTenEvents() => BatchPreparer.Coalesce(_tenRead).Row.Id;
 
     /// <summary>What the engine does with a claimed entity: read its ten events, keep the newest, map it.</summary>
     [Benchmark]
-    public int PrepareTenEvents() => SalesforceBatchUpsertService.Prepare(Accounts, _tenEvents, NothingSynced).Work.Count;
+    public int PrepareTenEvents() => BatchPreparer.Prepare(Accounts, _tenEvents, NothingSynced).Work.Count;
 
     /// <summary>What the consumer does per message: typed read + validation (entity id, event time).</summary>
     [Benchmark]

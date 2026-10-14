@@ -30,22 +30,7 @@ public static class SyncServiceCollectionExtensions
         var services = builder.Services;
         var config = builder.Configuration;
 
-        services.AddOptions<SalesforceOptions>()
-            .Bind(config.GetSection(SalesforceOptions.Section))
-            .Validate(o => Uri.IsWellFormedUriString(o.InstanceUrl, UriKind.Absolute),
-                $"{SalesforceOptions.Section}:InstanceUrl must be an absolute URL")
-            .ValidateOnStart();
-        services.AddOptions<SyncOptions>()
-            .Bind(config.GetSection(SyncOptions.Section))
-            .ValidateOnStart();
-        services.AddSingleton<IValidateOptions<SyncOptions>, SyncOptionsValidator>();
-        services.Configure<RateLimitOptions>(config.GetSection(RateLimitOptions.Section));
-        services.AddOptions<SalesforceLimitsOptions>()
-            .Bind(config.GetSection(SalesforceLimitsOptions.Section))
-            .ValidateOnStart();
-        services.AddSingleton<IValidateOptions<SalesforceLimitsOptions>, SalesforceLimitsValidator>();
-        services.Configure<FakeSalesforceOptions>(config.GetSection(FakeSalesforceOptions.Section));
-        services.Configure<PostgresRetryOptions>(config.GetSection(PostgresRetryOptions.Section));
+        AddWorkerOptions(services, config);
 
         // Postgres (ConnectionStrings:inboxdb, injected by Aspire, appsettings or the tests)
         builder.AddNpgsqlDataSource("inboxdb");
@@ -55,42 +40,11 @@ public static class SyncServiceCollectionExtensions
         // Handler order: rate limiter (outermost, so every attempt costs a token) -> gzip -> auth.
         var salesforce = services.AddSalesforceClient()
             .AddSalesforceRateLimiting(); // its initializer runs after the schema's, before the workers
-
-        if (config.GetValue<bool>("Salesforce:UseFake"))
-        {
-            // In-memory org: the real client, rate limiter and inbox are exercised; only the HTTP endpoint is fake.
-            services.AddSingleton(sp => new FakeSalesforceStore(sp.GetRequiredService<IOptions<FakeSalesforceOptions>>().Value));
-            salesforce.ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
-            services.AddHostedService<FakeStatsReporter>();
-        }
-        else
-        {
-            services.AddHttpClient(SalesforceTokenProvider.HttpClientName);
-            services.AddSingleton<SalesforceTokenProvider>();
-            services.AddTransient<SalesforceAuthHandler>();
-            salesforce.AddHttpMessageHandler<SalesforceAuthHandler>()
-                // Long-lived pooled connections (recycled so DNS changes are picked up) instead of handler rotation;
-                // responses are compressed by Salesforce when we accept it
-                .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-                {
-                    AutomaticDecompression = DecompressionMethods.All,
-                    PooledConnectionLifetime = TimeSpan.FromMinutes(5)
-                })
-                .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
-        }
+        if (config.GetValue<bool>("Salesforce:UseFake")) UseInMemoryOrg(salesforce);
+        else UseSalesforceOrg(salesforce);
 
         // Kafka -> inbox (only when a Kafka connection string is configured)
-        if (!string.IsNullOrWhiteSpace(config.GetConnectionString("kafka")))
-        {
-            builder.AddKafkaConsumer<string, string>("kafka", settings =>
-            {
-                // At-least-once without a broker round trip per message: KafkaInboxConsumer stores an offset only after
-                // its row is in the inbox, and the client commits stored offsets in the background (and on close).
-                settings.Config.EnableAutoCommit = true;
-                settings.Config.EnableAutoOffsetStore = false;
-            });
-            services.AddHostedService<KafkaInboxConsumer>();
-        }
+        if (!string.IsNullOrWhiteSpace(config.GetConnectionString("kafka"))) AddKafkaIngest(builder);
 
         // Inbox -> Salesforce: one engine, one strategy per synced object
         services.AddInboxSync();
@@ -99,8 +53,70 @@ public static class SyncServiceCollectionExtensions
         return builder;
     }
 
+    private static void AddWorkerOptions(IServiceCollection services, IConfiguration config)
+    {
+        services.AddOptions<SalesforceOptions>()
+            .Bind(config.GetSection(SalesforceOptions.Section))
+            .Validate(o => Uri.IsWellFormedUriString(o.InstanceUrl, UriKind.Absolute),
+                $"{SalesforceOptions.Section}:InstanceUrl must be an absolute URL")
+            .ValidateOnStart();
+        AddValidatedOptions<SyncOptions, SyncOptionsValidator>(services, config.GetSection(SyncOptions.Section));
+        AddValidatedOptions<SalesforceLimitsOptions, SalesforceLimitsValidator>(services, config.GetSection(SalesforceLimitsOptions.Section));
+        services.Configure<RateLimitOptions>(config.GetSection(RateLimitOptions.Section));
+        services.Configure<FakeSalesforceOptions>(config.GetSection(FakeSalesforceOptions.Section));
+        services.Configure<PostgresRetryOptions>(config.GetSection(PostgresRetryOptions.Section));
+    }
+
+    /// <summary>Options bound to a section and checked by <typeparamref name="TValidator"/> at startup.</summary>
+    private static void AddValidatedOptions<TOptions, TValidator>(IServiceCollection services, IConfigurationSection section)
+        where TOptions : class
+        where TValidator : class, IValidateOptions<TOptions>
+    {
+        services.AddOptions<TOptions>().Bind(section).ValidateOnStart();
+        services.AddSingleton<IValidateOptions<TOptions>, TValidator>();
+    }
+
+    /// <summary>In-memory org: the real client, rate limiter and inbox are exercised; only the HTTP endpoint is fake.</summary>
+    private static void UseInMemoryOrg(IHttpClientBuilder salesforce)
+    {
+        var services = salesforce.Services;
+        services.AddSingleton(sp => new FakeSalesforceStore(sp.GetRequiredService<IOptions<FakeSalesforceOptions>>().Value));
+        salesforce.ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
+        services.AddHostedService<FakeStatsReporter>();
+    }
+
+    /// <summary>A real org: OAuth, and one long-lived connection pool.</summary>
+    private static void UseSalesforceOrg(IHttpClientBuilder salesforce)
+    {
+        var services = salesforce.Services;
+        services.AddHttpClient(SalesforceTokenProvider.HttpClientName);
+        services.AddSingleton<SalesforceTokenProvider>();
+        services.AddTransient<SalesforceAuthHandler>();
+        salesforce.AddHttpMessageHandler<SalesforceAuthHandler>()
+            // Long-lived pooled connections (recycled so DNS changes are picked up) instead of handler rotation;
+            // responses are compressed by Salesforce when we accept it
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AutomaticDecompression = DecompressionMethods.All,
+                PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+            })
+            .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
+    }
+
+    private static void AddKafkaIngest(IHostApplicationBuilder builder)
+    {
+        builder.AddKafkaConsumer<string, string>("kafka", settings =>
+        {
+            // At-least-once without a broker round trip per message: KafkaInboxConsumer stores an offset only after
+            // its row is in the inbox, and the client commits stored offsets in the background (and on close).
+            settings.Config.EnableAutoCommit = true;
+            settings.Config.EnableAutoOffsetStore = false;
+        });
+        builder.Services.AddHostedService<KafkaInboxConsumer>();
+    }
+
     /// <summary>
-    /// Salesforce REST client and what it needs (Describe cache, diff, error classification).
+    /// Salesforce REST client and what the engine's Salesforce step needs (Describe cache, flapping check, error classification).
     /// Handler order: gzip -> (auth and primary handler, added by the caller); <see cref="AddSalesforceRateLimiting"/>
     /// puts the rate limiter in front.
     /// </summary>
@@ -111,7 +127,6 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton<WriteEchoTracker>();
         services.AddSingleton<SalesforceErrors>();
         services.AddTransient<GzipRequestHandler>();
-        services.AddTransient<SalesforceRecordUpserter>();
 
         return services.AddHttpClient<SalesforceRestClient>((sp, c) =>
             {
@@ -143,6 +158,7 @@ public static class SyncServiceCollectionExtensions
             sp.GetRequiredService<PostgresExecutionStrategy>(),
             sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests,
             sp.GetRequiredService<ILogger<SalesforceConcurrencySlots>>()));
+        services.AddSingleton<ISalesforceBatchGate, SalesforceBatchGate>();
         services.AddTransient<SalesforceRateLimitHandler>();
 
         return salesforce
@@ -160,12 +176,15 @@ public static class SyncServiceCollectionExtensions
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {
         services.AddSingleton<PostgresExecutionStrategy>(); // every unit of work retries transient Postgres errors
+        services.AddSingleton<IInboxRepository, InboxRepository>();
         services.AddTransient<SalesforceBatchUpsertService>();
-        // Mappers are stateless
+
+        // The synced objects. Mappers are stateless.
         services.AddSingleton<ISObjectMapper<AccountPayload, AccountSObject>, AccountMapper>();
         services.AddSingleton<ISObjectMapper<ProfilePayload, ProfileSObject>, ProfileMapper>();
-        services.AddSingleton<ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject>, AccountRelationshipMapper>();
         services.AddTransient<ISalesforceEntitySync, AccountSyncService>();
+
+        services.AddSingleton<ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject>, AccountRelationshipMapper>();
         services.AddTransient<ISalesforceEntitySync, AccountRelationshipSyncService>();
         return services;
     }
