@@ -14,11 +14,12 @@ public sealed record FakeField(
     bool Updateable = true,
     bool Nillable = true,
     string? ReferenceTo = null,
-    string? RelationshipName = null);
+    string? RelationshipName = null,
+    int Digits = 0);
 
 /// <summary>
 /// The mock org's metadata (served by sObject Describe) and how it stores values, the way Salesforce does:
-/// unknown and read-only fields are rejected, numbers are rounded to the field's scale, a checkbox is never null,
+/// unknown and read-only fields are rejected, numbers are rounded to the field's scale, date/time is kept to the second, a checkbox is never null,
 /// multi-select values are kept in picklist order, text is length-checked. Deliberately independent of the client's
 /// normalization, so tests catch a client that would make fields flap.
 /// </summary>
@@ -36,7 +37,7 @@ public static class FakeSchema
                 new("Industry", "picklist", 255),
                 new("Description", "textarea", 32000),
                 new("AnnualRevenue", "currency", Precision: 18, Scale: 2),
-                new("NumberOfEmployees", "int", Precision: 8),
+                new("NumberOfEmployees", "int", Digits: 8),
                 new("Phone", "phone", 40),
                 new("Website", "url", 255),
                 new("Active__c", "boolean", Nillable: false),
@@ -101,6 +102,7 @@ public static class FakeSchema
             ["length"] = f.Length,
             ["precision"] = f.Precision,
             ["scale"] = f.Scale,
+            ["digits"] = f.Digits,
             ["createable"] = f.Createable,
             ["updateable"] = f.Updateable,
             ["nillable"] = f.Nillable,
@@ -145,8 +147,9 @@ public static class FakeSchema
                     ? (d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), null, null)
                     : Invalid(field, value);
             case "datetime":
+                // Stored to the second, like Salesforce's date/time fields
                 return text is not null && DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var t)
-                    ? (FormatDateTime(t), null, null)
+                    ? (FormatDateTime(new DateTimeOffset(t.UtcTicks - t.UtcTicks % TimeSpan.TicksPerSecond, TimeSpan.Zero)), null, null)
                     : Invalid(field, value);
             case "id" or "reference":
                 return text is { Length: 15 or 18 } ? (text, null, null) : (null, "MALFORMED_ID", $"{field.Name}: id value of incorrect type: {text}");
