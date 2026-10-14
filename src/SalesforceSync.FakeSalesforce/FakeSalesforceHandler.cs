@@ -28,7 +28,7 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
         if (slot is null)
         {
             store.CountApiCall();
-            return Json(request, HttpStatusCode.Forbidden, FakeSalesforceStore.Errors("REQUEST_LIMIT_EXCEEDED",
+            return Json(request, HttpStatusCode.Forbidden, FakeJson.Errors("REQUEST_LIMIT_EXCEEDED",
                 "ConcurrentPerOrgLongTxn Limit exceeded."));
         }
         return await HandleAsync(request, ct);
@@ -59,7 +59,7 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
         if (options.EnforceDailyLimit && calls > options.DailyApiLimit)
         {
             res = Json(request, HttpStatusCode.Forbidden,
-                FakeSalesforceStore.Errors("REQUEST_LIMIT_EXCEEDED", "TotalRequests Limit exceeded."));
+                FakeJson.Errors("REQUEST_LIMIT_EXCEEDED", "TotalRequests Limit exceeded."));
         }
         else
         {
@@ -84,12 +84,12 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
                 else
                 {
                     res = Json(request, HttpStatusCode.NotFound,
-                        FakeSalesforceStore.Errors("NOT_FOUND", $"Fake does not support {request.Method} {path}"));
+                        FakeJson.Errors("NOT_FOUND", $"Fake does not support {request.Method} {path}"));
                 }
             }
             catch (FakeSalesforceException ex)
             {
-                res = Json(request, (HttpStatusCode)ex.Status, FakeSalesforceStore.Errors(ex.ErrorCode, ex.Message));
+                res = Json(request, (HttpStatusCode)ex.Status, FakeJson.Errors(ex.ErrorCode, ex.Message));
             }
         }
 

@@ -76,6 +76,16 @@ public static class FakeSchema
             ]
         };
 
+    /// <summary>The first three characters of an object's record Ids.</summary>
+    private static readonly Dictionary<string, string> KeyPrefixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Account"] = "001",
+        ["Profile__c"] = "a00"
+    };
+
+    /// <summary>Custom objects without a prefix of their own share one.</summary>
+    public static string KeyPrefixOf(string sobject) => KeyPrefixes.GetValueOrDefault(sobject, "a01");
+
     public static FakeField? Find(string sobject, string field)
         => Objects.TryGetValue(sobject, out var fields)
             ? fields.FirstOrDefault(f => f.Name.Equals(field, StringComparison.OrdinalIgnoreCase))
