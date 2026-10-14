@@ -364,13 +364,13 @@ public sealed class InboxEventTests
             ["account"] = new JsonObject { ["externalId"] = id, ["name"] = name }
         }.ToJsonString();
 
-    private static SalesforceBatchUpsertService.PreparedBatch Prepare(params InboxEvent[] rows)
+    private static PreparedBatch Prepare(params InboxEvent[] rows)
         => SalesforceBatchUpsertService.Prepare(Accounts, rows, new Dictionary<string, long>());
 
-    private static SalesforceBatchUpsertService.PreparedBatch Prepare(Dictionary<string, long> synced, params InboxEvent[] rows)
+    private static PreparedBatch Prepare(Dictionary<string, long> synced, params InboxEvent[] rows)
         => SalesforceBatchUpsertService.Prepare(Accounts, rows, synced);
 
-    private static long Micros(string time) => SalesforceBatchUpsertService.ToMicroseconds(DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
+    private static long Micros(string time) => BatchPreparer.ToMicroseconds(DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
 
     /// <summary>A claimed row of the entity its payload names.</summary>
     private static InboxEvent Row(long id, string payload)

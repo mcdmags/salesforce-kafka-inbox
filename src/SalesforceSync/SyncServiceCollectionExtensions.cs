@@ -111,7 +111,6 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton<WriteEchoTracker>();
         services.AddSingleton<SalesforceErrors>();
         services.AddTransient<GzipRequestHandler>();
-        services.AddTransient<SalesforceRecordUpserter>();
 
         return services.AddHttpClient<SalesforceRestClient>((sp, c) =>
             {
@@ -143,6 +142,7 @@ public static class SyncServiceCollectionExtensions
             sp.GetRequiredService<PostgresExecutionStrategy>(),
             sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests,
             sp.GetRequiredService<ILogger<SalesforceConcurrencySlots>>()));
+        services.AddSingleton<ISalesforceBatchGate, SalesforceBatchGate>();
         services.AddTransient<SalesforceRateLimitHandler>();
 
         return salesforce
@@ -160,6 +160,7 @@ public static class SyncServiceCollectionExtensions
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {
         services.AddSingleton<PostgresExecutionStrategy>(); // every unit of work retries transient Postgres errors
+        services.AddSingleton<IInboxRepository, InboxRepository>();
         services.AddTransient<SalesforceBatchUpsertService>();
         // Mappers are stateless
         services.AddSingleton<ISObjectMapper<AccountPayload, AccountSObject>, AccountMapper>();
