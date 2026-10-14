@@ -42,13 +42,16 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     public Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct)
     {
         var attempted = new List<Guid>();
+        var attemptedEntityIds = new HashSet<string>(StringComparer.Ordinal);
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
             var sql = InboxSql.For(db.TableOf<TEntity>());
 
-            if (attempted.Count > 0)
+            await db.Database.ExecuteAsync(InboxSql.PinPlans, t);
+            if (attemptedEntityIds.Count > 0)
             {
-                await db.Database.ExecuteAsync(sql.ReleaseLostClaims, t, Param("tokens", attempted.ToArray()));
+                await db.Database.ExecuteAsync(sql.ReleaseLostClaims, t,
+                    Param("tokens", attempted.ToArray()), Param("entityIds", attemptedEntityIds.ToArray()));
             }
 
             var token = Guid.NewGuid();
@@ -60,6 +63,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             {
                 return new InboxClaim(entityType, token, [], new Dictionary<string, long>());
             }
+            attemptedEntityIds.UnionWith(entityIds);
 
             var events = await db.Database.QueryAsync<InboxEvent>(sql.ClaimEntities, t,
                 Param("entityIds", entityIds), Param("token", token), Param("lease", _opt.Lease),
@@ -82,6 +86,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         {
             var sql = InboxSql.For(db.TableOf<TEntity>());
 
+            await db.Database.ExecuteAsync(InboxSql.PinPlans, t);
             if (outcomes.Synced.Count > 0)
             {
                 // Watermarks first: Complete releases the lease that MarkSynced checks

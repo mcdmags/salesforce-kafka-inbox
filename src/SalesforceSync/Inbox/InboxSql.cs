@@ -69,6 +69,20 @@ public sealed partial class InboxSql
     /// <inheritdoc cref="Template.Dead"/>
     public string Dead { get; }
 
+    /// <summary>
+    /// Run first in every claim and outcome transaction. An inbox is a queue: its statistics describe some earlier
+    /// moment (taken while every row was finished, or never taken after a bulk load), so a plan chosen from estimates
+    /// is wrong exactly when a backlog arrives. Measured with statistics from a table of finished rows and 100,000
+    /// new pending ones, the planner expected one pending row, read the whole ready index once per entity and sorted
+    /// it: 1.5 s per statement instead of 2 ms. With these off, every lookup in the statements below can only be the
+    /// ordered index scan it was written for (the indexes in sql/schema.sql), whatever the estimates say. JIT is off
+    /// because a misestimated cost can also make Postgres compile a 1 ms statement for 200 ms. SET LOCAL: the
+    /// settings end with the transaction, so a pooled connection never keeps them.
+    /// </summary>
+    public const string PinPlans = """
+        set local enable_bitmapscan = off; set local enable_sort = off; set local enable_seqscan = off; set local jit = off
+        """;
+
     /// <summary>The statements with <c>{inbox}</c> for the table name.</summary>
     public static class Template
     {
@@ -89,10 +103,13 @@ public sealed partial class InboxSql
         /// or backing off); this finds the entities behind them.</item>
         /// <item>Per entity, never per row: find its head, require it to be due and the entity to have no live lease,
         /// and lock the head by primary key. The conditions are on the locked row too, so they are re-checked if
-        /// another worker changed it in the meantime.</item>
+        /// another worker changed it in the meantime. They are written as one CASE so that the only index that fits
+        /// the locked row is its primary key: as plain conditions they also fit the ready index, and with stale
+        /// statistics the planner fetched the head through it, reading every due row once per entity.</item>
         /// </list>
         /// LIMIT stops the walk as soon as the batch is full, so <c>heads</c> is normally never started. The probes are
-        /// LATERAL ... LIMIT 1 subqueries rather than joins, which keeps the plan the same whatever the statistics say.
+        /// LATERAL ... LIMIT 1 subqueries rather than joins, and the transaction runs under <see cref="PinPlans"/>,
+        /// which together keep the plan the same whatever the statistics say.
         /// </summary>
         public const string LockHeads = """
             with recursive
@@ -125,8 +142,9 @@ public sealed partial class InboxSql
               order by o.id limit 1) h
             cross join lateral (
               select x.entity_id from {inbox} x
-              where x.id = h.id and x.status = 'pending' and x.next_attempt_at <= now()
-                and (x.locked_until is null or x.locked_until < now())
+              where x.id = h.id
+                and case when x.status = 'pending' and x.next_attempt_at <= now()
+                              and (x.locked_until is null or x.locked_until < now()) then true else false end
                 and not exists (select 1 from {inbox} p
                                 where p.entity_id = c.entity_id and p.locked_until > now())
               for update skip locked) l
@@ -151,7 +169,9 @@ public sealed partial class InboxSql
         /// whatever row a worker's snapshot shows as oldest, and an event committed out of id order (two consumers
         /// storing events of one entity) makes it a different row for two workers. Then neither row lock conflicts,
         /// LockHeads' own lease check reads a snapshot from before the other worker's commit, and both leased the
-        /// entity (ClaimRaceTests).
+        /// entity (ClaimRaceTests). Rows are also re-checked to still be pending when they are locked; as a CASE, like
+        /// in LockHeads, because as a plain condition it let the planner read the updated rows off the ready index
+        /// (with stale statistics: the whole index, once per row claimed).
         /// </para>
         /// </summary>
         public const string ClaimEntities = """
@@ -166,26 +186,31 @@ public sealed partial class InboxSql
                                 where p.entity_id = e.entity_id and p.locked_until > now()
                                   and p.lock_token is distinct from @token)
               order by o.id limit @maxPerEntity) r
-            where u.id = r.id
+            where u.id = r.id and case when u.status = 'pending' then true else false end
             returning u.id as Id, u.entity_id as EntityId, u.payload::text as Payload, u.retry_count as RetryCount
             """;
 
         /// <summary>
         /// Undoes ClaimEntities of earlier attempts of a retried claim whose commit outcome was unknown: no worker knows
         /// those tokens, so their rows would otherwise sit leased, unprocessed, until the lease expires. Restores
-        /// retry_count. Only leased rows are looked at (the leased index), not the whole table.
+        /// retry_count. @entityIds are the entities those attempts locked: their leased rows are found through the
+        /// leased index, a few rows per entity. (Nothing indexes lock_token, so looking for the tokens alone scanned
+        /// every leased row, or the table.) The status check is a CASE for the same reason as in LockHeads: as a
+        /// plain condition the pending and ready indexes fit too, and the planner took them.
         /// </summary>
         public const string ReleaseLostClaims = """
             update {inbox}
             set locked_until = null, lock_token = null, last_updated = now(), next_attempt_at = now(),
                 retry_count = greatest(retry_count - 1, 0)
-            where locked_until is not null and status = 'pending' and lock_token = any(@tokens)
+            where entity_id = any(@entityIds) and locked_until is not null and lock_token = any(@tokens)
+              and case when status = 'pending' then true else false end
             """;
 
         /// <summary>
         /// Advances the watermarks of entities (@entityIds[i] to @times[i]), but only while this worker still holds the
         /// lease on the entity's rows, so a worker whose lease expired cannot move them. The lease check is a scalar
-        /// LIMIT 1 probe of the leased index per entity (as EXISTS it can turn into a join over every leased row).
+        /// LIMIT 1 probe of the leased index per entity (as EXISTS it can turn into a join over every leased row),
+        /// in the index's own order so that it is read as an index scan.
         /// </summary>
         public const string MarkSynced = """
             insert into sf_sync_state (entity_type, entity_id, synced_time)
@@ -193,36 +218,36 @@ public sealed partial class InboxSql
             from unnest(@entityIds, @times) as s(entity_id, synced_time)
             where (select true from {inbox} l
                    where l.entity_id = s.entity_id and l.locked_until is not null and l.lock_token = @token
-                   limit 1)
+                   order by l.entity_id, l.locked_until limit 1)
             on conflict (entity_type, entity_id) do update
             set synced_time = greatest(sf_sync_state.synced_time, excluded.synced_time), synced_at = now()
             """;
 
         /// <summary>
         /// Transient failure: retry with exponential backoff; dead-letter once retries are used up. @errors is a JSON
-        /// object, row id -> [error, code], so a whole batch's failures are one statement. Parsed once (the
-        /// one-row CTE) and looked up per row rather than joined as arrays: a join against the ids let the planner
-        /// drive the update from a scan for lock_token and compare every row with every id.
+        /// object, row id -> [error, code], so a whole batch's failures are one statement. The rows are found by
+        /// primary key like every other outcome; the object is an uncorrelated scalar subquery, which Postgres
+        /// evaluates once per statement and then only looks up a key in per row. (Joined in as a one-row CTE it was
+        /// copied once per row: 230 ms for 5,000 rows. Joined as arrays, the planner could drive the update from a
+        /// scan for lock_token and compare every row with every id.)
         /// </summary>
         public const string Fail = """
-            with e as materialized (select @errors::jsonb as by_id)
             update {inbox} i
             set locked_until = null, lock_token = null, last_updated = now(),
-                last_error = e.by_id -> i.id::text ->> 0, last_error_code = e.by_id -> i.id::text ->> 1,
+                last_error = (select @errors::jsonb) -> i.id::text ->> 0,
+                last_error_code = (select @errors::jsonb) -> i.id::text ->> 1,
                 next_attempt_at = now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.retry_count - 1))),
                 status = case when i.retry_count >= @maxRetries then 'dead' else 'pending' end
-            from e
             where i.id = any(@ids) and i.lock_token = @token
             """;
 
         /// <summary>Permanent failure: retrying the same data can't succeed, dead-letter now. @errors as in <see cref="Fail"/>.</summary>
         public const string Dead = """
-            with e as materialized (select @errors::jsonb as by_id)
             update {inbox} i
             set locked_until = null, lock_token = null, last_updated = now(),
-                last_error = e.by_id -> i.id::text ->> 0, last_error_code = e.by_id -> i.id::text ->> 1,
+                last_error = (select @errors::jsonb) -> i.id::text ->> 0,
+                last_error_code = (select @errors::jsonb) -> i.id::text ->> 1,
                 status = 'dead'
-            from e
             where i.id = any(@ids) and i.lock_token = @token
             """;
     }

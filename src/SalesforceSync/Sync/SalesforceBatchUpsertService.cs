@@ -303,13 +303,4 @@ public sealed class SalesforceBatchUpsertService(
             log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}",
                 results.Count(r => r.Outcome == SyncOutcome.RateLimited), entityType, limited.RetryAfter);
     }
-
-    /// <summary><see cref="BatchPreparer.Prepare{TEvent}"/>, callable on the engine.</summary>
-    internal static PreparedBatch Prepare<TEvent>(UpsertStrategy<TEvent> strategy, IReadOnlyList<InboxEvent> rows,
-        IReadOnlyDictionary<string, long> synced)
-        => BatchPreparer.Prepare(strategy, rows, synced);
-
-    /// <summary><see cref="BatchPreparer.Coalesce{TEvent}"/>, callable on the engine.</summary>
-    public static (InboxEvent Row, ReadEvent<TEvent> Read) Coalesce<TEvent>(IReadOnlyList<(InboxEvent Row, ReadEvent<TEvent> Read)> events)
-        => BatchPreparer.Coalesce(events);
 }

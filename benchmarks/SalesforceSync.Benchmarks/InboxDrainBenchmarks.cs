@@ -368,6 +368,10 @@ public abstract class DrainBenchmarkBase
         var rows = await Count($"select count(*) from ({inbox}) i");
         var notDone = await Count($"select count(*) from ({inbox}) i where status not in ('done', 'superseded')");
         var superseded = await Count($"select count(*) from ({inbox}) i where status = 'superseded'");
+        // A done row is an entity synced from its newest claimed event; the superseded rows are the events coalesced
+        // into it (or dropped by the watermark). Events per done row is therefore the coalescing, per entity sync:
+        // counting records written instead would mix in that an account event writes two records (Account, Profile).
+        var done = await Count($"select count(*) from ({inbox}) i where status = 'done'");
         var claims = await Count("select count(*) from sf_claim_audit");
         var overlaps = await Count("select count(*) from sf_claim_overlaps");
         // retry_count counts attempts (bumped at claim), so retries = attempts beyond the first. Mostly relationships
@@ -378,8 +382,9 @@ public abstract class DrainBenchmarkBase
         var stats = _store.GetStats();
         Console.WriteLine(
             $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms] " +
-            $"events={Events} relationshipEvents={relationshipEvents} {stats} coalescing={(double)Events / Math.Max(1, stats.RecordsSucceeded):F1} events/record written " +
-            $"claims={claims} retries={retries} superseded={superseded} overlappingClaims={overlaps} notDone={notDone} wrong={wrong.Count} regressions={regressions}");
+            $"events={Events} relationshipEvents={relationshipEvents} {stats} done={done} superseded={superseded} " +
+            $"coalescing={(double)Events / Math.Max(1, done):F2} events/entity sync " +
+            $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} wrong={wrong.Count} regressions={regressions}");
 
         if (wrong.Count > 0 || rows != Events || notDone > 0 || overlaps > 0 || regressions > 0)
             throw new InvalidOperationException(
