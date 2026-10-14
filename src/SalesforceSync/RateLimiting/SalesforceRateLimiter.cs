@@ -76,8 +76,8 @@ public sealed class SalesforceRateLimiter(
     public Task PauseAsync(TimeSpan duration, CancellationToken ct) => pg.ExecuteAsync(RateLimitSql.Pause, new { duration }, ct);
 
     /// <summary>
-    /// Records the limits Salesforce reported and adjusts the shared bucket:
-    /// slows down near the daily / per-app allocation or burst limit, pauses near exhaustion.
+    /// Records the limits Salesforce reported and adjusts the shared bucket: slows down near the daily or per-app
+    /// allocation, pauses near exhaustion. api-bursts is recorded but not acted on (see <see cref="SalesforceLimitInfo"/>).
     /// </summary>
     public async Task ReportLimitsAsync(SalesforceLimitInfo info, CancellationToken ct)
     {
@@ -114,29 +114,15 @@ public sealed class SalesforceRateLimiter(
     internal ThrottleDecision Decide(SalesforceLimitInfo info, double ownDailyRatio = 0)
     {
         var daily = Math.Max(info.DailyRatio, ownDailyRatio);
-        var burst = info.BurstRatio;
-
         if (daily >= _opt.DailyHardRatio)
+        {
             return new ThrottleDecision(ThrottleLevel.DailyExhausted, _opt.DailySoftSpeed, _opt.DailyHardPause);
-
-        var speed = 1.0;
-        var pause = TimeSpan.Zero;
-        var level = ThrottleLevel.Normal;
-
+        }
         if (daily >= _opt.DailySoftRatio)
         {
-            speed = Math.Min(speed, _opt.DailySoftSpeed);
-            level = ThrottleLevel.DailyLow;
+            return new ThrottleDecision(ThrottleLevel.DailyLow, _opt.DailySoftSpeed, TimeSpan.Zero);
         }
-
-        if (burst >= _opt.BurstSoftRatio)
-        {
-            speed = Math.Min(speed, _opt.BurstSoftSpeed);
-            pause = _opt.BurstPause;
-            level = level == ThrottleLevel.Normal ? ThrottleLevel.Bursting : level;
-        }
-
-        return new ThrottleDecision(level, speed, pause);
+        return ThrottleDecision.Normal;
     }
 
     /// <summary>The configured allocation drives the budget; say so once if Salesforce reports a different one.</summary>
@@ -159,7 +145,7 @@ public sealed class SalesforceRateLimiter(
             info.ApiUsage, info.ApiBursts, info.PerAppUsage, info.AppName);
     }
 
-    internal enum ThrottleLevel { Normal, Bursting, DailyLow, DailyExhausted }
+    internal enum ThrottleLevel { Normal, DailyLow, DailyExhausted }
 
     internal readonly record struct ThrottleDecision(ThrottleLevel Level, double Speed, TimeSpan Pause)
     {

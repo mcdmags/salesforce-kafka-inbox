@@ -44,13 +44,6 @@ public sealed class RateLimitOptions
     /// </summary>
     public TimeSpan DailyHardPause { get; set; } = TimeSpan.FromMinutes(15);
 
-    /// <summary>Burst usage ratio at which to back off briefly.</summary>
-    public double BurstSoftRatio { get; set; } = 0.80;
-
-    public double BurstSoftSpeed { get; set; } = 0.5;
-
-    public TimeSpan BurstPause { get; set; } = TimeSpan.FromSeconds(10);
-
     /// <summary>
     /// Minimum gap between writes of header values to Postgres per process.
     /// A change in throttle level is always written immediately.

@@ -17,7 +17,11 @@ public sealed class SalesforceRateLimitHandler(
 {
     public const string LimitInfoHeader = "Sforce-Limit-Info";
 
-    /// <summary>Pause after a 429/503 that doesn't say how long to wait.</summary>
+    /// <summary>
+    /// Pause after a 429/503 that doesn't say how long to wait. Salesforce documents 503 (server down for maintenance
+    /// or overloaded) and REQUEST_LIMIT_EXCEEDED as a 403; 429 isn't in its REST status codes and is handled in case
+    /// something in front of it sends one.
+    /// </summary>
     private static readonly TimeSpan DefaultRetryAfter = TimeSpan.FromSeconds(30);
 
     public enum LimitExceeded { ConcurrentLongRunning, TotalRequests }
