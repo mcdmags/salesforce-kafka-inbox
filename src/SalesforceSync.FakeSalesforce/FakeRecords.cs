@@ -27,7 +27,26 @@ internal sealed class FakeRecords
 
     public List<JsonObject> HistoryOf(string id) => _history[id];
 
-    public string NewId(string sobject) => $"{FakeSchema.KeyPrefixOf(sobject)}FAKE{++_idCounter:D11}";
+    /// <summary>A valid 18-character id: key prefix, "FAKE", a counter, and the suffix that encodes their case.</summary>
+    public string NewId(string sobject)
+    {
+        var id = $"{FakeSchema.KeyPrefixOf(sobject)}FAKE{++_idCounter:D8}";
+        const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
+        var suffix = new char[3];
+        for (var chunk = 0; chunk < 3; chunk++)
+        {
+            var bits = 0;
+            for (var i = 0; i < 5; i++)
+            {
+                if (char.IsAsciiLetterUpper(id[chunk * 5 + i]))
+                {
+                    bits |= 1 << i;
+                }
+            }
+            suffix[chunk] = alphabet[bits];
+        }
+        return id + new string(suffix);
+    }
 
     /// <returns>How to take the record out again (allOrNone rollback).</returns>
     public Action Insert(string sobject, string id, JsonObject record, JsonObject storedValues)
