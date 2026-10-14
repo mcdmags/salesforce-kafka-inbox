@@ -34,7 +34,7 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 | Problem | Solution |
 |---|---|
 | Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to that object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`) with the entity's id in a plain `entity_id` column, before storing its offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. A redelivery is simply stored again and ends `superseded`. A message that isn't a valid event of its topic's type (see below) is logged with its offset and skipped, rather than blocking its partition. |
-| Ordering across parallel batches | Workers claim **entities, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each entity's *head* (oldest pending) row, only for entities with nothing in flight, then lease the entity's rows (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same entity. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
+| Ordering across parallel batches | Workers claim **entities, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each entity's *head* (oldest pending) row plus a per-entity advisory **claim lock** for the claim transaction, only for entities with nothing in flight, then lease the entity's rows (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same entity. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
 | Bursts of updates to one entity | Pending events for an entity are **coalesced**: every event carries the full record, so of the events claimed together only the one with the newest `meta.time` is written (ties: the one stored later) and the others are marked `superseded`. Five updates in five seconds become one Salesforce write with the newest data. At most `Sync:MaxEventsPerEntity` (20) events of an entity are taken per claim, so a deep backlog is never leased or loaded whole. |
 | Late or replayed older events | **Sync watermark in Postgres**: `sf_sync_state` holds the newest `meta.time` synced per entity, advanced in the same transaction that completes the events and only while the worker still holds the lease. A claimed event at or before the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement and the watermark are conditional on its `lock_token`. |
@@ -212,12 +212,20 @@ locks each one's head row; a second leases them:
    order off the ready index, and reduce them to distinct entities.
 2. Per entity (not per row): find its head (lowest pending `id`), require it to be due and the entity to have no live
    lease on any row, and lock the head by primary key `FOR UPDATE SKIP LOCKED`, re-checking the conditions on the
-   locked row.
+   locked row. Then take the entity's claim lock, `pg_try_advisory_xact_lock(hashtext(table), hashtext(entity_id))`,
+   held until the claim transaction ends; an entity whose claim lock another worker holds is skipped.
 3. Only if those 500 rows were not enough for a batch (they can all belong to entities that are in flight or backing
    off): walk the pending entities in id order to find the ones behind them.
 4. Lease the claimed entities' oldest `Sync:MaxEventsPerEntity` pending rows (`lock_token`, `locked_until`,
    `retry_count + 1`) and return them. While a row is leased its `next_attempt_at` is the end of the lease, so leased
-   rows are outside the range step 1 scans and come back by themselves if the lease expires.
+   rows are outside the range step 1 scans and come back by themselves if the lease expires. An entity on which
+   another worker holds a live lease gets no rows.
+
+The claim lock and the lease check in step 4 are what keep two workers off one entity; the head row lock alone is
+not enough. The head is whatever row a worker's snapshot shows as oldest, and an event committed out of id order
+(two consumers storing events of one entity) makes it a different row for two workers, so neither row lock
+conflicts. Step 4 runs while holding the claim lock, so its snapshot is taken after every earlier claim of the entity
+committed, and it sees their leases (`ClaimRaceTests` replays that interleaving on four connections).
 
 Then, per claimed entity, in C#: deserialize its rows, keep the one with the newest `meta.time` (the rest are
 `superseded`), supersede that one too if it is not newer than the entity's watermark, otherwise map → write → advance
@@ -304,7 +312,7 @@ the entity were released and a newer event synced in the meantime, the late writ
 
 | Guarantee | How | Test |
 |---|---|---|
-| Two workers or pods never hold the same entity at once | head row `FOR UPDATE SKIP LOCKED`, lease on the entity's rows | `ConcurrencyTests.Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version` (3 pods × 8 loops, claim audit: 0 overlaps) |
+| Two workers or pods never hold the same entity at once | head row `FOR UPDATE SKIP LOCKED`, per-entity claim lock, lease on the entity's rows checked under that lock | `ConcurrencyTests.Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version` (3 pods × 8 loops, claim audit: 0 overlaps); `ClaimRaceTests` (a row committed out of id order; fails without the claim lock and lease check) |
 | An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | the claim requires the head to be due and the entity unleased | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
 | Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | newest-time coalescing + watermark | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
 | A worker whose lease expired can't record outcomes or move the watermark | every statement is conditional on `lock_token` | `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark` |
