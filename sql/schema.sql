@@ -70,7 +70,8 @@ create table if not exists {inbox} (
   received_at     timestamptz not null default now()
 );
 
--- The claim's lookups, all on plain columns (InboxSql.LockHeads):
+-- The claim's lookups, all on plain columns (InboxSql.LockHeads). Every statement is written for one of these indexes
+-- and runs under InboxSql.PinPlans, so the plans don't change with the statistics:
 -- rows that may be claimed now, oldest first. Leased rows have next_attempt_at at the end of their lease, so they are
 -- beyond the range the claim scans, and re-enter it if the lease expires;
 create index if not exists {inbox}_ready on {inbox} (next_attempt_at, id) where status = 'pending';
@@ -78,6 +79,13 @@ create index if not exists {inbox}_ready on {inbox} (next_attempt_at, id) where 
 create index if not exists {inbox}_pending on {inbox} (entity_id, id) where status = 'pending';
 -- an entity's leased rows: is it in flight, and does this worker still hold it.
 create index if not exists {inbox}_leased on {inbox} (entity_id, locked_until) where locked_until is not null;
+-- A queue table: every event is updated at least twice (leased, then finished), and the claim reads the oldest
+-- entries of the ready index, which is where the dead index entries those updates leave behind collect. The default
+-- (vacuum once 20% of the table is dead) lets that grow with the table, which keeps every finished row: measured
+-- on 200,000 rows, the first claim after 150,000 had finished took 187 ms and the following ones 5 to 7 ms, against
+-- 2 ms once vacuumed. Vacuum after 2% (plus 1,000 rows) instead. The plans themselves don't depend on statistics
+-- (InboxSql.PinPlans), so analyze keeps its defaults.
+alter table {inbox} set (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000);
 -- <<< inbox table template
 
 -- Shared token bucket + daily budget guard

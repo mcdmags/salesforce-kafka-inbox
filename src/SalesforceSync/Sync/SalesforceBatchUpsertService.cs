@@ -156,11 +156,13 @@ public sealed class SalesforceBatchUpsertService(
     private Task<Claim> ClaimAsync(InboxSql sql, string entityType, CancellationToken ct)
     {
         var attempted = new List<Guid>();
+        var attemptedEntityIds = new HashSet<string>(StringComparer.Ordinal);
         return pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
         {
-            if (attempted.Count > 0)
+            await conn.ExecuteAsync(new CommandDefinition(InboxSql.PinPlans, transaction: tx, cancellationToken: t));
+            if (attemptedEntityIds.Count > 0)
                 await conn.ExecuteAsync(new CommandDefinition(sql.ReleaseLostClaims,
-                    new { tokens = attempted.ToArray() }, tx, cancellationToken: t));
+                    new { tokens = attempted.ToArray(), entityIds = attemptedEntityIds.ToArray() }, tx, cancellationToken: t));
 
             var token = Guid.NewGuid();
             attempted.Add(token);
@@ -170,6 +172,7 @@ public sealed class SalesforceBatchUpsertService(
                 batchSize = Math.Min(_opt.BatchSize, SalesforceRestClient.MaxEntitiesPerBatch)
             }, tx, cancellationToken: t))).ToArray();
             if (entityIds.Length == 0) return new Claim(token, [], new Dictionary<string, long>());
+            attemptedEntityIds.UnionWith(entityIds);
 
             var events = (await conn.QueryAsync<InboxEvent>(new CommandDefinition(sql.ClaimEntities,
                 new { entityIds, token, lease = _opt.Lease, maxPerEntity = _opt.MaxEventsPerEntity }, tx, cancellationToken: t))).ToList();
@@ -278,8 +281,9 @@ public sealed class SalesforceBatchUpsertService(
 
         return pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
         {
-            Task Run(string statement, object args) => conn.ExecuteAsync(new CommandDefinition(statement, args, tx, cancellationToken: t));
+            Task Run(string statement, object? args = null) => conn.ExecuteAsync(new CommandDefinition(statement, args, tx, cancellationToken: t));
 
+            await Run(InboxSql.PinPlans);
             if (done.Count > 0)
             {
                 // Watermarks first: Complete releases the lease that MarkSynced checks
