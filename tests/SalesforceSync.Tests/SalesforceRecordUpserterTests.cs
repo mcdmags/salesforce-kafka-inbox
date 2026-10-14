@@ -342,7 +342,7 @@ public sealed class SalesforceRecordUpserterTests
         var body = Body(account);
         body["profile"] = Body(profile);
         if (profileId is not null) body["profile"]!["externalId"] = profileId;
-        return new JsonObject { ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z" }, ["account"] = body };
+        return new JsonObject { ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z", ["type"] = "updated" }, ["account"] = body };
     }
 
     private static UpsertUnit RawAccount(string key, Dictionary<string, object?> fields)

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using Microsoft.Extensions.Options;
+using SalesforceSync.Salesforce;
 
 namespace SalesforceSync.RateLimiting;
 
@@ -23,7 +24,17 @@ public sealed class SalesforceRateLimitHandler(
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
-        await limiter.AcquireAsync(1, ct);
+        try
+        {
+            await limiter.AcquireAsync(1, ct);
+        }
+        catch (Exception ex)
+        {
+            // Nothing has been sent yet: whatever went wrong here (Postgres, the wait being cancelled) is not a
+            // write whose outcome is unknown
+            WriteOutcome.MarkNotSent(ex);
+            throw;
+        }
         var started = Stopwatch.GetTimestamp();
         var res = await base.SendAsync(request, ct);
         try
@@ -42,7 +53,11 @@ public sealed class SalesforceRateLimitHandler(
             {
                 var retryAfter = RetryAfter(res) ?? DefaultRetryAfter;
                 await limiter.PauseAsync(retryAfter, ct);
-                throw new RateLimitedException(retryAfter);
+                // A 503 that isn't Salesforce's own (a gateway in front of it) doesn't say whether the request was
+                // processed: everyone pauses just the same, but a write must be treated as possibly applied
+                var processed = res.StatusCode == HttpStatusCode.ServiceUnavailable &&
+                                !new SalesforceResponseException(res.StatusCode, await res.Content.ReadAsStringAsync(ct)).IsSalesforceError;
+                throw new RateLimitedException(retryAfter, mayHaveBeenProcessed: processed);
             }
 
             if (res.StatusCode == HttpStatusCode.Forbidden && Classify(await res.Content.ReadAsStringAsync(ct)) is { } exceeded)

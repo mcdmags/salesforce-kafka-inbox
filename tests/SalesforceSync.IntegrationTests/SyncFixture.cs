@@ -29,7 +29,7 @@ public class SyncFixture : IAsyncLifetime
 
     /// <summary>
     /// Tests think in versions (v1, v2, ...); an event's order is its meta.time, so version N is published as this
-    /// time + N ms, and read back from sf_event_version the same way.
+    /// time + N ms, and read back from the stored payload the same way.
     /// </summary>
     public static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
@@ -77,6 +77,8 @@ public class SyncFixture : IAsyncLifetime
         ["Sync:Workers"] = "4",
         // Fast retries, so tests that wait for a transient failure to clear don't wait 30 s
         ["Sync:RetryBaseDelay"] = "00:00:01",
+        // Seconds instead of the production 10 minutes, so the unknown-outcome test can watch a hold end
+        ["Sync:UnknownOutcomeHold"] = "00:00:04",
         ["Logging:LogLevel:Default"] = "Warning"
     };
 
@@ -156,9 +158,12 @@ public class SyncFixture : IAsyncLifetime
     public async Task PublishAsync(string accountExtId, long version, JsonObject account, JsonObject profile)
         => await _producer!.ProduceAsync(Topic, Event(accountExtId, version, account, profile));
 
-    /// <summary>Publishes a raw message value as it is (for events the consumer must reject or deduplicate).</summary>
-    public async Task PublishRawAsync(string key, string value)
-        => await _producer!.ProduceAsync(Topic, new Message<string, string> { Key = key, Value = value });
+    /// <summary>
+    /// Publishes a raw message value as it is, under any Kafka key (or none) and on either topic. The sync must not
+    /// depend on the key, so tests use this to scatter one entity's events over partitions.
+    /// </summary>
+    public async Task PublishRawAsync(string? key, string value, string topic = Topic)
+        => await _producer!.ProduceAsync(topic, new Message<string, string> { Key = key!, Value = value });
 
     /// <summary>Fire-and-forget produce for bulk loads; call <see cref="Flush"/> afterwards.</summary>
     public void Publish(string accountExtId, long version, JsonObject account, JsonObject profile)
@@ -207,9 +212,11 @@ public class SyncFixture : IAsyncLifetime
         });
     }
 
-    public static JsonObject Meta(long version) => new()
+    /// <summary>meta of version N: its time, and by default "inserted" for version 1 and "updated" for every later one.</summary>
+    public static JsonObject Meta(long version, string? type = null) => new()
     {
-        ["time"] = BaseTime.AddMilliseconds(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture)
+        ["time"] = BaseTime.AddMilliseconds(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+        ["type"] = type ?? (version == 1 ? "inserted" : "updated")
     };
 
     private static JsonObject Body(string externalId, JsonObject fields)
@@ -243,22 +250,46 @@ public class SyncFixture : IAsyncLifetime
 
     public async Task<JsonElement> GetStatsAsync() => await Salesforce.GetFromJsonAsync<JsonElement>("/__fake/stats");
 
-    /// <summary>(version, status) of every inbox row for the entity, oldest first (version N = meta.time BaseTime + N ms).</summary>
+    /// <summary>The inbox table of an entity type (the strategies' constants).</summary>
+    public static string InboxTable(string entityType = Accounts) => entityType == Relationships
+        ? Sync.AccountRelationshipSyncService.InboxTable
+        : Sync.AccountSyncService.InboxTable;
+
+    /// <summary>(version, status) of every inbox row for the entity, by version then arrival (version N = meta.time BaseTime + N ms).</summary>
     public async Task<IReadOnlyList<(long Version, string Status)>> GetInboxAsync(string key, string entityType = Accounts)
         => (await GetInboxRowsAsync(key, entityType)).Select(r => (r.Version, r.Status)).ToList();
 
-    public async Task<IReadOnlyList<(long Version, string Status, int RetryCount, string? ErrorCode)>> GetInboxRowsAsync(
-        string key, string entityType = Accounts)
+    /// <summary>
+    /// The entity's inbox rows. The table has no event columns, so the version is read here from the stored payload,
+    /// like the worker does (in C#, not in SQL).
+    /// </summary>
+    public async Task<IReadOnlyList<InboxRow>> GetInboxRowsAsync(string key, string entityType = Accounts)
     {
         await using var conn = await Db.OpenConnectionAsync();
-        var rows = await conn.QueryAsync<(long, string, int, string?)>(
-            """
-            select (sf_event_version(payload) - @baseMicros) / 1000, status, retry_count, last_error_code from sf_inbox
-            where sf_event_type(payload) = @entityType and sf_event_key(payload) = @key
-            order by sf_event_version(payload), id
-            """,
-            new { entityType, key, baseMicros = (BaseTime - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond });
-        return rows.ToList();
+        var rows = await conn.QueryAsync<(long Id, string Payload, string Status, int RetryCount, string? ErrorCode, DateTime? LockedUntil, Guid? LockToken)>(
+            $"""
+            select id, payload::text, status, retry_count, last_error_code, locked_until, lock_token
+            from {InboxTable(entityType)} where entity_id = @key order by id
+            """, new { key });
+        return rows
+            .Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.RetryCount, r.ErrorCode, r.LockedUntil, r.LockToken))
+            .OrderBy(r => r.Version).ThenBy(r => r.Id)
+            .ToList();
+    }
+
+    private static long VersionOf(string payload)
+    {
+        var time = DateTimeOffset.Parse((string)JsonNode.Parse(payload)!["meta"]!["time"]!, CultureInfo.InvariantCulture);
+        return (long)(time - BaseTime).TotalMilliseconds;
+    }
+
+    /// <summary>Stores events directly in the inbox, in one statement, so a single claim is sure to see them together.</summary>
+    public async Task InsertIntoInboxAsync(string entityId, params JsonObject[] events)
+    {
+        await using var conn = await Db.OpenConnectionAsync();
+        await conn.ExecuteAsync(
+            $"insert into {InboxTable()} (entity_id, payload) select @entityId, p::jsonb from unnest(@payloads) with ordinality as u(p, n) order by n",
+            new { entityId, payloads = events.Select(e => e.ToJsonString()).ToArray() });
     }
 
     public async Task ExecuteSqlAsync(string sql)
@@ -267,7 +298,7 @@ public class SyncFixture : IAsyncLifetime
         await conn.ExecuteAsync(sql);
     }
 
-    /// <summary>Polls until every expected inbox row exists and none is pending, then returns them.</summary>
+    /// <summary>Polls until every expected inbox row exists and none is pending, then returns them (by version, then arrival).</summary>
     public Task<IReadOnlyList<(long Version, string Status)>> WaitForInboxSettledAsync(string key, int expectedRows,
         string entityType = Accounts)
         => Eventually.ValueAsync(
@@ -297,6 +328,9 @@ public class SyncFixture : IAsyncLifetime
         }
     }
 }
+
+/// <summary>An inbox row as the tests see it; <paramref name="Version"/> comes from the payload's meta.time.</summary>
+public sealed record InboxRow(long Id, long Version, string Status, int RetryCount, string? ErrorCode, DateTime? LockedUntil, Guid? LockToken);
 
 [CollectionDefinition(Name)]
 public sealed class SyncCollection : ICollectionFixture<SyncFixture>

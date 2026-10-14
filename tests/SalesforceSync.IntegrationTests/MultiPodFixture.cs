@@ -24,6 +24,9 @@ public sealed class MultiPodFixture : SyncFixture
         WorkerSettings["Sync:IdleDelay"] = "00:00:00.050";
         // Short lease: a claim lost to a dropped connection (chaos test) is reclaimed quickly
         WorkerSettings["Sync:Lease"] = "00:00:20";
+        // A lease must outlast the HTTP timeout (startup validation), and the timeout the wait for a token
+        WorkerSettings["SalesforceLimits:RequestTimeout"] = "00:00:15";
+        WorkerSettings["RateLimit:MaxWait"] = "00:00:05";
         // The chaos test drops every connection every 200 ms, so under load several attempts in a row can be killed.
         // More, shorter retries (at most about 12 s in all, well inside the lease) let a unit of work outlast that.
         // With the defaults (5 retries) a batch whose outcomes can't be recorded keeps its lease until it expires,

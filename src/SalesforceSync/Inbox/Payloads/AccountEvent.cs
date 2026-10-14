@@ -9,7 +9,7 @@ namespace SalesforceSync.Inbox.Payloads;
 /// An event always carries the full record: a property that is null or absent means "empty in the source", and the
 /// field is cleared in Salesforce. The one exception is <see cref="AccountPayload.Profile"/> as a whole.
 /// </summary>
-public sealed record AccountEvent(AccountPayload? Account);
+public sealed record AccountEvent(EventMeta? Meta, AccountPayload? Account);
 
 /// <summary>The <c>account</c> object of an <see cref="AccountEvent"/>.</summary>
 public sealed class AccountPayload

@@ -64,7 +64,7 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
         // Work that didn't fit is deferred, not failed: still pending, retries not spent, nothing dead-lettered
         await using var conn = await app.Db.OpenConnectionAsync();
         var rows = (await conn.QueryAsync<(string Status, int RetryCount, DateTime NextAttempt)>(
-            "select status, retry_count, next_attempt_at from sf_inbox where sf_event_key(payload) = any(@ids)",
+            "select status, retry_count, next_attempt_at from sf_account_inbox where entity_id = any(@ids)",
             new { ids })).ToList();
         var pending = rows.Where(r => r.Status == "pending").ToList();
         output.WriteLine($"done={rows.Count(r => r.Status == "done")} pending={pending.Count}");
@@ -135,14 +135,14 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
         // Rate-limited attempts are handed back without spending a retry
         await using var conn = await app.Db.OpenConnectionAsync();
         var maxRetry = await conn.ExecuteScalarAsync<int>(
-            "select max(retry_count) from sf_inbox where sf_event_key(payload) = any(@ids)", new { ids });
+            "select max(retry_count) from sf_account_inbox where entity_id = any(@ids)", new { ids });
         maxRetry.Should().Be(1, "rate-limited attempts are handed back without spending a retry");
 
         async Task<long> DoneAsync()
         {
             await using var c = await app.Db.OpenConnectionAsync();
             return await c.ExecuteScalarAsync<long>(
-                "select count(*) from sf_inbox where status = 'done' and sf_event_key(payload) = any(@ids)", new { ids });
+                "select count(*) from sf_account_inbox where status = 'done' and entity_id = any(@ids)", new { ids });
         }
     }
 }

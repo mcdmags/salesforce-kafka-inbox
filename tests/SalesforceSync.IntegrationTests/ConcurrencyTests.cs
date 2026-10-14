@@ -53,18 +53,18 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         await using var conn = await app.Db.OpenConnectionAsync();
         var overlaps = (await conn.QueryAsync<string>(
             """
-            select format('%s: claim %s (seq %s, versions %s) while claim %s (seq %s..%s, versions %s) was open',
-                          entity_key, second_token, second_claim_seq, second_versions,
-                          first_token, first_claim_seq, coalesce(first_release_seq::text, 'never'), first_versions)
-            from sf_claim_overlaps where entity_key = any(@ids)
+            select format('%s: claim %s (seq %s, rows %s) while claim %s (seq %s..%s, rows %s) was open',
+                          entity_id, second_token, second_claim_seq, second_row_ids,
+                          first_token, first_claim_seq, coalesce(first_release_seq::text, 'never'), first_row_ids)
+            from sf_claim_overlaps where entity_id = any(@ids)
             """,
             new { ids })).ToList();
         var audit = await conn.QuerySingleAsync<(long Claims, long Unreleased, long ReclaimedAccounts)>("""
             select count(*),
                    count(*) filter (where release_seq is null),
-                   (select count(*) from (select 1 from sf_claim_audit where entity_key = any(@ids)
-                                          group by entity_key having count(*) > 1) x)
-            from sf_claim_audit where entity_key = any(@ids)
+                   (select count(*) from (select 1 from sf_claim_audit where entity_id = any(@ids)
+                                          group by entity_id having count(*) > 1) x)
+            from sf_claim_audit where entity_id = any(@ids)
             """, new { ids });
         output.WriteLine($"claims={audit.Claims} unreleased={audit.Unreleased} accountsClaimedMoreThanOnce={audit.ReclaimedAccounts} overlaps={overlaps.Count}");
         overlaps.Should().BeEmpty("no two claims on the same account may overlap, e.g. {0}", string.Join(" | ", overlaps.Take(3)));
@@ -89,9 +89,11 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         regressions.Should().BeEmpty("no account may receive an older version after a newer one, e.g. {0}",
             string.Join(" | ", regressions.Take(3)));
 
-        // 3. Everything processed, nothing superseded (events arrive in order, so superseded would mean an
-        //    account's watermark ran ahead of its events), every claim released, and real contention happened
-        statuses.Should().Equal(new Dictionary<string, long> { ["done"] = Accounts * Versions });
+        // 3. Everything processed: every event was written, or superseded because a newer event of its account was
+        //    claimed along with it. Every claim released, and real contention happened
+        statuses.Keys.Should().BeSubsetOf(["done", "superseded"], "nothing may be left pending or dead-lettered");
+        statuses.Values.Sum().Should().Be(Accounts * Versions);
+        statuses["done"].Should().BeGreaterThanOrEqualTo(Accounts, "each account's newest event is written");
         audit.Unreleased.Should().Be(0, "every claim must be released");
         audit.ReclaimedAccounts.Should().BeGreaterThan(Accounts / 2,
             "most of the {0} accounts should be claimed repeatedly (real contention)", Accounts);
@@ -112,6 +114,43 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         clients.Should().NotBeNull();
         foreach (var (client, requests) in clients!) output.WriteLine($"{client}: {requests} graph requests");
         clients.Should().HaveCount(MultiPodFixture.PodCount, "every pod should have written to Salesforce");
+    }
+
+    [Fact]
+    public async Task Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time()
+    {
+        const int accounts = 30, versions = 12;
+        var ids = Enumerable.Range(0, accounts).Select(_ => SyncFixture.NewAccountId()).ToArray();
+        var random = new Random(7);
+
+        // Every account's versions in a shuffled order, each under a random Kafka key or none: the events of one
+        // account are spread over the 6 partitions, consumed by 3 pods, and arrive in no particular order
+        var events = ids.SelectMany(id => Enumerable.Range(1, versions).Select(v => (Id: id, Version: v)))
+            .OrderBy(_ => random.Next()).ToList();
+        foreach (var wave in events.Chunk(accounts))
+        {
+            foreach (var (id, v) in wave)
+                await app.PublishRawAsync(random.Next(3) == 0 ? null : Any.String("k-"),
+                    SyncFixture.AccountEvent(id, v, new JsonObject { ["name"] = $"Shuffled {id}", ["description"] = $"v{v}" },
+                        new JsonObject { ["score"] = v }).ToJsonString());
+            await Task.Delay(50);
+        }
+
+        var statuses = await Eventually.ValueAsync(() => InboxStatusesAsync(ids),
+            s => s.Values.Sum() == accounts * versions && !s.ContainsKey("pending"),
+            "all shuffled events to be processed", TimeSpan.FromMinutes(2));
+        statuses.Keys.Should().BeSubsetOf(["done", "superseded"]);
+
+        await using var conn = await app.Db.OpenConnectionAsync();
+        (await conn.ExecuteScalarAsync<long>("select count(*) from sf_claim_overlaps where entity_id = any(@ids)", new { ids }))
+            .Should().Be(0, "no two claims on the same account may overlap");
+        foreach (var id in ids)
+        {
+            ((string?)(await app.GetRecordAsync("Account", id))!["Description"]).Should().Be($"v{versions}", "the newest meta.time wins");
+            ((decimal?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(id)))!["Score__c"]).Should().Be(versions);
+            var written = (await app.GetHistoryAsync("Account", id)).Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+            written.Should().BeInAscendingOrder().And.OnlyHaveUniqueItems("{0} must never receive an older record after a newer one", id);
+        }
     }
 
     private static bool IsIncreasing(List<long> versions) => versions.Zip(versions.Skip(1)).All(p => p.First < p.Second);
@@ -152,7 +191,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             }
 
             await Eventually.ValueAsync(() => InboxStatusesAsync(ids),
-                s => s.GetValueOrDefault("done") + s.GetValueOrDefault("dead") == ids.Length * versions,
+                s => s.Values.Sum() == ids.Length * versions && !s.ContainsKey("pending"),
                 "all events to be processed despite dropped connections", TimeSpan.FromMinutes(3));
         }
         finally
@@ -163,10 +202,12 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
 
         output.WriteLine($"terminated {killed} worker connections");
         killed.Should().BePositive("the chaos loop should have dropped connections");
-        (await InboxStatusesAsync(ids)).Should().Equal(new Dictionary<string, long> { ["done"] = ids.Length * versions });
+        var statuses = await InboxStatusesAsync(ids);
+        statuses.Keys.Should().BeSubsetOf(["done", "superseded"], "no event may be lost or dead-lettered");
+        statuses.Values.Sum().Should().Be(ids.Length * versions);
 
         await using var db = await app.Db.OpenConnectionAsync();
-        (await db.ExecuteScalarAsync<long>("select count(*) from sf_claim_overlaps where entity_key = any(@ids)", new { ids }))
+        (await db.ExecuteScalarAsync<long>("select count(*) from sf_claim_overlaps where entity_id = any(@ids)", new { ids }))
             .Should().Be(0, "no two claims on the same account may overlap");
         foreach (var id in ids)
         {
@@ -183,7 +224,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<(string Status, long Count)>(
-            "select status, count(*) from sf_inbox where sf_event_key(payload) = any(@ids) group by status", new { ids });
+            "select status, count(*) from sf_account_inbox where entity_id = any(@ids) group by status", new { ids });
         return rows.ToDictionary(r => r.Status, r => r.Count);
     }
 }

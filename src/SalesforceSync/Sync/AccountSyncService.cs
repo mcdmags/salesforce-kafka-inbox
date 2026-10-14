@@ -14,10 +14,23 @@ public sealed class AccountSyncService(
     ISObjectMapper<ProfilePayload, ProfileSObject> profiles) : ISalesforceEntitySync
 {
     public const string Type = "account";
+    public const string InboxTable = "sf_account_inbox";
+    public const string DefaultTopic = "account-changes";
 
     private readonly UpsertStrategy<AccountEvent> _strategy = CreateStrategy(accounts, profiles);
 
     public string EntityType => Type;
+
+    string ISalesforceEntitySync.InboxTable => InboxTable;
+
+    public string Topic => DefaultTopic;
+
+    public bool TryReadEvent(string json, out string? entityId, out string? problem)
+    {
+        var ok = _strategy.TryRead(json, out var read, out problem);
+        entityId = read?.EntityId;
+        return ok;
+    }
 
     public Task<int> SyncBatchAsync(CancellationToken ct) => upsert.UpsertBatchAsync(_strategy, ct);
 
@@ -25,7 +38,8 @@ public sealed class AccountSyncService(
     public static UpsertStrategy<AccountEvent> CreateStrategy(
         ISObjectMapper<AccountPayload, AccountSObject> accounts,
         ISObjectMapper<ProfilePayload, ProfileSObject> profiles)
-        => new(Type, (key, e) => Map(key, e, accounts, profiles), Queries);
+        => new(Type, InboxTable, e => e.Account?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
+            (key, e) => Map(key, e, accounts, profiles), Queries);
 
     public static UpsertUnit Map(string accountKey, AccountEvent e,
         ISObjectMapper<AccountPayload, AccountSObject> accounts,

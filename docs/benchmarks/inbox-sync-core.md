@@ -1,5 +1,9 @@
 # Benchmark report: inbox sync core (without rate limiting)
 
+> **Note:** this report predates the inbox redesign (one inbox table per object type with an `entity_id` column, no
+> SQL reading the payload, typed full-record events, newest-`meta.time` coalescing). The numbers below were measured on
+> the earlier single `sf_inbox` table and will be re-run; they are kept unchanged for reference.
+
 The Kafka → Postgres inbox → Salesforce pipeline with the generic batch upsert engine, the raw-JSON inbox and **no** rate limiter or concurrency slots. In-flight batches = pods × workers.
 
 ## Environment

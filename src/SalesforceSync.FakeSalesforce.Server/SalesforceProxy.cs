@@ -28,7 +28,18 @@ public static class SalesforceProxy
                 request.Content.Headers.TryAddWithoutValidation("Content-Type", contentType);
         }
 
-        using var response = await invoker.SendAsync(request, ctx.RequestAborted);
+        HttpResponseMessage response;
+        try
+        {
+            response = await invoker.SendAsync(request, ctx.RequestAborted);
+        }
+        catch (FakeResponseLostException)
+        {
+            // The org applied the request; the client sees its connection drop without an answer
+            ctx.Abort();
+            return;
+        }
+        using var _ = response;
 
         ctx.Response.StatusCode = (int)response.StatusCode;
         foreach (var (name, values) in response.Headers.Concat(response.Content.Headers))

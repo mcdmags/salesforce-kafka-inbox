@@ -15,7 +15,8 @@ namespace SalesforceSync.Sync;
 /// </list>
 /// Values are normalized with the fields' Describe metadata (cached) before they are compared and sent. A value
 /// Salesforce would reject (unknown or read-only field, too long, wrong type) fails only its own unit, before any
-/// call. Each graph's result is classified per unit: saved, not attempted, transient or permanent failure.
+/// call. Each graph's result is classified per unit: saved, not attempted, transient or permanent failure. If the
+/// write call itself fails without proving that nothing was applied, <see cref="UnknownOutcomeException"/> is thrown.
 /// </summary>
 public sealed class SalesforceRecordUpserter(
     SalesforceRestClient api,
@@ -77,7 +78,17 @@ public sealed class SalesforceRecordUpserter(
         if (graphs.Count == 0) return results;
 
         // 5. Write: one Composite Graph call; each graph reports its own outcome
-        var graphResults = await api.SendGraphsAsync(graphs.Values.Select(g => g.Graph).ToList(), ct);
+        IReadOnlyList<GraphResult> graphResults;
+        try
+        {
+            graphResults = await api.SendGraphsAsync(graphs.Values.Select(g => g.Graph).ToList(), ct);
+        }
+        catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
+        {
+            // Everything before this point only read from Salesforce, so its failures are safe to retry. From here
+            // on Salesforce may have the write, and may still apply it after we stop waiting.
+            throw new UnknownOutcomeException(ex);
+        }
         var written = new List<WriteEcho>();
         foreach (var r in graphResults)
         {

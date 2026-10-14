@@ -66,6 +66,12 @@ public static class FakeSalesforceServer
             store.InjectFault(f.SObject, f.ExternalId, f.ErrorCode, f.Message ?? f.ErrorCode, f.Times ?? int.MaxValue);
             return Results.NoContent();
         });
+        // Apply the next N writes of one record, but drop the connection instead of answering
+        fake.MapPost("/lost-responses", (LostResponseRequest l, FakeSalesforceStore store) =>
+        {
+            store.LoseResponsesFor(l.SObject, l.ExternalId, l.Times ?? 1);
+            return Results.NoContent();
+        });
         fake.MapPost("/reset", (FakeSalesforceStore store, ClientLog clients) =>
         {
             store.Reset();
@@ -76,6 +82,8 @@ public static class FakeSalesforceServer
         // Everything else is Salesforce REST (/services/oauth2/token, /services/data/vXX.X/...)
         app.Map("/{**path}", SalesforceProxy.HandleAsync);
     }
+
+    internal sealed record LostResponseRequest(string SObject, string ExternalId, int? Times);
 
     internal sealed record FaultRequest(string SObject, string ExternalId, string ErrorCode, string? Message, int? Times);
 }

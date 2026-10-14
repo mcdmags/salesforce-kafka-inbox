@@ -1,5 +1,9 @@
 # Benchmark report: rate limiting and concurrency slots
 
+> **Note:** this report predates the inbox redesign (one inbox table per object type with an `entity_id` column, no
+> SQL reading the payload, typed full-record events, newest-`meta.time` coalescing). The numbers below were measured on
+> the earlier single `sf_inbox` table and will be re-run; they are kept unchanged for reference.
+
 The same pipeline as `inbox-sync-core.md` **plus** the Salesforce rate limiter (Postgres token bucket, daily budget, `Sforce-Limit-Info`) and the global concurrency slots (Postgres advisory locks). The bucket is set to effectively unlimited and the daily budget is off, so the numbers show the limiter's overhead (one token acquire per Salesforce call, one slot per batch), not throttling. The slot cap is workers × pods.
 
 ## Environment

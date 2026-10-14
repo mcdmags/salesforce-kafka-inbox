@@ -7,7 +7,7 @@ namespace SalesforceSync.Inbox.Payloads;
 ///   "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-1", "relatedAccountExternalId": "ACC-2",
 ///                            "type": "Parent", "isActive": true } }</code>
 /// </summary>
-public sealed record AccountRelationshipEvent(AccountRelationshipPayload? AccountRelationship);
+public sealed record AccountRelationshipEvent(EventMeta? Meta, AccountRelationshipPayload? AccountRelationship);
 
 /// <summary>The <c>accountRelationship</c> object of an <see cref="AccountRelationshipEvent"/>.</summary>
 public sealed class AccountRelationshipPayload

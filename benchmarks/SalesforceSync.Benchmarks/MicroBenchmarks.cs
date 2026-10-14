@@ -11,7 +11,7 @@ using SalesforceSync.Sync.Mapping;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// CPU-only hot paths: header parsing, event coalescing, the typed mapping (event JSON -> payload -> sObject ->
+/// CPU-only hot paths: header parsing, reading and coalescing events, the typed mapping (event JSON -> payload -> sObject ->
 /// record), type-aware normalize + compare.
 /// </summary>
 [MemoryDiagnoser]
@@ -21,8 +21,11 @@ public class MicroBenchmarks
 
     private static readonly UpsertStrategy<AccountEvent> Accounts = AccountSyncService.CreateStrategy(new AccountMapper(), new ProfileMapper());
 
+    private static readonly Dictionary<string, long> NothingSynced = new();
+
     private readonly AccountMapper _accountMapper = new();
     private List<InboxEvent> _tenEvents = default!;
+    private List<(InboxEvent Row, ReadEvent<AccountEvent> Read)> _tenRead = default!;
     private AccountPayload _payload = default!;
     private AccountSObject _sobject = default!;
     private JsonElement _number;
@@ -36,11 +39,10 @@ public class MicroBenchmarks
         // Full records, as the source sends them; ids are deliberately not in version order
         _tenEvents = Enumerable.Range(1, 10).Select(v => new InboxEvent(
             Id: 11 - v,
-            Key: "ACC-000001",
-            Version: v,
+            EntityId: "ACC-000001",
             Payload: new JsonObject
             {
-                ["meta"] = new JsonObject { ["time"] = $"2026-10-14T01:02:03.{v:D3}Z" },
+                ["meta"] = new JsonObject { ["time"] = $"2026-10-14T01:02:03.{v:D3}Z", ["type"] = v == 1 ? "inserted" : "updated" },
                 ["account"] = new JsonObject
                 {
                     ["externalId"] = "ACC-000001",
@@ -70,6 +72,7 @@ public class MicroBenchmarks
             }.ToJsonString(),
             RetryCount: 1)).ToList();
 
+        _tenRead = _tenEvents.Select(row => (row, Accounts.TryRead(row.Payload, out var read, out _) ? read : null!)).ToList();
         _payload = JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchUpsertService.EventJson)!.Account!;
         _sobject = _accountMapper.Map(_payload);
 
@@ -80,9 +83,17 @@ public class MicroBenchmarks
     [Benchmark]
     public SalesforceLimitInfo? ParseLimitHeader() => SalesforceLimitInfo.Parse(LimitHeader);
 
-    /// <summary>Ten pending events of one entity -> the one to write (the newest).</summary>
+    /// <summary>Ten claimed events of one entity, already read -> the one to write (the newest by event time).</summary>
     [Benchmark]
-    public InboxEvent CoalesceTenEvents() => SalesforceBatchUpsertService.Coalesce(_tenEvents);
+    public long CoalesceTenEvents() => SalesforceBatchUpsertService.Coalesce(_tenRead).Row.Id;
+
+    /// <summary>What the engine does with a claimed entity: read its ten events, keep the newest, map it.</summary>
+    [Benchmark]
+    public int PrepareTenEvents() => SalesforceBatchUpsertService.Prepare(Accounts, _tenEvents, NothingSynced).Work.Count;
+
+    /// <summary>What the consumer does per message: typed read + validation (entity id, event time).</summary>
+    [Benchmark]
+    public bool ReadAndValidateEvent() => Accounts.TryRead(_tenEvents[0].Payload, out _, out _);
 
     /// <summary>What the engine does per entity: raw event JSON -> typed event -> mappers -> Account + Profile records.</summary>
     [Benchmark]
