@@ -6,9 +6,12 @@ using Microsoft.Extensions.Options;
 namespace SalesforceSync.Salesforce;
 
 /// <summary>
-/// Cache of sObject Describe results (fields and record types), in two layers. Metadata rarely changes, so each object
-/// is described once and then revalidated every <see cref="SalesforceOptions.SchemaRefreshInterval"/> with
-/// If-Modified-Since (a 304 costs no download, but is still an API call).
+/// Cache of sObject Describe results (fields and record types). The sync needs Describe for change-only writes: values
+/// are compared in the form Salesforce stores them (scale, digits, date/time precision, checkbox null as false, text
+/// length, required), a record is checked before any call (unknown or read-only fields, lookups), the read selects
+/// the fields that exist, and record types resolve to their Ids. Metadata rarely changes, so each object is described
+/// once and then revalidated every <see cref="SalesforceOptions.SchemaRefreshInterval"/> with If-Modified-Since (a 304
+/// costs no download, but is still an API call). Two layers:
 /// <list type="number">
 /// <item>In process: the snapshot each worker reads without I/O; concurrent callers share one in-flight fetch per
 /// object.</item>

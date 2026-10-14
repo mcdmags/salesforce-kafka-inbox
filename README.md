@@ -120,6 +120,37 @@ about once per interval in total rather than once per pod, and a new pod starts 
 
 Two pods that miss at the same moment may both describe once; that costs a call, never correctness.
 
+**Why Redis.** Without it every pod describes every object once per interval, and a pod that starts (a deploy, a
+scale-out) describes everything before its first batch. With it the pods pool their describes: one call per object
+per interval for the whole deployment, and new pods start warm. It is optional, and never on the critical path: a
+cache failure means a describe, not a failed batch.
+
+### Why the sync calls Describe
+
+Change-only writes depend on it. To decide that a value is unchanged, the sync must compare it in the form Salesforce
+stores it, and only Describe says what that is:
+
+- **Normalization**: number scale and precision, int digits, date/time to the second, checkbox `null` → `false`, text
+  length, required fields.
+- **Validation before any call**: an unknown or read-only field (`INVALID_FIELD`), a lookup that isn't a reference,
+  a value that would be rejected. The entity fails on its own instead of costing a write.
+- **The read query**: which fields to select.
+- **The diff**: whether a field is createable or updateable.
+- **Record types**: the developer name → `RecordTypeId` (`recordTypeInfos`).
+
+**Is it best practice?** Caching Describe and revalidating it with `If-Modified-Since` is what Salesforce's REST API
+documentation recommends, and what generic integration tools do. The cost is about one call per object per refresh
+interval: with 3 objects and 15 minutes, 288 calls a day (a 304 still counts as a call). That was per pod; with the
+shared Redis layer it is for the whole deployment.
+
+| Alternative | Gains | Loses |
+|---|---|---|
+| Upsert everything by external id (no Describe, no read, no diff) | Two fewer steps | Every event writes every field: triggers, flows, field history and `LastModifiedDate` fire on every event, and bursts multiply writes. |
+| Hard-coded field metadata | No calls | Drifts silently when an admin changes a field (scale, length, read-only). |
+| Describe once at startup, refresh only on `INVALID_FIELD` | Fewer calls | Misses scale or read-only changes until the next restart. |
+
+Recommendation: keep it. To spend fewer calls, raise `Salesforce:SchemaRefreshInterval`.
+
 ## Event format
 
 The inbox stores only the raw Kafka message value. Every event is one entity object next to `meta`, in **camelCase**
@@ -306,6 +337,48 @@ from sf_account_inbox where entity_id = 'ACC-000001' order by id;
 
 (Queries like these, for people, may look inside the payload; the worker's own SQL never does.)
 
+### How a lease works
+
+A lease is two columns on the inbox rows: `lock_token` (which claim owns the row) and `locked_until` (until when).
+It is what keeps an entity to one worker while that worker talks to Salesforce, without holding a database lock
+or a transaction all that time.
+
+1. **Take.** In the claim transaction, `LockHeads` locks each entity's head row (`FOR UPDATE SKIP LOCKED`) and takes
+   the entity's claim lock (`pg_try_advisory_xact_lock(hashtext(table), hashtext(entity_id))`). `ClaimEntities` then
+   checks that no other worker has a live lease on the entity and leases its oldest pending rows: a new `lock_token`,
+   `locked_until = now() + Sync:Lease`, and `next_attempt_at` = the end of the lease, so leased rows drop out of the
+   claim's scan. Because the claim lock serializes claims of one entity, that check sees every earlier claim's
+   lease, even when two workers see different head rows (`ClaimRaceTests`). The transaction commits; the locks go,
+   the lease stays.
+2. **While live.** Other workers skip the entity. This worker calls Salesforce outside any transaction and stops
+   (cancels the call) at 80% of the lease, measured from the claim, so it gives up before anyone else can claim the
+   entity.
+3. **Release.** The outcome transaction records done, superseded, retry, dead or hold. Every statement, the
+   watermark (`MarkSynced`) included, only touches rows `where lock_token = @token`: a worker whose lease expired and
+   was claimed by another changes nothing.
+4. **Crash.** Nothing to clean up. The lease expires, `next_attempt_at` has already passed, and the next claim takes
+   the rows. Its read of Salesforce shows what the crashed worker did or didn't save. (A write whose outcome is
+   unknown is held instead; see [Unknown outcomes](#unknown-outcomes).)
+
+### Why the Salesforce calls run outside a transaction
+
+A batch uses two short transactions: the claim (`InboxRepository.ClaimAsync`) and the outcomes
+(`RecordAsync`), each through `RunInTransactionAsync` (the execution strategy around `BeginTransactionAsync`). The
+Salesforce read and write happen between them, in no transaction. One transaction around everything would be worse:
+
+| One transaction around the batch would | Because |
+|---|---|
+| only look atomic | Salesforce can't take part in a Postgres transaction. A rollback can't undo a write Salesforce saved. |
+| send the HTTP calls again | The execution strategy re-runs the whole delegate on a transient Postgres error (dropped connection, failover). |
+| hold row locks for seconds, up to the request timeout (90 s) | Other workers and the consumer wait on them. |
+| pin a pooled connection per worker | Workers × pods connections busy doing nothing. |
+| block autovacuum | An open transaction holds back the horizon, and the inbox tables churn: bloat builds up. |
+
+The lease protects the rows between the two transactions. The trade-off: a crash after Salesforce saved but before
+the outcomes committed leaves the rows pending. That is safe, because every attempt reads Salesforce first and writes
+only what differs, so the retry finds the records saved and ends `done` without writing them again. A write whose
+outcome is unknown is held rather than retried at once.
+
 ### Retries and dead letters
 
 A transient failure (`UNABLE_TO_LOCK_ROW`, `DEPENDENCY_NOT_SYNCED`, `INVALID_RECORD_TYPE`, a create answered with `DUPLICATE_VALUE` because
@@ -442,6 +515,11 @@ compared after normalization (15 → 18-character id), and written on update onl
 |---|---|
 | The developer name isn't in the object's Describe, isn't active, or isn't available to the run-as user | The entity fails before any call with `INVALID_RECORD_TYPE` (the message names the object and developer name). The object's cached Describe is invalidated, so the next batch describes it again. |
 | Salesforce rejects the `RecordTypeId` at write time (`INVALID_CROSS_REFERENCE_KEY` on `RecordTypeId`: deactivated or unassigned after the describe) | Recorded as the same `INVALID_RECORD_TYPE`, Describe invalidated. |
+
+**Why from Describe, not a query on `RecordType`.** The record type Ids come from the Describe the engine already
+makes, so there is no extra call and no second cache: they are refreshed together with the fields, and Describe
+already says whether a record type is active and available to the run-as user, which a SOQL query on `RecordType`
+would not.
 
 `INVALID_RECORD_TYPE` is transient (it is not in `Salesforce:PermanentErrorCodes`): it is retried with backoff, so
 events go through once an admin has created, activated or assigned the record type, and dead-lettered only after

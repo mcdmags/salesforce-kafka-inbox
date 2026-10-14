@@ -66,6 +66,8 @@ internal static class RecordNormalizer
     /// <summary>
     /// The Id of the record's record type, from Describe's record types: null if the record has none, or if the org
     /// has no such record type for the running user (a problem; the caller describes the object again next time).
+    /// Describe rather than a query on RecordType: no extra call, cached and refreshed with the fields, and it already
+    /// says whether the record type is active and available to the running user.
     /// </summary>
     private static string? RecordTypeId(SObjectRecord record, SObjectSchema schema, List<SalesforceError> problems)
     {

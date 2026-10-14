@@ -39,7 +39,8 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// Locks and leases a batch, and reads the claimed entities' watermarks in the same transaction. A fresh token per
     /// attempt: if a commit's outcome is unknown and the claim is retried, rows leased by the lost attempt are not
     /// mistaken for this one's. The retry releases them first, so they don't wait for their lease to expire (and a
-    /// lease nobody works on is never taken over).
+    /// lease nobody works on is never taken over). The transaction ends before Salesforce is called: from then on the
+    /// lease (lock_token, locked_until) protects the rows, not a lock.
     /// </summary>
     public Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct)
     {
@@ -78,8 +79,9 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     }
 
     /// <summary>
-    /// One statement per kind of outcome (not per entity). Safe to repeat: every statement is conditional on the
-    /// lease token.
+    /// One statement per kind of outcome (not per entity), in the batch's second short transaction. Safe to repeat:
+    /// every statement is conditional on the lease token, so it is also a no-op for a worker whose lease expired and
+    /// was claimed by another.
     /// </summary>
     public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
     {

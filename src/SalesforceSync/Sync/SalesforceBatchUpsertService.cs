@@ -76,7 +76,8 @@ public sealed class SalesforceBatchUpsertService(
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
 
-        // 1. Claim events from the inbox table (short transaction)
+        // 1. Claim events from the inbox table (short transaction; the lease, not a transaction, protects the rows
+        // until step 4)
         var claim = await inbox.ClaimAsync(strategy.EntityType, ct);
         if (claim.Events.Count == 0)
         {
@@ -86,7 +87,12 @@ public sealed class SalesforceBatchUpsertService(
         // 2. Per entity: keep the newest event, drop it if it isn't newer than what is synced, map it to records
         var batch = BatchPreparer.Prepare(strategy, claim.Events, claim.SyncedTimes);
 
-        // 3. Salesforce (outside any transaction): read, decide, send, interpret
+        // 3. Salesforce (outside any transaction): read, decide, send, interpret. Not inside one on purpose: Salesforce
+        // can't take part in a Postgres transaction (a rollback can't undo a saved write), the execution strategy
+        // re-runs its whole delegate on a transient Postgres error (the HTTP calls would be sent again), and a
+        // transaction held for up to the request timeout keeps locks, a pooled connection per worker and autovacuum's
+        // horizon on a high-churn table. A crash between here and step 4 leaves the rows pending under an expiring
+        // lease; the retry reads Salesforce and writes only what still differs.
         Dictionary<string, UpsertResult> results;
         try
         {
