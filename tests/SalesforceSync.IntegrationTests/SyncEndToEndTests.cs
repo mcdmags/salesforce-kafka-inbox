@@ -118,7 +118,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = name, ["rating"] = "Hot" }, new JsonObject { ["tier"] = "Gold" });
         await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
 
-        var withoutProfile = SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = name, ["rating"] = "Cold" }, new JsonObject());
+        var withoutProfile = SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = name, ["rating"] = "Cold" }, []);
         withoutProfile["account"]!.AsObject().Remove("profile");
         await app.PublishRawAsync(acct, withoutProfile.ToJsonString());
         await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
@@ -141,7 +141,9 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         // Someone edits the record directly in Salesforce
         using (var edit = await app.Salesforce.PatchAsJsonAsync($"/__fake/records/Account/{acct}",
                    new JsonObject { ["Rating"] = "Cold", ["Description"] = "edited in Salesforce" }))
+        {
             edit.EnsureSuccessStatusCode();
+        }
 
         // The next event carries the same account data as v1; Salesforce differs in two fields, so both are written back
         await app.PublishAsync(acct, 2, (JsonObject)account.DeepClone(), new JsonObject { ["tier"] = "Gold" });
@@ -220,7 +222,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     public async Task Redelivered_event_is_stored_again_and_changes_nothing()
     {
         var acct = SyncFixture.NewAccountId();
-        var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme "), ["rating"] = "Hot" }, new JsonObject());
+        var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme "), ["rating"] = "Hot" }, []);
 
         await app.PublishRawAsync(acct, v1.ToJsonString());
         await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
@@ -237,7 +239,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     public async Task Redelivery_claimed_together_with_the_original_is_written_once()
     {
         var acct = SyncFixture.NewAccountId();
-        var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, new JsonObject());
+        var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, []);
 
         await app.InsertIntoInboxAsync(acct, v1, v1);
 
@@ -251,8 +253,8 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     {
         var acct = SyncFixture.NewAccountId();
         var name = Any.String("Acme ");
-        var valid = SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = name }, new JsonObject());
-        var noOffset = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "never stored" }, new JsonObject());
+        var valid = SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = name }, []);
+        var noOffset = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "never stored" }, []);
         noOffset["meta"]!["time"] = ((string)noOffset["meta"]!["time"]!).TrimEnd('Z');
         var relationship = new JsonObject
         {
@@ -277,7 +279,10 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     public async Task The_Kafka_key_is_not_used_and_arrival_order_does_not_matter()
     {
         var acct = SyncFixture.NewAccountId();
-        JsonObject Version(int v) => SyncFixture.AccountEvent(acct, v, new JsonObject { ["name"] = $"v{v}", ["description"] = $"v{v}" }, new JsonObject { ["score"] = v });
+        JsonObject Version(int v)
+        {
+            return SyncFixture.AccountEvent(acct, v, new JsonObject { ["name"] = $"v{v}", ["description"] = $"v{v}" }, new JsonObject { ["score"] = v });
+        }
 
         // One account's events under different keys and none (so on different partitions), newest neither first nor last
         await app.PublishRawAsync(Any.String("other-key-"), Version(2).ToJsonString());
@@ -300,8 +305,8 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     public async Task Older_event_claimed_together_with_a_newer_one_is_superseded_in_the_same_claim()
     {
         var acct = SyncFixture.NewAccountId();
-        var newer = SyncFixture.AccountEvent(acct, 9, new JsonObject { ["name"] = "newer" }, new JsonObject());
-        var older = SyncFixture.AccountEvent(acct, 4, new JsonObject { ["name"] = "older" }, new JsonObject());
+        var newer = SyncFixture.AccountEvent(acct, 9, new JsonObject { ["name"] = "newer" }, []);
+        var older = SyncFixture.AccountEvent(acct, 4, new JsonObject { ["name"] = "older" }, []);
 
         // The newer event is stored first, the older one after it; one claim takes both
         await app.InsertIntoInboxAsync(acct, newer, older);
@@ -318,9 +323,9 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         var a = new JsonObject { ["name"] = "A", ["rating"] = "Hot" };
         var b = new JsonObject { ["name"] = "B", ["rating"] = "Cold" };
 
-        await app.PublishAsync(acct, 1, a, new JsonObject());
-        await app.PublishAsync(acct, 2, b, new JsonObject());
-        await app.PublishAsync(acct, 3, (JsonObject)a.DeepClone(), new JsonObject()); // the same content as the first event
+        await app.PublishAsync(acct, 1, a, []);
+        await app.PublishAsync(acct, 2, b, []);
+        await app.PublishAsync(acct, 3, (JsonObject)a.DeepClone(), []); // the same content as the first event
 
         var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 3);
         inbox.Should().OnlyContain(r => r.Status == "done" || r.Status == "superseded", "the third event must not be dropped as a duplicate of the first");
@@ -353,7 +358,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     {
         // Warm-up: the first batch after start also describes Account and Profile__c (then cached for 15 minutes)
         var warm = SyncFixture.NewAccountId();
-        await app.PublishAsync(warm, 1, new JsonObject { ["name"] = Any.String("Warm ") }, new JsonObject());
+        await app.PublishAsync(warm, 1, new JsonObject { ["name"] = Any.String("Warm ") }, []);
         await app.WaitForInboxSettledAsync(warm, expectedRows: 1);
 
         var acct = SyncFixture.NewAccountId();
@@ -363,7 +368,11 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
 
         var after = await app.GetStatsAsync();
-        long Delta(string counter) => after.GetProperty(counter).GetInt64() - before.GetProperty(counter).GetInt64();
+        long Delta(string counter)
+        {
+            return after.GetProperty(counter).GetInt64() - before.GetProperty(counter).GetInt64();
+        }
+
         Delta("apiCalls").Should().Be(2, "a batch is one composite read plus one composite write");
         Delta("compositeRequests").Should().Be(2);
         Delta("queries").Should().Be(2, "the Account and Profile__c queries go in the one read");
@@ -380,8 +389,15 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     private static JsonObject WithType(JsonObject evt, string? type)
     {
         var copy = (JsonObject)evt.DeepClone();
-        if (type is null) copy["meta"]!.AsObject().Remove("type");
-        else copy["meta"]!["type"] = type;
+        if (type is null)
+        {
+            copy["meta"]!.AsObject().Remove("type");
+        }
+        else
+        {
+            copy["meta"]!["type"] = type;
+        }
+
         return copy;
     }
 }

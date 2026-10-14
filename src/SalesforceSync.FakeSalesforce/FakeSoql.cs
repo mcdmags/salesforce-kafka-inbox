@@ -17,16 +17,25 @@ internal sealed partial record FakeSoql(string[] Fields, string SObject, string 
     {
         var m = Select().Match(soql);
         if (!m.Success)
+        {
             throw new FakeSalesforceException(400, "MALFORMED_QUERY", $"Fake only supports SELECT ... WHERE x IN (...): {soql}");
+        }
 
         var fields = m.Groups["fields"].Value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         var sobject = m.Groups["obj"].Value;
         var whereField = m.Groups["field"].Value;
         if (!FakeSchema.Objects.ContainsKey(sobject))
+        {
             throw new FakeSalesforceException(400, "INVALID_TYPE", $"sObject type '{sobject}' is not supported.");
+        }
+
         foreach (var f in fields.Append(whereField))
+        {
             if (FakeSchema.Find(sobject, f) is null)
+            {
                 throw new FakeSalesforceException(400, "INVALID_FIELD", $"No such column '{f}' on entity '{sobject}'.");
+            }
+        }
 
         var values = QuotedValue().Matches(m.Groups["values"].Value)
             .Select(v => v.Groups[1].Value.Replace("\\'", "'").Replace("\\\\", "\\"))

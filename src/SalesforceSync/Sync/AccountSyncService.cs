@@ -22,8 +22,10 @@ public sealed class AccountSyncService(
     public static UpsertStrategy<AccountEvent> CreateStrategy(
         ISObjectMapper<AccountPayload, AccountSObject> accounts,
         ISObjectMapper<ProfilePayload, ProfileSObject> profiles)
-        => new(Type, InboxTable, e => e.Account?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
-            (key, e) => Map(key, e, accounts, profiles), Queries);
+    {
+        return new(Type, InboxTable, e => e.Account?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
+                (key, e) => Map(key, e, accounts, profiles), Queries);
+    }
 
     public static UpsertUnit Map(string accountKey, AccountEvent e,
         ISObjectMapper<AccountPayload, AccountSObject> accounts,
@@ -43,9 +45,11 @@ public sealed class AccountSyncService(
         return new UpsertUnit(records);
     }
 
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units) =>
-    [
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
+    {
+        return [
         SoqlQuery.RecordsOf<AccountSObject>(units),
         SoqlQuery.RecordsOf<ProfileSObject>(units)
     ];
+    }
 }

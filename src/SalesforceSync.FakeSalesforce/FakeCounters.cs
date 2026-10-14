@@ -11,14 +11,23 @@ internal sealed class FakeCounters
     public long Queries, WriteRequests, RecordsSucceeded, RecordsFailed, RecordsRolledBack, Creates, Updates,
         Describes, DescribesNotModified, CompositeRequests;
 
-    public long CountApiCall() => Interlocked.Increment(ref _apiCalls);
+    public long CountApiCall()
+    {
+        return Interlocked.Increment(ref _apiCalls);
+    }
 
-    public void CountConcurrencyRejection() => Interlocked.Increment(ref _concurrencyRejections);
+    public void CountConcurrencyRejection()
+    {
+        Interlocked.Increment(ref _concurrencyRejections);
+    }
 
-    public FakeSalesforceStats Snapshot(int records) => new(
+    public FakeSalesforceStats Snapshot(int records)
+    {
+        return new(
         Interlocked.Read(ref _apiCalls), Queries, WriteRequests, RecordsSucceeded, RecordsFailed, RecordsRolledBack,
         Creates, Updates, Interlocked.Read(ref _concurrencyRejections), Describes, DescribesNotModified,
         CompositeRequests, records);
+    }
 
     public void Reset()
     {

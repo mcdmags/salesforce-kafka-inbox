@@ -24,7 +24,10 @@ public sealed class KafkaInboxConsumer(
     private static readonly TimeSpan StoreRetryDelay = TimeSpan.FromSeconds(2);
 
     // Consume() blocks, so run the loop off the host's startup path.
-    protected override Task ExecuteAsync(CancellationToken stoppingToken) => Task.Run(() => RunAsync(stoppingToken), stoppingToken);
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        return Task.Run(() => RunAsync(stoppingToken), stoppingToken);
+    }
 
     /// <summary>Topic -> the entity type whose events it carries. Two types can't share a topic: a message says nothing but its topic about its type.</summary>
     public static IReadOnlyDictionary<string, ISalesforceEntitySync> TopicsOf(IEnumerable<ISalesforceEntitySync> syncs, IConfiguration config)
@@ -34,8 +37,10 @@ public sealed class KafkaInboxConsumer(
         {
             var topic = config[$"Kafka:Topics:{sync.EntityType}"] is { Length: > 0 } configured ? configured : sync.Topic;
             if (!byTopic.TryAdd(topic, sync))
+            {
                 throw new InvalidOperationException(
                     $"Topic '{topic}' is configured for both '{byTopic[topic].EntityType}' and '{sync.EntityType}'; each entity type needs its own topic.");
+            }
         }
         return byTopic;
     }
@@ -46,7 +51,11 @@ public sealed class KafkaInboxConsumer(
         using var scope = scopes.CreateScope();
         var byTopic = TopicsOf(scope.ServiceProvider.GetServices<ISalesforceEntitySync>(), config);
 
-        foreach (var topic in byTopic.Keys) await EnsureTopicAsync(topic);
+        foreach (var topic in byTopic.Keys)
+        {
+            await EnsureTopicAsync(topic);
+        }
+
         consumer.Subscribe(byTopic.Keys);
         log.LogInformation("Consuming {Topics}", string.Join(", ", byTopic.Select(t => $"{t.Key} -> {t.Value.InboxTable}")));
 
@@ -54,8 +63,15 @@ public sealed class KafkaInboxConsumer(
         {
             while (!ct.IsCancellationRequested)
             {
-                if (!TryConsume(ct, out var message)) break;
-                if (message?.Message?.Value is null) continue;
+                if (!TryConsume(ct, out var message))
+                {
+                    break;
+                }
+
+                if (message?.Message?.Value is null)
+                {
+                    continue;
+                }
 
                 await IngestAsync(message, byTopic[message.Topic], ct);
             }
@@ -147,7 +163,10 @@ public sealed class KafkaInboxConsumer(
     private async Task EnsureTopicAsync(string topic)
     {
         var bootstrap = config.GetConnectionString("kafka");
-        if (string.IsNullOrWhiteSpace(bootstrap)) return;
+        if (string.IsNullOrWhiteSpace(bootstrap))
+        {
+            return;
+        }
 
         using var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = bootstrap }).Build();
         try

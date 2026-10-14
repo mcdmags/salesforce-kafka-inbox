@@ -31,55 +31,94 @@ public static class FieldValues
         var type = field.Type;
         var isBoolean = type.Equals("boolean", StringComparison.OrdinalIgnoreCase);
 
-        if (value is null || value is string { Length: 0 })
+        if (value is null or string { Length: 0 })
         {
-            if (isBoolean) normalized = false; // a checkbox is never null
-            else if (!field.Nillable) return Fail(field, "REQUIRED_FIELD_MISSING", "Required field can't be empty", out error);
+            if (isBoolean)
+            {
+                normalized = false; // a checkbox is never null
+            }
+            else if (!field.Nillable)
+            {
+                return Fail(field, "REQUIRED_FIELD_MISSING", "Required field can't be empty", out error);
+            }
+
             return true; // Salesforce stores "" as null
         }
 
         if (TextTypes.Contains(type))
+        {
             return TryText(field, AsString(value), out normalized, out error);
+        }
 
         if (type.Equals("multipicklist", StringComparison.OrdinalIgnoreCase))
+        {
             return TryText(field, string.Join(';', SplitMultiPicklist(AsString(value))), out normalized, out error);
+        }
 
         if (type is "id" or "reference")
         {
             var id = To18CharId(AsString(value));
-            if (id is null) return Fail(field, "MALFORMED_ID", $"'{value}' is not a Salesforce id", out error);
+            if (id is null)
+            {
+                return Fail(field, "MALFORMED_ID", $"'{value}' is not a Salesforce id", out error);
+            }
+
             normalized = id;
             return true;
         }
 
         if (isBoolean)
         {
-            if (value is bool b) normalized = b;
-            else if (value is string s && bool.TryParse(s, out var parsed)) normalized = parsed;
-            else return WrongType(field, value, "a boolean", out error);
+            if (value is bool b)
+            {
+                normalized = b;
+            }
+            else if (value is string s && bool.TryParse(s, out var parsed))
+            {
+                normalized = parsed;
+            }
+            else
+            {
+                return WrongType(field, value, "a boolean", out error);
+            }
+
             return true;
         }
 
         if (NumberTypes.Contains(type))
+        {
             return TryNumber(field, value, out normalized, out error);
+        }
 
         if (type.Equals("date", StringComparison.OrdinalIgnoreCase))
         {
-            if (!TryDate(value, out var date)) return WrongType(field, value, "a date", out error);
+            if (!TryDate(value, out var date))
+            {
+                return WrongType(field, value, "a date", out error);
+            }
+
             normalized = date;
             return true;
         }
 
         if (type.Equals("datetime", StringComparison.OrdinalIgnoreCase))
         {
-            if (!TryDateTime(value, out var instant)) return WrongType(field, value, "a date/time", out error);
+            if (!TryDateTime(value, out var instant))
+            {
+                return WrongType(field, value, "a date/time", out error);
+            }
+
             normalized = instant;
             return true;
         }
 
         if (type.Equals("time", StringComparison.OrdinalIgnoreCase))
         {
-            if (!TryTime(value, out var time)) return WrongType(field, value, "a time", out error);
+            if (!TryTime(value, out var time))
+            {
+                return WrongType(field, value, "a time", out error);
+            }
+
             normalized = time;
             return true;
         }
@@ -93,7 +132,10 @@ public static class FieldValues
         normalized = null;
         error = default;
         if (field.Length > 0 && text.Length > field.Length)
+        {
             return Fail(field, "STRING_TOO_LONG", $"{text.Length} characters, max {field.Length}", out error);
+        }
+
         normalized = text;
         return true;
     }
@@ -106,7 +148,10 @@ public static class FieldValues
     {
         normalized = null;
         error = default;
-        if (!TryDecimal(value, out var number)) return WrongType(field, value, "a number", out error);
+        if (!TryDecimal(value, out var number))
+        {
+            return WrongType(field, value, "a number", out error);
+        }
 
         var isInteger = field.Type is "int" or "long";
         var scale = isInteger ? 0 : field.Scale;
@@ -122,13 +167,22 @@ public static class FieldValues
     }
 
     private static bool WrongType(SalesforceField field, object value, string expected, out FieldError error)
-        => Fail(field, "INVALID_TYPE_ON_FIELD_IN_RECORD", $"'{value}' is not {expected}", out error);
+    {
+        return Fail(field, "INVALID_TYPE_ON_FIELD_IN_RECORD", $"'{value}' is not {expected}", out error);
+    }
 
     /// <summary>Whether Salesforce's current value equals a value produced by <see cref="TryNormalize"/>.</summary>
     public static bool AreEqual(SalesforceField field, object? normalized, JsonElement current)
     {
-        if (current.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return normalized is null;
-        if (normalized is null) return false;
+        if (current.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return normalized is null;
+        }
+
+        if (normalized is null)
+        {
+            return false;
+        }
 
         var currentText = current.ValueKind == JsonValueKind.String ? current.GetString() : null;
         return normalized switch
@@ -148,13 +202,16 @@ public static class FieldValues
     }
 
     /// <summary>The JSON value to send for a normalized value.</summary>
-    public static object? ToWire(object? normalized) => normalized switch
+    public static object? ToWire(object? normalized)
     {
-        DateOnly d => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-        DateTimeOffset t => t.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
-        TimeOnly t => t.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + "Z",
-        _ => normalized
-    };
+        return normalized switch
+        {
+            DateOnly d => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            DateTimeOffset t => t.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+            TimeOnly t => t.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + "Z",
+            _ => normalized
+        };
+    }
 
     /// <summary>
     /// Salesforce ids are case-sensitive 15-character values; the API returns the 18-character form, whose last three
@@ -179,7 +236,13 @@ public static class FieldValues
         {
             var bits = 0;
             for (var i = 0; i < 5; i++)
-                if (char.IsAsciiLetterUpper(id[chunk * 5 + i])) bits |= 1 << i;
+            {
+                if (char.IsAsciiLetterUpper(id[(chunk * 5) + i]))
+                {
+                    bits |= 1 << i;
+                }
+            }
+
             suffix[chunk] = alphabet[bits];
         }
         return id + new string(suffix);
@@ -188,15 +251,20 @@ public static class FieldValues
     // ---------- Parsing ----------
 
     private static IEnumerable<string> SplitMultiPicklist(string value)
-        => value.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Distinct(StringComparer.Ordinal);
-
-    private static string AsString(object value) => value switch
     {
-        string s => s,
-        bool b => b ? "true" : "false",
-        IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
-        _ => value.ToString() ?? ""
-    };
+        return value.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Distinct(StringComparer.Ordinal);
+    }
+
+    private static string AsString(object value)
+    {
+        return value switch
+        {
+            string s => s,
+            bool b => b ? "true" : "false",
+            IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
+            _ => value.ToString() ?? ""
+        };
+    }
 
     private static bool TryDecimal(object value, out decimal number)
     {
@@ -217,7 +285,11 @@ public static class FieldValues
     private static decimal Pow10(int exponent)
     {
         var result = 1m;
-        for (var i = 0; i < Math.Clamp(exponent, 0, 28); i++) result *= 10;
+        for (var i = 0; i < Math.Clamp(exponent, 0, 28); i++)
+        {
+            result *= 10;
+        }
+
         return result;
     }
 
@@ -241,11 +313,16 @@ public static class FieldValues
         switch (value)
         {
             case DateTimeOffset dto: parsed = dto; break;
-            case DateTime dt: parsed = new DateTimeOffset(dt.Kind == DateTimeKind.Unspecified
+            case DateTime dt:
+                parsed = new DateTimeOffset(dt.Kind == DateTimeKind.Unspecified
                 ? DateTime.SpecifyKind(dt, DateTimeKind.Utc) : dt.ToUniversalTime()); break;
             case string s:
                 // Salesforce returns "+0000"; .NET wants "+00:00"
-                if (s.Length > 5 && s[^5] is '+' or '-' && char.IsAsciiDigit(s[^1])) s = s.Insert(s.Length - 2, ":");
+                if (s.Length > 5 && s[^5] is '+' or '-' && char.IsAsciiDigit(s[^1]))
+                {
+                    s = s.Insert(s.Length - 2, ":");
+                }
+
                 if (!DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out parsed))
                 {
                     instant = default;
@@ -260,7 +337,7 @@ public static class FieldValues
         // Salesforce keeps date/time values to the second ("full timestamps with a precision of one second",
         // Object Reference, Primitive Data Types); time values keep milliseconds
         var utc = parsed.ToUniversalTime();
-        instant = new DateTimeOffset(utc.UtcTicks - utc.UtcTicks % TimeSpan.TicksPerSecond, TimeSpan.Zero);
+        instant = new DateTimeOffset(utc.UtcTicks - (utc.UtcTicks % TimeSpan.TicksPerSecond), TimeSpan.Zero);
         return true;
     }
 
@@ -277,7 +354,7 @@ public static class FieldValues
             return false;
         }
 
-        time = new TimeOnly(time.Ticks - time.Ticks % TimeSpan.TicksPerMillisecond);
+        time = new TimeOnly(time.Ticks - (time.Ticks % TimeSpan.TicksPerMillisecond));
         return true;
     }
 

@@ -14,20 +14,48 @@ namespace SalesforceSync.Tests;
 internal static class SalesforceStep
 {
     public static SalesforceBatchUpsertService Service(HttpClient http, IOptions<SalesforceOptions> options, SyncOptions? sync = null)
-        => new(new NoDatabase(), new NoDatabase(), new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
-            new SalesforceErrors(options), new WriteEchoTracker(), options, Options.Create(sync ?? new SyncOptions()),
-            NullLogger<SalesforceBatchUpsertService>.Instance);
+    {
+        return new(new NoDatabase(), new NoDatabase(), new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
+                new SalesforceErrors(options), new WriteEchoTracker(), options, Options.Create(sync ?? new SyncOptions()),
+                NullLogger<SalesforceBatchUpsertService>.Instance);
+    }
 
     /// <summary>The Salesforce step never claims, records or takes a slot.</summary>
     private sealed class NoDatabase : ISalesforceBatchGate, IInboxRepository
     {
-        private static NotSupportedException NotUsed() => new("The Salesforce step does not use the inbox");
+        private static NotSupportedException NotUsed()
+        {
+            return new("The Salesforce step does not use the inbox");
+        }
 
-        public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct) => throw NotUsed();
-        public Task<InboxClaim> ClaimAsync(string inboxTable, string entityType, CancellationToken ct) => throw NotUsed();
-        public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct) => throw NotUsed();
-        public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct) => throw NotUsed();
-        public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct) => throw NotUsed();
-        public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct) => throw NotUsed();
+        public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct)
+        {
+            throw NotUsed();
+        }
+
+        public Task<InboxClaim> ClaimAsync(string inboxTable, string entityType, CancellationToken ct)
+        {
+            throw NotUsed();
+        }
+
+        public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
+        {
+            throw NotUsed();
+        }
+
+        public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
+        {
+            throw NotUsed();
+        }
+
+        public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
+        {
+            throw NotUsed();
+        }
+
+        public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
+        {
+            throw NotUsed();
+        }
     }
 }

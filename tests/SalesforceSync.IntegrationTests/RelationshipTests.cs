@@ -10,8 +10,8 @@ public sealed class RelationshipTests(SyncFixture app)
     public async Task Relationship_links_two_synced_Accounts_and_updates_only_what_changed()
     {
         var (parent, child, rel) = (SyncFixture.NewAccountId(), SyncFixture.NewAccountId(), SyncFixture.NewRelationshipId());
-        await app.PublishAsync(parent, 1, new JsonObject { ["name"] = Any.String("Parent ") }, new JsonObject());
-        await app.PublishAsync(child, 1, new JsonObject { ["name"] = Any.String("Child ") }, new JsonObject());
+        await app.PublishAsync(parent, 1, new JsonObject { ["name"] = Any.String("Parent ") }, []);
+        await app.PublishAsync(child, 1, new JsonObject { ["name"] = Any.String("Child ") }, []);
         await app.WaitForInboxSettledAsync(parent, 1);
         await app.WaitForInboxSettledAsync(child, 1);
 
@@ -46,8 +46,8 @@ public sealed class RelationshipTests(SyncFixture app)
         waiting[0].Status.Should().Be("pending", "a missing dependency is retried, not dead-lettered");
         (await app.GetRecordAsync("Account_Relationship__c", rel)).Should().BeNull();
 
-        await app.PublishAsync(parent, 1, new JsonObject { ["name"] = Any.String("Late parent ") }, new JsonObject());
-        await app.PublishAsync(child, 1, new JsonObject { ["name"] = Any.String("Late child ") }, new JsonObject());
+        await app.PublishAsync(parent, 1, new JsonObject { ["name"] = Any.String("Late parent ") }, []);
+        await app.PublishAsync(child, 1, new JsonObject { ["name"] = Any.String("Late child ") }, []);
 
         var settled = await Eventually.ValueAsync(
             () => app.GetInboxRowsAsync(rel, SyncFixture.Relationships),
@@ -64,7 +64,7 @@ public sealed class RelationshipTests(SyncFixture app)
     {
         var rel = SyncFixture.NewRelationshipId();
 
-        await app.PublishRelationshipAsync(rel, 1, SyncFixture.NewAccountId(), "", new JsonObject());
+        await app.PublishRelationshipAsync(rel, 1, SyncFixture.NewAccountId(), "", []);
 
         var rows = await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships);
         rows[0].Status.Should().Be("dead");

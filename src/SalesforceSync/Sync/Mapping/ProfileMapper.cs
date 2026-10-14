@@ -9,15 +9,18 @@ namespace SalesforceSync.Sync.Mapping;
 /// </summary>
 public sealed class ProfileMapper : ISObjectMapper<ProfilePayload, ProfileSObject>
 {
-    public ProfileSObject Map(ProfilePayload payload) => new()
+    public ProfileSObject Map(ProfilePayload payload)
     {
-        ExternalId = payload.ExternalId,
-        Name = payload.Name,
-        Tier = payload.Tier,
-        Score = payload.Score,
-        Discount = payload.DiscountPercent,
-        Notes = payload.Notes,
-        OptIn = payload.OptIn,
-        StartDate = payload.StartDate
-    };
+        return new()
+        {
+            ExternalId = payload.ExternalId,
+            Name = payload.Name,
+            Tier = payload.Tier,
+            Score = payload.Score,
+            Discount = payload.DiscountPercent,
+            Notes = payload.Notes,
+            OptIn = payload.OptIn,
+            StartDate = payload.StartDate
+        };
+    }
 }

@@ -29,10 +29,15 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
         var attempted = new List<Guid>();
         return pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
         {
-            CommandDefinition Command(string statement, object args) => new(statement, args, tx, cancellationToken: t);
+            CommandDefinition Command(string statement, object args)
+            {
+                return new(statement, args, tx, cancellationToken: t);
+            }
 
             if (attempted.Count > 0)
+            {
                 await conn.ExecuteAsync(Command(sql.ReleaseLostClaims, new { tokens = attempted.ToArray() }));
+            }
 
             var token = Guid.NewGuid();
             attempted.Add(token);
@@ -41,7 +46,10 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
                 window = InboxSql.ClaimWindow,
                 batchSize = Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)
             }))).ToArray();
-            if (entityIds.Length == 0) return new InboxClaim(inboxTable, entityType, token, [], new Dictionary<string, long>());
+            if (entityIds.Length == 0)
+            {
+                return new InboxClaim(inboxTable, entityType, token, [], new Dictionary<string, long>());
+            }
 
             var events = (await conn.QueryAsync<InboxEvent>(Command(sql.ClaimEntities,
                 new { entityIds, token, lease = _opt.Lease, maxPerEntity = _opt.MaxEventsPerEntity }))).ToList();
@@ -61,39 +69,64 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
         var token = claim.Token;
         return pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
         {
-            Task Run(string statement, object args) => conn.ExecuteAsync(new CommandDefinition(statement, args, tx, cancellationToken: t));
+            Task Run(string statement, object args)
+            {
+                return conn.ExecuteAsync(new CommandDefinition(statement, args, tx, cancellationToken: t));
+            }
 
             if (outcomes.Synced.Count > 0)
             {
                 // Watermarks first: Complete releases the lease that MarkSynced checks
                 await Run(sql.MarkSynced, new
                 {
-                    entityType = claim.EntityType, token,
+                    entityType = claim.EntityType,
+                    token,
                     entityIds = outcomes.Synced.Select(s => s.EntityId).ToArray(),
                     times = outcomes.Synced.Select(s => s.EventTime).ToArray()
                 });
                 await Run(sql.Complete, new { ids = outcomes.Synced.Select(s => s.EventId).ToArray(), token, status = "done" });
             }
             if (outcomes.Superseded.Count > 0)
+            {
                 await Run(sql.Complete, new { ids = outcomes.Superseded.ToArray(), token, status = "superseded" });
+            }
+
             if (outcomes.Released.Count > 0)
+            {
                 await Run(sql.Release, new { ids = outcomes.Released.ToArray(), token });
+            }
+
             if (outcomes.Dead.Count > 0)
+            {
                 await Run(sql.Dead, new { ids = Ids(outcomes.Dead), errors = ErrorsJson(outcomes.Dead), token });
+            }
+
             if (outcomes.Failed.Count > 0)
+            {
                 await Run(sql.Fail, FailArgs(outcomes.Failed, token));
+            }
+
             if (outcomes.Held.Count > 0)
+            {
                 await Run(sql.Hold, HoldArgs(Ids(outcomes.Held), token, outcomes.Held[0].Error));
+            }
+
             if (outcomes.Deferred.Count > 0)
+            {
                 await Run(sql.Defer, new { ids = outcomes.Deferred.ToArray(), token, delay = outcomes.DeferFor });
+            }
         }, ct);
     }
 
     public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
-        => pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Hold, HoldArgs(claim.EventIds, claim.Token, error), ct);
+    {
+        return pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Hold, HoldArgs(claim.EventIds, claim.Token, error), ct);
+    }
 
     public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
-        => pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Defer, new { ids = claim.EventIds, token = claim.Token, delay }, ct);
+    {
+        return pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Defer, new { ids = claim.EventIds, token = claim.Token, delay }, ct);
+    }
 
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
     {
@@ -101,26 +134,38 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
         return pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Fail, FailArgs(all, claim.Token), ct);
     }
 
-    private object FailArgs(IReadOnlyList<FailedEvent> rows, Guid token) => new
+    private object FailArgs(IReadOnlyList<FailedEvent> rows, Guid token)
     {
-        ids = Ids(rows),
-        errors = ErrorsJson(rows),
-        token,
-        maxRetries = _opt.MaxRetries,
-        baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
-        maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
-    };
+        return new
+        {
+            ids = Ids(rows),
+            errors = ErrorsJson(rows),
+            token,
+            maxRetries = _opt.MaxRetries,
+            baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
+            maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
+        };
+    }
 
     private object HoldArgs(long[] ids, Guid token, string error)
-        => new { ids, token, hold = _opt.UnknownOutcomeHold, error, code = UnknownOutcomeException.Code };
+    {
+        return new { ids, token, hold = _opt.UnknownOutcomeHold, error, code = UnknownOutcomeException.Code };
+    }
 
-    private static long[] Ids(IReadOnlyList<FailedEvent> rows) => rows.Select(r => r.EventId).ToArray();
+    private static long[] Ids(IReadOnlyList<FailedEvent> rows)
+    {
+        return [.. rows.Select(r => r.EventId)];
+    }
 
     /// <summary>{ "row id": [error, code] }, as InboxSql.Fail / Dead take the errors.</summary>
     private static string ErrorsJson(IReadOnlyList<FailedEvent> rows)
     {
         var errors = new Dictionary<string, string?[]>(StringComparer.Ordinal);
-        foreach (var row in rows) errors[row.EventId.ToString(CultureInfo.InvariantCulture)] = [row.Error, row.Code];
+        foreach (var row in rows)
+        {
+            errors[row.EventId.ToString(CultureInfo.InvariantCulture)] = [row.Error, row.Code];
+        }
+
         return JsonSerializer.Serialize(errors);
     }
 }

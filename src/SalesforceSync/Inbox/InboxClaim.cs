@@ -12,5 +12,5 @@ public sealed record InboxClaim(
     IReadOnlyList<InboxEvent> Events,
     IReadOnlyDictionary<string, long> SyncedTimes)
 {
-    public long[] EventIds => Events.Select(e => e.Id).ToArray();
+    public long[] EventIds => [.. Events.Select(e => e.Id)];
 }

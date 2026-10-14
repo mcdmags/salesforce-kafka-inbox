@@ -73,25 +73,42 @@ public sealed class SalesforceRateLimiter(
             // increment committed by whoever held the lock before (a single statement would read sf_api_usage
             // from a snapshot taken before it waited for the lock). Retried as a whole on transient errors; a
             // retry after an unknown commit can only over-count usage, the safe direction.
-            (bool granted, double waitSeconds, double used24h, double? budget) r = await pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
+            (var granted, var waitSeconds, var used24h, var budget) = await pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
             {
                 await conn.ExecuteAsync(new CommandDefinition(RateLimitSql.Lock, transaction: tx, cancellationToken: t));
                 return await conn.QuerySingleAsync<(bool, double, double, double?)>(
                     new CommandDefinition(RateLimitSql.Acquire, new { n = (double)permits }, tx, cancellationToken: t));
             }, ct);
-            if (r.budget > 0) Volatile.Write(ref _ownDailyRatio, r.used24h / r.budget.Value);
-            if (r.granted) return;
+            if (budget > 0)
+            {
+                Volatile.Write(ref _ownDailyRatio, used24h / budget.Value);
+            }
 
-            var wait = TimeSpan.FromSeconds(Math.Max(r.waitSeconds, 0.05))
+            if (granted)
+            {
+                return;
+            }
+
+            var wait = TimeSpan.FromSeconds(Math.Max(waitSeconds, 0.05))
                        + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100)); // jitter
-            if (DateTime.UtcNow + wait > deadline) throw new RateLimitedException(wait);
+            if (DateTime.UtcNow + wait > deadline)
+            {
+                throw new RateLimitedException(wait);
+            }
+
             await Task.Delay(wait, ct);
         }
     }
 
-    public Task<bool> IsPausedAsync(CancellationToken ct) => pg.ExecuteScalarAsync<bool>(RateLimitSql.IsPaused, null, ct);
+    public Task<bool> IsPausedAsync(CancellationToken ct)
+    {
+        return pg.ExecuteScalarAsync<bool>(RateLimitSql.IsPaused, null, ct);
+    }
 
-    public Task PauseAsync(TimeSpan duration, CancellationToken ct) => pg.ExecuteAsync(RateLimitSql.Pause, new { duration }, ct);
+    public Task PauseAsync(TimeSpan duration, CancellationToken ct)
+    {
+        return pg.ExecuteAsync(RateLimitSql.Pause, new { duration }, ct);
+    }
 
     /// <summary>
     /// Records the limits Salesforce reported and adjusts the shared bucket: slows down near the daily or per-app
@@ -107,9 +124,16 @@ public sealed class SalesforceRateLimiter(
         lock (_reportLock)
         {
             var now = DateTime.UtcNow;
-            if (decision == _lastDecision && now - _lastReportUtc < _opt.ReportInterval) return;
+            if (decision == _lastDecision && now - _lastReportUtc < _opt.ReportInterval)
+            {
+                return;
+            }
+
             if (decision != _lastDecision)
+            {
                 LogTransition(_lastDecision, decision, info);
+            }
+
             _lastDecision = decision;
             _lastReportUtc = now;
         }
@@ -133,15 +157,11 @@ public sealed class SalesforceRateLimiter(
     internal ThrottleDecision Decide(SalesforceLimitInfo info, double ownDailyRatio = 0)
     {
         var daily = Math.Max(info.DailyRatio, ownDailyRatio);
-        if (daily >= _opt.DailyHardRatio)
-        {
-            return new ThrottleDecision(ThrottleLevel.DailyExhausted, _opt.DailySoftSpeed, _opt.DailyHardPause);
-        }
-        if (daily >= _opt.DailySoftRatio)
-        {
-            return new ThrottleDecision(ThrottleLevel.DailyLow, _opt.DailySoftSpeed, TimeSpan.Zero);
-        }
-        return ThrottleDecision.Normal;
+        return daily >= _opt.DailyHardRatio
+            ? new ThrottleDecision(ThrottleLevel.DailyExhausted, _opt.DailySoftSpeed, _opt.DailyHardPause)
+            : daily >= _opt.DailySoftRatio
+            ? new ThrottleDecision(ThrottleLevel.DailyLow, _opt.DailySoftSpeed, TimeSpan.Zero)
+            : ThrottleDecision.Normal;
     }
 
     /// <summary>Logs which allocation the budget follows, once per process and again whenever Salesforce's changes.</summary>

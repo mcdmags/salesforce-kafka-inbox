@@ -20,23 +20,26 @@ public sealed class AccountRelationshipSyncService(
     /// <summary>The strategy the engine runs, with the mapper it maps through (injected, so built per instance).</summary>
     public static UpsertStrategy<AccountRelationshipEvent> CreateStrategy(
         ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
-        => new(Type, InboxTable, e => e.AccountRelationship?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
-            (key, e) => Map(key, e, relationships), Queries);
+    {
+        return new(Type, InboxTable, e => e.AccountRelationship?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
+                (key, e) => Map(key, e, relationships), Queries);
+    }
 
     public static UpsertUnit Map(string relationshipKey, AccountRelationshipEvent e,
         ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
     {
         var payload = e.AccountRelationship;
-        if (string.IsNullOrWhiteSpace(payload?.AccountExternalId) || string.IsNullOrWhiteSpace(payload.RelatedAccountExternalId))
-            throw new ArgumentException("accountExternalId and relatedAccountExternalId are required");
-
-        return new UpsertUnit([SObjectRecord.From("rel", relationships.Map(payload))]);
+        return string.IsNullOrWhiteSpace(payload?.AccountExternalId) || string.IsNullOrWhiteSpace(payload.RelatedAccountExternalId)
+            ? throw new ArgumentException("accountExternalId and relatedAccountExternalId are required")
+            : new UpsertUnit([SObjectRecord.From("rel", relationships.Map(payload))]);
     }
 
     // What to read: the relationships themselves (to diff) and the Accounts they point at (for their Ids)
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units) =>
-    [
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
+    {
+        return [
         SoqlQuery.RecordsOf<AccountRelationshipSObject>(units),
         SoqlQuery.LookupTargetsOf<AccountSObject>(units)
     ];
+    }
 }

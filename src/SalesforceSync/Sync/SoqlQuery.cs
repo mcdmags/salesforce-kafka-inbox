@@ -21,18 +21,20 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
 
     /// <summary>The external ids of every record of <paramref name="sobject"/> in the units.</summary>
     public static IReadOnlyCollection<string> ExternalIdsOf(IEnumerable<UpsertUnit> units, string sobject)
-        => units.SelectMany(u => u.Records)
-            .Where(r => r.SObject.Equals(sobject, StringComparison.OrdinalIgnoreCase))
-            .Select(r => r.ExternalId)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
+    {
+        return [.. units.SelectMany(u => u.Records)
+                .Where(r => r.SObject.Equals(sobject, StringComparison.OrdinalIgnoreCase))
+                .Select(r => r.ExternalId)
+                .Distinct(StringComparer.Ordinal)];
+    }
 
     /// <summary>The external ids every lookup of the units points at in <paramref name="sobject"/>.</summary>
     public static IReadOnlyCollection<string> LookupIdsOf(IEnumerable<UpsertUnit> units, string sobject)
-        => units.SelectMany(u => u.Records)
-            .SelectMany(r => r.Lookups ?? [])
-            .Where(l => l.SObject.Equals(sobject, StringComparison.OrdinalIgnoreCase))
-            .Select(l => l.ExternalId)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
+    {
+        return [.. units.SelectMany(u => u.Records)
+                .SelectMany(r => r.Lookups ?? [])
+                .Where(l => l.SObject.Equals(sobject, StringComparison.OrdinalIgnoreCase))
+                .Select(l => l.ExternalId)
+                .Distinct(StringComparer.Ordinal)];
+    }
 }

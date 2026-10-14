@@ -11,7 +11,10 @@ public sealed class SalesforceAuthHandler(SalesforceTokenProvider tokens) : Dele
         var token = await TokenAsync(null, ct);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var res = await base.SendAsync(request, ct);
-        if (res.StatusCode != HttpStatusCode.Unauthorized) return res;
+        if (res.StatusCode != HttpStatusCode.Unauthorized)
+        {
+            return res;
+        }
 
         res.Dispose();
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await TokenAsync(token, ct));

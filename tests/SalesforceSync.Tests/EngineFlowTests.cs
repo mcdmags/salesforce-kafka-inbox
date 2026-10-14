@@ -170,7 +170,7 @@ public sealed class EngineFlowTests
         _http.OnRead = request => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
         {
             RequestMessage = request,
-            Content = new StringContent("""{"compositeResponse":[{"referenceId":"q0","httpStatusCode":400,"httpHeaders":{},"body":[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating'"}]}]}""")
+            Content = new StringContent(/*lang=json,strict*/ """{"compositeResponse":[{"referenceId":"q0","httpStatusCode":400,"httpHeaders":{},"body":[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating'"}]}]}""")
         };
 
         await engine.UpsertBatchAsync(Accounts, CancellationToken.None);
@@ -200,7 +200,11 @@ public sealed class EngineFlowTests
     [Fact]
     public void Outcomes_are_grouped_by_what_the_inbox_does_with_them()
     {
-        Work Entity(string id, long eventId) => new(id, new UpsertUnit([]), eventId * 10, eventId);
+        static Work Entity(string id, long eventId)
+        {
+            return new(id, new UpsertUnit([]), eventId * 10, eventId);
+        }
+
         var batch = new PreparedBatch([9], [Entity("A", 1), Entity("B", 2), Entity("C", 3), Entity("D", 4), Entity("E", 5)], [(8, "bad")]);
         SalesforceError[] error = [new(null, "PROCESSING_HALTED", "x"), new("acct", "SOME_CODE", "why")];
 
@@ -278,8 +282,11 @@ public sealed class EngineFlowTests
             NullLogger<SalesforceBatchUpsertService>.Instance);
     }
 
-    private static InboxEvent Row(long id, string account, string time, string name = "Acme") => new(id, account,
+    private static InboxEvent Row(long id, string account, string time, string name = "Acme")
+    {
+        return new(id, account,
         $$"""{ "meta": { "time": "{{time}}", "type": "inserted" }, "account": { "externalId": "{{account}}", "name": "{{name}}" } }""", 1);
+    }
 
     /// <summary>Lets requests through to the org, or fails all of them, the read, or the Nth write.</summary>
     private sealed class Interceptor : DelegatingHandler
@@ -291,12 +298,23 @@ public sealed class EngineFlowTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            if (Throw is not null) throw Throw;
+            if (Throw is not null)
+            {
+                throw Throw;
+            }
+
             if (request.RequestUri!.AbsolutePath.EndsWith("/composite", StringComparison.Ordinal))
             {
                 var isWrite = (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
-                if (!isWrite && OnRead is not null) return OnRead(request);
-                if (isWrite && ++Writes == FailWrite?.Number) throw FailWrite.Value.Failure;
+                if (!isWrite && OnRead is not null)
+                {
+                    return OnRead(request);
+                }
+
+                if (isWrite && ++Writes == FailWrite?.Number)
+                {
+                    throw FailWrite.Value.Failure;
+                }
             }
             return await base.SendAsync(request, ct);
         }
@@ -307,7 +325,10 @@ public sealed class EngineFlowTests
         public bool Open { get; set; } = true;
         public int Released { get; private set; }
 
-        public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct) => Task.FromResult<IAsyncDisposable?>(Open ? this : null);
+        public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct)
+        {
+            return Task.FromResult<IAsyncDisposable?>(Open ? this : null);
+        }
 
         public ValueTask DisposeAsync()
         {
@@ -336,9 +357,20 @@ public sealed class EngineFlowTests
             return Task.CompletedTask;
         }
 
-        public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct) => Call("hold");
-        public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct) => Call($"defer {delay}");
-        public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct) => Call($"fail all: {error} ({code})");
+        public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
+        {
+            return Call("hold");
+        }
+
+        public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
+        {
+            return Call($"defer {delay}");
+        }
+
+        public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
+        {
+            return Call($"fail all: {error} ({code})");
+        }
 
         private Task Call(string what)
         {

@@ -9,20 +9,23 @@ public sealed class PostgresExecutionStrategyTests
 {
     private readonly Fixture _any = new();
 
-    private static PostgresExecutionStrategy Strategy(int maxRetries = 3) => new(
+    private static PostgresExecutionStrategy Strategy(int maxRetries = 3)
+    {
+        return new(
         NpgsqlDataSource.Create("Host=unused"),
         Options.Create(new PostgresRetryOptions { MaxRetryCount = maxRetries, BaseDelay = TimeSpan.FromMilliseconds(1), MaxRetryDelay = TimeSpan.FromMilliseconds(5) }),
         NullLogger<PostgresExecutionStrategy>.Instance);
+    }
 
-    public static TheoryData<Exception> Transient => new()
-    {
+    public static TheoryData<Exception> Transient =>
+    [
         new NpgsqlException("connection reset", new IOException("broken pipe")),
         new PostgresException("could not serialize access", "ERROR", "ERROR", "40001"),
         new PostgresException("deadlock detected", "ERROR", "ERROR", "40P01"),
         new PostgresException("terminating connection due to administrator command", "FATAL", "FATAL", "57P01"),
         new PostgresException("the database system is starting up", "FATAL", "FATAL", "57P03"),
         new TimeoutException("timeout")
-    };
+    ];
 
     [Theory]
     [MemberData(nameof(Transient))]

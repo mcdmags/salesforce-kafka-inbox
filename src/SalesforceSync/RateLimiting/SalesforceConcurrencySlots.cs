@@ -25,28 +25,32 @@ public sealed class SalesforceConcurrencySlots(
 
     /// <returns>A held slot, or null when all are busy.</returns>
     public Task<IAsyncDisposable?> TryAcquireAsync(CancellationToken ct)
-        => pg.RetryAsync<IAsyncDisposable?>(async token =>
-        {
-            var conn = await db.OpenConnectionAsync(token);
-            try
+    {
+        return pg.RetryAsync<IAsyncDisposable?>(async token =>
             {
-                foreach (var i in Enumerable.Range(0, maxConcurrent).OrderBy(_ => Random.Shared.Next()))
+                var conn = await db.OpenConnectionAsync(token);
+                try
                 {
-                    var key = KeyBase + i;
-                    if (await conn.ExecuteScalarAsync<bool>(
-                            new CommandDefinition("select pg_try_advisory_lock(@key)", new { key }, cancellationToken: token)))
-                        return new Slot(conn, key, log);
+                    foreach (var i in Enumerable.Range(0, maxConcurrent).OrderBy(_ => Random.Shared.Next()))
+                    {
+                        var key = KeyBase + i;
+                        if (await conn.ExecuteScalarAsync<bool>(
+                                new CommandDefinition("select pg_try_advisory_lock(@key)", new { key }, cancellationToken: token)))
+                        {
+                            return new Slot(conn, key, log);
+                        }
+                    }
                 }
-            }
-            catch
-            {
-                await conn.DisposeAsync(); // the session (and any lock it took) ends with it
-                throw;
-            }
+                catch
+                {
+                    await conn.DisposeAsync(); // the session (and any lock it took) ends with it
+                    throw;
+                }
 
-            await conn.DisposeAsync();
-            return null; // all slots busy
-        }, ct);
+                await conn.DisposeAsync();
+                return null; // all slots busy
+            }, ct);
+    }
 
     private sealed class Slot(NpgsqlConnection conn, long key, ILogger? log) : IAsyncDisposable
     {

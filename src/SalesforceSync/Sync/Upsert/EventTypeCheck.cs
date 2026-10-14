@@ -13,13 +13,16 @@ internal static class EventTypeCheck
     /// <returns>The mismatch, or null if the type agrees with Salesforce (or the unit has no type).</returns>
     public static SalesforceError? Mismatch(NormalizedUnit unit, CurrentRecords current)
     {
-        if (unit.EventType is not { } type) return null;
+        if (unit.EventType is not { } type)
+        {
+            return null;
+        }
 
         var main = unit.MainRecord;
         var exists = current.Find(main) is not null;
-        if (exists == (type == EventType.Updated)) return null;
-
-        return new SalesforceError(main.ReferenceId, SalesforceErrors.EventTypeMismatch, exists
+        return exists == (type == EventType.Updated)
+            ? null
+            : new SalesforceError(main.ReferenceId, SalesforceErrors.EventTypeMismatch, exists
             ? $"the event says inserted, but {main.SObject} {main.ExternalIdField}={main.ExternalId} is already in Salesforce"
             : $"the event says updated, but {main.SObject} {main.ExternalIdField}={main.ExternalId} is not in Salesforce");
     }

@@ -91,8 +91,8 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         var acct = SyncFixture.NewAccountId();
 
         await app.InsertIntoInboxAsync(acct,
-            SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1", ["rating"] = "Hot" }, new JsonObject()),
-            SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = "v2" }, new JsonObject()));
+            SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1", ["rating"] = "Hot" }, []),
+            SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = "v2" }, []));
 
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().Equal((1L, "superseded"), (2L, "done"));
         var write = (await app.GetWriteRequestsAsync(acct)).Should().ContainSingle().Subject;
@@ -107,7 +107,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
     public async Task Redelivered_insert_of_a_record_that_changed_since_updates_only_what_differs()
     {
         var acct = SyncFixture.NewAccountId();
-        var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1", ["rating"] = "Hot" }, new JsonObject());
+        var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1", ["rating"] = "Hot" }, []);
         await app.InsertIntoInboxAsync(acct, v1);
         await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
 
@@ -125,5 +125,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
     }
 
     private static List<JsonObject> Records(JsonNode collection)
-        => collection["body"]!["records"]!.AsArray().Select(r => r!.AsObject()).ToList();
+    {
+        return [.. collection["body"]!["records"]!.AsArray().Select(r => r!.AsObject())];
+    }
 }

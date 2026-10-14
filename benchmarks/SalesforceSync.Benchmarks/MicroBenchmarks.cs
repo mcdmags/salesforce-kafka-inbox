@@ -21,7 +21,7 @@ public class MicroBenchmarks
 
     private static readonly UpsertStrategy<AccountEvent> Accounts = AccountSyncService.CreateStrategy(new AccountMapper(), new ProfileMapper());
 
-    private static readonly Dictionary<string, long> NothingSynced = new();
+    private static readonly Dictionary<string, long> NothingSynced = [];
 
     private readonly AccountMapper _accountMapper = new();
     private List<InboxEvent> _tenEvents = default!;
@@ -37,7 +37,7 @@ public class MicroBenchmarks
     public void Setup()
     {
         // Full records, as the source sends them; ids are deliberately not in version order
-        _tenEvents = Enumerable.Range(1, 10).Select(v => new InboxEvent(
+        _tenEvents = [.. Enumerable.Range(1, 10).Select(v => new InboxEvent(
             Id: 11 - v,
             EntityId: "ACC-000001",
             Payload: new JsonObject
@@ -70,9 +70,9 @@ public class MicroBenchmarks
                     }
                 }
             }.ToJsonString(),
-            RetryCount: 1)).ToList();
+            RetryCount: 1))];
 
-        _tenRead = _tenEvents.Select(row => (row, Accounts.TryRead(row.Payload, out var read, out _) ? read : null!)).ToList();
+        _tenRead = [.. _tenEvents.Select(row => (row, Accounts.TryRead(row.Payload, out var read, out _) ? read : null!))];
         _payload = JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchUpsertService.EventJson)!.Account!;
         _sobject = _accountMapper.Map(_payload);
 
@@ -81,38 +81,62 @@ public class MicroBenchmarks
     }
 
     [Benchmark]
-    public SalesforceLimitInfo? ParseLimitHeader() => SalesforceLimitInfo.Parse(LimitHeader);
+    public SalesforceLimitInfo? ParseLimitHeader()
+    {
+        return SalesforceLimitInfo.Parse(LimitHeader);
+    }
 
     /// <summary>Ten claimed events of one entity, already read -> the one to write (the newest by event time).</summary>
     [Benchmark]
-    public long CoalesceTenEvents() => SalesforceBatchUpsertService.Coalesce(_tenRead).Row.Id;
+    public long CoalesceTenEvents()
+    {
+        return SalesforceBatchUpsertService.Coalesce(_tenRead).Row.Id;
+    }
 
     /// <summary>What the engine does with a claimed entity: read its ten events, keep the newest, map it.</summary>
     [Benchmark]
-    public int PrepareTenEvents() => SalesforceBatchUpsertService.Prepare(Accounts, _tenEvents, NothingSynced).Work.Count;
+    public int PrepareTenEvents()
+    {
+        return SalesforceBatchUpsertService.Prepare(Accounts, _tenEvents, NothingSynced).Work.Count;
+    }
 
     /// <summary>What the consumer does per message: typed read + validation (entity id, event time).</summary>
     [Benchmark]
-    public bool ReadAndValidateEvent() => Accounts.TryRead(_tenEvents[0].Payload, out _, out _);
+    public bool ReadAndValidateEvent()
+    {
+        return Accounts.TryRead(_tenEvents[0].Payload, out _, out _);
+    }
 
     /// <summary>What the engine does per entity: raw event JSON -> typed event -> mappers -> Account + Profile records.</summary>
     [Benchmark]
     public UpsertUnit MapAccountEvent()
-        => Accounts.Map("ACC-000001", JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchUpsertService.EventJson)!);
+    {
+        return Accounts.Map("ACC-000001", JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchUpsertService.EventJson)!);
+    }
 
     /// <summary>The hand-written mapper alone: payload -> sObject.</summary>
     [Benchmark]
-    public AccountSObject MapPayloadToSObject() => _accountMapper.Map(_payload);
+    public AccountSObject MapPayloadToSObject()
+    {
+        return _accountMapper.Map(_payload);
+    }
 
     /// <summary>sObject -> record through the cached attribute metadata (no reflection per call).</summary>
     [Benchmark]
-    public SObjectRecord MapSObjectToRecord() => SObjectRecord.From("acct", _sobject);
+    public SObjectRecord MapSObjectToRecord()
+    {
+        return SObjectRecord.From("acct", _sobject);
+    }
 
     [Benchmark]
     public bool DiffNumber()
-        => FieldValues.TryNormalize(_currency, "87.499", out var v, out _) && FieldValues.AreEqual(_currency, v, _number);
+    {
+        return FieldValues.TryNormalize(_currency, "87.499", out var v, out _) && FieldValues.AreEqual(_currency, v, _number);
+    }
 
     [Benchmark]
     public bool DiffDateTime()
-        => FieldValues.TryNormalize(_stamp, "2026-10-12T01:02:03Z", out var v, out _) && FieldValues.AreEqual(_stamp, v, _datetime);
+    {
+        return FieldValues.TryNormalize(_stamp, "2026-10-12T01:02:03Z", out var v, out _) && FieldValues.AreEqual(_stamp, v, _datetime);
+    }
 }

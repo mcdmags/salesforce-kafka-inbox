@@ -30,7 +30,11 @@ public sealed class ClaimRaceTests(SyncFixture app)
 
         // A commits its lease; B goes on with whatever it locked
         await race.TxA.CommitAsync();
-        foreach (var e in lockedByB) await ClaimEntitiesAsync(race.WorkerB, txB, e, Guid.NewGuid());
+        foreach (var e in lockedByB)
+        {
+            await ClaimEntitiesAsync(race.WorkerB, txB, e, Guid.NewGuid());
+        }
+
         await txB.CommitAsync();
 
         (await race.LiveLeaseTokensAsync()).Should().NotBeEmpty().And.OnlyContain(t => t == race.TokenA,
@@ -47,13 +51,19 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await using var txB = await race.WorkerB.BeginTransactionAsync();
         var claimB = Task.Run(async () =>
         {
-            foreach (var e in await LockHeadsAsync(race.WorkerB, txB)) await ClaimEntitiesAsync(race.WorkerB, txB, e, Guid.NewGuid());
+            foreach (var e in await LockHeadsAsync(race.WorkerB, txB))
+            {
+                await ClaimEntitiesAsync(race.WorkerB, txB, e, Guid.NewGuid());
+            }
         });
 
         // Without the claim lock B leases the unlocked row and then waits for A's row; let A commit then
         var deadline = DateTime.UtcNow.AddSeconds(10);
         while (!claimB.IsCompleted && !await race.IsWaitingOnALockAsync(race.WorkerB) && DateTime.UtcNow < deadline)
+        {
             await Task.Delay(20);
+        }
+
         await race.TxA.CommitAsync();
         await claimB;
         await txB.CommitAsync();
@@ -78,11 +88,15 @@ public sealed class ClaimRaceTests(SyncFixture app)
     }
 
     private static async Task<string[]> LockHeadsAsync(NpgsqlConnection conn, NpgsqlTransaction tx)
-        => (await conn.QueryAsync<string>(Sql.LockHeads, new { window = InboxSql.ClaimWindow, batchSize = 75 }, tx)).ToArray();
+    {
+        return [.. await conn.QueryAsync<string>(Sql.LockHeads, new { window = InboxSql.ClaimWindow, batchSize = 75 }, tx)];
+    }
 
     private static async Task<int> ClaimEntitiesAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string entity, Guid token)
-        => (await conn.QueryAsync<InboxEvent>(Sql.ClaimEntities,
-            new { entityIds = new[] { entity }, token, lease = TimeSpan.FromMinutes(1), maxPerEntity = 20 }, tx)).Count();
+    {
+        return (await conn.QueryAsync<InboxEvent>(Sql.ClaimEntities,
+                new { entityIds = new[] { entity }, token, lease = TimeSpan.FromMinutes(1), maxPerEntity = 20 }, tx)).Count();
+    }
 
     /// <summary>
     /// The common start: the higher id is committed and the lower id is not (<see cref="SlowInsert"/>); worker A has
@@ -108,10 +122,15 @@ public sealed class ClaimRaceTests(SyncFixture app)
         public static async Task<Race> StartAsync(SyncFixture app)
         {
             await using (var setup = await app.Db.OpenConnectionAsync())
+            {
                 await InboxSchema.ApplyAsync(setup, null, [Table]);
+            }
 
             var entity = SyncFixture.NewAccountId();
-            string Event(int v) => SyncFixture.AccountEvent(entity, v, new JsonObject { ["name"] = $"v{v}" }, new JsonObject()).ToJsonString();
+            string Event(int v)
+            {
+                return SyncFixture.AccountEvent(entity, v, new JsonObject { ["name"] = $"v{v}" }, []).ToJsonString();
+            }
 
             var consumer1 = await app.Db.OpenConnectionAsync();
             var consumer2 = await app.Db.OpenConnectionAsync();
@@ -133,17 +152,24 @@ public sealed class ClaimRaceTests(SyncFixture app)
         }
 
         public async Task<List<Guid?>> LiveLeaseTokensAsync()
-            => (await _consumer2.QueryAsync<Guid?>($"select lock_token from {Table} where entity_id = @Entity and locked_until > now()",
-                new { Entity })).ToList();
+        {
+            return [.. await _consumer2.QueryAsync<Guid?>($"select lock_token from {Table} where entity_id = @Entity and locked_until > now()",
+                        new { Entity })];
+        }
 
         public async Task<bool> IsWaitingOnALockAsync(NpgsqlConnection conn)
-            => await _consumer2.ExecuteScalarAsync<bool>(
-                "select coalesce((select wait_event_type = 'Lock' from pg_stat_activity where pid = @pid), false)",
-                new { pid = conn.ProcessID });
+        {
+            return await _consumer2.ExecuteScalarAsync<bool>(
+                        "select coalesce((select wait_event_type = 'Lock' from pg_stat_activity where pid = @pid), false)",
+                        new { pid = conn.ProcessID });
+        }
 
         public async ValueTask DisposeAsync()
         {
-            foreach (var conn in new[] { _consumer1, _consumer2, _workerA, WorkerB }) await conn.DisposeAsync();
+            foreach (var conn in new[] { _consumer1, _consumer2, _workerA, WorkerB })
+            {
+                await conn.DisposeAsync();
+            }
         }
     }
 }

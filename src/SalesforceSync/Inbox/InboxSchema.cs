@@ -28,7 +28,11 @@ public static class InboxSchema
 
         var start = sql.IndexOf(TemplateStart, StringComparison.Ordinal);
         var end = sql.IndexOf(TemplateEnd, StringComparison.Ordinal);
-        if (start < 0 || end < start) throw new InvalidOperationException("schema.sql has no inbox table template");
+        if (start < 0 || end < start)
+        {
+            throw new InvalidOperationException("schema.sql has no inbox table template");
+        }
+
         var template = sql[start..end];
 
         var tables = string.Concat(inboxTables.Distinct(StringComparer.Ordinal)

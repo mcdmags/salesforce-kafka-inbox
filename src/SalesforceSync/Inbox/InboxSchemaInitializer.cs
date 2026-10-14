@@ -15,11 +15,16 @@ public sealed class InboxSchemaInitializer(NpgsqlDataSource db, PostgresExecutio
     {
         string[] tables;
         using (var scope = scopes.CreateScope())
-            tables = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().Select(s => s.InboxTable).ToArray();
+        {
+            tables = [.. scope.ServiceProvider.GetServices<ISalesforceEntitySync>().Select(s => s.InboxTable)];
+        }
 
         await InboxSchema.EnsureCreatedAsync(db, tables, cancellationToken, pg);
         log.LogInformation("Inbox schema is up to date ({Tables})", string.Join(", ", tables));
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        return Task.CompletedTask;
+    }
 }

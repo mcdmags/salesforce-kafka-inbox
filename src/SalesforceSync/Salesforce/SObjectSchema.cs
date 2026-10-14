@@ -24,7 +24,10 @@ public sealed class SObjectSchema(string name, IEnumerable<SalesforceField> fiel
     public IReadOnlyDictionary<string, SalesforceField> Fields { get; } =
         fields.ToDictionary(f => f.Name, StringComparer.OrdinalIgnoreCase);
 
-    public SalesforceField? Find(string field) => Fields.GetValueOrDefault(field);
+    public SalesforceField? Find(string field)
+    {
+        return Fields.GetValueOrDefault(field);
+    }
 }
 
 /// <summary>Result of a (conditional) describe call: the schema, or null when Salesforce answered 304 Not Modified.</summary>

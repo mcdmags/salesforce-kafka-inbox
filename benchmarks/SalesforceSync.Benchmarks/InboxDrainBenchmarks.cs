@@ -6,10 +6,8 @@ using BenchmarkDotNet.Engines;
 using BenchmarkDotNet.Jobs;
 using Dapper;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;
-using SalesforceSync;
 using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
@@ -78,8 +76,8 @@ public abstract class DrainBenchmarkBase
     private FakeSalesforceStore _store = default!;
     private List<ServiceProvider> _pods = [];
     private List<InboxRow> _events = [];
-    private Dictionary<(string Type, string Key), long> _expected = new();
-    private Dictionary<string, (string Account, string Related)> _relationships = new();
+    private Dictionary<(string Type, string Key), long> _expected = [];
+    private Dictionary<string, (string Account, string Related)> _relationships = [];
 
     private static readonly string[] InboxTables = [AccountSyncService.InboxTable, AccountRelationshipSyncService.InboxTable];
 
@@ -92,11 +90,14 @@ public abstract class DrainBenchmarkBase
     /// </summary>
     private static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-    private static JsonObject Meta(long version) => new()
+    private static JsonObject Meta(long version)
     {
-        ["time"] = BaseTime.AddMilliseconds(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
-        ["type"] = version == 1 ? "inserted" : "updated"
-    };
+        return new()
+        {
+            ["time"] = BaseTime.AddMilliseconds(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+            ["type"] = version == 1 ? "inserted" : "updated"
+        };
+    }
 
     [GlobalSetup]
     public void GlobalSetup()
@@ -104,7 +105,9 @@ public abstract class DrainBenchmarkBase
         _db = NpgsqlDataSource.Create(BenchmarkDb.ConnectionString);
         InboxSchema.EnsureCreatedAsync(_db, InboxTables).GetAwaiter().GetResult();
         using (var conn = _db.OpenConnection())
+        {
             conn.Execute(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "claim-audit.sql")));
+        }
 
         _store = new FakeSalesforceStore(new FakeSalesforceOptions
         {
@@ -112,21 +115,31 @@ public abstract class DrainBenchmarkBase
             EnforceDailyLimit = false
         });
 
-        _pods = Enumerable.Range(0, Pods).Select(_ => BuildPod()).ToList();
+        _pods = [.. Enumerable.Range(0, Pods).Select(_ => BuildPod())];
     }
 
     [GlobalCleanup]
     public void GlobalCleanup()
     {
-        foreach (var pod in _pods) pod.Dispose();
+        foreach (var pod in _pods)
+        {
+            pod.Dispose();
+        }
+
         _db.Dispose();
     }
 
     [IterationSetup]
-    public void IterationSetup() => SetupAsync().GetAwaiter().GetResult();
+    public void IterationSetup()
+    {
+        SetupAsync().GetAwaiter().GetResult();
+    }
 
     [IterationCleanup]
-    public void IterationCleanup() => VerifyAsync().GetAwaiter().GetResult();
+    public void IterationCleanup()
+    {
+        VerifyAsync().GetAwaiter().GetResult();
+    }
 
     protected async Task DrainAsync()
     {
@@ -144,9 +157,11 @@ public abstract class DrainBenchmarkBase
         foreach (var chunk in _events.Chunk(IngestChunk))
         {
             foreach (var table in chunk.GroupBy(e => e.Table))
+            {
                 await conn.ExecuteAsync(new CommandDefinition(
                     $"insert into {table.Key} (entity_id, payload) select e, p::jsonb from unnest(@e::text[], @p::text[]) as u(e, p)",
                     new { e = table.Select(r => r.EntityId).ToArray(), p = table.Select(r => r.Payload).ToArray() }, cancellationToken: ct));
+            }
         }
     }
 
@@ -160,9 +175,21 @@ public abstract class DrainBenchmarkBase
             // The worker's own pass: one batch of every registered entity type (accounts, relationships)
             var processed = await InboxWorkerService.SyncOnceAsync(scopes, loop + iteration, ct);
 
-            if (processed > 0) continue;
-            if (ingest.IsFaulted) return;
-            if (ingest.IsCompleted && !await HasPendingAsync(ct)) return;
+            if (processed > 0)
+            {
+                continue;
+            }
+
+            if (ingest.IsFaulted)
+            {
+                return;
+            }
+
+            if (ingest.IsCompleted && !await HasPendingAsync(ct))
+            {
+                return;
+            }
+
             await Task.Delay(2, ct); // other workers hold the remaining accounts, or more events are on the way
         }
     }
@@ -215,7 +242,11 @@ public abstract class DrainBenchmarkBase
         _store.Reset();
 
         await using var conn = await _db.OpenConnectionAsync();
-        foreach (var table in InboxTables) await conn.ExecuteAsync($"truncate {table} restart identity");
+        foreach (var table in InboxTables)
+        {
+            await conn.ExecuteAsync($"truncate {table} restart identity");
+        }
+
         await conn.ExecuteAsync("truncate sf_sync_state; truncate sf_api_usage; truncate sf_claim_audit");
         // Effectively unlimited bucket and no daily budget: measure the pipeline, not the throttle
         await conn.ExecuteAsync("""
@@ -226,7 +257,10 @@ public abstract class DrainBenchmarkBase
             """);
 
         (_events, _expected) = Generate();
-        if (!StreamIngest) await PreloadAsync(conn);
+        if (!StreamIngest)
+        {
+            await PreloadAsync(conn);
+        }
     }
 
     /// <summary>
@@ -248,7 +282,11 @@ public abstract class DrainBenchmarkBase
             {
                 var a = seen[random.Next(seen.Count)];
                 var b = seen[random.Next(seen.Count)];
-                if (a == b) continue;
+                if (a == b)
+                {
+                    continue;
+                }
+
                 var relKey = $"REL-{a[4..]}-{b[4..]}";
                 _relationships[relKey] = (a, b);
                 var relVersion = versions[(AccountRelationshipSyncService.Type, relKey)] =
@@ -276,7 +314,10 @@ public abstract class DrainBenchmarkBase
             for (var i = 0; i < burst && events.Count < Events; i++)
             {
                 var version = versions[(AccountSyncService.Type, key)] = versions.GetValueOrDefault((AccountSyncService.Type, key)) + 1;
-                if (version == 1) seen.Add(key);
+                if (version == 1)
+                {
+                    seen.Add(key);
+                }
                 // No profile.externalId: the Profile__c takes the account's
                 var payload = new JsonObject
                 {
@@ -322,7 +363,11 @@ public abstract class DrainBenchmarkBase
         {
             if (type == AccountRelationshipSyncService.Type)
             {
-                if (!VerifyRelationship(acct, expected, ref regressions, out var problem)) wrong.Add(problem);
+                if (!VerifyRelationship(acct, expected, ref regressions, out var problem))
+                {
+                    wrong.Add(problem);
+                }
+
                 continue;
             }
 
@@ -334,9 +379,15 @@ public abstract class DrainBenchmarkBase
                 .Where(w => w.ContainsKey("Score__c"))
                 .Select(w => Number(w["Score__c"])).ToList();
 
-            if (!IsIncreasing(accountVersions) || !IsIncreasing(profileVersions)) regressions++;
+            if (!IsIncreasing(accountVersions) || !IsIncreasing(profileVersions))
+            {
+                regressions++;
+            }
+
             if (accountVersions.LastOrDefault() != expected || profileVersions.LastOrDefault() != expected)
+            {
                 wrong.Add($"{acct}: expected v{expected}, account v{accountVersions.LastOrDefault()}, profile v{profileVersions.LastOrDefault()}");
+            }
         }
 
         await using var conn = await _db.OpenConnectionAsync();
@@ -359,10 +410,12 @@ public abstract class DrainBenchmarkBase
             $"claims={claims} retries={retries} superseded={superseded} overlappingClaims={overlaps} notDone={notDone} wrong={wrong.Count} regressions={regressions}");
 
         if (wrong.Count > 0 || rows != Events || notDone > 0 || overlaps > 0 || regressions > 0)
+        {
             throw new InvalidOperationException(
                 $"Correctness check failed: {wrong.Count} entities not at newest version, {notDone} of {rows}/{Events} " +
                 $"inbox rows not done, {overlaps} overlapping claims, {regressions} entities received an older version " +
                 "after a newer one. " + string.Join("; ", wrong.Take(5)));
+        }
     }
 
     private const string RelationshipObject = "Account_Relationship__c";
@@ -374,7 +427,10 @@ public abstract class DrainBenchmarkBase
         var versions = (_store.History(RelationshipObject, key) ?? [])
             .Where(w => w.ContainsKey("Name"))
             .Select(w => long.Parse(((string)w["Name"]!)[1..])).ToList();
-        if (!IsIncreasing(versions)) regressions++;
+        if (!IsIncreasing(versions))
+        {
+            regressions++;
+        }
 
         var (account, related) = _relationships[key];
         var record = _store.FindByExternalId(RelationshipObject, key);
@@ -382,17 +438,24 @@ public abstract class DrainBenchmarkBase
         var relatedId = (string?)_store.FindByExternalId("Account", related)?["Id"];
         if (versions.LastOrDefault() == expected && record is not null && accountId is not null &&
             (string?)record["Account__c"] == accountId && (string?)record["Related_Account__c"] == relatedId)
+        {
             return true;
+        }
 
         problem = $"{key}: expected v{expected} linking {account}->{related}, got v{versions.LastOrDefault()} " +
                   $"linking {record?["Account__c"]}->{record?["Related_Account__c"]}";
         return false;
     }
 
-    private static bool IsIncreasing(List<long> versions) => versions.Zip(versions.Skip(1)).All(p => p.First < p.Second);
+    private static bool IsIncreasing(List<long> versions)
+    {
+        return versions.Zip(versions.Skip(1)).All(p => p.First < p.Second);
+    }
 
-    private static long Number(JsonNode? node) =>
-        (long)decimal.Parse(node!.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
+    private static long Number(JsonNode? node)
+    {
+        return (long)decimal.Parse(node!.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
+    }
 }
 
 /// <summary>Whole inbox loaded up front, then drained.</summary>
@@ -406,7 +469,10 @@ public class InboxDrainBenchmarks : DrainBenchmarkBase
     protected override bool StreamIngest => false;
 
     [Benchmark(Description = "Drain inbox")]
-    public Task DrainInbox() => DrainAsync();
+    public Task DrainInbox()
+    {
+        return DrainAsync();
+    }
 }
 
 /// <summary>
@@ -424,5 +490,8 @@ public class StreamingIngestBenchmarks : DrainBenchmarkBase
     protected override bool StreamIngest => true;
 
     [Benchmark(Description = "Drain while ingesting")]
-    public Task DrainWhileIngesting() => DrainAsync();
+    public Task DrainWhileIngesting()
+    {
+        return DrainAsync();
+    }
 }

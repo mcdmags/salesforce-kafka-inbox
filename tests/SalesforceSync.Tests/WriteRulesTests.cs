@@ -38,14 +38,17 @@ public sealed class WriteRulesTests
 
     // ---------- RecordDiffer ----------
 
-    public static TheoryData<string, object?, string, string[]> Diffs() => new()
+    public static TheoryData<string, object?, string, string[]> Diffs()
     {
-        { "equal", "Acme", """{"Name":"Acme","Active__c":false}""", [] },
-        { "changed", "Globex", """{"Name":"Acme","Active__c":false}""", ["Name"] },
-        { "cleared to null", null, """{"Name":"Acme","Active__c":false}""", ["Name"] },
-        { "empty and null stay equal", null, """{"Name":null,"Active__c":false}""", [] },
-        { "a checkbox that is null is false", "Acme", """{"Name":"Acme","Active__c":true}""", ["Active__c"] }
+        return new()
+    {
+        { "equal", "Acme", /*lang=json,strict*/ """{"Name":"Acme","Active__c":false}""", [] },
+        { "changed", "Globex", /*lang=json,strict*/ """{"Name":"Acme","Active__c":false}""", ["Name"] },
+        { "cleared to null", null, /*lang=json,strict*/ """{"Name":"Acme","Active__c":false}""", ["Name"] },
+        { "empty and null stay equal", null, /*lang=json,strict*/ """{"Name":null,"Active__c":false}""", [] },
+        { "a checkbox that is null is false", "Acme", /*lang=json,strict*/ """{"Name":"Acme","Active__c":true}""", ["Active__c"] }
     };
+    }
 
     [Theory, MemberData(nameof(Diffs))]
     public void Only_fields_whose_normalized_value_differs_are_sent(string what, object? name, string stored, string[] expected)
@@ -80,10 +83,10 @@ public sealed class WriteRulesTests
         var record = Normalized(Account("A1", "Acme", locked: "new")).Records[0];
         var problems = new List<SalesforceError>();
 
-        RecordDiffer.Changes(record, Current("""{"Name":"Acme","Active__c":false,"Locked__c":"new"}"""), [], problems);
+        RecordDiffer.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"new"}"""), [], problems);
         problems.Should().BeEmpty();
 
-        RecordDiffer.Changes(record, Current("""{"Name":"Acme","Active__c":false,"Locked__c":"old"}"""), [], problems);
+        RecordDiffer.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"old"}"""), [], problems);
         problems.Should().ContainSingle().Which.Code.Should().Be("INVALID_FIELD_FOR_INSERT_UPDATE");
     }
 
@@ -93,7 +96,7 @@ public sealed class WriteRulesTests
     public void Create_update_and_unchanged_are_decided_by_what_Salesforce_has()
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","External_Id__c":"OLD","Name":"Acme","Active__c":false}"""),
-            ("Account", """{"Id":"001000000000002AAA","External_Id__c":"SAME","Name":"Same","Active__c":false}"""));
+            ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","External_Id__c":"SAME","Name":"Same","Active__c":false}"""));
 
         var plan = Planner().Plan(
             [Normalized(Account("NEW", "New")), Normalized(Account("OLD", "Changed")), Normalized(Account("SAME", "Same"))],
@@ -107,13 +110,16 @@ public sealed class WriteRulesTests
         bodies[1].Records.Single().Keys.Should().BeEquivalentTo(["attributes", "id", "Name"], "an update sends only what differs");
     }
 
-    public static TheoryData<string, ParentLink, string, string, object> Links() => new()
+    public static TheoryData<string, ParentLink, string, string, object> Links()
+    {
+        return new()
     {
         { "new parent, by reference", ParentLink.ReferenceId, "", "Account__c", "@{Account_create[0].id}" },
         { "new parent, by external id", ParentLink.ExternalId, "", "Account__r", new Dictionary<string, object?> { ["External_Id__c"] = "A1" } },
         { "existing parent, literal Id", ParentLink.ReferenceId, AccountId, "Account__c", AccountId },
         { "existing parent, literal Id whatever the setting", ParentLink.ExternalId, AccountId, "Account__c", AccountId }
     };
+    }
 
     [Theory, MemberData(nameof(Links))]
     public void A_child_is_linked_to_its_parent_by_reference_external_id_or_Id(string what, ParentLink mode, string existingAccountId,
@@ -215,7 +221,9 @@ public sealed class WriteRulesTests
         saved.Select(e => (e.Object, e.Field)).Should().Contain([("Account", "Name"), ("Profile__c", "Tier__c")]);
     }
 
-    public static TheoryData<string, CollectionResult[], SyncOutcome, string> SingleRecordResults() => new()
+    public static TheoryData<string, CollectionResult[], SyncOutcome, string> SingleRecordResults()
+    {
+        return new()
     {
         { "no answer for the subrequest", [], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
         { "the subrequest failed as a whole, even with a permanent code",
@@ -228,6 +236,7 @@ public sealed class WriteRulesTests
         { "a create that lost a race", [Failed("Account_create", "DUPLICATE_VALUE")], SyncOutcome.TransientFailure, "DUPLICATE_VALUE" },
         { "only rolled back, nobody says why", [Failed("Account_create", "ALL_OR_NONE_OPERATION_ROLLED_BACK")], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" }
     };
+    }
 
     [Theory, MemberData(nameof(SingleRecordResults))]
     public void A_records_result_decides_its_units_outcome(string what, CollectionResult[] answers, SyncOutcome outcome, string code)
@@ -299,24 +308,36 @@ public sealed class WriteRulesTests
 
     private static SalesforceField Field(string name, string type, bool createable = true, bool updateable = true, bool nillable = true,
         string? relationship = null)
-        => new(name, type, 255, 0, 0, createable, updateable, nillable, relationship);
+    {
+        return new(name, type, 255, 0, 0, createable, updateable, nillable, relationship);
+    }
 
     private static WritePlanner Planner(SalesforceOptions? options = null, SyncOptions? sync = null)
-        => new(options ?? new SalesforceOptions(), sync ?? new SyncOptions());
+    {
+        return new(options ?? new SalesforceOptions(), sync ?? new SyncOptions());
+    }
 
     private static UpsertUnit Account(string key, object? name, bool? active = false, string? locked = null)
     {
         var fields = new Dictionary<string, object?> { ["Name"] = name, ["Active__c"] = active };
-        if (locked is not null) fields["Locked__c"] = locked;
+        if (locked is not null)
+        {
+            fields["Locked__c"] = locked;
+        }
+
         return new UpsertUnit([new SObjectRecord("acct", "Account", "External_Id__c", key, fields)]);
     }
 
     private static SObjectRecord Profile(string key, string tier, string accountKey)
-        => new("prof", "Profile__c", "External_Id__c", key, new Dictionary<string, object?> { ["Tier__c"] = tier },
-            [new SObjectLookup("Account__c", "Account", "External_Id__c", accountKey)]);
+    {
+        return new("prof", "Profile__c", "External_Id__c", key, new Dictionary<string, object?> { ["Tier__c"] = tier },
+                [new SObjectLookup("Account__c", "Account", "External_Id__c", accountKey)]);
+    }
 
     private static UpsertUnit AccountWithProfile(string key)
-        => new([Account(key, "Acme").Records[0], Profile($"P-{key}", "Gold", key)]);
+    {
+        return new([Account(key, "Acme").Records[0], Profile($"P-{key}", "Gold", key)]);
+    }
 
     private static NormalizedUnit Normalized(UpsertUnit unit)
     {
@@ -325,21 +346,35 @@ public sealed class WriteRulesTests
         return normalized;
     }
 
-    private static CurrentRecord Current(string json) => new(JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json)!
+    private static CurrentRecord Current(string json)
+    {
+        return new(JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json)!
         .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase));
+    }
 
     private static CurrentRecords Rows(params (string SObject, string Json)[] rows)
-        => new(rows.Select(r => (r.SObject, Current(r.Json))));
+    {
+        return new(rows.Select(r => (r.SObject, Current(r.Json))));
+    }
 
     /// <summary>The one request for these new units.</summary>
     private static CompositeWrite Request(params UpsertUnit[] units)
-        => Planner().Plan(units.Select(Normalized).ToList(), CurrentRecords.None, Schemas).Requests.Single();
+    {
+        return Planner().Plan([.. units.Select(Normalized)], CurrentRecords.None, Schemas).Requests.Single();
+    }
 
     private static List<UpsertResult> Interpret(CompositeWrite request, List<WriteEcho> saved, params CollectionResult[] answers)
-        => new WriteResultInterpreter(new SalesforceErrors(Options.Create(new SalesforceOptions()))).Interpret(request, answers, saved);
+    {
+        return new WriteResultInterpreter(new SalesforceErrors(Options.Create(new SalesforceOptions()))).Interpret(request, answers, saved);
+    }
 
-    private static CollectionResult Ok(string referenceId) => new(referenceId, [new RecordResult(true, AccountId, [])], []);
+    private static CollectionResult Ok(string referenceId)
+    {
+        return new(referenceId, [new RecordResult(true, AccountId, [])], []);
+    }
 
     private static CollectionResult Failed(string referenceId, string code)
-        => new(referenceId, [new RecordResult(false, null, [new SalesforceError(null, code, "failed")])], []);
+    {
+        return new(referenceId, [new RecordResult(false, null, [new SalesforceError(null, code, "failed")])], []);
+    }
 }

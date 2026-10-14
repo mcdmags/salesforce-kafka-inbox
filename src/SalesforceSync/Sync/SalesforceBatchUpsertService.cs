@@ -2,7 +2,6 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Inbox;
-using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync.Upsert;
@@ -67,7 +66,10 @@ public sealed class SalesforceBatchUpsertService(
     public async Task<int> UpsertBatchAsync<TEvent>(UpsertStrategy<TEvent> strategy, CancellationToken ct)
     {
         await using var admission = await gate.TryEnterAsync(ct);
-        if (admission is null) return 0;
+        if (admission is null)
+        {
+            return 0;
+        }
 
         // Give up on Salesforce before the lease runs out, so another worker never claims an entity while this one
         // can still write to it. Started before the claim, so the margin is measured from when the lease began.
@@ -76,7 +78,10 @@ public sealed class SalesforceBatchUpsertService(
 
         // 1. Claim events from the strategy's inbox table (short transaction)
         var claim = await inbox.ClaimAsync(strategy.InboxTable, strategy.EntityType, ct);
-        if (claim.Events.Count == 0) return 0;
+        if (claim.Events.Count == 0)
+        {
+            return 0;
+        }
 
         // 2. Per entity: keep the newest event, drop it if it isn't newer than what is synced, map it to records
         var batch = BatchPreparer.Prepare(strategy, claim.Events, claim.SyncedTimes);
@@ -87,7 +92,7 @@ public sealed class SalesforceBatchUpsertService(
         {
             results = batch.Work.Count == 0
                 ? []
-                : (await WriteToSalesforceAsync(batch.Units, strategy.Queries(batch.Work.Select(w => w.Unit).ToList()).ToList(),
+                : (await WriteToSalesforceAsync(batch.Units, [.. strategy.Queries([.. batch.Work.Select(w => w.Unit)])],
                     leaseCts.Token)).ToDictionary(r => r.Key);
         }
         catch (UnknownOutcomeException ex)
@@ -148,10 +153,15 @@ public sealed class SalesforceBatchUpsertService(
         IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
     {
         if (units.Count > ReadQueryBuilder.MaxEntitiesPerBatch)
+        {
             throw new ArgumentOutOfRangeException(nameof(units), $"At most {ReadQueryBuilder.MaxEntitiesPerBatch} units per call");
+        }
 
         var results = new List<UpsertResult>(units.Count);
-        if (units.Count == 0) return results;
+        if (units.Count == 0)
+        {
+            return results;
+        }
 
         // 1. Field metadata of every object involved (cached per process, revalidated with If-Modified-Since)
         var schemas = await DescribeAsync(units, queries, ct);
@@ -159,7 +169,10 @@ public sealed class SalesforceBatchUpsertService(
         // 2. Normalize; a unit Salesforce would reject fails on its own without reaching the query
         var (normalized, rejected) = RecordNormalizer.Normalize(units, schemas);
         results.AddRange(rejected);
-        if (normalized.Count == 0) return results;
+        if (normalized.Count == 0)
+        {
+            return results;
+        }
 
         // 3. Read: one Composite call with the strategy's queries
         var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas), schemas.Keys, ct);
@@ -186,7 +199,10 @@ public sealed class SalesforceBatchUpsertService(
             catch (Exception ex) when (i > 0)
             {
                 var stop = LaterCallFailed(ex, request, plan.Requests.Skip(i + 1), results);
-                if (stop) break;
+                if (stop)
+                {
+                    break;
+                }
             }
         }
         echoTracker.Record(saved);
@@ -202,7 +218,9 @@ public sealed class SalesforceBatchUpsertService(
     private static bool LaterCallFailed(Exception ex, CompositeWrite failed, IEnumerable<CompositeWrite> notSent, List<UpsertResult> results)
     {
         IEnumerable<UpsertResult> For(CompositeWrite request, SyncOutcome outcome, IReadOnlyList<SalesforceError> errors, TimeSpan? retryAfter = null)
-            => request.Units.Select(u => new UpsertResult(u.Key, outcome, errors, retryAfter));
+        {
+            return request.Units.Select(u => new UpsertResult(u.Key, outcome, errors, retryAfter));
+        }
 
         switch (ex)
         {
@@ -231,24 +249,35 @@ public sealed class SalesforceBatchUpsertService(
 
         var schemas = new Dictionary<string, SObjectSchema>(StringComparer.OrdinalIgnoreCase);
         foreach (var sobject in sobjects)
+        {
             schemas[sobject] = await schemaCache.GetAsync(sobject, _salesforceOpt.SchemaRefreshInterval,
                 (since, token) => salesforce.DescribeAsync(sobject, since, token), ct);
+        }
+
         return schemas;
     }
 
     private async Task<CurrentRecords> ReadCurrentAsync(IReadOnlyList<ReadQuery> queries, IEnumerable<string> describedSObjects,
         CancellationToken ct)
     {
-        if (queries.Count == 0) return CurrentRecords.None;
+        if (queries.Count == 0)
+        {
+            return CurrentRecords.None;
+        }
+
         try
         {
-            var rows = await salesforce.QueryAsync(queries.Select(q => q.Query).ToList(), ct);
+            var rows = await salesforce.QueryAsync([.. queries.Select(q => q.Query)], ct);
             return CurrentRecords.From(rows, queries);
         }
         catch (SalesforceQueryException ex) when (ex.Errors.Any(e => e.Code == "INVALID_FIELD"))
         {
             // The cached describe is out of date (a field was removed or renamed): describe again next time
-            foreach (var sobject in describedSObjects) schemaCache.Invalidate(sobject);
+            foreach (var sobject in describedSObjects)
+            {
+                schemaCache.Invalidate(sobject);
+            }
+
             throw;
         }
     }
@@ -269,12 +298,20 @@ public sealed class SalesforceBatchUpsertService(
 
     private void LogTypeMismatches(WritePlan plan, int total)
     {
-        if (plan.TypeMismatches.Count == 0) return;
+        if (plan.TypeMismatches.Count == 0)
+        {
+            return;
+        }
 
         var deadLettered = plan.MismatchHandling == EventTypeMismatch.DeadLetter;
         if (!deadLettered)
+        {
             foreach (var (key, message) in plan.TypeMismatches)
+            {
                 log.LogDebug("{Key}: {Mismatch}; going by Salesforce", key, message);
+            }
+        }
+
         log.LogInformation(
             "{Count} of {Total} events had a type that disagrees with Salesforce (inserted but the record exists, or updated but it does not): {Action}",
             plan.TypeMismatches.Count, total, deadLettered ? "dead-lettered" : "reconciled with Salesforce");
@@ -284,32 +321,48 @@ public sealed class SalesforceBatchUpsertService(
     private void WarnAboutFlappingFields(IReadOnlyList<FieldWrite> rewrites)
     {
         foreach (var (echo, stored, fieldType) in rewrites)
+        {
             if (echoTracker.IsFlapping(echo, stored!))
+            {
                 log.LogWarning(
                     "{Object}.{Field} on {ExternalId} keeps differing after it is written: sent {Sent}, Salesforce stores {Stored}. " +
                     "Every event rewrites this field: org automation (a trigger or flow) changes the value, or FieldValues " +
                     "is missing a normalization rule for '{Type}' fields.",
                     echo.Object, echo.Field, echo.ExternalId, echo.Value, stored, fieldType);
+            }
+        }
     }
 
     private void LogFailures(string entityType, PreparedBatch batch, IEnumerable<UpsertResult> results)
     {
         foreach (var (id, error) in batch.Invalid)
+        {
             log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", id, SalesforceErrors.InvalidEvent, error);
+        }
+
         foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure or SyncOutcome.OutcomeUnknown))
+        {
             log.LogWarning("{Type} {Key}: {Outcome} ({Code}) {Errors}", entityType, r.Key, r.Outcome,
                 r.PrimaryError?.Code, string.Join("; ", r.Errors));
+        }
+
         if (results.FirstOrDefault(r => r.Outcome == SyncOutcome.RateLimited) is { } limited)
+        {
             log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}",
                 results.Count(r => r.Outcome == SyncOutcome.RateLimited), entityType, limited.RetryAfter);
+        }
     }
 
     /// <summary><see cref="BatchPreparer.Prepare{TEvent}"/>, callable on the engine.</summary>
     internal static PreparedBatch Prepare<TEvent>(UpsertStrategy<TEvent> strategy, IReadOnlyList<InboxEvent> rows,
         IReadOnlyDictionary<string, long> synced)
-        => BatchPreparer.Prepare(strategy, rows, synced);
+    {
+        return BatchPreparer.Prepare(strategy, rows, synced);
+    }
 
     /// <summary><see cref="BatchPreparer.Coalesce{TEvent}"/>, callable on the engine.</summary>
     public static (InboxEvent Row, ReadEvent<TEvent> Read) Coalesce<TEvent>(IReadOnlyList<(InboxEvent Row, ReadEvent<TEvent> Read)> events)
-        => BatchPreparer.Coalesce(events);
+    {
+        return BatchPreparer.Coalesce(events);
+    }
 }

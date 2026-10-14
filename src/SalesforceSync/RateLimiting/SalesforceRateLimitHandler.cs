@@ -45,11 +45,13 @@ public sealed class SalesforceRateLimitHandler(
         {
             var elapsed = Stopwatch.GetElapsedTime(started);
             if (elapsed >= limits.Value.LongRunningThreshold)
+            {
                 log.LogWarning(
                     "Salesforce call {Method} {Path} took {Elapsed}; calls of {Threshold} or longer count toward the org's " +
                     "limit of {Limit} concurrent long-running requests. Consider a smaller Sync:BatchSize.",
                     request.Method, request.RequestUri?.AbsolutePath, elapsed, limits.Value.LongRunningThreshold,
                     limits.Value.EffectiveConcurrentLongRunningLimit);
+            }
 
             await ReportLimitsAsync(res, ct);
 
@@ -85,12 +87,15 @@ public sealed class SalesforceRateLimitHandler(
     }
 
     /// <summary>Retry-After as a delay, whether sent as seconds or as an HTTP date.</summary>
-    private static TimeSpan? RetryAfter(HttpResponseMessage res) => res.Headers.RetryAfter switch
+    private static TimeSpan? RetryAfter(HttpResponseMessage res)
     {
-        { Delta: { } delta } => delta,
-        { Date: { } date } when date > DateTimeOffset.UtcNow => date - DateTimeOffset.UtcNow,
-        _ => null
-    };
+        return res.Headers.RetryAfter switch
+        {
+            { Delta: { } delta } => delta,
+            { Date: { } date } when date > DateTimeOffset.UtcNow => date - DateTimeOffset.UtcNow,
+            _ => null
+        };
+    }
 
     /// <summary>
     /// REQUEST_LIMIT_EXCEEDED covers two limits that clear very differently: too many concurrent long-running
@@ -100,18 +105,25 @@ public sealed class SalesforceRateLimitHandler(
     /// </summary>
     public static LimitExceeded? Classify(string body)
     {
-        if (!body.Contains("REQUEST_LIMIT_EXCEEDED", StringComparison.Ordinal)) return null;
-        return body.Contains("ConcurrentPerOrgLongTxn", StringComparison.OrdinalIgnoreCase)
+        return !body.Contains("REQUEST_LIMIT_EXCEEDED", StringComparison.Ordinal)
+            ? null
+            : body.Contains("ConcurrentPerOrgLongTxn", StringComparison.OrdinalIgnoreCase)
             ? LimitExceeded.ConcurrentLongRunning
             : LimitExceeded.TotalRequests;
     }
 
     private async Task ReportLimitsAsync(HttpResponseMessage res, CancellationToken ct)
     {
-        if (!res.Headers.TryGetValues(LimitInfoHeader, out var values)) return;
+        if (!res.Headers.TryGetValues(LimitInfoHeader, out var values))
+        {
+            return;
+        }
 
         var info = SalesforceLimitInfo.Parse(string.Join("; ", values));
-        if (info is null) return;
+        if (info is null)
+        {
+            return;
+        }
 
         try
         {

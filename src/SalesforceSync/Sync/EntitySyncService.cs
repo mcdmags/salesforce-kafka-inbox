@@ -23,5 +23,8 @@ public abstract class EntitySyncService<TEvent>(
         return ok;
     }
 
-    public Task<int> SyncBatchAsync(CancellationToken ct) => engine.UpsertBatchAsync(strategy, ct);
+    public Task<int> SyncBatchAsync(CancellationToken ct)
+    {
+        return engine.UpsertBatchAsync(strategy, ct);
+    }
 }

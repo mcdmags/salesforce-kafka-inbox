@@ -49,13 +49,21 @@ public sealed record UpsertStrategy<TEvent>(
         }
 
         if (e is null)
+        {
             problem = "Event is null";
+        }
         else if (EntityId(e) is not { } id || string.IsNullOrWhiteSpace(id))
+        {
             problem = $"A {EntityType} event needs its entity object with a non-empty id";
+        }
         else if (EventTime(e) is not { } time)
+        {
             problem = "The event time must be an ISO-8601 time with an offset or Z, e.g. 2026-10-14T01:02:03.456Z";
+        }
         else if (EventType(e) is not { } type)
+        {
             problem = "The event type must be \"inserted\" or \"updated\" (deletes are not synced)";
+        }
         else
         {
             read = new ReadEvent<TEvent>(e, id, time, type);

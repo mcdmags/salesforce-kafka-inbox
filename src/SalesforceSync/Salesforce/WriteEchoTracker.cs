@@ -30,8 +30,16 @@ public sealed class WriteEchoTracker
     public bool IsFlapping(WriteEcho echo, string stored)
     {
         var key = (echo.Object, echo.ExternalId, echo.Field);
-        if (!_entries.TryGetValue(key, out var entry) || entry.Sent != echo.Value) return false;
-        if (entry.StoredAfterWrite == stored) return true;
+        if (!_entries.TryGetValue(key, out var entry) || entry.Sent != echo.Value)
+        {
+            return false;
+        }
+
+        if (entry.StoredAfterWrite == stored)
+        {
+            return true;
+        }
+
         _entries[key] = entry with { StoredAfterWrite = stored };
         return false;
     }
@@ -39,7 +47,11 @@ public sealed class WriteEchoTracker
     /// <summary>Remembers the values of a successful write.</summary>
     public void Record(IEnumerable<WriteEcho> written)
     {
-        if (_entries.Count > MaxEntries) _entries.Clear();
+        if (_entries.Count > MaxEntries)
+        {
+            _entries.Clear();
+        }
+
         foreach (var echo in written)
         {
             var key = (echo.Object, echo.ExternalId, echo.Field);

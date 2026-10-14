@@ -50,7 +50,10 @@ public sealed class AccountEventProducer(
 
                 producer.Produce(o.Topic, new Message<string, string> { Key = key, Value = value }, report =>
                 {
-                    if (report.Error.IsError) log.LogWarning("Produce failed: {Reason}", report.Error.Reason);
+                    if (report.Error.IsError)
+                    {
+                        log.LogWarning("Produce failed: {Reason}", report.Error.Reason);
+                    }
                 });
                 sent++;
 
@@ -74,16 +77,25 @@ public sealed class AccountEventProducer(
                     producer.Produce(o.RelationshipTopic,
                         new Message<string, string> { Key = relKey, Value = relationship.ToJsonString() }, report =>
                         {
-                            if (report.Error.IsError) log.LogWarning("Produce failed: {Reason}", report.Error.Reason);
+                            if (report.Error.IsError)
+                            {
+                                log.LogWarning("Produce failed: {Reason}", report.Error.Reason);
+                            }
                         });
                 }
             }
 
             // Simple pacing: keep the average rate at EventsPerSecond
-            var due = interval * sent - sw.Elapsed;
-            if (due > TimeSpan.Zero) await Task.Delay(due, stoppingToken);
+            var due = (interval * sent) - sw.Elapsed;
+            if (due > TimeSpan.Zero)
+            {
+                await Task.Delay(due, stoppingToken);
+            }
 
-            if (sent % 5_000 == 0) log.LogInformation("Produced {Sent} events", sent);
+            if (sent % 5_000 == 0)
+            {
+                log.LogInformation("Produced {Sent} events", sent);
+            }
         }
 
         producer.Flush(TimeSpan.FromSeconds(10));
@@ -101,7 +113,7 @@ public sealed class AccountEventProducer(
             ["rating"] = Ratings[random.Next(Ratings.Length)],
             ["industry"] = "Technology",
             ["description"] = $"Updated to v{version}",
-            ["annualRevenue"] = 1_000_000 + random.Next(0, 100) * 10_000,
+            ["annualRevenue"] = 1_000_000 + (random.Next(0, 100) * 10_000),
             ["numberOfEmployees"] = 250,
             ["phone"] = "+1 555 0100",
             ["website"] = "https://example.com",
