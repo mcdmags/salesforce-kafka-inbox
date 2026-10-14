@@ -330,14 +330,14 @@ public sealed class InboxEventTests
     {
         var use = () => InboxSql.For(table);
 
-        if (valid) use.Should().NotThrow().Which.Insert.Should().Contain($"insert into {table} ");
+        if (valid) use.Should().NotThrow().Which.LockHeads.Should().Contain($"from {table} ");
         else use.Should().Throw<ArgumentException>();
     }
 
     [Fact]
     public void Schema_script_has_one_inbox_per_table_and_no_placeholder_left()
     {
-        var script = InboxSchema.Script([AccountSyncService.InboxTable, AccountRelationshipSyncService.InboxTable]);
+        var script = InboxSchema.Script(["sf_account_inbox", "sf_account_relationship_inbox"]);
 
         script.Should().Contain("create table if not exists sf_account_inbox (")
             .And.Contain("create table if not exists sf_account_relationship_inbox (")
@@ -351,8 +351,8 @@ public sealed class InboxEventTests
     [Fact]
     public void No_inbox_statement_reads_inside_the_payload()
     {
-        var sql = InboxSql.For(AccountSyncService.InboxTable);
-        string[] claimAndOutcomes = [sql.LockHeads, sql.ClaimEntities, sql.ReleaseLostClaims, sql.MarkSynced, sql.Complete, sql.Release, sql.Defer, sql.Hold, sql.Insert];
+        var sql = InboxSql.For("sf_account_inbox");
+        string[] claimAndOutcomes = [sql.LockHeads, sql.ClaimEntities, sql.ReleaseLostClaims, sql.MarkSynced];
 
         claimAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
     }

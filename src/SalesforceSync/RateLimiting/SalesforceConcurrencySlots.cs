@@ -1,6 +1,6 @@
-using Dapper;
-using Npgsql;
+using Microsoft.EntityFrameworkCore;
 using SalesforceSync.Data;
+using static SalesforceSync.Data.SqlCommands;
 
 namespace SalesforceSync.RateLimiting;
 
@@ -8,10 +8,10 @@ namespace SalesforceSync.RateLimiting;
 /// Global cap on in-flight Salesforce batches using session-level advisory locks: a slot is a connection holding
 /// one of N lock keys for the duration of a batch. Requires direct or session-mode pooled connections
 /// (not PgBouncer transaction mode). If the connection drops, Postgres releases the lock with the session.
+/// The connection is a context's, opened explicitly and held (not returned to the pool) until the slot is disposed.
 /// </summary>
 public sealed class SalesforceConcurrencySlots(
-    NpgsqlDataSource db,
-    PostgresExecutionStrategy pg,
+    IDbContextFactory<SyncDbContext> contexts,
     int maxConcurrent,
     ILogger<SalesforceConcurrencySlots>? log = null)
 {
@@ -23,47 +23,63 @@ public sealed class SalesforceConcurrencySlots(
     // The value is a convention: it must only be identical in every pod and unused by other applications.
     private const long KeyBase = 0x5346_0000;
 
+    /// <summary>
+    /// A retry (a transient failure while taking a slot) starts on a fresh session: the attempt's connection is closed
+    /// and opened again, so a lock taken by the failed attempt is gone with its session.
+    /// </summary>
     /// <returns>A held slot, or null when all are busy.</returns>
-    public Task<IAsyncDisposable?> TryAcquireAsync(CancellationToken ct)
-        => pg.RetryAsync<IAsyncDisposable?>(async token =>
+    public async Task<IAsyncDisposable?> TryAcquireAsync(CancellationToken ct)
+    {
+        var db = await contexts.CreateDbContextAsync(ct);
+        try
         {
-            var conn = await db.OpenConnectionAsync(token);
-            try
+            var strategy = db.Database.CreateExecutionStrategy();
+            var key = await strategy.ExecuteAsync(async t =>
             {
+                await db.Database.CloseConnectionAsync();
+                await db.Database.OpenConnectionAsync(t); // stays open: EF would otherwise release it after each statement
                 foreach (var i in Enumerable.Range(0, maxConcurrent).OrderBy(_ => Random.Shared.Next()))
                 {
-                    var key = KeyBase + i;
-                    if (await conn.ExecuteScalarAsync<bool>(
-                            new CommandDefinition("select pg_try_advisory_lock(@key)", new { key }, cancellationToken: token)))
-                        return new Slot(conn, key, log);
+                    var candidate = KeyBase + i;
+                    if (await db.Database.QuerySingleAsync<bool>("select pg_try_advisory_lock(@key)", t, Param("key", candidate)))
+                    {
+                        return candidate;
+                    }
                 }
-            }
-            catch
+                return (long?)null; // all slots busy
+            }, ct);
+
+            if (key is { } held)
             {
-                await conn.DisposeAsync(); // the session (and any lock it took) ends with it
-                throw;
+                return new Slot(db, held, log);
             }
+        }
+        catch
+        {
+            await db.DisposeAsync(); // the session (and any lock it took) ends with it
+            throw;
+        }
 
-            await conn.DisposeAsync();
-            return null; // all slots busy
-        }, ct);
+        await db.DisposeAsync();
+        return null;
+    }
 
-    private sealed class Slot(NpgsqlConnection conn, long key, ILogger? log) : IAsyncDisposable
+    private sealed class Slot(SyncDbContext db, long key, ILogger? log) : IAsyncDisposable
     {
         public async ValueTask DisposeAsync()
         {
             try
             {
-                await conn.ExecuteAsync("select pg_advisory_unlock(@key)", new { key });
+                await db.Database.ExecuteAsync("select pg_advisory_unlock(@key)", CancellationToken.None, Param("key", key));
             }
-            catch (Exception ex) when (PostgresExecutionStrategy.IsTransient(ex) || ex is InvalidOperationException)
+            catch (Exception ex) when (PostgresRetryStrategy.IsTransient(ex) || ex is InvalidOperationException)
             {
                 // The connection broke while the batch ran; its session, and so the lock, is already gone
                 log?.LogDebug(ex, "Slot {Key} connection was lost; lock released with the session", key);
             }
             finally
             {
-                await conn.DisposeAsync();
+                await db.DisposeAsync();
             }
         }
     }

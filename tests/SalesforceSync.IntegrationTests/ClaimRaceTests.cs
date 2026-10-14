@@ -1,5 +1,4 @@
 using System.Text.Json.Nodes;
-using Dapper;
 using Npgsql;
 using SalesforceSync.Inbox;
 using SalesforceSync.Sync;
@@ -78,7 +77,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
     }
 
     private static async Task<string[]> LockHeadsAsync(NpgsqlConnection conn, NpgsqlTransaction tx)
-        => (await conn.QueryAsync<string>(InboxSql.Pinned(Sql.LockHeads), new { window = InboxSql.ClaimWindow, batchSize = 75 }, tx)).ToArray();
+        => (await conn.QueryAsync<string>(Sql.LockHeads, new { window = InboxSql.ClaimWindow, batchSize = 75 }, tx)).ToArray();
 
     private static async Task<int> ClaimEntitiesAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string entity, Guid token)
         => (await conn.QueryAsync<InboxEvent>(Sql.ClaimEntities,
@@ -108,7 +107,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         public static async Task<Race> StartAsync(SyncFixture app)
         {
             await using (var setup = await app.Db.OpenConnectionAsync())
-                await InboxSchema.ApplyAsync(setup, null, [Table]);
+                await PgSql.ApplySchemaAsync(setup, null, [Table]);
 
             var entity = SyncFixture.NewAccountId();
             string Event(int v) => SyncFixture.AccountEvent(entity, v, new JsonObject { ["name"] = $"v{v}" }, new JsonObject()).ToJsonString();
@@ -120,8 +119,8 @@ public sealed class ClaimRaceTests(SyncFixture app)
 
             // Two consumers store an event of the entity each; the one with the lower id commits last
             var slowInsert = await consumer1.BeginTransactionAsync();
-            await consumer1.ExecuteAsync(Sql.Insert, new { entityId = entity, payload = Event(1) }, slowInsert);
-            await consumer2.ExecuteAsync(Sql.Insert, new { entityId = entity, payload = Event(2) });
+            await consumer1.ExecuteAsync(PgSql.Insert(Table), new { entityId = entity, payload = Event(1) }, slowInsert);
+            await consumer2.ExecuteAsync(PgSql.Insert(Table), new { entityId = entity, payload = Event(2) });
 
             // Worker A claims the entity: its head is the only row it can see, the higher id
             var tokenA = Guid.NewGuid();

@@ -30,7 +30,7 @@ public sealed class EngineFlowTests
         _gate.Open = false;
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
 
-        (await Engine().UpsertBatchAsync(Accounts, CancellationToken.None)).Should().Be(0);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
 
         _inbox.Calls.Should().BeEmpty();
     }
@@ -38,9 +38,9 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task An_empty_claim_is_nothing_to_do()
     {
-        (await Engine().UpsertBatchAsync(Accounts, CancellationToken.None)).Should().Be(0);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
 
-        _inbox.Calls.Should().Equal("claim sf_account_inbox account");
+        _inbox.Calls.Should().Equal("claim account");
         _gate.Released.Should().Be(1, "the slot is given back");
     }
 
@@ -56,10 +56,10 @@ public sealed class EngineFlowTests
         ]);
         _inbox.Synced["ACC-3"] = BatchPreparer.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
 
-        (await Engine().UpsertBatchAsync(Accounts, CancellationToken.None)).Should().Be(4);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(4);
 
         ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("new");
-        _inbox.Calls.Should().Equal("claim sf_account_inbox account", "record");
+        _inbox.Calls.Should().Equal("claim account", "record");
         var outcomes = _inbox.Recorded!;
         outcomes.Synced.Should().ContainSingle().Which.Should().Be(
             new SyncedEntity("ACC-1", BatchPreparer.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T02:00:00Z")), 2));
@@ -76,7 +76,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.AddRange([Row(1, "ACC-1", "2026-10-14T01:00:00Z"), Row(2, "ACC-1", "2026-10-14T02:00:00Z")]);
         _org.LoseResponsesFor("Account", "ACC-1", 1);
 
-        (await Engine().UpsertBatchAsync(Accounts, CancellationToken.None)).Should().Be(2);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
 
         _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "hold");
     }
@@ -87,7 +87,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
         _http.Throw = new RateLimitedException(TimeSpan.FromSeconds(7));
 
-        (await Engine().UpsertBatchAsync(Accounts, CancellationToken.None)).Should().Be(0);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
 
         _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "defer 00:00:07");
     }
@@ -98,7 +98,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
         _http.Throw = new HttpRequestException(HttpRequestError.ConnectionError, "refused");
 
-        (await Engine().UpsertBatchAsync(Accounts, CancellationToken.None)).Should().Be(1);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
 
         _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: refused ()");
     }
@@ -109,7 +109,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(new InboxEvent(1, "ACC-1", "not json", 1));
         _http.Throw = new InvalidOperationException("Salesforce must not be called");
 
-        (await Engine().UpsertBatchAsync(Accounts, CancellationToken.None)).Should().Be(1);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
 
         _inbox.Recorded!.Dead.Should().ContainSingle();
     }
@@ -124,7 +124,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim sf_account_inbox account", "record");
+        _inbox.Calls.Should().Equal("claim account", "record");
         _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
         _inbox.Recorded.Failed.Should().ContainSingle().Which.Should().Be(new FailedEvent(2, "UNKNOWN_ERROR refused", "UNKNOWN_ERROR"));
         _inbox.Recorded.Held.Should().BeEmpty();
@@ -138,7 +138,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim sf_account_inbox account", "record");
+        _inbox.Calls.Should().Equal("claim account", "record");
         _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
         _inbox.Recorded.Held.Should().ContainSingle().Which.Should().Match<FailedEvent>(h => h.EventId == 2 && h.Code == UnknownOutcomeException.Code);
         _inbox.Recorded.Failed.Should().BeEmpty();
@@ -152,7 +152,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim sf_account_inbox account", "record");
+        _inbox.Calls.Should().Equal("claim account", "record");
         _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().Equal("NEW");
         _inbox.Recorded.Deferred.Should().Equal(2L);
         _inbox.Recorded.DeferFor.Should().Be(TimeSpan.FromSeconds(7));
@@ -165,7 +165,7 @@ public sealed class EngineFlowTests
     {
         var engine = Engine();
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
-        await engine.UpsertBatchAsync(Accounts, CancellationToken.None); // describes are cached now
+        await engine.UpsertBatchAsync(Accounts, _inbox, CancellationToken.None); // describes are cached now
         _inbox.Calls.Clear();
         _http.OnRead = request => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
         {
@@ -173,12 +173,12 @@ public sealed class EngineFlowTests
             Content = new StringContent("""{"compositeResponse":[{"referenceId":"q0","httpStatusCode":400,"httpHeaders":{},"body":[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating'"}]}]}""")
         };
 
-        await engine.UpsertBatchAsync(Accounts, CancellationToken.None);
+        await engine.UpsertBatchAsync(Accounts, _inbox, CancellationToken.None);
 
         _inbox.Calls.Should().HaveElementAt(1, "fail all: Query q0 failed: q0: INVALID_FIELD No such column 'Rating' (INVALID_FIELD)");
         var before = _org.GetStats();
         _http.OnRead = null;
-        await engine.UpsertBatchAsync(Accounts, CancellationToken.None);
+        await engine.UpsertBatchAsync(Accounts, _inbox, CancellationToken.None);
         var after = _org.GetStats();
         (after.Describes - before.Describes).Should().BeGreaterThan(0, "the cached describe was invalidated");
         (after.DescribesNotModified - before.DescribesNotModified).Should().Be(0, "an invalidated describe is unconditional");
@@ -190,7 +190,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
         _http.OnRead = _ => throw new TaskCanceledException("The lease cutoff");
 
-        await Engine().UpsertBatchAsync(Accounts, CancellationToken.None);
+        await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None);
 
         _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: The lease cutoff ()");
     }
@@ -227,7 +227,7 @@ public sealed class EngineFlowTests
     /// Account, Profile and relationship per entity: a new entity needs three collections (creates), an existing one
     /// three others (updates), so the two together take two Composite write calls (5 collections each at most).
     /// </summary>
-    private static readonly UpsertStrategy<AccountEvent> ThreeObjects = new("account", "sf_account_inbox",
+    private static readonly UpsertStrategy<AccountEvent> ThreeObjects = new("account",
         e => e.Account?.ExternalId, e => e.Meta?.Timestamp(), e => e.Meta?.Kind(),
         (key, e) => new UpsertUnit(
         [
@@ -248,7 +248,7 @@ public sealed class EngineFlowTests
     private async Task CreateOldAsync()
     {
         _inbox.Rows.Add(Row(9, "OLD", "2026-10-14T01:00:00Z", "Gold"));
-        (await Engine().UpsertBatchAsync(ThreeObjects, CancellationToken.None)).Should().Be(1);
+        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(1);
         _inbox.Recorded!.Synced.Should().ContainSingle();
         _inbox.Rows.Clear();
         _inbox.Calls.Clear();
@@ -261,7 +261,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.AddRange([Row(1, "NEW", "2026-10-14T02:00:00Z", "Gold"), Row(2, "OLD", "2026-10-14T02:00:00Z", "Silver")]);
         var before = _org.GetStats().WriteRequests;
 
-        (await Engine().UpsertBatchAsync(ThreeObjects, CancellationToken.None)).Should().Be(2);
+        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
 
         _http.Writes.Should().Be(2, "the batch takes two write calls");
         _org.FindByExternalId("Account", "NEW").Should().NotBeNull("the first call's records are in Salesforce");
@@ -273,7 +273,7 @@ public sealed class EngineFlowTests
         var options = Options.Create(new SalesforceOptions());
         _http.InnerHandler ??= new FakeSalesforceHandler(_org);
         var http = new HttpClient(_http) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
-        return new SalesforceBatchUpsertService(_gate, _inbox, new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
+        return new SalesforceBatchUpsertService(_gate, new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
             new SalesforceErrors(options), new WriteEchoTracker(), options, Options.Create(new SyncOptions()),
             NullLogger<SalesforceBatchUpsertService>.Instance);
     }
@@ -316,17 +316,19 @@ public sealed class EngineFlowTests
         }
     }
 
-    private sealed class RecordingInbox : IInboxRepository
+    private sealed class RecordingInbox : IRepository<AccountInboxRow>
     {
         public List<InboxEvent> Rows { get; } = [];
         public Dictionary<string, long> Synced { get; } = [];
         public List<string> Calls { get; } = [];
         public BatchOutcomes? Recorded { get; private set; }
 
-        public Task<InboxClaim> ClaimAsync(string inboxTable, string entityType, CancellationToken ct)
+        public Task AddAsync(string entityId, string payload, CancellationToken ct) => Call($"add {entityId}");
+
+        public Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct)
         {
-            Calls.Add($"claim {inboxTable} {entityType}");
-            return Task.FromResult(new InboxClaim(inboxTable, entityType, Guid.NewGuid(), Rows, Synced));
+            Calls.Add($"claim {entityType}");
+            return Task.FromResult(new InboxClaim(entityType, Guid.NewGuid(), Rows, Synced));
         }
 
         public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)

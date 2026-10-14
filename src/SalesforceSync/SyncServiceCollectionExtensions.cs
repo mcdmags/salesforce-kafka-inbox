@@ -1,5 +1,7 @@
 using System.Net;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
@@ -154,8 +156,7 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton<SalesforceRateLimiter>();
         services.AddHostedService<RateLimitInitializer>();
         services.AddSingleton(sp => new SalesforceConcurrencySlots(
-            sp.GetRequiredService<Npgsql.NpgsqlDataSource>(),
-            sp.GetRequiredService<PostgresExecutionStrategy>(),
+            sp.GetRequiredService<IDbContextFactory<SyncDbContext>>(),
             sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests,
             sp.GetRequiredService<ILogger<SalesforceConcurrencySlots>>()));
         services.AddSingleton<ISalesforceBatchGate, SalesforceBatchGate>();
@@ -169,14 +170,16 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Inbox -> Salesforce: the Postgres execution strategy, one engine, and per synced object its mappers (payload ->
-    /// sObject) and its strategy. Register a new object's mapper and <see cref="ISalesforceEntitySync"/> here: its inbox
-    /// table is created at startup, the consumer subscribes to its topic and the worker loops pick it up.
+    /// Inbox -> Salesforce: the database context, one engine, and per synced object its mappers (payload ->
+    /// sObject) and its strategy. Register a new object's mapper and <see cref="ISalesforceEntitySync"/> here (its
+    /// <see cref="InboxRow"/> type is mapped in <see cref="SyncDbContext"/>): its inbox table is created at startup, the consumer subscribes to its topic and the worker loops pick it up.
     /// </summary>
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {
-        services.AddSingleton<PostgresExecutionStrategy>(); // every unit of work retries transient Postgres errors
-        services.AddSingleton<IInboxRepository, InboxRepository>();
+        // The database: EF contexts pooled over the app's NpgsqlDataSource; every unit of work retries transient errors
+        services.AddPooledDbContextFactory<SyncDbContext>((sp, o) => SyncDbContext.Configure(o,
+            sp.GetRequiredService<NpgsqlDataSource>(), sp.GetRequiredService<IOptions<PostgresRetryOptions>>().Value));
+        services.AddSingleton(typeof(IRepository<>), typeof(InboxRepository<>)); // one per inbox row type
         services.AddTransient<SalesforceBatchUpsertService>();
 
         // The synced objects. Mappers are stateless.

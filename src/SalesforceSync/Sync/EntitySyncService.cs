@@ -1,18 +1,20 @@
+using SalesforceSync.Inbox;
+
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// What every entity type's sync has in common: it is a strategy and a topic, run by the engine. A synced object
-/// derives from this and supplies only its strategy (names, how to read an event, the mapping and the queries).
+/// What every entity type's sync has in common: it is a strategy, a topic and an inbox, run by the engine. A synced
+/// object derives from this and supplies only its strategy (names, how to read an event, the mapping and the queries)
+/// and its inbox row type, which selects the inbox table.
 /// </summary>
-public abstract class EntitySyncService<TEvent>(
+public abstract class EntitySyncService<TEvent, TRow>(
     SalesforceBatchUpsertService engine,
+    IRepository<TRow> inbox,
     UpsertStrategy<TEvent> strategy,
     string defaultTopic) : ISalesforceEntitySync
+    where TRow : InboxRow, new()
 {
     public string EntityType => strategy.EntityType;
-
-    // Explicit: a derived class names its table as a constant called InboxTable
-    string ISalesforceEntitySync.InboxTable => strategy.InboxTable;
 
     public string Topic => defaultTopic;
 
@@ -23,5 +25,7 @@ public abstract class EntitySyncService<TEvent>(
         return ok;
     }
 
-    public Task<int> SyncBatchAsync(CancellationToken ct) => engine.UpsertBatchAsync(strategy, ct);
+    public Task StoreEventAsync(string entityId, string json, CancellationToken ct) => inbox.AddAsync(entityId, json, ct);
+
+    public Task<int> SyncBatchAsync(CancellationToken ct) => engine.UpsertBatchAsync(strategy, inbox, ct);
 }

@@ -1,21 +1,37 @@
 using System.Globalization;
 using System.Text.Json;
-using Dapper;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 using SalesforceSync.Sync.Upsert;
+using static SalesforceSync.Data.SqlCommands;
 
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// <see cref="IInboxRepository"/> on Postgres: the <see cref="InboxSql"/> statements of the claim's table, each unit of
-/// work run through <see cref="PostgresExecutionStrategy"/>.
+/// <see cref="IRepository{TEntity}"/> on Postgres, for any inbox row type: the claim and the failure statements are the
+/// <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL; the outcomes that are a plain
+/// conditional UPDATE are LINQ (<c>ExecuteUpdate</c>), one statement with the same WHERE as the SQL it replaced.
+/// Each unit of work runs through EF's execution strategy (<see cref="PostgresRetryStrategy"/>).
 /// </summary>
-public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncOptions> options) : IInboxRepository
+public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TEntity>
+    where TEntity : InboxRow, new()
 {
     private readonly SyncOptions _opt = options.Value;
+
+    /// <summary>
+    /// One event. Nothing makes a row unique: a Kafka redelivery is stored again and ends superseded (its time is
+    /// not newer than what was synced), which is harmless; a uniqueness rule on the payload would wrongly drop the
+    /// last event of A -> B -> A. Safe to retry for the same reason.
+    /// </summary>
+    public Task AddAsync(string entityId, string payload, CancellationToken ct)
+        => contexts.RunAsync(async (db, t) =>
+        {
+            db.Set<TEntity>().Add(new TEntity { EntityId = entityId, Payload = payload });
+            await db.SaveChangesAsync(t);
+        }, ct);
 
     /// <summary>
     /// Locks and leases a batch, and reads the claimed entities' watermarks in the same transaction. A fresh token per
@@ -23,34 +39,39 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
     /// mistaken for this one's. The retry releases them first, so they don't wait for their lease to expire (and a
     /// lease nobody works on is never taken over).
     /// </summary>
-    public Task<InboxClaim> ClaimAsync(string inboxTable, string entityType, CancellationToken ct)
+    public Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct)
     {
-        var sql = InboxSql.For(inboxTable);
         var attempted = new List<Guid>();
         var attemptedEntityIds = new HashSet<string>(StringComparer.Ordinal);
-        return pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
+        return contexts.RunInTransactionAsync(async (db, t) =>
         {
-            CommandDefinition Command(string statement, object args) => new(statement, args, tx, cancellationToken: t);
+            var sql = InboxSql.For(db.TableOf<TEntity>());
 
+            await db.Database.ExecuteAsync(InboxSql.PinPlans, t);
             if (attemptedEntityIds.Count > 0)
-                await conn.ExecuteAsync(Command(InboxSql.Pinned(sql.ReleaseLostClaims),
-                    new { tokens = attempted.ToArray(), entityIds = attemptedEntityIds.ToArray() }));
+            {
+                await db.Database.ExecuteAsync(sql.ReleaseLostClaims, t,
+                    Param("tokens", attempted.ToArray()), Param("entityIds", attemptedEntityIds.ToArray()));
+            }
 
             var token = Guid.NewGuid();
             attempted.Add(token);
-            var entityIds = (await conn.QueryAsync<string>(Command(InboxSql.Pinned(sql.LockHeads), new
+            var entityIds = (await db.Database.QueryAsync<string>(sql.LockHeads, t,
+                Param("window", InboxSql.ClaimWindow),
+                Param("batchSize", Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)))).ToArray();
+            if (entityIds.Length == 0)
             {
-                window = InboxSql.ClaimWindow,
-                batchSize = Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)
-            }))).ToArray();
-            if (entityIds.Length == 0) return new InboxClaim(inboxTable, entityType, token, [], new Dictionary<string, long>());
+                return new InboxClaim(entityType, token, [], new Dictionary<string, long>());
+            }
             attemptedEntityIds.UnionWith(entityIds);
 
-            var events = (await conn.QueryAsync<InboxEvent>(Command(sql.ClaimEntities,
-                new { entityIds, token, lease = _opt.Lease, maxPerEntity = _opt.MaxEventsPerEntity }))).ToList();
-            var synced = (await conn.QueryAsync<(string EntityId, long Time)>(Command(InboxSql.SyncedTimes, new { entityType, entityIds })))
-                .ToDictionary(r => r.EntityId, r => r.Time, StringComparer.Ordinal);
-            return new InboxClaim(inboxTable, entityType, token, events, synced);
+            var events = await db.Database.QueryAsync<InboxEvent>(sql.ClaimEntities, t,
+                Param("entityIds", entityIds), Param("token", token), Param("lease", _opt.Lease),
+                Param("maxPerEntity", _opt.MaxEventsPerEntity));
+            var synced = await db.SyncState.AsNoTracking()
+                .Where(s => s.EntityType == entityType && entityIds.Contains(s.EntityId))
+                .ToDictionaryAsync(s => s.EntityId, s => s.SyncedTime, StringComparer.Ordinal, t);
+            return new InboxClaim(entityType, token, events, synced);
         }, ct);
     }
 
@@ -60,69 +81,118 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
     /// </summary>
     public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
     {
-        var sql = InboxSql.For(claim.InboxTable);
         var token = claim.Token;
-        return pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
+        return contexts.RunInTransactionAsync(async (db, t) =>
         {
-            // The first statement sent also pins the plans for the transaction (same round trip)
-            var first = true;
-            Task Run(string statement, object args)
-            {
-                var text = first ? InboxSql.Pinned(statement) : statement;
-                first = false;
-                return conn.ExecuteAsync(new CommandDefinition(text, args, tx, cancellationToken: t));
-            }
+            var sql = InboxSql.For(db.TableOf<TEntity>());
 
+            await db.Database.ExecuteAsync(InboxSql.PinPlans, t);
             if (outcomes.Synced.Count > 0)
             {
                 // Watermarks first: Complete releases the lease that MarkSynced checks
-                await Run(sql.MarkSynced, new
-                {
-                    entityType = claim.EntityType, token,
-                    entityIds = outcomes.Synced.Select(s => s.EntityId).ToArray(),
-                    times = outcomes.Synced.Select(s => s.EventTime).ToArray()
-                });
-                await Run(sql.Complete, new { ids = outcomes.Synced.Select(s => s.EventId).ToArray(), token, status = "done" });
+                await db.Database.ExecuteAsync(sql.MarkSynced, t,
+                    Param("entityType", claim.EntityType), Param("token", token),
+                    Param("entityIds", outcomes.Synced.Select(s => s.EntityId).ToArray()),
+                    Param("times", outcomes.Synced.Select(s => s.EventTime).ToArray()));
+                await CompleteAsync(db, outcomes.Synced.Select(s => s.EventId).ToArray(), token, "done", t);
             }
             if (outcomes.Superseded.Count > 0)
-                await Run(sql.Complete, new { ids = outcomes.Superseded.ToArray(), token, status = "superseded" });
+            {
+                await CompleteAsync(db, outcomes.Superseded.ToArray(), token, "superseded", t);
+            }
             if (outcomes.Released.Count > 0)
-                await Run(sql.Release, new { ids = outcomes.Released.ToArray(), token });
+            {
+                await ReleaseAsync(db, outcomes.Released.ToArray(), token, t);
+            }
             if (outcomes.Dead.Count > 0)
-                await Run(sql.Dead, new { ids = Ids(outcomes.Dead), errors = ErrorsJson(outcomes.Dead), token });
+            {
+                await db.Database.ExecuteAsync(sql.Dead, t, Param("ids", Ids(outcomes.Dead)), Param("errors", ErrorsJson(outcomes.Dead)),
+                    Param("token", token));
+            }
             if (outcomes.Failed.Count > 0)
-                await Run(sql.Fail, FailArgs(outcomes.Failed, token));
+            {
+                await FailAsync(db, sql, outcomes.Failed, token, t);
+            }
             if (outcomes.Held.Count > 0)
-                await Run(sql.Hold, HoldArgs(Ids(outcomes.Held), token, outcomes.Held[0].Error));
+            {
+                await HoldAsync(db, Ids(outcomes.Held), token, outcomes.Held[0].Error, t);
+            }
             if (outcomes.Deferred.Count > 0)
-                await Run(sql.Defer, new { ids = outcomes.Deferred.ToArray(), token, delay = outcomes.DeferFor });
+            {
+                await DeferAsync(db, outcomes.Deferred.ToArray(), token, outcomes.DeferFor, t);
+            }
         }, ct);
     }
 
     public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
-        => pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Hold, HoldArgs(claim.EventIds, claim.Token, error), ct);
+        => contexts.RunAsync((db, t) => HoldAsync(db, claim.EventIds, claim.Token, error, t), ct);
 
     public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
-        => pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Defer, new { ids = claim.EventIds, token = claim.Token, delay }, ct);
+        => contexts.RunAsync((db, t) => DeferAsync(db, claim.EventIds, claim.Token, delay, t), ct);
 
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
     {
         var all = claim.Events.Select(e => new FailedEvent(e.Id, error, code)).ToList();
-        return pg.ExecuteAsync(InboxSql.For(claim.InboxTable).Fail, FailArgs(all, claim.Token), ct);
+        return contexts.RunAsync((db, t) => FailAsync(db, InboxSql.For(db.TableOf<TEntity>()), all, claim.Token, t), ct);
     }
 
-    private object FailArgs(IReadOnlyList<FailedEvent> rows, Guid token) => new
-    {
-        ids = Ids(rows),
-        errors = ErrorsJson(rows),
-        token,
-        maxRetries = _opt.MaxRetries,
-        baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
-        maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
-    };
+    /// <summary>The rows of a claim that this lease still holds: every outcome below updates only these.</summary>
+    private static IQueryable<TEntity> Leased(SyncDbContext db, long[] ids, Guid token)
+        => db.Set<TEntity>().Where(r => ids.Contains(r.Id) && r.LockToken == token);
 
-    private object HoldArgs(long[] ids, Guid token, string error)
-        => new { ids, token, hold = _opt.UnknownOutcomeHold, error, code = UnknownOutcomeException.Code };
+    /// <summary>Done or superseded (<paramref name="status"/>): the row leaves the queue.</summary>
+    private static Task<int> CompleteAsync(SyncDbContext db, long[] ids, Guid token, string status, CancellationToken ct)
+        => Leased(db, ids, token).ExecuteUpdateAsync(u => u
+            .SetProperty(r => r.Status, status)
+            .SetProperty(r => r.LockedUntil, (DateTimeOffset?)null)
+            .SetProperty(r => r.LockToken, (Guid?)null)
+            .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
+            .SetProperty(r => r.LastError, (string?)null)
+            .SetProperty(r => r.LastErrorCode, (string?)null), ct);
+
+    /// <summary>Not attempted (rolled back or skipped because of another entity's record): hand back for the next claim, no retry spent.</summary>
+    private static Task<int> ReleaseAsync(SyncDbContext db, long[] ids, Guid token, CancellationToken ct)
+        => Leased(db, ids, token).ExecuteUpdateAsync(u => u
+            .SetProperty(r => r.LockedUntil, (DateTimeOffset?)null)
+            .SetProperty(r => r.LockToken, (Guid?)null)
+            .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
+            .SetProperty(r => r.NextAttemptAt, _ => DateTimeOffset.UtcNow)
+            .SetProperty(r => r.RetryCount, r => Math.Max(r.RetryCount - 1, 0)), ct);
+
+    /// <summary>Rate limited: hand back without spending a retry, not before <paramref name="delay"/>.</summary>
+    private static Task<int> DeferAsync(SyncDbContext db, long[] ids, Guid token, TimeSpan delay, CancellationToken ct)
+        => Leased(db, ids, token).ExecuteUpdateAsync(u => u
+            .SetProperty(r => r.LockedUntil, (DateTimeOffset?)null)
+            .SetProperty(r => r.LockToken, (Guid?)null)
+            .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
+            .SetProperty(r => r.RetryCount, r => Math.Max(r.RetryCount - 1, 0))
+            .SetProperty(r => r.NextAttemptAt, _ => DateTimeOffset.UtcNow + delay), ct);
+
+    /// <summary>
+    /// The write's outcome is unknown: nobody may touch these entities until the hold has passed, by when Salesforce
+    /// has applied the lost write or dropped it. The rows stay pending and leased, but under no token, so the old
+    /// worker can't record anything on them either; the claim skips an entity whose head is leased, which also makes
+    /// events arriving meanwhile wait. No retry is spent.
+    /// </summary>
+    private Task<int> HoldAsync(SyncDbContext db, long[] ids, Guid token, string error, CancellationToken ct)
+    {
+        var hold = _opt.UnknownOutcomeHold;
+        var code = UnknownOutcomeException.Code;
+        return Leased(db, ids, token).ExecuteUpdateAsync(u => u
+            .SetProperty(r => r.LockedUntil, _ => DateTimeOffset.UtcNow + hold)
+            .SetProperty(r => r.NextAttemptAt, _ => DateTimeOffset.UtcNow + hold)
+            .SetProperty(r => r.LockToken, (Guid?)null)
+            .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
+            .SetProperty(r => r.RetryCount, r => Math.Max(r.RetryCount - 1, 0))
+            .SetProperty(r => r.LastError, error)
+            .SetProperty(r => r.LastErrorCode, code), ct);
+    }
+
+    private Task<int> FailAsync(SyncDbContext db, InboxSql sql, IReadOnlyList<FailedEvent> rows, Guid token, CancellationToken ct)
+        => db.Database.ExecuteAsync(sql.Fail, ct,
+            Param("ids", Ids(rows)), Param("errors", ErrorsJson(rows)), Param("token", token),
+            Param("maxRetries", _opt.MaxRetries), Param("baseDelaySecs", _opt.RetryBaseDelay.TotalSeconds),
+            Param("maxDelaySecs", _opt.MaxRetryDelay.TotalSeconds));
 
     private static long[] Ids(IReadOnlyList<FailedEvent> rows) => rows.Select(r => r.EventId).ToArray();
 
@@ -130,7 +200,10 @@ public sealed class InboxRepository(PostgresExecutionStrategy pg, IOptions<SyncO
     private static string ErrorsJson(IReadOnlyList<FailedEvent> rows)
     {
         var errors = new Dictionary<string, string?[]>(StringComparer.Ordinal);
-        foreach (var row in rows) errors[row.EventId.ToString(CultureInfo.InvariantCulture)] = [row.Error, row.Code];
+        foreach (var row in rows)
+        {
+            errors[row.EventId.ToString(CultureInfo.InvariantCulture)] = [row.Error, row.Code];
+        }
         return JsonSerializer.Serialize(errors);
     }
 }

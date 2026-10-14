@@ -45,7 +45,7 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 | Batching and API calls | **2 calls per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries), one Composite request with all writes (≤5 collections of ≤200 records; more are split over further requests). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (rolled back or skipped because of another entity's record) → back to the inbox without spending a retry. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
-| Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through **`PostgresExecutionStrategy`**: a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new connection, new transaction) with backoff. After a lost connection the pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
+| Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` around a transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new transaction, change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
 | Rate limits | Configured from Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) and own usage slow everyone down at 80% and pause at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
 
 ```
@@ -58,11 +58,11 @@ Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per 
                                 AccountSyncService ─┐            (strategy: typed event → mapper →
                                 AccountRelationshipSyncService ─┤          sObject → records, + queries)
                                                                 ▼
-                              SalesforceBatchUpsertService.UpsertBatchAsync<TEvent>(strategy)
+                              SalesforceBatchUpsertService.UpsertBatchAsync<TEvent, TRow>(strategy, IRepository<TRow>)
                                 claim → newest meta.time per entity (supersede stale) → map
                                 → describe → normalize → 1 composite read → decide (diff + lookups)
                                 → 1 composite write → per-record results → outcome per entity → record outcomes
-                                                       │  inbox: IInboxRepository (Postgres, PostgresExecutionStrategy)
+                                                       │  inbox: IRepository<TRow> (EF Core + raw SQL, PostgresRetryStrategy)
                                                        │  token bucket + daily budget + concurrency slots
                                                        ▼
                                                   Salesforce  (standard + existing fields only)
@@ -74,9 +74,20 @@ The sync is three layers, each with one job:
 
 | Layer | Classes | Does |
 |---|---|---|
-| **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`); `InboxRepository` (`IInboxRepository`: claim, record, hold, defer, fail, over `InboxSql` and `PostgresExecutionStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
+| **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryonStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
 | **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
 | **Rules, no I/O** | `BatchPreparer` (coalesce, watermark, map), `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `EventTypeCheck` (`meta.type` against existence), `RecordDiffer` (changed fields), `WritePlanner` (create / update / unchanged, lookups by Id, reference or external id, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
+
+**Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`); the schema
+stays `sql/schema.sql` (partial indexes, the table template, views, autovacuum settings: not expressible as migrations),
+and `SchemaTests` checks the model against the real tables column by column. Every inbox table has the same columns, so
+they all live on the abstract `InboxRow`; `AccountInboxRow` and `AccountRelationshipInboxRow` only name their tables
+(two independent entity types, no shared table), and the one `InboxRepository<TRow>` (`IRepository<TRow>`, registered as
+an open generic) serves both. The table name comes from the EF model. What EF can express is LINQ (`Add` + `SaveChanges`
+for an event, `ExecuteUpdate` for the lease-conditional outcomes done, superseded, released, held and deferred, a query for
+the watermarks); the claim, `ReleaseLostClaims`, `MarkSynced`, fail and dead-letter, and the rate limiter's statements are
+the SQL texts of `InboxSql` and `RateLimitSql` run unchanged through `Database.SqlQueryRaw` / `ExecuteSqlRaw` with named
+`NpgsqlParameter`s, since a recursive CTE with `FOR UPDATE SKIP LOCKED` or `UPDATE ... RETURNING` has no LINQ form.
 
 Describe results are cached by `SalesforceSchemaCache` and written values remembered by `WriteEchoTracker` (to warn
 about a field that is rewritten on every event).
@@ -328,7 +339,7 @@ the entity were released and a newer event synced in the meantime, the late writ
 | An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | the claim requires the head to be due and the entity unleased | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
 | Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | newest-time coalescing + watermark | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
 | A worker whose lease expired can't record outcomes or move the watermark | every statement is conditional on `lock_token` | `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark` |
-| Dropped Postgres connections cause no overlap, loss or regression | `PostgresExecutionStrategy`, idempotent statements | `ConcurrencyTests.Pods_survive_their_Postgres_connections_being_dropped` |
+| Dropped Postgres connections cause no overlap, loss or regression | `PostgresRetryStrategy` (EF execution strategy), idempotent statements | `ConcurrencyTests.Pods_survive_their_Postgres_connections_being_dropped` |
 | A write with an unknown outcome can't be overtaken by a newer write | the hold | `UnknownOutcomeTests.Entity_is_held_after_a_write_with_an_unknown_outcome_and_ends_at_the_newest_event` |
 
 Windows in which a guarantee does not hold, stated plainly: (1) a worker whose **Postgres** work to record a hold
@@ -450,11 +461,12 @@ always literal Ids from the read; `ParentLink` doesn't apply to it.
 
 ## Adding a Salesforce object
 
-The engine (`SalesforceBatchUpsertService.UpsertBatchAsync<TEvent>`) owns claiming, ordering, coalescing, rate
+The engine (`SalesforceBatchUpsertService.UpsertBatchAsync<TEvent, TRow>`) owns claiming, ordering, coalescing, rate
 limits, batching, normalization, diffing, lookups, retries and dead-lettering. Nothing in the engine, the consumer or
 the worker loops names an object. An object supplies four small things: a payload class, an sObject class, a mapper,
-and a strategy class that names the object's inbox table and topic and says how an event becomes records. The
-strategy class derives from `EntitySyncService<TEvent>`, which does the rest of `ISalesforceEntitySync`.
+an inbox row class (which selects the object's inbox table) and a strategy class that names the object's topic and says
+how an event becomes records. The strategy class derives from `EntitySyncService<TEvent, TRow>`, which does the rest of
+`ISalesforceEntitySync` through the shared `IRepository<TRow>`.
 
 ```csharp
 // 1. Payload: the event as the source sends it  { "meta": {...}, "accountRelationship": { "externalId": ..., ... } }
@@ -499,19 +511,25 @@ public sealed class AccountRelationshipMapper : ISObjectMapper<AccountRelationsh
     };
 }
 
-// 4. Strategy: where the events are, how to read one (id, time, type), event -> records, and what to read
+// 4. Inbox row: the object's inbox table. Every column is on InboxRow, so every object's inbox has the same fields
+public sealed class AccountRelationshipInboxRow : InboxRow;
+//    ... and in SyncDbContext: a DbSet<AccountRelationshipInboxRow>, and in OnModelCreating
+//    ConfigureInbox(modelBuilder.Entity<AccountRelationshipInboxRow>(), "sf_account_relationship_inbox");
+//    The table is created at startup from the schema template (sql/schema.sql); SchemaTests checks the model against it.
+
+// 5. Strategy: how to read an event (id, time, type), event -> records, and what to read
 public sealed class AccountRelationshipSyncService(
     SalesforceBatchUpsertService engine,
+    IRepository<AccountRelationshipInboxRow> inbox,   // the open generic InboxRepository<TRow>, registered once
     ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
-    : EntitySyncService<AccountRelationshipEvent>(engine, CreateStrategy(relationships), DefaultTopic)
+    : EntitySyncService<AccountRelationshipEvent, AccountRelationshipInboxRow>(engine, inbox, CreateStrategy(relationships), DefaultTopic)
 {
     public const string Type = "accountRelationship";
-    public const string InboxTable = "sf_account_relationship_inbox";  // created at startup
     public const string DefaultTopic = "account-relationship-changes";  // Kafka:Topics:accountRelationship overrides
 
     public static UpsertStrategy<AccountRelationshipEvent> CreateStrategy(
         ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
-        => new(Type, InboxTable,
+        => new(Type,
             EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id,
             EventTime: e => e.Meta?.Timestamp(),                 // the time and the type are in the event
             EventType: e => e.Meta?.Kind(),
@@ -560,7 +578,7 @@ does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers
 ```
 src/
   SalesforceSync/                 Worker:
-    Inbox/                        Kafka consumer, worker loops, inbox schema, InboxSql and InboxRepository
+    Inbox/                        Kafka consumer, worker loops, inbox schema, InboxSql, InboxRow and its subclasses, InboxRepository
     Inbox/Payloads/               The typed events (payload classes) and their meta
     Sync/                         The engine (SalesforceBatchUpsertService), BatchPreparer, the strategies
                                   (EntitySyncService and one class per object) and the engine's model types
@@ -569,7 +587,7 @@ src/
     Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors
     Salesforce/SObjects/          sObject classes and the attributes they are read by
     RateLimiting/                 Token bucket, daily budget, pause, concurrency slots, the batch gate
-    Data/                         Postgres execution strategy
+    Data/                         SyncDbContext (the EF model of the tables), PostgresRetryStrategy, raw-SQL helpers
   SalesforceSync.FakeSalesforce/  In-memory Salesforce (describe, query, composite, sObject collections, Salesforce-like
                                   value storage, error injection, write history, Sforce-Limit-Info): FakeSalesforceStore
                                   is the org's surface and lock; FakeRecords, FakeSoql, FakeCollectionWriter,
@@ -872,8 +890,9 @@ outlive a connection.
 
 **Trade-offs and how they're handled**
 
-- **Session-level locks need a stable session.** Use direct connections or PgBouncer in *session* mode. In
-  *transaction* mode the unlock can run on a different server connection, so the lock would stay held.
+- **Session-level locks need a stable session.** Use Npgsql's own connection pooling (a slot is a pooled `SyncDbContext` whose connection is opened explicitly and held
+  until the slot is disposed) or a pooler in *session* mode, not PgBouncer in *transaction* mode: there the unlock can
+  run on a different server connection, so the lock would stay held.
 - **A held slot keeps a connection open** for the whole batch, in addition to the short claim/outcome
   connections. Size `Maximum Pool Size` per pod above `Workers` (one slot connection per worker plus headroom),
   and Postgres `max_connections` for all pods together.

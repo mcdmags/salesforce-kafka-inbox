@@ -1,5 +1,4 @@
 using System.Text.Json.Nodes;
-using Dapper;
 using Xunit.Abstractions;
 
 namespace SalesforceSync.IntegrationTests;
