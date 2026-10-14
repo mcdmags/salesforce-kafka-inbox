@@ -5,20 +5,17 @@ namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
 /// sObject Collections create (POST) and update (PATCH): each record is checked the way Salesforce checks it (type,
-/// id, fields, lookups, uniqueness, injected faults) and gets a result of its own; allOrNone rolls the collection
-/// back if any record fails. Not thread-safe; <see cref="FakeSalesforceStore"/> holds its lock.
+/// id, fields, lookups, uniqueness, injected faults) and gets a result of its own (allOrNone false, the only mode the
+/// sync uses). Not thread-safe; <see cref="FakeSalesforceStore"/> holds its lock.
 /// </summary>
 internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults faults, FakeCounters counters)
 {
     public const int MaxRecords = 200;
 
     private const string ExternalIdField = FakeSalesforceStore.ExternalIdField;
-    private const string RolledBack = "ALL_OR_NONE_OPERATION_ROLLED_BACK";
-    private const string RolledBackMessage = "Record rolled back because not all records were valid and the request was using AllOrNone header";
 
     /// <summary>One result per record, in request order.</summary>
-    /// <param name="outerUndo">Receives how to undo what was committed, for a rollback of the whole Composite request.</param>
-    public JsonArray Execute(bool create, JsonObject body, List<Action> outerUndo)
+    public JsonArray Execute(bool create, JsonObject body)
     {
         var sent = body["records"]?.AsArray() ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing 'records'");
         if (sent.Count > MaxRecords)
@@ -26,49 +23,20 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             throw new FakeSalesforceException(400, "LIMIT_EXCEEDED", $"A maximum of {MaxRecords} records is allowed per request");
         }
 
-        var allOrNone = body["allOrNone"]?.GetValue<bool>() ?? false;
-
         var results = new JsonArray();
-        var undo = new List<Action>();
         foreach (var record in sent)
         {
-            results.Add(Write(create, record!.DeepClone().AsObject(), undo));
+            results.Add(Write(create, record!.DeepClone().AsObject()));
         }
 
         var failed = results.Count(r => !r!["success"]!.GetValue<bool>());
-        if (allOrNone && failed > 0)
-        {
-            for (var i = undo.Count - 1; i >= 0; i--)
-            {
-                undo[i]();
-            }
-
-            foreach (var result in results.Where(r => r!["success"]!.GetValue<bool>()))
-            {
-                MarkRolledBack(result!.AsObject());
-            }
-        }
-        else
-        {
-            outerUndo.AddRange(undo);
-            counters.RecordsSucceeded += results.Count - failed;
-            outerUndo.Add(() => counters.RecordsSucceeded -= results.Count - failed);
-        }
+        counters.RecordsSucceeded += results.Count - failed;
         counters.RecordsFailed += failed;
         return results;
     }
 
-    /// <summary>A record that had succeeded is reported as rolled back because of another one.</summary>
-    public void MarkRolledBack(JsonObject result)
-    {
-        result["success"] = false;
-        result["id"] = null;
-        result["errors"] = new JsonArray(new JsonObject { ["statusCode"] = RolledBack, ["message"] = RolledBackMessage, ["fields"] = new JsonArray() });
-        counters.RecordsRolledBack++;
-    }
-
     /// <summary>Creates or updates one record and returns its result: <c>{ "id", "success", "errors" }</c>.</summary>
-    private JsonObject Write(bool create, JsonObject record, List<Action> undo)
+    private JsonObject Write(bool create, JsonObject record)
     {
         var sobject = record["attributes"]?["type"]?.GetValue<string>();
         var id = Str(record["id"]) ?? Str(record["Id"]);
@@ -76,25 +44,13 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         record.Remove("id");
         record.Remove("Id");
 
-        (int Status, JsonNode? Body) outcome;
-        if (sobject is null || !FakeSchema.Objects.ContainsKey(sobject))
-        {
-            outcome = (400, Errors("INVALID_TYPE", $"sObject type '{sobject}' is not supported."));
-        }
-        else if (!create && id is null)
-        {
-            outcome = (400, Errors("MISSING_ARGUMENT", "Id not specified in an update call"));
-        }
-        else if (create && id is not null)
-        {
-            outcome = (400, Errors("INVALID_FIELD_FOR_INSERT_UPDATE", "cannot specify Id in an insert call", "Id"));
-        }
-        else
-        {
-            outcome = ResolveRelationships(sobject, record) is { } missing
-                ? ((int Status, JsonNode? Body))(400, missing)
-                : ((int Status, JsonNode? Body))(create ? Create(sobject, record, undo) : Update(sobject, id!, record, undo));
-        }
+        var outcome = sobject is null || !FakeSchema.Objects.ContainsKey(sobject)
+            ? (400, Errors("INVALID_TYPE", $"sObject type '{sobject}' is not supported."))
+            : !create && id is null
+            ? (400, Errors("MISSING_ARGUMENT", "Id not specified in an update call"))
+            : create && id is not null
+            ? (400, Errors("INVALID_FIELD_FOR_INSERT_UPDATE", "cannot specify Id in an insert call", "Id"))
+            : create ? Create(sobject, record) : Update(sobject, id!, record);
 
         var ok = outcome.Status < 400;
         return new JsonObject
@@ -112,7 +68,7 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         };
     }
 
-    private (int, JsonNode?) Create(string sobject, JsonObject body, List<Action> undo)
+    private (int Status, JsonNode? Body) Create(string sobject, JsonObject body)
     {
         var extId = Str(body[ExternalIdField]);
         if (faults.Take(sobject, extId) is { } fault)
@@ -143,18 +99,13 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         var now = FakeSchema.FormatDateTime(DateTimeOffset.UtcNow);
         record["CreatedDate"] = now;
         record["LastModifiedDate"] = now;
-        var remove = records.Insert(sobject, id, record, stored);
+        records.Insert(sobject, id, record, stored);
         counters.Creates++;
-        undo.Add(() =>
-        {
-            remove();
-            counters.Creates--;
-        });
 
         return (201, new JsonObject { ["id"] = id, ["success"] = true, ["errors"] = new JsonArray() });
     }
 
-    private (int, JsonNode?) Update(string sobject, string id, JsonObject body, List<Action> undo)
+    private (int Status, JsonNode? Body) Update(string sobject, string id, JsonObject body)
     {
         if (!records.Table(sobject).TryGetValue(id, out var existing))
         {
@@ -179,48 +130,10 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         }
 
         faults.NoteWrite(sobject, extId);
-        var restore = records.Update(sobject, id, stored);
+        records.Update(sobject, id, stored);
         counters.Updates++;
-        undo.Add(() =>
-        {
-            restore();
-            counters.Updates--;
-        });
 
         return (204, null);
-    }
-
-    /// <summary>
-    /// A lookup given as a relationship reference, <c>"Account__r": { "External_Id__c": "ACC-1" }</c>, becomes the
-    /// target's Id in the lookup field. Returns the error Salesforce gives when no record has that external id.
-    /// </summary>
-    private JsonNode? ResolveRelationships(string sobject, JsonObject record)
-    {
-        foreach (var (name, value) in record.ToList())
-        {
-            if (value is not JsonObject reference)
-            {
-                continue;
-            }
-
-            var field = FakeSchema.Objects[sobject].FirstOrDefault(f => name.Equals(f.RelationshipName, StringComparison.OrdinalIgnoreCase));
-            if (field?.ReferenceTo is null)
-            {
-                return Errors("INVALID_FIELD", $"No such relationship '{name}' on {sobject}", name);
-            }
-
-            var (externalField, externalValue) = reference.Where(kv => kv.Key != "attributes").Select(kv => (kv.Key, Str(kv.Value))).FirstOrDefault();
-            var target = externalField is null ? null : records.Find(field.ReferenceTo, externalField, externalValue);
-            if (target is null)
-            {
-                return Errors("INVALID_FIELD",
-                    $"Foreign key external ID: {externalValue} not found for field {externalField} in entity {field.ReferenceTo}");
-            }
-
-            record.Remove(name);
-            record[field.Name] = target["Id"]!.GetValue<string>();
-        }
-        return null;
     }
 
     /// <summary>A lookup must point at a record that exists (and is of the right object).</summary>

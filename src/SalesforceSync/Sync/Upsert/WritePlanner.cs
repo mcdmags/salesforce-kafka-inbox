@@ -67,7 +67,7 @@ internal static class WritePlanner
         {
             var existing = current.Find(record.Record);
             var changes = RecordDiffer.Changes(record, existing, problems);
-            var links = new List<NewParentLink>();
+            var links = new List<ParentReference>();
             var depth = 0;
 
             foreach (var lookup in record.Lookups)
@@ -97,7 +97,7 @@ internal static class WritePlanner
                 }
                 else
                 {
-                    links.Add(new NewParentLink(lookup.Field, target.Create));
+                    links.Add(new ParentReference(lookup.Field, target.Create));
                 }
             }
 
@@ -139,7 +139,7 @@ internal static class WritePlanner
 
     /// <summary>A create for a new record (with its external id), an update if anything differs, else null.</summary>
     private static PlannedWrite? Write(NormalizedRecord record, CurrentRecord? existing, Dictionary<string, object?> changes,
-        List<NewParentLink> links, int depth)
+        List<ParentReference> links, int depth)
     {
         if (existing is not null && changes.Count == 0 && links.Count == 0)
         {
