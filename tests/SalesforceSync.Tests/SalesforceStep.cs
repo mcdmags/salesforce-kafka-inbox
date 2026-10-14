@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Inbox;
@@ -15,9 +17,17 @@ internal static class SalesforceStep
 {
     public static SalesforceBatchUpsertService Service(HttpClient http, IOptions<SalesforceOptions> options)
     {
-        return new(new NoDatabase(), new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
+        return new(new NoDatabase(), new SalesforceRestClient(http), SchemaCache(),
                 new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
                 NullLogger<SalesforceBatchUpsertService>.Instance);
+    }
+
+    /// <summary>A Describe cache of its own; with <paramref name="shared"/>, a pod sharing that cache with others.</summary>
+    public static SalesforceSchemaCache SchemaCache(IDistributedCache? shared = null, TimeProvider? clock = null)
+    {
+        return new(clock ?? TimeProvider.System, shared ?? new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())),
+            Options.Create(new SalesforceOptions { InstanceUrl = "https://fake.my.salesforce.com" }),
+            NullLogger<SalesforceSchemaCache>.Instance);
     }
 
     /// <summary>The Salesforce step never claims, records or takes a slot.</summary>

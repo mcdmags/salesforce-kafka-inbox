@@ -116,9 +116,19 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     /// Salesforce rejecting a lookup because its target isn't there (the target was deleted after the read) is the
     /// same situation as the read not finding it: the target is expected to arrive through its own sync, so the record
     /// waits for it rather than being dead-lettered.
+    /// <para>
+    /// Salesforce rejecting the RecordTypeId (the record type was deactivated or unassigned after the describe) is an
+    /// <see cref="SalesforceErrors.InvalidRecordType"/>, like the describe not offering it: retried, not dead-lettered.
+    /// </para>
     /// </summary>
     private static SalesforceError Translate(PlannedWrite write, SalesforceError e)
     {
+        if (e.Code is "INVALID_CROSS_REFERENCE_KEY"
+            && e.Fields?.Contains(SObjectSchema.RecordTypeIdField, StringComparer.OrdinalIgnoreCase) == true)
+        {
+            return new SalesforceError(write.ReferenceId, SalesforceErrors.InvalidRecordType, $"{e.Code}: {e.Message}", e.Fields);
+        }
+
         var targetMissing = e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED"
                             && write.LookupFields.Count > 0
                             && (e.Fields is not { Count: > 0 } || e.Fields.Any(write.LookupFields.Contains));

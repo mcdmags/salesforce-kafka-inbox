@@ -6,7 +6,7 @@ namespace SalesforceSync.Salesforce.SObjects;
 /// The Salesforce Account as this sync writes it. An instance is the record's complete desired state: a null
 /// property means "empty", and the diff clears the field if Salesforce has a value.
 /// </summary>
-[SObject("Account", ExternalIdField = "External_Id__c")]
+[SObject("Account", ExternalIdField = "External_Id__c", RecordType = "Business")]
 public sealed class AccountSObject
 {
     [JsonPropertyName("External_Id__c")] public string? ExternalId { get; set; }

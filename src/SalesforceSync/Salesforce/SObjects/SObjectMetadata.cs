@@ -5,7 +5,8 @@ using System.Text.Json.Serialization;
 namespace SalesforceSync.Salesforce.SObjects;
 
 /// <summary>
-/// What the attributes of an sObject class say: the object, its external id field, its fields and its lookups.
+/// What the attributes of an sObject class say: the object, its external id field, its record type, its fields and
+/// its lookups.
 /// Read by reflection once per class (see <see cref="SObjectMetadata{TSObject}"/>).
 /// </summary>
 public abstract class SObjectMetadata
@@ -14,6 +15,9 @@ public abstract class SObjectMetadata
     public required string SObject { get; init; }
 
     public required string ExternalIdField { get; init; }
+
+    /// <summary>Developer name of the record type of the class's records.</summary>
+    public required string RecordType { get; init; }
 
     /// <summary>API names of the value fields (everything except the external id and the lookups).</summary>
     public required IReadOnlyList<string> Fields { get; init; }
@@ -43,8 +47,8 @@ public abstract class SObjectMetadata
 /// <summary>
 /// <see cref="SObjectMetadata"/> of <typeparamref name="TSObject"/> plus compiled property getters. Built once per
 /// class (the static <see cref="Instance"/>), so turning an instance into a record costs no reflection. A class that
-/// is declared wrongly (a property without <c>[JsonPropertyName]</c>, no external id property, a lookup that isn't a
-/// string) fails here, the first time the class is used, rather than per event.
+/// is declared wrongly (a property without <c>[JsonPropertyName]</c>, no external id property, no record type, a lookup
+/// that isn't a string) fails here, the first time the class is used, rather than per event.
 /// </summary>
 public sealed class SObjectMetadata<TSObject> : SObjectMetadata where TSObject : class
 {
@@ -92,6 +96,11 @@ public sealed class SObjectMetadata<TSObject> : SObjectMetadata where TSObject :
     {
         var type = typeof(TSObject);
         var sobject = ObjectOf(type);
+        if (string.IsNullOrWhiteSpace(sobject.RecordType))
+        {
+            throw new InvalidOperationException($"{type.Name} needs [SObject(..., RecordType = \"<record type developer name>\")]");
+        }
+
         Func<TSObject, object?>? externalId = null;
         var fields = new List<(string, Func<TSObject, object?>)>();
         var lookups = new List<(SObjectLookupField, Func<TSObject, object?>)>();
@@ -128,6 +137,7 @@ public sealed class SObjectMetadata<TSObject> : SObjectMetadata where TSObject :
             {
                 SObject = sobject.Name,
                 ExternalIdField = sobject.ExternalIdField,
+                RecordType = sobject.RecordType,
                 Fields = [.. fields.Select(f => f.Item1)],
                 Lookups = [.. lookups.Select(l => l.Item1)]
             };

@@ -38,7 +38,12 @@ internal sealed class FakeRecords
     /// <summary>A valid 18-character id: key prefix, "FAKE", a counter, and the suffix that encodes their case.</summary>
     public string NewId(string sobject)
     {
-        var id = $"{FakeSchema.KeyPrefixOf(sobject)}FAKE{++_idCounter:D8}";
+        return Id18($"{FakeSchema.KeyPrefixOf(sobject)}FAKE{++_idCounter:D8}");
+    }
+
+    /// <summary>The 18-character form of a 15-character id: the id and the suffix that encodes its case.</summary>
+    public static string Id18(string id)
+    {
         const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
         var suffix = new char[3];
         for (var chunk = 0; chunk < 3; chunk++)

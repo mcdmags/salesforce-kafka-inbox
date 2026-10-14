@@ -16,20 +16,37 @@ public sealed record FakeField(
     string? ReferenceTo = null,
     int Digits = 0);
 
+/// <summary>A record type of the mock org, as Describe's <c>recordTypeInfos</c> lists it.</summary>
+public sealed record FakeRecordType(
+    string DeveloperName,
+    string Name,
+    string Id,
+    bool Active = true,
+    bool Available = true,
+    bool Master = false,
+    bool Default = false);
+
 /// <summary>
 /// The mock org's metadata (served by sObject Describe) and how it stores values, the way Salesforce does:
 /// unknown and read-only fields are rejected, numbers are rounded to the field's scale, date/time is kept to the second, a checkbox is never null,
-/// multi-select values are kept in picklist order, text is length-checked. Deliberately independent of the client's
+/// multi-select values are kept in picklist order, text is length-checked, a record type must be one of the object's
+/// that is active and available. Deliberately independent of the client's
 /// normalization, so tests catch a client that would make fields flap.
 /// </summary>
 public static class FakeSchema
 {
+    public const string RecordTypeIdField = "RecordTypeId";
+
+    /// <summary>The Master record type (its Id is the same in every org).</summary>
+    private static readonly FakeRecordType Master = new("Master", "Master", "012000000000000AAA", Available: false, Master: true);
+
     public static readonly IReadOnlyDictionary<string, IReadOnlyList<FakeField>> Objects =
         new Dictionary<string, IReadOnlyList<FakeField>>(StringComparer.OrdinalIgnoreCase)
         {
             ["Account"] =
             [
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
+                new(RecordTypeIdField, "reference", 18, ReferenceTo: "RecordType"),
                 new("External_Id__c", "string", 255),
                 new("Name", "string", 255, Nillable: false),
                 new("Rating", "picklist", 255),
@@ -49,6 +66,7 @@ public static class FakeSchema
             ["Profile__c"] =
             [
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
+                new(RecordTypeIdField, "reference", 18, ReferenceTo: "RecordType"),
                 new("Name", "string", 80),
                 new("External_Id__c", "string", 255),
                 new("Account__c", "reference", 18, ReferenceTo: "Account"),
@@ -64,6 +82,7 @@ public static class FakeSchema
             ["Account_Relationship__c"] =
             [
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
+                new(RecordTypeIdField, "reference", 18, ReferenceTo: "RecordType"),
                 new("Name", "string", 80),
                 new("External_Id__c", "string", 255),
                 new("Account__c", "reference", 18, ReferenceTo: "Account"),
@@ -74,6 +93,18 @@ public static class FakeSchema
                 new("CreatedDate", "datetime", Createable: false, Updateable: false, Nillable: false),
                 new("LastModifiedDate", "datetime", Createable: false, Updateable: false, Nillable: false)
             ]
+        };
+
+    /// <summary>
+    /// Every object's record types: one per synced object, with the developer name its sObject class declares, plus
+    /// Master (which every object has).
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, IReadOnlyList<FakeRecordType>> RecordTypes =
+        new Dictionary<string, IReadOnlyList<FakeRecordType>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Account"] = [Master, new("Business", "Business", FakeRecords.Id18("012FAKE00000001"), Default: true)],
+            ["Profile__c"] = [Master, new("Standard", "Standard", FakeRecords.Id18("012FAKE00000002"), Default: true)],
+            ["Account_Relationship__c"] = [Master, new("Standard", "Standard", FakeRecords.Id18("012FAKE00000003"), Default: true)]
         };
 
     /// <summary>The first three characters of an object's record Ids.</summary>
@@ -113,8 +144,25 @@ public static class FakeSchema
                 ["updateable"] = f.Updateable,
                 ["nillable"] = f.Nillable,
                 ["referenceTo"] = f.ReferenceTo is null ? [] : new JsonArray(f.ReferenceTo)
+            })]),
+            ["recordTypeInfos"] = new JsonArray([.. RecordTypes[sobject].Select(r => (JsonNode)new JsonObject
+            {
+                ["developerName"] = r.DeveloperName,
+                ["name"] = r.Name,
+                ["recordTypeId"] = r.Id,
+                ["active"] = r.Active,
+                ["available"] = r.Available,
+                ["master"] = r.Master,
+                ["defaultRecordTypeMapping"] = r.Default
             })])
         };
+    }
+
+    /// <summary>Whether records of the object can be given the record type with this (15- or 18-character) Id.</summary>
+    public static bool IsAssignableRecordType(string sobject, string id)
+    {
+        return RecordTypes.TryGetValue(sobject, out var recordTypes)
+               && recordTypes.Any(r => r.Active && r.Available && id.Length >= 15 && r.Id.StartsWith(id[..15], StringComparison.Ordinal));
     }
 
     /// <summary>The value Salesforce would store, or an error (code, message) it would return.</summary>
