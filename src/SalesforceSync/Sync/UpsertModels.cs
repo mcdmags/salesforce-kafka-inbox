@@ -49,11 +49,11 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
 
 /// <summary>
 /// What varies per synced object: how an inbox event becomes Salesforce records, and what to read from Salesforce
-/// to diff them and resolve their lookups. Everything else (claiming, ordering, coalescing, rate limits, batching,
+/// to diff them and resolve their lookups. Everything else (claiming, ordering, coalescing, batching,
 /// retries, dead-lettering) is <see cref="SalesforceBatchUpsertService"/>'s.
 /// </summary>
-/// <typeparam name="TEvent">The inbox payload, deserialized after the entity's pending events are merged.</typeparam>
-/// <param name="EntityType">The inbox entity type (sf_inbox.entity_type) this strategy syncs.</param>
+/// <typeparam name="TEvent">The inbox payload (the whole event envelope), deserialized after the entity's pending events are merged.</typeparam>
+/// <param name="EntityType">The entity type this strategy syncs: the name of the event's entity object (sf_event_type).</param>
 /// <param name="Map">Inbox event (with its entity key) -> the records to upsert together.</param>
 /// <param name="Queries">The batch's units -> the reads (at most 5 after chunking) the diff and lookups need.</param>
 public sealed record UpsertStrategy<TEvent>(

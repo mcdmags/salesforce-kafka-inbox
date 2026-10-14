@@ -2,18 +2,15 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using BenchmarkDotNet.Attributes;
 using SalesforceSync.Inbox;
-using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Benchmarks;
 
-/// <summary>CPU-only hot paths: header parsing, event coalescing, type-aware normalize + compare.</summary>
+/// <summary>CPU-only hot paths: event coalescing, type-aware normalize + compare.</summary>
 [MemoryDiagnoser]
 public class MicroBenchmarks
 {
-    private const string LimitHeader = "api-usage=10018/100000; api-bursts=1/750; per-app-api-usage=17/250(appName=sync)";
-
     private List<InboxEvent> _tenEvents = default!;
     private JsonElement _number;
     private JsonElement _datetime;
@@ -29,19 +26,20 @@ public class MicroBenchmarks
             Version: v,
             Payload: new JsonObject
             {
-                ["profileExternalId"] = "PRF-000001",
-                ["version"] = v,
-                ["account"] = new JsonObject { ["Name"] = "Acme", ["Description"] = $"v{v}" },
-                ["profile"] = new JsonObject { ["Score__c"] = v }
+                ["meta"] = new JsonObject { ["time"] = $"2026-10-14T01:02:03.{v:D3}Z" },
+                ["account"] = new JsonObject
+                {
+                    ["externalId"] = "ACC-000001",
+                    ["Name"] = "Acme",
+                    ["Description"] = $"v{v}",
+                    ["profile"] = new JsonObject { ["Score__c"] = v }
+                }
             }.ToJsonString(),
             RetryCount: 1)).ToList();
 
         _number = JsonDocument.Parse("87.50").RootElement.Clone();
         _datetime = JsonDocument.Parse("\"2026-10-12T01:02:03.000+0000\"").RootElement.Clone();
     }
-
-    [Benchmark]
-    public SalesforceLimitInfo? ParseLimitHeader() => SalesforceLimitInfo.Parse(LimitHeader);
 
     [Benchmark]
     public JsonObject CoalesceTenEvents() => SalesforceBatchUpsertService.Coalesce(_tenEvents);

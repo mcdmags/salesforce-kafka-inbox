@@ -9,6 +9,12 @@ public sealed class SalesforceOptions
     public string ClientId { get; set; } = "";
     public string ClientSecret { get; set; } = "";
 
+    /// <summary>
+    /// How this process names itself in the User-Agent, which Salesforce API logs (and the mock org's per-client
+    /// counters) show. Unset = machine name (the pod name in Kubernetes) and process id.
+    /// </summary>
+    public string? UserAgentInstance { get; set; }
+
     /// <summary>Salesforce does not return expires_in for client credentials; refresh proactively.</summary>
     public TimeSpan TokenLifetime { get; set; } = TimeSpan.FromMinutes(30);
 
@@ -22,7 +28,7 @@ public sealed class SalesforceOptions
     public int CompressRequestsLargerThan { get; set; } = 1024;
 
     /// <summary>
-    /// Salesforce error codes that won't succeed on retry; the account's events are dead-lettered immediately.
+    /// Salesforce error codes that won't succeed on retry; the entity's events are dead-lettered immediately.
     /// Unset = <see cref="SalesforceErrors.DefaultPermanentCodes"/>; setting it replaces the list.
     /// Codes not listed (and not "not attempted") are treated as transient and retried with backoff.
     /// </summary>

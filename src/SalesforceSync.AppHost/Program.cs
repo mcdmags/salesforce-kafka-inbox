@@ -1,6 +1,7 @@
 var builder = DistributedApplication.CreateBuilder(args);
 
-// Integration tests pass --AppHost:TestMode=true: no persistent volume, admin UIs, load generator or benchmarks.
+// --AppHost:TestMode=true runs a minimal app: no persistent volume, admin UIs, load generator or benchmarks.
+// (The integration tests don't use Aspire; they run on Testcontainers.)
 var testMode = bool.TryParse(builder.Configuration["AppHost:TestMode"], out var t) && t;
 
 // Infrastructure
@@ -14,7 +15,7 @@ if (!testMode) kafka.WithKafkaUI();
 // Mock Salesforce org (HTTP service; inspect it at /__fake/stats and /__fake/records/{sobject})
 var salesforce = builder.AddProject<Projects.SalesforceSync_FakeSalesforce_Server>("fake-salesforce")
     .WithEnvironment("FakeSalesforce__Latency", testMode ? "00:00:00" : "00:00:00.050")
-    // Matches the worker's SalesforceLimits (Enterprise, 15 Salesforce licenses: 100,000 + 15 x 1,000)
+    // Daily API allocation of an Enterprise org with 15 Salesforce licenses (100,000 + 15 x 1,000)
     .WithEnvironment("FakeSalesforce__DailyApiLimit", "115000")
     .WithHttpHealthCheck("/health");
 var salesforceUrl = salesforce.GetEndpoint("http");
@@ -42,7 +43,7 @@ if (!testMode)
     var benchDb = postgres.AddDatabase("benchdb");
     builder.AddProject<Projects.SalesforceSync_Benchmarks>("benchmarks")
         .WithReference(benchDb).WaitFor(benchDb)
-        .WithArgs("--filter", "*InboxDrain*")
+        .WithArgs("--filter", "*InboxDrain*", "*StreamingIngest*")
         .WithExplicitStart();
 }
 

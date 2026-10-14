@@ -9,27 +9,33 @@ public sealed class SalesforceTokenProvider(IHttpClientFactory httpFactory, IOpt
 {
     public const string HttpClientName = "salesforce-token";
 
-    private readonly SemaphoreSlim _lock = new(1, 1);
-    private string? _token;
-    private DateTimeOffset _expiresAt;
+    private sealed record CachedToken(string Value, DateTimeOffset ExpiresAt);
 
-    public async Task<string> GetTokenAsync(bool forceRefresh, CancellationToken ct)
+    private readonly SemaphoreSlim _lock = new(1, 1);
+    private volatile CachedToken? _token; // replaced as a whole, so lock-free readers never pair a token with another's expiry
+
+    /// <param name="rejected">
+    /// A token Salesforce just answered 401 to. It is replaced only if it is still the cached one, so when many
+    /// requests fail at once, one of them fetches a new token and the rest reuse it.
+    /// </param>
+    public async Task<string> GetTokenAsync(string? rejected, CancellationToken ct)
     {
-        if (!forceRefresh && _token is not null && DateTimeOffset.UtcNow < _expiresAt) return _token;
+        if (Usable(_token, rejected) is { } cached) return cached;
 
         await _lock.WaitAsync(ct);
         try
         {
-            if (!forceRefresh && _token is not null && DateTimeOffset.UtcNow < _expiresAt) return _token;
+            if (Usable(_token, rejected) is { } refreshed) return refreshed; // another request just refreshed it
 
             var o = options.Value;
             using var client = httpFactory.CreateClient(HttpClientName);
-            using var res = await client.PostAsync(o.TokenUrl, new FormUrlEncodedContent(new Dictionary<string, string>
+            using var form = new FormUrlEncodedContent(new Dictionary<string, string>
             {
                 ["grant_type"] = "client_credentials",
                 ["client_id"] = o.ClientId,
                 ["client_secret"] = o.ClientSecret
-            }), ct);
+            });
+            using var res = await client.PostAsync(o.TokenUrl, form, ct);
 
             if (!res.IsSuccessStatusCode)
                 throw new HttpRequestException(
@@ -38,15 +44,17 @@ public sealed class SalesforceTokenProvider(IHttpClientFactory httpFactory, IOpt
             var body = await res.Content.ReadFromJsonAsync<TokenResponse>(cancellationToken: ct)
                        ?? throw new InvalidOperationException("Empty token response");
 
-            _token = body.AccessToken;
-            _expiresAt = DateTimeOffset.UtcNow + o.TokenLifetime;
-            return _token;
+            _token = new CachedToken(body.AccessToken, DateTimeOffset.UtcNow + o.TokenLifetime);
+            return body.AccessToken;
         }
         finally
         {
             _lock.Release();
         }
     }
+
+    private static string? Usable(CachedToken? token, string? rejected)
+        => token is not null && token.Value != rejected && DateTimeOffset.UtcNow < token.ExpiresAt ? token.Value : null;
 
     private sealed record TokenResponse([property: JsonPropertyName("access_token")] string AccessToken);
 }
