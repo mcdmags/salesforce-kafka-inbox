@@ -6,10 +6,17 @@ namespace SalesforceSync.Salesforce;
 public sealed record WriteEcho(string Object, string ExternalId, string Field, string Value);
 
 /// <summary>
-/// Detects "flapping" fields: the sync writes a value, Salesforce stores it differently (a normalization rule is
-/// missing), so the next identical event sees a difference and writes it again, forever. A field counts as flapping
-/// when, after two consecutive identical writes, Salesforce held the same different value both times. A person
-/// editing the record in between doesn't trigger it. Per process and bounded; it only feeds a warning.
+/// Detects "flapping" fields: the sync writes a value, Salesforce stores it differently, so the next identical event
+/// sees a difference and writes it again, forever: an extra write per event and a field that never matches.
+/// For example, with a before-save flow in the org that adds "https://" to Account.Website:
+///   1. An event has Website = "example.com". The sync writes it; Salesforce stores "https://example.com".
+///   2. The next event has "example.com" again. The read shows "https://example.com", so the sync writes it again.
+///   3. Salesforce stores "https://example.com" again: same value sent, same different value stored, twice in a row.
+/// Causes are org automation (a trigger, flow or workflow field update) that rewrites the value, or a storage rule
+/// <see cref="FieldValues"/> doesn't model. Rules it does model can't flap: Amount = 12.345 on a 2-decimal field is
+/// rounded and sent as 12.35, which then matches. A field counts as flapping when, after two consecutive identical
+/// writes, Salesforce held the same different value both times. A person editing the record in between doesn't
+/// trigger it. Per process and bounded; it only feeds a warning.
 /// </summary>
 public sealed class WriteEchoTracker
 {
