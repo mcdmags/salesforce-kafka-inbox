@@ -11,7 +11,7 @@ public static class DbContextFactoryExtensions
     /// <summary>
     /// Runs <paramref name="unit"/> in a transaction and commits. On a retry, the context's change tracker is cleared and a
     /// new transaction begun, so a unit that tracks entities never re-sends the state of a failed attempt. Anything the
-    /// unit keeps outside the lambda (see <c>InboxRepository.ClaimAsync</c>) survives the attempts.
+    /// unit keeps outside the lambda survives the attempts.
     /// </summary>
     public static async Task<T> RunInTransactionAsync<T>(this IDbContextFactory<SyncDbContext> contexts,
         Func<SyncDbContext, CancellationToken, Task<T>> unit, CancellationToken ct)

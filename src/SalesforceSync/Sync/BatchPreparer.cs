@@ -1,10 +1,10 @@
 namespace SalesforceSync.Sync;
 
-/// <summary>Decides what to do with the rows of a claim, before Salesforce is involved. No I/O.</summary>
+/// <summary>Decides what to do with the rows of a batch, before Salesforce is involved. No I/O.</summary>
 internal static class BatchPreparer
 {
     /// <summary>
-    /// Decides, per claimed entity, what to do with its rows. Rows that can't be read (or whose event is about another
+    /// Decides, per entity of the batch, what to do with its rows. Rows that can't be read (or whose event is about another
     /// entity than the row says) are invalid on their own. Of the rest only the newest event counts
     /// (<see cref="Coalesce{TEvent}"/>): the others are superseded, and the newest too if its time is not after the
     /// entity's watermark (a replay, a redelivery, or an older event that arrived late). Otherwise it is mapped to
@@ -60,7 +60,7 @@ internal static class BatchPreparer
             }
             else if (!string.Equals(read.EntityId, entityId, StringComparison.Ordinal))
             {
-                // The lease is on the row's entity; writing another entity under it would bypass that entity's own
+                // Rows are ordered per entity_id; writing another entity from this row would bypass that entity's own order
                 invalid.Add((row.Id, $"{strategy.EntityType} {entityId}: the event is about '{read.EntityId}', but the row's entity_id is '{entityId}'"));
             }
             else
@@ -72,7 +72,7 @@ internal static class BatchPreparer
     }
 
     /// <summary>
-    /// An entity's claimed events become one write: the event with the newest time. Every event carries the full
+    /// An entity's events in the batch become one write: the event with the newest time. Every event carries the full
     /// record, so the newest one is the whole desired state and the older ones add nothing (merging them in would
     /// keep a field the newest event no longer has). Two events with the same time: the one stored later (the higher
     /// row id) counts as newer.

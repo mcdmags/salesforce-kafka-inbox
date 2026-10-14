@@ -25,7 +25,7 @@ public static class SyncServiceCollectionExtensions
     /// <summary>
     /// The worker: options (validated at startup), the Postgres data source (<c>ConnectionStrings:inboxdb</c>), the
     /// inbox schema, the rate-limited Salesforce client (real OAuth endpoint, or the in-memory org with
-    /// <c>Salesforce:UseFake</c>), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the worker loops.
+    /// <c>Salesforce:UseFake</c>), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the worker loop.
     /// </summary>
     public static IHostApplicationBuilder AddSalesforceSyncWorker(this IHostApplicationBuilder builder)
     {
@@ -152,10 +152,10 @@ public static class SyncServiceCollectionExtensions
     /// <summary>
     /// Rate limiting shared through Postgres, for the client from <see cref="AddSalesforceClient"/>: the token bucket,
     /// daily budget and pause (<see cref="SalesforceRateLimiter"/>, configured at startup by
-    /// <see cref="RateLimitInitializer"/>), the global concurrency slots (advisory locks, at most
-    /// <see cref="SyncOptions.MaxConcurrentRequests"/> batches across all pods) and <see cref="SalesforceRateLimitHandler"/>,
+    /// <see cref="RateLimitInitializer"/>), the gate that holds batches back during its pause and
+    /// <see cref="SalesforceRateLimitHandler"/>,
     /// inserted as the outermost handler whatever else is added, so every attempt costs a token:
-    /// rate limiter -> gzip -> auth. Register it after <see cref="InboxSchemaInitializer"/> and before the worker loops
+    /// rate limiter -> gzip -> auth. Register it after <see cref="InboxSchemaInitializer"/> and before the worker loop
     /// (hosted services start in registration order). <see cref="SalesforceBatchUpsertService"/> needs it.
     /// </summary>
     public static IHttpClientBuilder AddSalesforceRateLimiting(this IHttpClientBuilder salesforce)
@@ -163,10 +163,6 @@ public static class SyncServiceCollectionExtensions
         var services = salesforce.Services;
         services.AddSingleton<SalesforceRateLimiter>();
         services.AddHostedService<RateLimitInitializer>();
-        services.AddSingleton(sp => new SalesforceConcurrencySlots(
-            sp.GetRequiredService<IDbContextFactory<SyncDbContext>>(),
-            sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests,
-            sp.GetRequiredService<ILogger<SalesforceConcurrencySlots>>()));
         services.AddSingleton<ISalesforceBatchGate, SalesforceBatchGate>();
         services.AddTransient<SalesforceRateLimitHandler>();
 
@@ -180,7 +176,7 @@ public static class SyncServiceCollectionExtensions
     /// <summary>
     /// Inbox -> Salesforce: the database context, one engine, and per synced object its mappers (payload ->
     /// sObject) and its strategy. Register a new object's mapper and <see cref="ISalesforceEntitySync"/> here (its
-    /// <see cref="InboxRow"/> type is mapped in <see cref="SyncDbContext"/>): its inbox table is created at startup, the consumer subscribes to its topic and the worker loops pick it up.
+    /// <see cref="InboxRow"/> type is mapped in <see cref="SyncDbContext"/>): its inbox table is created at startup, the consumer subscribes to its topic and the worker loop picks it up.
     /// </summary>
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {

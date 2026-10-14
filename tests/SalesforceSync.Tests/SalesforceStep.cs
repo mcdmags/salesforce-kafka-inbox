@@ -20,7 +20,7 @@ internal static class SalesforceStep
                 NullLogger<SalesforceBatchUpsertService>.Instance);
     }
 
-    /// <summary>The Salesforce step never claims, records or takes a slot.</summary>
+    /// <summary>The Salesforce step never reads, records or checks the gate.</summary>
     private sealed class NoDatabase : ISalesforceBatchGate, IRepository<AccountInboxRow>
     {
         private static NotSupportedException NotUsed()
@@ -28,7 +28,7 @@ internal static class SalesforceStep
             return new("The Salesforce step does not use the inbox");
         }
 
-        public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct)
+        public Task<bool> IsOpenAsync(CancellationToken ct)
         {
             throw NotUsed();
         }
@@ -38,27 +38,27 @@ internal static class SalesforceStep
             throw NotUsed();
         }
 
-        public Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct)
+        public Task<InboxBatch> ReadBatchAsync(string entityType, CancellationToken ct)
         {
             throw NotUsed();
         }
 
-        public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
+        public Task RecordAsync(InboxBatch batch, BatchOutcomes outcomes, CancellationToken ct)
         {
             throw NotUsed();
         }
 
-        public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
+        public Task HoldAsync(InboxBatch batch, string error, CancellationToken ct)
         {
             throw NotUsed();
         }
 
-        public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
+        public Task DeferAsync(InboxBatch batch, TimeSpan delay, CancellationToken ct)
         {
             throw NotUsed();
         }
 
-        public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
+        public Task FailAllAsync(InboxBatch batch, string error, string? code, CancellationToken ct)
         {
             throw NotUsed();
         }

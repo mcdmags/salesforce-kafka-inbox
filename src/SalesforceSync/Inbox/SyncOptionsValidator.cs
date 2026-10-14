@@ -4,7 +4,7 @@ using SalesforceSync.Sync.Upsert;
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// Fails startup on values that would make the workers silently do nothing (no slots, no loops) or exceed what
+/// Fails startup on values that would make the workers silently do nothing (empty batches) or exceed what
 /// one batch can carry.
 /// </summary>
 public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
@@ -27,8 +27,6 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
             }
         }
 
-        AtLeastOne(nameof(o.Workers), o.Workers);
-        AtLeastOne(nameof(o.MaxConcurrentRequests), o.MaxConcurrentRequests);
         if (o.BatchSize is < 1 or > ReadQueryBuilder.MaxEntitiesPerBatch)
         {
             errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {ReadQueryBuilder.MaxEntitiesPerBatch} " +
@@ -36,7 +34,6 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
         }
 
         AtLeastOne(nameof(o.MaxEventsPerEntity), o.MaxEventsPerEntity);
-        Positive(nameof(o.Lease), o.Lease);
         Positive(nameof(o.UnknownOutcomeHold), o.UnknownOutcomeHold);
         AtLeastOne(nameof(o.MaxRetries), o.MaxRetries);
         if (o.RetryBaseDelay < TimeSpan.Zero || o.MaxRetryDelay < o.RetryBaseDelay)

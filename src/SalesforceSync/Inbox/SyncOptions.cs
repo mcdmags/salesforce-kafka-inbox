@@ -6,12 +6,6 @@ public sealed class SyncOptions
 {
     public const string Section = "Sync";
 
-    /// <summary>Parallel worker loops in this process.</summary>
-    public int Workers { get; set; } = 4;
-
-    /// <summary>Max in-flight Salesforce batches across ALL processes.</summary>
-    public int MaxConcurrentRequests { get; set; } = 6;
-
     /// <summary>
     /// Entities per batch, 1 to <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/> (100): a batch is read with one
     /// Composite request, which carries 5 queries of 100 external ids.
@@ -19,13 +13,11 @@ public sealed class SyncOptions
     public int BatchSize { get; set; } = 75;
 
     /// <summary>
-    /// Pending events of one entity taken per claim (the oldest first). An event is the full record, so only the
-    /// newest of them is written; the bound keeps a deep backlog for one entity from being leased and loaded whole.
-    /// What is left is taken by the following claims.
+    /// Pending events of one entity read per batch (the oldest first). An event is the full record, so only the
+    /// newest of them is written; the bound keeps a deep backlog for one entity from being loaded whole.
+    /// What is left is read by the following batches.
     /// </summary>
     public int MaxEventsPerEntity { get; set; } = 20;
-
-    public TimeSpan Lease { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
     /// How long an entity is left alone after a write to Salesforce whose outcome never arrived (timeout, lost

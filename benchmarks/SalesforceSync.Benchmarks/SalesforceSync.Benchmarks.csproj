@@ -19,11 +19,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Test/benchmark-only claim audit used by the correctness check -->
-    <None Include="..\..\sql\claim-audit.sql" Link="claim-audit.sql" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
-
-  <ItemGroup>
     <ProjectReference Include="..\..\src\SalesforceSync\SalesforceSync.csproj" />
     <ProjectReference Include="..\..\src\SalesforceSync.FakeSalesforce\SalesforceSync.FakeSalesforce.csproj" />
   </ItemGroup>

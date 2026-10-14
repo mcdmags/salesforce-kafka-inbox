@@ -30,8 +30,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         var heldAt = DateTime.UtcNow;
         held.Status.Should().Be("pending");
         held.RetryCount.Should().Be(0, "an unknown outcome doesn't spend a retry");
-        held.LockToken.Should().BeNull("the old worker can't record anything on it any more");
-        held.LockedUntil.Should().BeAfter(heldAt.AddSeconds(1)).And.BeBefore(heldAt + Hold + TimeSpan.FromSeconds(1));
+        held.NextAttemptAt.Should().BeAfter(heldAt.AddSeconds(1)).And.BeBefore(heldAt + Hold + TimeSpan.FromSeconds(1));
         ((string?)(await app.GetRecordAsync("Account", acct))?["Description"]).Should().Be("v1", "Salesforce did apply the write");
 
         // A newer event arrives during the hold and has to wait, although nobody is working on the account
@@ -39,15 +38,14 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         await Eventually.ValueAsync(() => app.GetInboxRowsAsync(acct), rows => rows.Count == 2, "v2 to be stored");
         await Task.Delay(TimeSpan.FromSeconds(1.5));
         var during = await app.GetInboxRowsAsync(acct);
-        DateTime.UtcNow.Should().BeBefore(held.LockedUntil!.Value, "the check must fall inside the hold");
-        during.Should().OnlyContain(r => r.Status == "pending" && r.RetryCount == 0, "nothing of a held entity may be claimed");
-        during[1].LockToken.Should().BeNull();
+        DateTime.UtcNow.Should().BeBefore(held.NextAttemptAt, "the check must fall inside the hold");
+        during.Should().OnlyContain(r => r.Status == "pending" && r.RetryCount == 0, "nothing of a held entity may be read");
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v1");
 
         // After the hold, normal processing converges: read, diff, write the newest
         var settled = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
         settled.Should().Equal((1L, "superseded"), (2L, "done"));
-        DateTime.UtcNow.Should().BeOnOrAfter(held.LockedUntil!.Value, "nothing was processed before the hold ended");
+        DateTime.UtcNow.Should().BeOnOrAfter(held.NextAttemptAt, "nothing was processed before the hold ended");
 
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v2");
         ((decimal?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Score__c"]).Should().Be(2m);

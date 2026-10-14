@@ -7,7 +7,7 @@ namespace SalesforceSync.Sync;
 /// <summary>
 /// What varies per synced object: how to read an event's entity id and meta (time and type), how an
 /// event becomes Salesforce records, and what to read from Salesforce to diff them and resolve their lookups.
-/// Everything else (claiming, ordering, coalescing, rate limits, batching, retries, dead-lettering) is
+/// Everything else (reading the inbox, ordering, coalescing, rate limits, batching, retries, dead-lettering) is
 /// <see cref="SalesforceBatchUpsertService"/>'s. The engine, the Kafka consumer and the SQL never name an event
 /// field: they go through <paramref name="EntityId"/> and <paramref name="Meta"/>.
 /// </summary>
@@ -29,7 +29,7 @@ public sealed record UpsertStrategy<TEvent>(
     /// <summary>
     /// Reads and validates a raw event: valid JSON for <typeparamref name="TEvent"/>, an entity with a non-empty id,
     /// a time with an explicit offset, and a type of inserted or updated. The Kafka consumer admits only events that pass (anything else can never
-    /// be synced), and the engine reads claimed rows the same way.
+    /// be synced), and the engine reads inbox rows the same way.
     /// </summary>
     /// <returns>False with <paramref name="problem"/> saying why the event can never be synced.</returns>
     public bool TryRead(string json, [NotNullWhen(true)] out ReadEvent<TEvent>? read, [NotNullWhen(false)] out string? problem)

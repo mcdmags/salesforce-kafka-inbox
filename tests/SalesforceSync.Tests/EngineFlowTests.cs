@@ -11,7 +11,7 @@ using SalesforceSync.Sync.Mapping;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The engine's flow end to end without a database: a claim handed to it, the in-memory org behind the real client,
+/// The engine's flow end to end without a database: a batch handed to it, the in-memory org behind the real client,
 /// and a recording inbox. What is asserted is which inbox operation each kind of result leads to.
 /// </summary>
 public sealed class EngineFlowTests
@@ -25,7 +25,7 @@ public sealed class EngineFlowTests
     private readonly Interceptor _http = new();
 
     [Fact]
-    public async Task Nothing_is_claimed_while_there_is_no_capacity()
+    public async Task Nothing_is_read_while_the_rate_limiter_pauses()
     {
         _gate.Open = false;
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
@@ -36,12 +36,11 @@ public sealed class EngineFlowTests
     }
 
     [Fact]
-    public async Task An_empty_claim_is_nothing_to_do()
+    public async Task An_empty_batch_is_nothing_to_do()
     {
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
 
-        _inbox.Calls.Should().Equal("claim account");
-        _gate.Released.Should().Be(1, "the slot is given back");
+        _inbox.Calls.Should().Equal("read account");
     }
 
     [Fact]
@@ -59,19 +58,17 @@ public sealed class EngineFlowTests
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(4);
 
         ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("new");
-        _inbox.Calls.Should().Equal("claim account", "record");
+        _inbox.Calls.Should().Equal("read account", "record");
         var outcomes = _inbox.Recorded!;
         outcomes.Synced.Should().ContainSingle().Which.Should().Be(
             new SyncedEntity("ACC-1", BatchPreparer.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T02:00:00Z")), 2));
         outcomes.Superseded.Should().BeEquivalentTo([1L, 4L], "an older event, and one that is not newer than the watermark");
         outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.EventId == 3 && f.Code == SalesforceErrors.InvalidEvent);
-        outcomes.Released.Should().BeEmpty();
         outcomes.Failed.Should().BeEmpty();
-        _gate.Released.Should().Be(1);
     }
 
     [Fact]
-    public async Task A_write_whose_answer_is_lost_holds_every_claimed_row()
+    public async Task A_write_whose_answer_is_lost_holds_every_row_of_the_batch()
     {
         _inbox.Rows.AddRange([Row(1, "ACC-1", "2026-10-14T01:00:00Z"), Row(2, "ACC-1", "2026-10-14T02:00:00Z")]);
         _org.LoseResponsesFor("Account", "ACC-1", 1);
@@ -124,7 +121,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal(["claim account", "fail all: refused ()"],
+        _inbox.Calls.Should().Equal(["read account", "fail all: refused ()"],
             "every event is retried and none is marked done, not even NEW's, whose call succeeded");
     }
 
@@ -153,7 +150,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim account", "hold");
+        _inbox.Calls.Should().Equal("read account", "hold");
     }
 
     [Fact]
@@ -164,7 +161,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync(processed: 0);
 
-        _inbox.Calls.Should().Equal("claim account", "defer 00:00:07");
+        _inbox.Calls.Should().Equal("read account", "defer 00:00:07");
     }
 
     // ---------- Failures of the read ----------
@@ -194,14 +191,14 @@ public sealed class EngineFlowTests
     }
 
     [Fact]
-    public async Task A_read_cut_off_by_the_lease_is_retried_not_held_because_nothing_was_written()
+    public async Task A_read_that_times_out_is_retried_not_held_because_nothing_was_written()
     {
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
-        _http.OnRead = _ => throw new TaskCanceledException("The lease cutoff");
+        _http.OnRead = _ => throw new TaskCanceledException("The timeout");
 
         await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None);
 
-        _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: The lease cutoff ()");
+        _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: The timeout ()");
     }
 
     // ---------- Grouping ----------
@@ -228,7 +225,9 @@ public sealed class EngineFlowTests
 
         outcomes.Synced.Should().Equal(new SyncedEntity("A", 10, 1), new SyncedEntity("B", 20, 2));
         outcomes.Superseded.Should().Equal(9L);
-        outcomes.Released.Should().Equal(3L);
+        outcomes.Synced.Select(s => s.EventId).Concat(outcomes.Superseded)
+            .Concat(outcomes.Dead.Select(d => d.EventId)).Concat(outcomes.Failed.Select(f => f.EventId))
+            .Should().NotContain(3L, "an entity not attempted stays pending as it is");
         outcomes.Dead.Should().Equal(new FailedEvent(8, "bad", SalesforceErrors.InvalidEvent),
             new FailedEvent(4, "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));
         outcomes.Failed.Should().Equal(new FailedEvent(5, "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));
@@ -330,20 +329,13 @@ public sealed class EngineFlowTests
         }
     }
 
-    private sealed class Gate : ISalesforceBatchGate, IAsyncDisposable
+    private sealed class Gate : ISalesforceBatchGate
     {
         public bool Open { get; set; } = true;
-        public int Released { get; private set; }
 
-        public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct)
+        public Task<bool> IsOpenAsync(CancellationToken ct)
         {
-            return Task.FromResult<IAsyncDisposable?>(Open ? this : null);
-        }
-
-        public ValueTask DisposeAsync()
-        {
-            Released++;
-            return ValueTask.CompletedTask;
+            return Task.FromResult(Open);
         }
     }
 
@@ -359,30 +351,30 @@ public sealed class EngineFlowTests
             return Call($"add {entityId}");
         }
 
-        public Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct)
+        public Task<InboxBatch> ReadBatchAsync(string entityType, CancellationToken ct)
         {
-            Calls.Add($"claim {entityType}");
-            return Task.FromResult(new InboxClaim(entityType, Guid.NewGuid(), Rows, Synced));
+            Calls.Add($"read {entityType}");
+            return Task.FromResult(new InboxBatch(entityType, Rows, Synced));
         }
 
-        public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
+        public Task RecordAsync(InboxBatch batch, BatchOutcomes outcomes, CancellationToken ct)
         {
             Calls.Add("record");
             Recorded = outcomes;
             return Task.CompletedTask;
         }
 
-        public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
+        public Task HoldAsync(InboxBatch batch, string error, CancellationToken ct)
         {
             return Call("hold");
         }
 
-        public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
+        public Task DeferAsync(InboxBatch batch, TimeSpan delay, CancellationToken ct)
         {
             return Call($"defer {delay}");
         }
 
-        public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
+        public Task FailAllAsync(InboxBatch batch, string error, string? code, CancellationToken ct)
         {
             return Call($"fail all: {error} ({code})");
         }

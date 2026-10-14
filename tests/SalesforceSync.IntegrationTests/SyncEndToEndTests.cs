@@ -174,7 +174,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 5);
         inbox.Should().OnlyContain(r => r.Status == "done" || r.Status == "superseded",
-            "an event claimed together with a newer one of its account is superseded, the rest are written");
+            "an event read together with a newer one of its account is superseded, the rest are written");
         inbox[^1].Should().Be((5L, "done"));
 
         // Exactly the v5 record, however the five events were batched: nothing of an older event survives
@@ -236,7 +236,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Redelivery_claimed_together_with_the_original_is_written_once()
+    public async Task Redelivery_read_together_with_the_original_is_written_once()
     {
         var acct = SyncFixture.NewAccountId();
         var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, []);
@@ -302,17 +302,17 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Older_event_claimed_together_with_a_newer_one_is_superseded_in_the_same_claim()
+    public async Task Older_event_read_together_with_a_newer_one_is_superseded_in_the_same_batch()
     {
         var acct = SyncFixture.NewAccountId();
         var newer = SyncFixture.AccountEvent(acct, 9, new JsonObject { ["name"] = "newer" }, []);
         var older = SyncFixture.AccountEvent(acct, 4, new JsonObject { ["name"] = "older" }, []);
 
-        // The newer event is stored first, the older one after it; one claim takes both
+        // The newer event is stored first, the older one after it; one batch reads both
         await app.InsertIntoInboxAsync(acct, newer, older);
 
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().Equal((4L, "superseded"), (9L, "done"));
-        (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("only the newest event of a claim is written")
+        (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("only the newest event of a batch is written")
             .Which["Name"]!.GetValue<string>().Should().Be("newer");
     }
 

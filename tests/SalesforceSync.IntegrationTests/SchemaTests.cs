@@ -17,8 +17,8 @@ public sealed class SchemaTests(SyncFixture app)
         var before = await TablesAndIndexesAsync();
         before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_sync_state", "sf_rate_limit", "sf_api_usage"]);
         before.Should().Contain([
-            "sf_account_inbox_ready", "sf_account_inbox_pending", "sf_account_inbox_leased", "sf_account_inbox_pkey",
-            "sf_account_relationship_inbox_ready", "sf_account_relationship_inbox_pending", "sf_account_relationship_inbox_leased"]);
+            "sf_account_inbox_ready", "sf_account_inbox_pending", "sf_account_inbox_pkey",
+            "sf_account_relationship_inbox_ready", "sf_account_relationship_inbox_pending"]);
         before.Should().NotContain("sf_inbox", "there is no shared inbox any more");
 
         await InboxSchema.EnsureCreatedAsync(app.Contexts, InboxTables);
@@ -41,7 +41,7 @@ public sealed class SchemaTests(SyncFixture app)
         var account = await Columns(SyncFixture.InboxTable());
         account.Select(c => c.Split(' ')[0]).Should().Equal(
             "id", "entity_id", "payload", "status", "retry_count", "last_updated", "last_error", "last_error_code",
-            "next_attempt_at", "locked_until", "lock_token", "received_at");
+            "next_attempt_at", "received_at");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await conn.ExecuteScalarAsync<long>("select count(*) from pg_proc where proname like 'sf\\_event\\_%'"))
             .Should().Be(0, "no SQL function reads inside an event");

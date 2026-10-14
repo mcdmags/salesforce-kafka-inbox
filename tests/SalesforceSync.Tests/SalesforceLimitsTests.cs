@@ -36,15 +36,6 @@ public sealed class SalesforceLimitsTests
         result.FailureMessage.Should().Contain("SalesforceLimits:DailyApiAllocation");
     }
 
-    [Fact]
-    public void More_concurrent_requests_than_the_org_allows_fails_startup()
-    {
-        var result = Validate(Limits(concurrentLongRunningLimit: 5), new SyncOptions { MaxConcurrentRequests = 6 });
-
-        result.Failed.Should().BeTrue();
-        result.FailureMessage.Should().Contain("MaxConcurrentRequests (6) exceeds the org's limit of 5");
-    }
-
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
@@ -191,17 +182,6 @@ public sealed class SalesforceLimitsTests
     }
 
     [Fact]
-    public void Lease_must_outlast_the_request_timeout()
-    {
-        // A call that is merely slow must end (or be given up on) while its entities are still leased
-        var limits = Limits();
-        limits.RequestTimeout = TimeSpan.FromSeconds(90);
-
-        Validate(limits, new SyncOptions { Lease = TimeSpan.FromSeconds(90) }).FailureMessage.Should().Contain("Sync:Lease");
-        Validate(limits, new SyncOptions { Lease = TimeSpan.FromSeconds(91) }).Succeeded.Should().BeTrue();
-    }
-
-    [Fact]
     public void Unknown_outcome_hold_defaults_to_the_Salesforce_api_timeout_and_must_be_positive()
     {
         new SyncOptions().UnknownOutcomeHold.Should().Be(SalesforceLimitsOptions.MaxApiTimeout);
@@ -218,11 +198,9 @@ public sealed class SalesforceLimitsTests
         return new() { DailyApiAllocation = 115_000, ConcurrentLongRunningLimit = concurrentLongRunningLimit };
     }
 
-    private static ValidateOptionsResult Validate(SalesforceLimitsOptions limits, SyncOptions? sync = null,
-        RateLimitOptions? rate = null)
+    private static ValidateOptionsResult Validate(SalesforceLimitsOptions limits, RateLimitOptions? rate = null)
     {
-        return new SalesforceLimitsValidator(Options.Create(sync ?? new SyncOptions()), Options.Create(rate ?? new RateLimitOptions()))
-                .Validate(null, limits);
+        return new SalesforceLimitsValidator(Options.Create(rate ?? new RateLimitOptions())).Validate(null, limits);
     }
 
     private static readonly NpgsqlDataSource Db = NpgsqlDataSource.Create("Host=unused");

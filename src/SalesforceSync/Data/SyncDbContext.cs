@@ -9,8 +9,8 @@ namespace SalesforceSync.Data;
 /// <summary>
 /// The sync's tables as EF sees them. The schema itself stays sql/schema.sql (partial indexes, the table template,
 /// views, an advisory lock: not expressible as migrations), so this model only describes it; an integration test
-/// checks the two against a real database. The claim's statements are raw SQL (<see cref="InboxSql"/>) run through
-/// <c>Database.SqlQueryRaw</c>, since a recursive CTE with FOR UPDATE SKIP LOCKED has no LINQ form.
+/// checks the two against a real database. The batch read is raw SQL (<see cref="InboxSql"/>) run through
+/// <c>Database.SqlQueryRaw</c>, so that it is the ordered index scan it was written for.
 /// <para>
 /// To sync another object: a subclass of <see cref="InboxRow"/>, a <c>DbSet</c> here and its
 /// <see cref="ConfigureInbox{TRow}"/> line in <see cref="OnModelCreating"/>.
@@ -85,8 +85,6 @@ public class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(
         e.Property(r => r.LastError).HasColumnName("last_error");
         e.Property(r => r.LastErrorCode).HasColumnName("last_error_code");
         e.Property(r => r.NextAttemptAt).HasColumnName("next_attempt_at").HasDefaultValueSql("now()");
-        e.Property(r => r.LockedUntil).HasColumnName("locked_until");
-        e.Property(r => r.LockToken).HasColumnName("lock_token");
         e.Property(r => r.ReceivedAt).HasColumnName("received_at").HasDefaultValueSql("now()");
     }
 }

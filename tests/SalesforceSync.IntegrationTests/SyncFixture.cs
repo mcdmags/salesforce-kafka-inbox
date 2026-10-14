@@ -17,10 +17,11 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// The whole sync, started once per xUnit collection: Postgres and Kafka in containers (Testcontainers), the mock
-/// Salesforce org on Kestrel in this process, and <see cref="Pods"/> worker pods, each an in-process
-/// <see cref="Microsoft.Extensions.Hosting.IHost"/> wired by the worker's own registrations. Tests produce to Kafka
-/// and assert on the mock org and the Postgres inbox. Subclasses reshape the deployment (pods, per-pod settings, the
-/// org's behavior) in their constructor through <see cref="WorkerSettings"/> and <see cref="FakeOrgSettings"/>.
+/// Salesforce org on Kestrel in this process, and one worker pod, an in-process
+/// <see cref="Microsoft.Extensions.Hosting.IHost"/> wired by the worker's own registrations (one sequential worker:
+/// nothing keeps a second one off the same rows). Tests produce to Kafka and assert on the mock org and the Postgres
+/// inbox. Subclasses reshape the deployment (the worker's settings, the org's behavior) in their constructor through
+/// <see cref="WorkerSettings"/> and <see cref="FakeOrgSettings"/>.
 /// Requires only Docker.
 /// </summary>
 public class SyncFixture : IAsyncLifetime
@@ -36,38 +37,23 @@ public class SyncFixture : IAsyncLifetime
     /// </summary>
     public static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-    /// <summary>The tests' own Postgres sessions, so chaos tests can drop everyone else's connections.</summary>
-    public const string TestsApplicationName = "integration-tests";
-
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromMinutes(5);
 
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17")
         .WithDatabase("inboxdb")
         .WithUsername("postgres")
         .WithPassword("postgres")
-        // Room for several pods' pools plus the tests' own connections
+        // Room for the pod's pool plus the tests' own connections
         .WithCommand("-c", "max_connections=300")
         .Build();
 
     private readonly KafkaContainer _kafka = new KafkaBuilder("apache/kafka:3.9.1").Build();
 
-    private readonly List<WorkerPod> _pods = [];
+    private WorkerPod? _pod;
     private FakeOrgHost? _org;
     private IProducer<string, string>? _producer;
     private NpgsqlDataSource? _db;
     private IDbContextFactory<SyncDbContext>? _contexts;
-
-    /// <param name="pods">Worker pods (replicas) sharing the inbox, the Kafka consumer group and the org.</param>
-    protected SyncFixture(int pods)
-    {
-        Pods = pods;
-    }
-
-    public SyncFixture() : this(pods: 1)
-    {
-    }
-
-    public int Pods { get; }
 
     /// <summary>
     /// Configuration every pod gets on top of the worker's appsettings.json (like the environment variables of a
@@ -78,7 +64,6 @@ public class SyncFixture : IAsyncLifetime
         ["Salesforce:UseFake"] = "false", // the real OAuth + REST client, over HTTP to the mock org
         ["Salesforce:ClientId"] = "fake-client",
         ["Salesforce:ClientSecret"] = "fake-secret",
-        ["Sync:Workers"] = "4",
         // Fast retries, so tests that wait for a transient failure to clear don't wait 30 s
         ["Sync:RetryBaseDelay"] = "00:00:01",
         // Seconds instead of the production 10 minutes, so the unknown-outcome test can watch a hold end
@@ -99,19 +84,7 @@ public class SyncFixture : IAsyncLifetime
 
     public NpgsqlDataSource Db => _db ?? throw new InvalidOperationException("Fixture not started");
 
-    /// <summary>The database's full connection string (the data source's own hides the password).</summary>
-    public string ConnectionString { get; private set; } = "";
-
     public IDbContextFactory<SyncDbContext> Contexts => _contexts ??= SyncDbContext.CreateFactory(Db);
-
-    /// <summary>The running pods, in start order.</summary>
-    public IReadOnlyList<WorkerPod> RunningPods => _pods;
-
-    /// <summary>Runs once the inbox schema exists, before any test.</summary>
-    protected virtual Task OnStartedAsync()
-    {
-        return Task.CompletedTask;
-    }
 
     public async Task InitializeAsync()
     {
@@ -133,33 +106,27 @@ public class SyncFixture : IAsyncLifetime
         }).Build();
 
         var inbox = _postgres.GetConnectionString();
-        ConnectionString = inbox;
-        _db = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(inbox) { ApplicationName = TestsApplicationName }.ConnectionString);
+        _db = NpgsqlDataSource.Create(inbox);
 
         var instanceUrl = _org.Url.GetLeftPart(UriPartial.Authority);
-        for (var i = 0; i < Pods; i++)
+        _pod = await WorkerPod.StartAsync("pod-0", new Dictionary<string, string?>(WorkerSettings)
         {
-            var name = $"pod-{i}";
-            var settings = new Dictionary<string, string?>(WorkerSettings)
-            {
-                ["ConnectionStrings:inboxdb"] = inbox,
-                ["ConnectionStrings:kafka"] = kafka,
-                ["Salesforce:InstanceUrl"] = instanceUrl,
-                ["Salesforce:TokenUrl"] = $"{instanceUrl}/services/oauth2/token",
-                // Pods share a process here, so name them apart (the mock org counts requests per User-Agent)
-                ["Salesforce:UserAgentInstance"] = name
-            };
-            // Started one at a time: StartAsync returns once the schema is applied, so later pods find it in place
-            _pods.Add(await WorkerPod.StartAsync(name, settings, ct));
-        }
-
-        await OnStartedAsync();
+            ["ConnectionStrings:inboxdb"] = inbox,
+            ["ConnectionStrings:kafka"] = kafka,
+            ["Salesforce:InstanceUrl"] = instanceUrl,
+            ["Salesforce:TokenUrl"] = $"{instanceUrl}/services/oauth2/token",
+            ["Salesforce:UserAgentInstance"] = "pod-0"
+        }, ct);
     }
 
     public async Task DisposeAsync()
     {
-        // Pods first, so nothing is still talking to the containers when they go
-        await Task.WhenAll(_pods.Select(p => p.DisposeAsync().AsTask()));
+        // The pod first, so nothing is still talking to the containers when they go
+        if (_pod is not null)
+        {
+            await _pod.DisposeAsync();
+        }
+
         _producer?.Dispose();
         Salesforce?.Dispose();
         if (_db is not null)
@@ -351,13 +318,13 @@ public class SyncFixture : IAsyncLifetime
     public async Task<IReadOnlyList<InboxRow>> GetInboxRowsAsync(string key, string entityType = Accounts)
     {
         await using var conn = await Db.OpenConnectionAsync();
-        var rows = await conn.QueryAsync<(long Id, string Payload, string Status, int RetryCount, string? ErrorCode, DateTime? LockedUntil, Guid? LockToken)>(
+        var rows = await conn.QueryAsync<(long Id, string Payload, string Status, int RetryCount, string? ErrorCode, DateTime NextAttemptAt)>(
             $"""
-            select id, payload::text, status, retry_count, last_error_code, locked_until, lock_token
+            select id, payload::text, status, retry_count, last_error_code, next_attempt_at
             from {InboxTable(entityType)} where entity_id = @key order by id
             """, new { key });
         return [.. rows
-            .Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.RetryCount, r.ErrorCode, r.LockedUntil, r.LockToken))
+            .Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.RetryCount, r.ErrorCode, r.NextAttemptAt))
             .OrderBy(r => r.Version).ThenBy(r => r.Id)];
     }
 
@@ -367,7 +334,7 @@ public class SyncFixture : IAsyncLifetime
         return (long)(time - BaseTime).TotalMilliseconds;
     }
 
-    /// <summary>Stores events directly in the inbox, in one statement, so a single claim is sure to see them together.</summary>
+    /// <summary>Stores events directly in the inbox, in one statement, so a single batch is sure to read them together.</summary>
     public async Task InsertIntoInboxAsync(string entityId, params JsonObject[] events)
     {
         await using var conn = await Db.OpenConnectionAsync();
@@ -398,7 +365,7 @@ public class SyncFixture : IAsyncLifetime
         return Uri.TryCreate(address, UriKind.Absolute, out var uri) ? $"{uri.Host}:{uri.Port}" : address;
     }
 
-    /// <summary>Creates both topics up front (6 partitions, like production), so pods never race to auto-create them.</summary>
+    /// <summary>Creates both topics up front (6 partitions, like production), so the consumer never has to auto-create them.</summary>
     private static async Task EnsureTopicsAsync(string bootstrap)
     {
         using var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = bootstrap }).Build();
@@ -418,7 +385,7 @@ public class SyncFixture : IAsyncLifetime
 }
 
 /// <summary>An inbox row as the tests see it; <paramref name="Version"/> comes from the payload's meta.time.</summary>
-public sealed record InboxRow(long Id, long Version, string Status, int RetryCount, string? ErrorCode, DateTime? LockedUntil, Guid? LockToken);
+public sealed record InboxRow(long Id, long Version, string Status, int RetryCount, string? ErrorCode, DateTime NextAttemptAt);
 
 [CollectionDefinition(Name)]
 public sealed class SyncCollection : ICollectionFixture<SyncFixture>

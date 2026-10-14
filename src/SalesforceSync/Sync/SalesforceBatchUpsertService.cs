@@ -13,19 +13,19 @@ namespace SalesforceSync.Sync;
 /// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds the events, and the
 /// strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
-/// <item>Takes a global concurrency slot and respects a shared pause (rate limits, all pods).</item>
-/// <item>Claims up to <see cref="SyncOptions.BatchSize"/> entities from the inbox table: per entity, the head
-/// row is locked with FOR UPDATE SKIP LOCKED and its oldest pending rows are leased, so no two workers in any pod
-/// ever process the same entity at once.</item>
-/// <item>Per entity, reads the claimed events and keeps the one with the newest event time (events carry the full
+/// <item>Respects the rate limiter's pause.</item>
+/// <item>Reads the next batch of up to <see cref="SyncOptions.BatchSize"/> entities from the inbox table, in arrival
+/// order, with each entity's oldest pending rows. One sequential worker does this: nothing is locked or leased, so two
+/// workers on one inbox would process the same entities at the same time.</item>
+/// <item>Per entity, reads the batch's events and keeps the one with the newest event time (events carry the full
 /// record); the others are superseded, and so is the newest if it is not newer than what was already synced. Arrival
 /// order plays no part, so events may come out of order, over any partitions. An event that can't be read or
 /// mapped is dead-lettered on its own.</item>
-/// <item>Writes the units to Salesforce in 2 API calls (<see cref="WriteToSalesforceAsync"/>), giving up before the
-/// lease runs out: one Composite request reads the current records, one writes what differs with sObject Collections.</item>
-/// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
-/// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
-/// every claimed event is held (the write's outcome is unknown), deferred (rate limited) or retried.</item>
+/// <item>Writes the units to Salesforce in 2 API calls (<see cref="WriteToSalesforceAsync"/>): one Composite request
+/// reads the current records, one writes what differs with sObject Collections.</item>
+/// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), left pending for the
+/// next batch, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
+/// every event of the batch is held (the write's outcome is unknown), deferred (rate limited) or retried.</item>
 /// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="BatchPreparer"/> and the
 /// ones in <c>Sync/Upsert</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
@@ -46,12 +46,6 @@ public sealed class SalesforceBatchUpsertService(
     /// </summary>
     public static readonly JsonSerializerOptions EventJson = new(JsonSerializerDefaults.Web);
 
-    /// <summary>
-    /// Share of the lease a batch may spend before its Salesforce call is cancelled; the rest is margin for recording
-    /// the outcome. A write cancelled this way has an unknown outcome and puts its entities on hold.
-    /// </summary>
-    private const double LeaseUsableFraction = 0.8;
-
     /// <summary>Recording a hold must not be cut short by the cancellation that caused it (shutdown), but may not hang it either.</summary>
     private static readonly TimeSpan HoldRecordingTimeout = TimeSpan.FromSeconds(10);
 
@@ -59,31 +53,25 @@ public sealed class SalesforceBatchUpsertService(
     private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
     private readonly WriteResultInterpreter _interpreter = new(errors);
 
-    /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
-    /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
+    /// <summary>Reads, upserts and records one batch of the strategy's entity type.</summary>
+    /// <returns>Inbox rows processed (0 = nothing to do, or paused right now).</returns>
     public async Task<int> UpsertBatchAsync<TEvent, TRow>(UpsertStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
         where TRow : InboxRow, new()
     {
-        await using var admission = await gate.TryEnterAsync(ct);
-        if (admission is null)
+        if (!await gate.IsOpenAsync(ct))
         {
             return 0;
         }
 
-        // Give up on Salesforce before the lease runs out, so another worker never claims an entity while this one
-        // can still write to it. Started before the claim, so the margin is measured from when the lease began.
-        using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
-
-        // 1. Claim events from the inbox table (short transaction)
-        var claim = await inbox.ClaimAsync(strategy.EntityType, ct);
-        if (claim.Events.Count == 0)
+        // 1. Read the next batch from the inbox table (short transaction)
+        var rows = await inbox.ReadBatchAsync(strategy.EntityType, ct);
+        if (rows.Events.Count == 0)
         {
             return 0;
         }
 
         // 2. Per entity: keep the newest event, drop it if it isn't newer than what is synced, map it to records
-        var batch = BatchPreparer.Prepare(strategy, claim.Events, claim.SyncedTimes);
+        var batch = BatchPreparer.Prepare(strategy, rows.Events, rows.SyncedTimes);
 
         // 3. Salesforce (outside any transaction): read, decide, send, interpret
         Dictionary<string, UpsertResult> results;
@@ -92,23 +80,22 @@ public sealed class SalesforceBatchUpsertService(
             results = batch.Work.Count == 0
                 ? []
                 : (await WriteToSalesforceAsync(batch.Units, [.. strategy.Queries([.. batch.Work.Select(w => w.Unit)])],
-                    leaseCts.Token)).ToDictionary(r => r.Key);
+                    ct)).ToDictionary(r => r.Key);
         }
         catch (UnknownOutcomeException ex)
         {
-            // Salesforce may still apply the write. Caught on shutdown too: an entity released now could be written
-            // by another worker before the lost write lands. If the hold can't be recorded (or the process is killed
-            // first), the lease is what still protects the entities.
-            log.LogWarning(ex, "{Type} batch: holding {Count} events for {Hold}", strategy.EntityType, claim.Events.Count, _opt.UnknownOutcomeHold);
+            // Salesforce may still apply the write. Caught on shutdown too: an entity synced again before the lost
+            // write lands could be overwritten by it.
+            log.LogWarning(ex, "{Type} batch: holding {Count} events for {Hold}", strategy.EntityType, rows.Events.Count, _opt.UnknownOutcomeHold);
             using var recording = new CancellationTokenSource(HoldRecordingTimeout);
-            await inbox.HoldAsync(claim, ex.Message, recording.Token);
+            await inbox.HoldAsync(rows, ex.Message, recording.Token);
             ct.ThrowIfCancellationRequested();
-            return claim.Events.Count;
+            return rows.Events.Count;
         }
         catch (RateLimitedException ex)
         {
-            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}", claim.Events.Count, strategy.EntityType, ex.RetryAfter);
-            await inbox.DeferAsync(claim, ex.RetryAfter, ct);
+            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}", rows.Events.Count, strategy.EntityType, ex.RetryAfter);
+            await inbox.DeferAsync(rows, ex.RetryAfter, ct);
             return 0;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -116,16 +103,16 @@ public sealed class SalesforceBatchUpsertService(
             // A request failed that Salesforce provably did not apply (describe, the read or a write): every entity is
             // retried. Records that earlier write requests of the batch saved are safe: the retry reads them and
             // writes only what still differs. Shutdown (ct) is not caught: the failed request wrote nothing, and the
-            // lease simply expires.
+            // rows are still pending.
             log.LogError(ex, "{Type} batch failed", strategy.EntityType);
-            await inbox.FailAllAsync(claim, ex.Message, ex is SalesforceQueryException q ? q.Errors.FirstOrDefault()?.Code : null, ct);
-            return claim.Events.Count;
+            await inbox.FailAllAsync(rows, ex.Message, ex is SalesforceQueryException q ? q.Errors.FirstOrDefault()?.Code : null, ct);
+            return rows.Events.Count;
         }
 
         // 4. Record every entity's outcome in the inbox
         LogFailures(strategy.EntityType, batch, results.Values);
-        await inbox.RecordAsync(claim, batch.Outcomes(results), ct);
-        return claim.Events.Count;
+        await inbox.RecordAsync(rows, batch.Outcomes(results), ct);
+        return rows.Events.Count;
     }
 
     /// <summary>
@@ -135,7 +122,7 @@ public sealed class SalesforceBatchUpsertService(
     /// </summary>
     /// <remarks>
     /// A write request that fails as a whole (the call, not records in it) throws, and the caller fails, holds or
-    /// defers the whole claim, even when earlier requests of the batch were saved: the retry diffs against Salesforce
+    /// defers the whole batch, even when earlier requests of the batch were saved: the retry diffs against Salesforce
     /// again, so what they saved is not written twice.
     /// </remarks>
     /// <param name="units">At most <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/>, keyed by entity key.</param>

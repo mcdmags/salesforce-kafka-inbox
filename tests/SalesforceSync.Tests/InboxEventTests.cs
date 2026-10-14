@@ -239,7 +239,7 @@ public sealed class InboxEventTests
     [Fact]
     public void An_event_stored_under_another_entity_than_it_is_about_is_never_written()
     {
-        // The lease is on the row's entity_id; writing ACC-2 under ACC-1's lease would bypass ACC-2's own
+        // Rows are ordered per entity_id; writing ACC-2 from ACC-1's row would bypass ACC-2's own order
         var batch = Prepare(new InboxEvent(1, "ACC-1", Account("ACC-2", "mismatch", "2026-10-14T01:00:00Z"), 1));
 
         batch.Work.Should().BeEmpty();
@@ -336,7 +336,7 @@ public sealed class InboxEventTests
 
         if (valid)
         {
-            use.Should().NotThrow().Which.LockHeads.Should().Contain($"from {table} ");
+            use.Should().NotThrow().Which.ReadBatch.Should().Contain($"from {table} ");
         }
         else
         {
@@ -362,9 +362,9 @@ public sealed class InboxEventTests
     public void No_inbox_statement_reads_inside_the_payload()
     {
         var sql = InboxSql.For("sf_account_inbox");
-        string[] claimAndOutcomes = [sql.LockHeads, sql.ClaimEntities, sql.ReleaseLostClaims, sql.MarkSynced];
+        string[] readAndOutcomes = [sql.ReadBatch, sql.MarkSynced];
 
-        claimAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
+        readAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
     }
 
     private static string Account(string id, string name, string time)

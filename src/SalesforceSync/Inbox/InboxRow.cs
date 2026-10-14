@@ -27,14 +27,8 @@ public abstract class InboxRow
     /// <summary>E.g. FIELD_CUSTOM_VALIDATION_EXCEPTION, to query dead letters by cause.</summary>
     public string? LastErrorCode { get; set; }
 
-    /// <summary>Not claimable before; while leased, the end of the lease.</summary>
+    /// <summary>Not read before (backoff, deferral or an unknown-outcome hold).</summary>
     public DateTimeOffset NextAttemptAt { get; set; }
-
-    /// <summary>Lease while a worker processes the row.</summary>
-    public DateTimeOffset? LockedUntil { get; set; }
-
-    /// <summary>Which worker holds the lease.</summary>
-    public Guid? LockToken { get; set; }
 
     public DateTimeOffset ReceivedAt { get; set; }
 }

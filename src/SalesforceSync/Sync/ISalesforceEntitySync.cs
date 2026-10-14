@@ -1,7 +1,7 @@
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Syncs one entity type from its inbox table to Salesforce; the worker loops run every registered one in turn.
+/// Syncs one entity type from its inbox table to Salesforce; the worker loop runs every registered one in turn.
 /// Also what the Kafka consumer needs to store that type's events, without knowing their shape.
 /// </summary>
 public interface ISalesforceEntitySync

@@ -1,5 +1,14 @@
 # salesforce-kafka-inbox
 
+> **This branch (`benchmark/sequential-limiter-only`) is the sequential, limiter-only comparison variant.** It runs
+> one worker loop per process and has no race-condition handling: no leases (`locked_until` / `lock_token`), no
+> per-entity claim lock, no `FOR UPDATE SKIP LOCKED`, no concurrency slots and no claim audit. The worker reads the
+> next pending rows in arrival order, coalesces them per entity, syncs them and records the outcome; only one worker
+> (one pod) may run against an inbox. The rate limiter (token bucket, daily budget, `Sforce-Limit-Info`,
+> `REQUEST_LIMIT_EXCEEDED` / 429 handling) is unchanged. `main` is the full version; the sections below describe it,
+> so their parts on leases, claims, slots, `Sync:Workers`, `Sync:MaxConcurrentRequests` and `Sync:Lease` do not apply
+> here. The comparison is in [docs/benchmarks/sequential-vs-full.md](docs/benchmarks/sequential-vs-full.md).
+
 Kafka change events → Postgres inbox → Salesforce, with per-entity ordering, atomic multi-record upserts,
 type-aware change-only updates and a shared, limit-aware rate limiter. One generic engine syncs every object;
 each object only defines its typed payload, its Salesforce sObject class, the mapper between them and its queries.
@@ -295,11 +304,11 @@ To re-queue dead letters once the cause is fixed (e.g. the missing Account now e
 
 ```sql
 update sf_account_inbox
-set status = 'pending', retry_count = 0, next_attempt_at = now(), locked_until = null, lock_token = null
+set status = 'pending', retry_count = 0, next_attempt_at = now()
 where status = 'dead' and last_error_code = 'DEPENDENCY_NOT_SYNCED';
 
 update sf_account_relationship_inbox
-set status = 'pending', retry_count = 0, next_attempt_at = now(), locked_until = null, lock_token = null
+set status = 'pending', retry_count = 0, next_attempt_at = now()
 where status = 'dead' and last_error_code = 'DEPENDENCY_NOT_SYNCED';
 ```
 

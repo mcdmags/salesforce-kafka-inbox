@@ -7,8 +7,7 @@ namespace SalesforceSync.IntegrationTests.Hosting;
 /// <summary>
 /// One worker "pod": its own <see cref="IHost"/> in the test process, wired by the worker's own
 /// <see cref="SyncServiceCollectionExtensions.AddSalesforceSyncWorker"/> (the same call Program.cs makes), so it has
-/// its own Postgres pool, Kafka consumer (in the shared consumer group), token cache, HTTP stack and worker loops.
-/// Several pods against the same containers behave like replicas of a Kubernetes deployment.
+/// its own Postgres pool, Kafka consumer, token cache, HTTP stack and worker loop.
 /// </summary>
 public sealed class WorkerPod : IAsyncDisposable
 {

@@ -399,7 +399,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         var result = await Account("A1", new() { ["name"] = "One" }, []);
 
         result.Outcome.Should().Be(SyncOutcome.TransientFailure,
-            "released as 'not attempted' it would be claimed and skipped again forever");
+            "left pending as 'not attempted' it would be read and skipped again forever");
         (result.PrimaryError?.Code).Should().Be("UNKNOWN_ERROR");
     }
 

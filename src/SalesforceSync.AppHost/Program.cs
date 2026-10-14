@@ -23,8 +23,7 @@ if (!testMode)
 var sync = builder.AddProject<Projects.SalesforceSync>("salesforce-sync")
     .WithReference(inboxDb).WaitFor(inboxDb)
     .WithReference(kafka).WaitFor(kafka)
-    .WithEnvironment("Salesforce__UseFake", "false")
-    .WithEnvironment("Sync__Workers", "4");
+    .WithEnvironment("Salesforce__UseFake", "false");
 
 // A real org (a sandbox) when the AppHost's user secrets hold Salesforce:InstanceUrl, ClientId and ClientSecret
 // (README: Using a real Salesforce org); otherwise the mock org
