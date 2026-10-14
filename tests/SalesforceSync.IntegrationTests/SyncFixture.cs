@@ -133,7 +133,7 @@ public class SyncFixture : IAsyncLifetime
                 ["ConnectionStrings:kafka"] = kafka,
                 ["Salesforce:InstanceUrl"] = instanceUrl,
                 ["Salesforce:TokenUrl"] = $"{instanceUrl}/services/oauth2/token",
-                // Pods share a process here, so name them apart (the mock org counts graph requests per User-Agent)
+                // Pods share a process here, so name them apart (the mock org counts requests per User-Agent)
                 ["Salesforce:UserAgentInstance"] = name
             };
             // Started one at a time: StartAsync returns once the schema is applied, so later pods find it in place
@@ -249,6 +249,23 @@ public class SyncFixture : IAsyncLifetime
            ?? throw new InvalidOperationException("Empty history response");
 
     public async Task<JsonElement> GetStatsAsync() => await Salesforce.GetFromJsonAsync<JsonElement>("/__fake/stats");
+
+    /// <summary>
+    /// The composite write requests the mock org received (the most recent ones, oldest first) that mention any of
+    /// <paramref name="texts"/>: a create carries the record's external id, an update only its Id.
+    /// </summary>
+    public async Task<List<JsonObject>> GetWriteRequestsAsync(params string[] texts)
+        => (await Salesforce.GetFromJsonAsync<List<JsonObject>>("/__fake/requests") ?? [])
+            .Where(r => r.ToJsonString() is var json && texts.Any(t => json.Contains(t, StringComparison.Ordinal)))
+            .ToList();
+
+    /// <summary>Makes the mock org reject the next <paramref name="times"/> writes of one record with a Salesforce error code.</summary>
+    public async Task InjectFaultAsync(string sobject, string externalId, string errorCode, int times)
+    {
+        using var res = await Salesforce.PostAsJsonAsync("/__fake/faults",
+            new JsonObject { ["sObject"] = sobject, ["externalId"] = externalId, ["errorCode"] = errorCode, ["times"] = times });
+        res.EnsureSuccessStatusCode();
+    }
 
     /// <summary>The inbox table of an entity type (the strategies' constants).</summary>
     public static string InboxTable(string entityType = Accounts) => entityType == Relationships

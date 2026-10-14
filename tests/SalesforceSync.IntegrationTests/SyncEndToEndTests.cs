@@ -35,7 +35,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         profile.Should().NotBeNull();
         ((string?)profile!["Tier__c"]).Should().Be("Gold");
         ((decimal?)profile["Score__c"]).Should().Be(score);
-        ((string?)profile["Account__c"]).Should().Be((string?)account["Id"], "the graph's reference to the new Account is resolved to its Id");
+        ((string?)profile["Account__c"]).Should().Be((string?)account["Id"], "the reference to the new Account is resolved to its Id");
     }
 
     [Fact]
@@ -349,7 +349,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task A_batch_costs_one_composite_read_and_one_graph_write()
+    public async Task A_batch_costs_one_composite_read_and_one_composite_write()
     {
         // Warm-up: the first batch after start also describes Account and Profile__c (then cached for 15 minutes)
         var warm = SyncFixture.NewAccountId();
@@ -364,11 +364,13 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         var after = await app.GetStatsAsync();
         long Delta(string counter) => after.GetProperty(counter).GetInt64() - before.GetProperty(counter).GetInt64();
-        Delta("apiCalls").Should().Be(2, "a batch is one composite read plus one graph write (it was 3 with separate queries)");
-        Delta("compositeRequests").Should().Be(1, "the Account and Profile__c queries go in one composite call");
-        Delta("graphRequests").Should().Be(1);
+        Delta("apiCalls").Should().Be(2, "a batch is one composite read plus one composite write");
+        Delta("compositeRequests").Should().Be(2);
+        Delta("queries").Should().Be(2, "the Account and Profile__c queries go in the one read");
+        Delta("writeRequests").Should().Be(1, "the Account and the Profile are created in the one write");
+        Delta("recordsSucceeded").Should().Be(2);
+        Delta("recordsFailed").Should().Be(0);
         Delta("describes").Should().Be(0, "Describe results are cached");
-        after.GetProperty("graphsFailed").GetInt64().Should().Be(0);
 
         var transport = await app.Salesforce.GetFromJsonAsync<JsonObject>("/__fake/transport");
         ((long)transport!["acceptGzip"]!).Should().BePositive("the worker accepts compressed responses");

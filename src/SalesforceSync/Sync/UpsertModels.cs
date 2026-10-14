@@ -45,13 +45,18 @@ public sealed record SObjectRecord(
 /// <summary>
 /// Sets <paramref name="Field"/> to the Id of the record of <paramref name="SObject"/> whose
 /// <paramref name="ExternalIdField"/> is <paramref name="ExternalId"/>: an earlier record of the same unit (created in
-/// the same graph if new) or a record already in Salesforce (read by the strategy's queries). If neither exists, the
+/// the same request if new) or a record already in Salesforce (read by the strategy's queries). If neither exists, the
 /// unit is retried later (<see cref="SalesforceErrors.DependencyNotSynced"/>).
 /// </summary>
 public sealed record SObjectLookup(string Field, string SObject, string ExternalIdField, string ExternalId);
 
-/// <summary>Records written as one Composite Graph: all succeed or none. A record must come after the records it looks up.</summary>
-public sealed record UpsertUnit(IReadOnlyList<SObjectRecord> Records);
+/// <summary>
+/// The records of one entity, written in the same request. Each record is saved or rejected on its own (they are not
+/// atomic); the entity counts as synced only when all of them are. The first record is the entity's main record; a
+/// record must come after the records it looks up.
+/// </summary>
+/// <param name="EventType">What the event says happened to the main record (set by the engine), or null to go by Salesforce alone.</param>
+public sealed record UpsertUnit(IReadOnlyList<SObjectRecord> Records, EventType? EventType = null);
 
 /// <summary>Records of one sObject to read from Salesforce, by a field (normally a unique external id).</summary>
 public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyCollection<string> Values)
@@ -161,7 +166,7 @@ public enum SyncOutcome
     /// <summary>The differing fields were written.</summary>
     Saved,
 
-    /// <summary>The graph never ran (halted or rolled back because of other graphs): retry now, no retry spent.</summary>
+    /// <summary>Not saved because of another entity's record (rolled back or skipped with it): retry now, no retry spent.</summary>
     NotAttempted,
 
     /// <summary>May succeed later (lock contention, outage, a lookup target not synced yet): retry with backoff.</summary>

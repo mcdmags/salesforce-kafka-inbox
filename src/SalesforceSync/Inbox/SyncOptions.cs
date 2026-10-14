@@ -13,7 +13,10 @@ public sealed class SyncOptions
     /// <summary>Max in-flight Salesforce batches across ALL processes.</summary>
     public int MaxConcurrentRequests { get; set; } = 6;
 
-    /// <summary>Entities per batch (= graphs per Composite Graph request, max 75).</summary>
+    /// <summary>
+    /// Entities per batch, 1 to <see cref="SalesforceRestClient.MaxEntitiesPerBatch"/> (100): a batch is read with one
+    /// Composite request, which carries 5 queries of 100 external ids.
+    /// </summary>
     public int BatchSize { get; set; } = 75;
 
     /// <summary>
@@ -41,11 +44,26 @@ public sealed class SyncOptions
 
     public TimeSpan MaxRetryDelay { get; set; } = TimeSpan.FromHours(1);
     public TimeSpan IdleDelay { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// What to do when an event's meta.type disagrees with Salesforce: "inserted" but the record exists, or "updated"
+    /// but it doesn't. Judged on the entity's main record (the first of its unit).
+    /// </summary>
+    public EventTypeMismatch EventTypeMismatch { get; set; } = EventTypeMismatch.Reconcile;
+}
+
+public enum EventTypeMismatch
+{
+    /// <summary>Salesforce decides: an existing record is updated with what differs, a missing one is created. Logged.</summary>
+    Reconcile,
+
+    /// <summary>The event is dead-lettered with <c>last_error_code = 'EVENT_TYPE_MISMATCH'</c>.</summary>
+    DeadLetter
 }
 
 /// <summary>
 /// Fails startup on values that would make the workers silently do nothing (no slots, no loops) or exceed what
-/// one Composite Graph request can carry.
+/// one batch can carry.
 /// </summary>
 public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
 {
@@ -54,9 +72,9 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
         var errors = new List<string>();
         if (o.Workers < 1) errors.Add($"{SyncOptions.Section}:Workers must be at least 1.");
         if (o.MaxConcurrentRequests < 1) errors.Add($"{SyncOptions.Section}:MaxConcurrentRequests must be at least 1.");
-        if (o.BatchSize is < 1 or > SalesforceRestClient.MaxGraphsPerRequest)
-            errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {SalesforceRestClient.MaxGraphsPerRequest} " +
-                       "(one Composite Graph per entity).");
+        if (o.BatchSize is < 1 or > SalesforceRestClient.MaxEntitiesPerBatch)
+            errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {SalesforceRestClient.MaxEntitiesPerBatch} " +
+                       "(a batch is read with one Composite request: 5 queries of 100 external ids).");
         if (o.MaxEventsPerEntity < 1) errors.Add($"{SyncOptions.Section}:MaxEventsPerEntity must be at least 1.");
         if (o.Lease <= TimeSpan.Zero) errors.Add($"{SyncOptions.Section}:Lease must be positive.");
         if (o.UnknownOutcomeHold <= TimeSpan.Zero) errors.Add($"{SyncOptions.Section}:UnknownOutcomeHold must be positive.");

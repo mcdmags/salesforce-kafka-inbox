@@ -3,13 +3,14 @@ using SalesforceSync.Sync;
 
 namespace SalesforceSync.Salesforce;
 
-/// <summary>An error Salesforce reported for one record operation (a Composite Graph node).</summary>
-public sealed record SalesforceError(string? ReferenceId, string Code, string? Message)
+/// <summary>An error Salesforce reported for one record (or for a whole subrequest), or one found before sending.</summary>
+/// <param name="Fields">The fields Salesforce blames, when it says.</param>
+public sealed record SalesforceError(string? ReferenceId, string Code, string? Message, IReadOnlyList<string>? Fields = null)
 {
     public override string ToString() => ReferenceId is null ? $"{Code} {Message}" : $"{ReferenceId}: {Code} {Message}";
 }
 
-/// <summary>Decides what a failed graph's errors mean for the entity: retry now, retry later, or give up.</summary>
+/// <summary>Decides what a failed record's errors mean: retry now, retry later, or give up.</summary>
 public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 {
     /// <summary>
@@ -21,11 +22,17 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     /// <summary>Our own code: the inbox event can't be mapped to records (malformed payload). Permanent.</summary>
     public const string InvalidEvent = "INVALID_EVENT";
 
-    /// <summary>The graph itself was fine but never ran, because of other graphs in the request.</summary>
+    /// <summary>
+    /// Our own code: the event's meta.type disagrees with Salesforce (inserted but the record exists, updated but it
+    /// doesn't) and <see cref="Inbox.SyncOptions.EventTypeMismatch"/> says to dead-letter rather than reconcile.
+    /// </summary>
+    public const string EventTypeMismatch = "EVENT_TYPE_MISMATCH";
+
+    /// <summary>The record itself was fine but was not saved, because of another record in the request.</summary>
     public static readonly IReadOnlySet<string> NotAttemptedCodes = new HashSet<string>(StringComparer.Ordinal)
     {
-        "PROCESSING_HALTED",                  // more than 14 graphs in the request failed
-        "ALL_OR_NONE_OPERATION_ROLLED_BACK"   // rolled back because another operation failed
+        "PROCESSING_HALTED",                  // a subrequest skipped or undone because an earlier one failed
+        "ALL_OR_NONE_OPERATION_ROLLED_BACK"   // allOrNone: rolled back because another record failed
     };
 
     /// <summary>Errors in the data or the org's configuration: retrying the same data fails the same way.</summary>
@@ -55,7 +62,7 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 
     public bool IsPermanent(string code) => _permanent.Contains(code);
 
-    /// <summary>Classifies the errors of one failed graph.</summary>
+    /// <summary>Classifies the errors of one failed record.</summary>
     public SyncOutcome Classify(IReadOnlyCollection<SalesforceError> errors)
     {
         var real = errors.Where(e => !NotAttemptedCodes.Contains(e.Code)).ToList();

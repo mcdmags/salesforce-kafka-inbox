@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
+using SalesforceSync.Inbox;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
@@ -29,7 +30,7 @@ public sealed class WriteOutcomeTests
         { "connection refused", new HttpRequestException(HttpRequestError.ConnectionError, "refused", new SocketException((int)SocketError.ConnectionRefused)), false },
         { "DNS failure", new HttpRequestException(HttpRequestError.NameResolutionError, "no such host"), false },
         { "TLS handshake failed", new HttpRequestException(HttpRequestError.SecureConnectionError, "handshake"), false },
-        { "too many graphs (not sent)", new ArgumentOutOfRangeException("graphs"), false },
+        { "too many collections (not sent)", new ArgumentOutOfRangeException("collections"), false },
 
         // Unknown
         { "lease cutoff or shutdown", new OperationCanceledException(), true },
@@ -42,7 +43,7 @@ public sealed class WriteOutcomeTests
         { "503 without a Salesforce body", new SalesforceResponseException(HttpStatusCode.ServiceUnavailable, "<html>Service Unavailable</html>"), true },
         { "503 from a gateway, via the rate limiter", new RateLimitedException(TimeSpan.FromSeconds(30), mayHaveBeenProcessed: true), true },
         { "unreadable response", new System.Text.Json.JsonException("unexpected end of data"), true },
-        { "empty response", new InvalidOperationException("Empty composite graph response"), true }
+        { "empty response", new InvalidOperationException("Empty composite response"), true }
     };
 
     [Theory, MemberData(nameof(Failures))]
@@ -62,7 +63,7 @@ public sealed class WriteOutcomeTests
     public async Task A_failed_read_is_not_an_unknown_outcome()
     {
         var (upserter, org, failing) = Upserter();
-        failing.FailPath = "/composite";
+        failing.FailReads = true;
 
         var upsert = () => Upsert(upserter, "A1");
 
@@ -86,7 +87,7 @@ public sealed class WriteOutcomeTests
     public async Task A_write_Salesforce_rejected_is_not_an_unknown_outcome()
     {
         var (upserter, _, failing) = Upserter();
-        failing.FailPath = "/composite/graph";
+        failing.FailWrites = true;
         failing.Status = HttpStatusCode.BadRequest;
 
         var upsert = () => Upsert(upserter, "A1");
@@ -98,7 +99,7 @@ public sealed class WriteOutcomeTests
     public async Task A_cancelled_write_is_an_unknown_outcome()
     {
         var (upserter, _, failing) = Upserter();
-        failing.FailPath = "/composite/graph";
+        failing.FailWrites = true;
         failing.Cancel = true;
 
         var upsert = () => Upsert(upserter, "A1");
@@ -119,26 +120,29 @@ public sealed class WriteOutcomeTests
         var failing = new FailingHandler { InnerHandler = new FakeSalesforceHandler(org) };
         var http = new HttpClient(failing) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
         return (new SalesforceRecordUpserter(new SalesforceRestClient(http), new SalesforceSchemaCache(TimeProvider.System),
-            new SalesforceErrors(options), new WriteEchoTracker(), options, NullLogger<SalesforceRecordUpserter>.Instance), org, failing);
+            new SalesforceErrors(options), new WriteEchoTracker(), options, Options.Create(new SyncOptions()), NullLogger<SalesforceRecordUpserter>.Instance), org, failing);
     }
 
-    /// <summary>Fails requests to one path before they reach the org.</summary>
+    /// <summary>Fails the composite read or the composite write (the one with sObject Collections) before it reaches the org.</summary>
     private sealed class FailingHandler : DelegatingHandler
     {
-        public string? FailPath { get; set; }
+        public bool FailReads { get; set; }
+        public bool FailWrites { get; set; }
         public HttpStatusCode Status { get; set; } = HttpStatusCode.InternalServerError;
         public bool Cancel { get; set; }
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            if (FailPath is null || !request.RequestUri!.AbsolutePath.EndsWith(FailPath, StringComparison.Ordinal))
-                return base.SendAsync(request, ct);
+            if (!request.RequestUri!.AbsolutePath.EndsWith("/composite", StringComparison.Ordinal))
+                return await base.SendAsync(request, ct);
+            var isWrite = (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
+            if (isWrite ? !FailWrites : !FailReads) return await base.SendAsync(request, ct);
             if (Cancel) throw new TaskCanceledException("timed out");
-            return Task.FromResult(new HttpResponseMessage(Status)
+            return new HttpResponseMessage(Status)
             {
                 RequestMessage = request,
                 Content = new StringContent("""[{"errorCode":"JSON_PARSER_ERROR","message":"injected"}]""")
-            });
+            };
         }
     }
 }

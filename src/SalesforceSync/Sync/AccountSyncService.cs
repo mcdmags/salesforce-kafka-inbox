@@ -5,7 +5,7 @@ using SalesforceSync.Sync.Mapping;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Account + its Profile__c, written together (one graph); the Profile looks up its Account.
+/// Account + its Profile__c, written in the same request (Accounts first); the Profile looks up its Account.
 /// Typed event -> mappers -> sObjects -> records. An event without a <c>profile</c> writes only the Account.
 /// </summary>
 public sealed class AccountSyncService(

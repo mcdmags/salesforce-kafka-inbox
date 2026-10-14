@@ -167,7 +167,7 @@ public sealed class SalesforceBatchUpsertService(
             var entityIds = (await conn.QueryAsync<string>(new CommandDefinition(sql.LockHeads, new
             {
                 window = InboxSql.ClaimWindow,
-                batchSize = Math.Min(_opt.BatchSize, SalesforceRestClient.MaxGraphsPerRequest)
+                batchSize = Math.Min(_opt.BatchSize, SalesforceRestClient.MaxEntitiesPerBatch)
             }, tx, cancellationToken: t))).ToArray();
             if (entityIds.Length == 0) return new Claim(token, [], new Dictionary<string, long>());
 
@@ -222,7 +222,7 @@ public sealed class SalesforceBatchUpsertService(
 
             try
             {
-                work.Add(new Work(entity.Key, strategy.Map(entity.Key, newest.Read.Event), time, newest.Row.Id));
+                work.Add(new Work(entity.Key, strategy.Map(entity.Key, newest.Read.Event) with { EventType = newest.Read.Type }, time, newest.Row.Id));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

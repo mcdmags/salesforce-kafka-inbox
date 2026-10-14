@@ -13,8 +13,8 @@ public static class SalesforceProxy
     public static async Task HandleAsync(HttpContext ctx)
     {
         var invoker = ctx.RequestServices.GetRequiredService<HttpMessageInvoker>();
-        if (ctx.Request.Path.Value?.EndsWith("/composite/graph", StringComparison.OrdinalIgnoreCase) == true)
-            ctx.RequestServices.GetRequiredService<ClientLog>().RecordGraphRequest(ctx.Request.Headers.UserAgent);
+        if (ctx.Request.Path.Value?.EndsWith("/composite", StringComparison.OrdinalIgnoreCase) == true)
+            ctx.RequestServices.GetRequiredService<ClientLog>().RecordCompositeRequest(ctx.Request.Headers.UserAgent);
 
         using var request = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), ctx.Request.GetEncodedUrl());
         foreach (var (name, values) in ctx.Request.Headers.Where(h => ForwardedHeaders.Contains(h.Key)))

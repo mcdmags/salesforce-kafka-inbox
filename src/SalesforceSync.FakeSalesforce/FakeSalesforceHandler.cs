@@ -13,9 +13,6 @@ namespace SalesforceSync.FakeSalesforce;
 /// </summary>
 public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : HttpMessageHandler
 {
-    private const int MaxCompositeSubrequests = 25;
-    private const int MaxCompositeQueries = 5;
-
     [GeneratedRegex(@"/sobjects/(?<obj>\w+)/describe/?$", RegexOptions.IgnoreCase)]
     private static partial Regex DescribeUrl();
 
@@ -80,13 +77,9 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
                 {
                     res = Json(request, HttpStatusCode.OK, store.Query(QueryOf(uri)));
                 }
-                else if (request.Method == HttpMethod.Post && path.EndsWith("/composite/graph", StringComparison.OrdinalIgnoreCase))
-                {
-                    res = Json(request, HttpStatusCode.OK, store.ExecuteGraphs(await ReadJsonAsync(request, ct)));
-                }
                 else if (request.Method == HttpMethod.Post && path.EndsWith("/composite", StringComparison.OrdinalIgnoreCase))
                 {
-                    res = Json(request, HttpStatusCode.OK, ExecuteComposite(await ReadJsonAsync(request, ct)));
+                    res = Json(request, HttpStatusCode.OK, store.ExecuteComposite(await ReadJsonAsync(request, ct)));
                 }
                 else
                 {
@@ -102,38 +95,6 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
 
         res.Headers.TryAddWithoutValidation("Sforce-Limit-Info", $"api-usage={calls}/{options.DailyApiLimit}");
         return res;
-    }
-
-    /// <summary>Composite: the subrequests run one after another and the whole request is one API call.</summary>
-    private JsonObject ExecuteComposite(JsonObject payload)
-    {
-        var subrequests = payload["compositeRequest"]?.AsArray()
-                          ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing 'compositeRequest'");
-        if (subrequests.Count > MaxCompositeSubrequests)
-            throw new FakeSalesforceException(400, "LIMIT_EXCEEDED", $"A maximum of {MaxCompositeSubrequests} subrequests is allowed");
-        if (subrequests.Count(r => (r?["url"]?.GetValue<string>() ?? "").Contains("/query", StringComparison.OrdinalIgnoreCase)) > MaxCompositeQueries)
-            throw new FakeSalesforceException(400, "LIMIT_EXCEEDED", $"A maximum of {MaxCompositeQueries} query subrequests is allowed");
-
-        store.CountCompositeRequest();
-        var responses = new JsonArray();
-        foreach (var sub in subrequests)
-        {
-            var referenceId = sub!["referenceId"]!.GetValue<string>();
-            var method = sub["method"]!.GetValue<string>();
-            var url = new Uri(new Uri("https://fake"), sub["url"]!.GetValue<string>());
-            try
-            {
-                if (!method.Equals("GET", StringComparison.OrdinalIgnoreCase)
-                    || !url.AbsolutePath.EndsWith("/query", StringComparison.OrdinalIgnoreCase))
-                    throw new FakeSalesforceException(400, "NOT_SUPPORTED", $"Fake composite only runs queries, not {method} {url.AbsolutePath}");
-                responses.Add(FakeSalesforceStore.SubResponse(referenceId, 200, store.Query(QueryOf(url))));
-            }
-            catch (FakeSalesforceException ex)
-            {
-                responses.Add(FakeSalesforceStore.SubResponse(referenceId, ex.Status, FakeSalesforceStore.Errors(ex.ErrorCode, ex.Message)));
-            }
-        }
-        return new JsonObject { ["compositeResponse"] = responses };
     }
 
     private static string QueryOf(Uri uri)
