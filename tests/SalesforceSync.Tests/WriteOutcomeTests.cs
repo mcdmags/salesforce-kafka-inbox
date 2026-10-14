@@ -143,7 +143,7 @@ public sealed class WriteOutcomeTests
             }
 
             var isWrite = (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
-            return isWrite ? !FailWrites : !FailReads
+            return (isWrite ? !FailWrites : !FailReads)
                 ? await base.SendAsync(request, ct)
                 : Cancel
                 ? throw new TaskCanceledException("timed out")

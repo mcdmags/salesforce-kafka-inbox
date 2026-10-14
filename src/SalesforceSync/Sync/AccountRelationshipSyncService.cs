@@ -25,6 +25,8 @@ public sealed class AccountRelationshipSyncService(
                 (key, e) => Map(key, e, relationships), Queries);
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter",
+        Justification = "Required by the strategy's (key, event) delegate shape; public signature kept as is")]
     public static UpsertUnit Map(string relationshipKey, AccountRelationshipEvent e,
         ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
     {

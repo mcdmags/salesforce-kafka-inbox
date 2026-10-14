@@ -54,9 +54,9 @@ internal static class RecordDiffer
     public static SalesforceError? NotWritable(NormalizedRecord record, SalesforceField field, CurrentRecord? existing)
     {
         var creating = existing is null;
-        return creating ? field.Createable : field.Updateable
+        return (creating ? field.Createable : field.Updateable)
             ? null
             : new SalesforceError(record.ReferenceId, "INVALID_FIELD_FOR_INSERT_UPDATE",
-            $"{record.Schema.Name}.{field.Name} is not {(creating ? "createable" : "updateable")}");
+                $"{record.Schema.Name}.{field.Name} is not {(creating ? "createable" : "updateable")}");
     }
 }
