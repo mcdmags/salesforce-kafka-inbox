@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Options;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 using SalesforceSync.Sync.Upsert;
@@ -63,6 +64,79 @@ public sealed class UpsertStepsTests
             ("acct", "STRING_TOO_LONG"), ("acct", "INVALID_FIELD"), ("prof", "INVALID_FIELD")
         ]);
         problems.Last().Message.Should().Contain("Profile__c.External_Id__c is not a lookup");
+    }
+
+    // ---------- Record types ----------
+
+    private static readonly Dictionary<string, SObjectSchema> WithRecordTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Account"] = new("Account",
+        [
+            new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
+            new SalesforceField("External_Id__c", "string", 255, 0, 0, true, true, true),
+            new SalesforceField("Name", "string", 5, 0, 0, true, true, false),
+            new SalesforceField("RecordTypeId", "reference", 18, 0, 0, true, true, true)
+        ],
+        [
+            new SalesforceRecordType("Master", "012000000000000AAA", true, false),
+            new SalesforceRecordType("Business", "012000000000001", true, true),
+            new SalesforceRecordType("Retired", "012000000000002AAA", false, true)
+        ])
+    };
+
+    [Fact]
+    public void The_record_type_becomes_RecordTypeId_a_field_like_any_other()
+    {
+        var unit = new UpsertUnit([AccountRecord("A1", "Acme") with { RecordType = "business" }]);
+
+        var normalized = RecordNormalizer.Normalize("A1", unit, WithRecordTypes, out var problems);
+
+        problems.Should().BeEmpty();
+        normalized.Records[0].Fields.Should().Contain(
+            new KeyValuePair<SalesforceField, object?>(WithRecordTypes["Account"].Fields["RecordTypeId"], "012000000000001AAA"),
+            "developer names match without regard to case; the Id is normalized to 18 characters for the diff");
+    }
+
+    [Fact]
+    public void A_record_without_a_record_type_leaves_RecordTypeId_alone()
+    {
+        var normalized = RecordNormalizer.Normalize("A1", new UpsertUnit([AccountRecord("A1", "Acme")]), WithRecordTypes, out var problems);
+
+        problems.Should().BeEmpty();
+        normalized.Records[0].Fields.Keys.Select(f => f.Name).Should().Equal("Name");
+    }
+
+    [Theory]
+    [InlineData("Nope", "doesn't exist")]
+    [InlineData("Retired", "is not active")]
+    [InlineData("Master", "is not available to the running user")]
+    public void A_record_type_the_org_does_not_offer_is_a_problem(string developerName, string why)
+    {
+        var unit = new UpsertUnit([AccountRecord("A1", "Acme") with { RecordType = developerName }]);
+
+        RecordNormalizer.Normalize("A1", unit, WithRecordTypes, out var problems);
+
+        var problem = problems.Should().ContainSingle().Subject;
+        (problem.ReferenceId, problem.Code).Should().Be(("acct", SalesforceErrors.InvalidRecordType));
+        problem.Message.Should().Be($"Record type '{developerName}' of Account {why}");
+    }
+
+    [Fact]
+    public void A_record_type_problem_alone_is_transient_with_another_problem_permanent()
+    {
+        var errors = new SalesforceErrors(Options.Create(new SalesforceOptions()));
+        (string, UpsertUnit)[] units =
+        [
+            ("A1", new UpsertUnit([AccountRecord("A1", "Acme") with { RecordType = "Nope" }])),
+            ("A2", new UpsertUnit([AccountRecord("A2", "too long") with { RecordType = "Nope" }]))
+        ];
+
+        var (normalized, rejected) = RecordNormalizer.Normalize(units, WithRecordTypes, errors);
+
+        normalized.Should().BeEmpty();
+        rejected.Select(r => (r.Key, r.Outcome, r.PrimaryError!.Code)).Should().Equal(
+            ("A1", SyncOutcome.TransientFailure, SalesforceErrors.InvalidRecordType),
+            ("A2", SyncOutcome.PermanentFailure, "STRING_TOO_LONG"));
     }
 
     // ---------- ReadQueryBuilder ----------

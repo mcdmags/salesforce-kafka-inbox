@@ -58,6 +58,7 @@ public sealed class SalesforceBatchUpsertService(
     private readonly SyncOptions _opt = options.Value;
     private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
     private readonly WriteResultInterpreter _interpreter = new(errors);
+    private readonly SalesforceErrors _errors = errors;
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
@@ -158,11 +159,13 @@ public sealed class SalesforceBatchUpsertService(
         // 1. Field metadata of every object involved (cached per process, revalidated with If-Modified-Since)
         var schemas = await DescribeAsync(units, queries, ct);
 
-        // 2. Normalize; a unit Salesforce would reject fails on its own without reaching the query
-        var (normalized, rejected) = RecordNormalizer.Normalize(units, schemas);
+        // 2. Normalize (and set each record's RecordTypeId); a unit Salesforce would reject fails on its own without
+        // reaching the query
+        var (normalized, rejected) = RecordNormalizer.Normalize(units, schemas, _errors);
         results.AddRange(rejected);
         if (normalized.Count == 0)
         {
+            InvalidateRecordTypes(units, results);
             return results;
         }
 
@@ -181,7 +184,31 @@ public sealed class SalesforceBatchUpsertService(
             results.AddRange(_interpreter.Interpret(request, answers));
         }
 
+        InvalidateRecordTypes(units, results);
         return results;
+    }
+
+    /// <summary>
+    /// A record type the cached describe doesn't have (or not as active and available), or whose Id Salesforce
+    /// rejected, may just have been created, activated or assigned: its object is described again next time.
+    /// </summary>
+    private void InvalidateRecordTypes(IReadOnlyList<(string Key, UpsertUnit Unit)> units, IEnumerable<UpsertResult> results)
+    {
+        var failed = results
+            .SelectMany(r => r.Errors.Where(e => e.Code == SalesforceErrors.InvalidRecordType).Select(e => (r.Key, e.ReferenceId)))
+            .ToHashSet();
+        if (failed.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var (key, unit) in units)
+        {
+            foreach (var record in unit.Records.Where(r => failed.Contains((key, r.ReferenceId))))
+            {
+                schemaCache.Invalidate(record.SObject);
+            }
+        }
     }
 
     private async Task<Dictionary<string, SObjectSchema>> DescribeAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,

@@ -136,7 +136,10 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         return (204, null);
     }
 
-    /// <summary>A lookup must point at a record that exists (and is of the right object).</summary>
+    /// <summary>
+    /// A lookup must point at a record that exists (and is of the right object); a record type must be one of the
+    /// object's that is active and available to the user.
+    /// </summary>
     private JsonNode? MissingLookupTarget(string sobject, JsonObject stored)
     {
         foreach (var (name, value) in stored)
@@ -146,7 +149,14 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
                 continue;
             }
 
-            if (!records.Table(target).ContainsKey(id))
+            if (name == FakeSchema.RecordTypeIdField)
+            {
+                if (!FakeSchema.IsAssignableRecordType(sobject, id))
+                {
+                    return Errors("INVALID_CROSS_REFERENCE_KEY", $"Record Type ID: this ID value isn't valid for the user: {id}", name);
+                }
+            }
+            else if (!records.Table(target).ContainsKey(id))
             {
                 return Errors("INVALID_CROSS_REFERENCE_KEY", $"invalid cross reference id: {id}", name);
             }

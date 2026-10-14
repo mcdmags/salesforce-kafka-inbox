@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text.Json.Serialization;
 using SalesforceSync.FakeSalesforce;
+using SalesforceSync.Salesforce;
 using SalesforceSync.Salesforce.SObjects;
 using SalesforceSync.Sync;
 
@@ -14,8 +15,8 @@ public sealed class SObjectRecordTests
     {
         var record = SObjectRecord.From("acct", account);
 
-        (record.ReferenceId, record.SObject, record.ExternalIdField, record.ExternalId)
-            .Should().Be(("acct", "Account", "External_Id__c", account.ExternalId!));
+        (record.ReferenceId, record.SObject, record.ExternalIdField, record.ExternalId, record.RecordType)
+            .Should().Be(("acct", "Account", "External_Id__c", account.ExternalId!, "Business"));
         record.Lookups.Should().BeNull();
         record.Fields.Should().BeEquivalentTo(new Dictionary<string, object?>
         {
@@ -133,6 +134,10 @@ public sealed class SObjectRecordTests
         }
 
         FakeSchema.Find(meta.SObject, meta.ExternalIdField).Should().NotBeNull();
+        FakeSchema.Find(meta.SObject, SObjectSchema.RecordTypeIdField).Should().NotBeNull("every synced object has record types");
+        FakeSchema.Describe(meta.SObject)["recordTypeInfos"]!.AsArray()
+            .Should().Contain(r => (string)r!["developerName"]! == meta.RecordType && (bool)r["active"]! && (bool)r["available"]!,
+                "{0}'s record type {1} must exist in the org, active and available", meta.SObject, meta.RecordType);
         foreach (var lookup in meta.Lookups)
         {
             FakeSchema.Find(meta.SObject, lookup.Field)!.Type.Should().Be("reference", "{0} is declared as a lookup", lookup.Field);
@@ -146,8 +151,9 @@ public sealed class SObjectRecordTests
     {
         var meta = SObjectMetadata.For(sobjectType);
 
-        meta.Fields.Concat(meta.Lookups.Select(l => l.Field)).Append(meta.ExternalIdField).Should().BeEquivalentTo(
-            FakeSchema.Objects[meta.SObject].Where(f => f.Createable || f.Updateable).Select(f => f.Name));
+        // RecordTypeId is set from the class's record type
+        meta.Fields.Concat(meta.Lookups.Select(l => l.Field)).Append(meta.ExternalIdField).Append(SObjectSchema.RecordTypeIdField)
+            .Should().BeEquivalentTo(FakeSchema.Objects[meta.SObject].Where(f => f.Createable || f.Updateable).Select(f => f.Name));
     }
 
     [Fact]
@@ -156,23 +162,33 @@ public sealed class SObjectRecordTests
         var noName = () => SObjectRecord.From("x", new NoFieldName { ExternalId = "1" });
         var noExternalId = () => SObjectRecord.From("x", new NoExternalId());
         var notMarked = () => SObjectRecord.From("x", new NotMarked());
+        var noRecordType = () => SObjectRecord.From("x", new NoRecordType { ExternalId = "1" });
 
         noName.Should().Throw<TypeInitializationException>().WithInnerException<InvalidOperationException>().WithMessage("*Oops*JsonPropertyName*");
         noExternalId.Should().Throw<TypeInitializationException>().WithInnerException<InvalidOperationException>().WithMessage("*Id__c*");
         notMarked.Should().Throw<TypeInitializationException>().WithInnerException<InvalidOperationException>().WithMessage("*[SObject*");
+        noRecordType.Should().Throw<TypeInitializationException>().WithInnerException<InvalidOperationException>()
+            .WithMessage("*NoRecordType*RecordType = *");
     }
 
-    [SObject("X__c", ExternalIdField = "Id__c")]
+    [SObject("X__c", ExternalIdField = "Id__c", RecordType = "X")]
     private sealed class NoFieldName
     {
         [JsonPropertyName("Id__c")] public string? ExternalId { get; set; }
         public string? Oops { get; set; }
     }
 
-    [SObject("X__c", ExternalIdField = "Id__c")]
+    [SObject("X__c", ExternalIdField = "Id__c", RecordType = "X")]
     private sealed class NoExternalId
     {
         [JsonPropertyName("Name")] public string? Name { get; set; }
+    }
+
+    /// <summary>RecordType is a required member, so only a blank one compiles.</summary>
+    [SObject("X__c", ExternalIdField = "Id__c", RecordType = " ")]
+    private sealed class NoRecordType
+    {
+        [JsonPropertyName("Id__c")] public string? ExternalId { get; set; }
     }
 
     private sealed class NotMarked
