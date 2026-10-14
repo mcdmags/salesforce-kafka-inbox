@@ -47,29 +47,45 @@ internal sealed partial class CompositeWrite
 
             // First request with room, so units needing the same collections end up together
             var request = requests.FirstOrDefault(r => r.Fits(needed));
-            if (request is null) requests.Add(request = new CompositeWrite());
+            if (request is null)
+            {
+                requests.Add(request = new CompositeWrite());
+            }
+
             request.Add(unit);
         }
 
-        foreach (var request in requests) request.Arrange();
+        foreach (var request in requests)
+        {
+            request.Arrange();
+        }
+
         return (requests, tooLarge);
     }
 
     /// <summary>The subrequests, in the order and with the reference ids fixed by <see cref="Pack"/>.</summary>
     public List<CollectionRequest> BuildRequests()
-        => Collections.Select(c => new CollectionRequest(c.ReferenceId, c.Create, c.Writes.Select(w => w.Body()).ToList())).ToList();
+    {
+        return [.. Collections.Select(c => new CollectionRequest(c.ReferenceId, c.Create, [.. c.Writes.Select(w => w.Body())]))];
+    }
 
     /// <summary>Whether a unit needing these collections (key -> records) still fits within Salesforce's limits.</summary>
     private bool Fits(IReadOnlyDictionary<CollectionKey, int> needed)
-        => _byKey.Keys.Union(needed.Keys).Count() <= SalesforceRestClient.MaxCompositeCollections
-           && needed.All(n => (_byKey.GetValueOrDefault(n.Key)?.Count ?? 0) + n.Value <= SalesforceRestClient.MaxCollectionRecords);
+    {
+        return _byKey.Keys.Union(needed.Keys).Count() <= SalesforceRestClient.MaxCompositeCollections
+               && needed.All(n => (_byKey.GetValueOrDefault(n.Key)?.Count ?? 0) + n.Value <= SalesforceRestClient.MaxCollectionRecords);
+    }
 
     private void Add(PlannedUnit unit)
     {
         Units.Add(unit);
         foreach (var write in unit.Writes)
         {
-            if (!_byKey.TryGetValue(write.Collection, out var writes)) _byKey[write.Collection] = writes = [];
+            if (!_byKey.TryGetValue(write.Collection, out var writes))
+            {
+                _byKey[write.Collection] = writes = [];
+            }
+
             writes.Add(write);
         }
     }
@@ -85,9 +101,16 @@ internal sealed partial class CompositeWrite
                      .ThenBy(c => c.Key.SObject, StringComparer.Ordinal).ThenBy(c => c.Key.ByReference))
         {
             var referenceId = ReferenceIdFor(key);
-            if (collections.Any(c => c.Item1 == referenceId)) referenceId += $"_{key.Depth}";
+            if (collections.Any(c => c.Item1 == referenceId))
+            {
+                referenceId += $"_{key.Depth}";
+            }
 
-            for (var i = 0; i < writes.Count; i++) (writes[i].CollectionReferenceId, writes[i].IndexInCollection) = (referenceId, i);
+            for (var i = 0; i < writes.Count; i++)
+            {
+                (writes[i].CollectionReferenceId, writes[i].IndexInCollection) = (referenceId, i);
+            }
+
             collections.Add((referenceId, key.Create, writes));
         }
         Collections = collections;
@@ -95,8 +118,10 @@ internal sealed partial class CompositeWrite
 
     /// <summary>E.g. Account_create, Profile__c_create_ref. Reference ids take letters, digits and underscores only.</summary>
     private static string ReferenceIdFor(CollectionKey key)
-        => NotReferenceIdCharacter().Replace(
-            $"{key.SObject}_{(key.Create ? "create" : "update")}{(key.ByReference ? "_ref" : "")}", "_");
+    {
+        return NotReferenceIdCharacter().Replace(
+                $"{key.SObject}_{(key.Create ? "create" : "update")}{(key.ByReference ? "_ref" : "")}", "_");
+    }
 
     [GeneratedRegex("[^A-Za-z0-9_]")]
     private static partial Regex NotReferenceIdCharacter();

@@ -18,7 +18,9 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         var acct = SyncFixture.NewAccountId();
         using (var lose = await app.Salesforce.PostAsJsonAsync("/__fake/lost-responses",
                    new JsonObject { ["sObject"] = "Account", ["externalId"] = acct, ["times"] = 1 }))
+        {
             lose.EnsureSuccessStatusCode();
+        }
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "v1", ["description"] = "v1" }, new JsonObject { ["score"] = 1 });
 
@@ -59,7 +61,9 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         var acct = SyncFixture.NewAccountId();
         using (var lose = await app.Salesforce.PostAsJsonAsync("/__fake/lost-responses",
                    new JsonObject { ["sObject"] = "Account", ["externalId"] = acct, ["times"] = 1 }))
+        {
             lose.EnsureSuccessStatusCode();
+        }
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "only" }, new JsonObject { ["tier"] = "Gold" });
 

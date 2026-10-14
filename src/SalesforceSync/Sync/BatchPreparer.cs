@@ -19,26 +19,29 @@ internal static class BatchPreparer
         foreach (var entity in rows.GroupBy(e => e.EntityId, StringComparer.Ordinal))
         {
             var events = ReadEvents(strategy, entity.Key, entity, batch.Invalid);
-            if (events.Count == 0) continue;
+            if (events.Count == 0)
+            {
+                continue;
+            }
 
-            var newest = Coalesce(events);
-            batch.SupersededIds.AddRange(events.Where(e => e.Row.Id != newest.Row.Id).Select(e => e.Row.Id));
+            var (Row, Read) = Coalesce(events);
+            batch.SupersededIds.AddRange(events.Where(e => e.Row.Id != Row.Id).Select(e => e.Row.Id));
 
-            var time = ToMicroseconds(newest.Read.Time);
+            var time = ToMicroseconds(Read.Time);
             if (synced.TryGetValue(entity.Key, out var syncedTime) && time <= syncedTime)
             {
-                batch.SupersededIds.Add(newest.Row.Id);
+                batch.SupersededIds.Add(Row.Id);
                 continue;
             }
 
             try
             {
-                var unit = strategy.Map(entity.Key, newest.Read.Event) with { EventType = newest.Read.Type };
-                batch.Work.Add(new Work(entity.Key, unit, time, newest.Row.Id));
+                var unit = strategy.Map(entity.Key, Read.Event) with { EventType = Read.Type };
+                batch.Work.Add(new Work(entity.Key, unit, time, Row.Id));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                batch.Invalid.Add((newest.Row.Id, $"{strategy.EntityType} {entity.Key}: {ex.Message}"));
+                batch.Invalid.Add((Row.Id, $"{strategy.EntityType} {entity.Key}: {ex.Message}"));
             }
         }
         return batch;
@@ -52,12 +55,18 @@ internal static class BatchPreparer
         foreach (var row in rows)
         {
             if (!strategy.TryRead(row.Payload, out var read, out var problem))
+            {
                 invalid.Add((row.Id, $"{strategy.EntityType} {entityId}: {problem}"));
+            }
             else if (!string.Equals(read.EntityId, entityId, StringComparison.Ordinal))
+            {
                 // The lease is on the row's entity; writing another entity under it would bypass that entity's own
                 invalid.Add((row.Id, $"{strategy.EntityType} {entityId}: the event is about '{read.EntityId}', but the row's entity_id is '{entityId}'"));
+            }
             else
+            {
                 events.Add((row, read));
+            }
         }
         return events;
     }
@@ -74,11 +83,17 @@ internal static class BatchPreparer
         for (var i = 1; i < events.Count; i++)
         {
             var e = events[i];
-            if (e.Read.Time > newest.Read.Time || (e.Read.Time == newest.Read.Time && e.Row.Id > newest.Row.Id)) newest = e;
+            if (e.Read.Time > newest.Read.Time || (e.Read.Time == newest.Read.Time && e.Row.Id > newest.Row.Id))
+            {
+                newest = e;
+            }
         }
         return newest;
     }
 
     /// <summary>An event time as the watermark stores it: microseconds since the Unix epoch.</summary>
-    public static long ToMicroseconds(DateTimeOffset time) => (time - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
+    public static long ToMicroseconds(DateTimeOffset time)
+    {
+        return (time - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
+    }
 }

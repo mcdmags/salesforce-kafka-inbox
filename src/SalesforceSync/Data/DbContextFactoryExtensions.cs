@@ -31,7 +31,7 @@ public static class DbContextFactoryExtensions
     public static async Task RunInTransactionAsync(this IDbContextFactory<SyncDbContext> contexts,
         Func<SyncDbContext, CancellationToken, Task> unit, CancellationToken ct)
     {
-        await contexts.RunInTransactionAsync<bool>(async (db, t) =>
+        await contexts.RunInTransactionAsync(async (db, t) =>
         {
             await unit(db, t);
             return true;
@@ -54,7 +54,7 @@ public static class DbContextFactoryExtensions
     public static async Task RunAsync(this IDbContextFactory<SyncDbContext> contexts,
         Func<SyncDbContext, CancellationToken, Task> unit, CancellationToken ct)
     {
-        await contexts.RunAsync<bool>(async (db, t) =>
+        await contexts.RunAsync(async (db, t) =>
         {
             await unit(db, t);
             return true;

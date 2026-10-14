@@ -7,9 +7,14 @@ namespace SalesforceSync.Tests;
 public sealed class FieldValuesTests
 {
     private static SalesforceField F(string type, int length = 0, int precision = 0, int scale = 0, bool nillable = true, int digits = 0)
-        => new("F__c", type, length, precision, scale, true, true, nillable, Digits: digits);
+    {
+        return new("F__c", type, length, precision, scale, true, true, nillable, Digits: digits);
+    }
 
-    private static JsonElement J(string json) => JsonDocument.Parse(json).RootElement.Clone();
+    private static JsonElement J(string json)
+    {
+        return JsonDocument.Parse(json).RootElement.Clone();
+    }
 
     private static object? N(SalesforceField field, object? value)
     {
@@ -63,7 +68,9 @@ public sealed class FieldValuesTests
 
     [Fact]
     public void Empty_text_is_null()
-        => FieldValues.AreEqual(F("string", 80), N(F("string", 80), ""), J("null")).Should().BeTrue();
+    {
+        FieldValues.AreEqual(F("string", 80), N(F("string", 80), ""), J("null")).Should().BeTrue();
+    }
 
     [Theory, AutoData]
     public void Text_longer_than_the_field_is_rejected(string text)
@@ -81,7 +88,9 @@ public sealed class FieldValuesTests
 
     [Fact]
     public void Multi_select_compares_as_a_set()
-        => FieldValues.AreEqual(F("multipicklist", 4099), N(F("multipicklist", 4099), "B; A;A"), J("\"A;B\"")).Should().BeTrue();
+    {
+        FieldValues.AreEqual(F("multipicklist", 4099), N(F("multipicklist", 4099), "B; A;A"), J("\"A;B\"")).Should().BeTrue();
+    }
 
     [Fact]
     public void Fifteen_character_id_is_compared_in_its_18_character_form()
@@ -103,18 +112,24 @@ public sealed class FieldValuesTests
 
     [Fact]
     public void Time_keeps_milliseconds()
-        => FieldValues.ToWire(N(F("time"), "13:14:15.678Z")).Should().Be("13:14:15.678Z");
+    {
+        FieldValues.ToWire(N(F("time"), "13:14:15.678Z")).Should().Be("13:14:15.678Z");
+    }
 
     [Theory]
     [InlineData("001D000000IqhSLIAZ", true)]
     [InlineData("001D000000IqhSLiaz", false)] // suffix case changed
     [InlineData("001d000000IqhSLIAZ", false)] // id case changed: the suffix no longer matches
     public void Eighteen_character_id_must_match_its_case_suffix(string id, bool valid)
-        => FieldValues.TryNormalize(F("reference", 18), id, out _, out _).Should().Be(valid);
+    {
+        FieldValues.TryNormalize(F("reference", 18), id, out _, out _).Should().Be(valid);
+    }
 
     [Fact]
     public void Date_is_sent_as_yyyy_MM_dd()
-        => FieldValues.ToWire(N(F("date"), "2026-10-13")).Should().Be("2026-10-13");
+    {
+        FieldValues.ToWire(N(F("date"), "2026-10-13")).Should().Be("2026-10-13");
+    }
 
     [Theory, AutoData]
     public void Wrong_type_is_rejected(string notABoolean)
@@ -132,7 +147,7 @@ public sealed class FieldValuesTests
     public void Record_errors_are_classified(string[] codes, SyncOutcome expected)
     {
         var errors = new SalesforceErrors(Microsoft.Extensions.Options.Options.Create(new SalesforceOptions()));
-        errors.Classify(codes.Select(c => new SalesforceError("acct", c, null)).ToList()).Should().Be(expected);
+        errors.Classify([.. codes.Select(c => new SalesforceError("acct", c, null))]).Should().Be(expected);
     }
 
     [Fact]

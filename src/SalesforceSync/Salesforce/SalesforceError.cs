@@ -4,5 +4,8 @@ namespace SalesforceSync.Salesforce;
 /// <param name="Fields">The fields Salesforce blames, when it says.</param>
 public sealed record SalesforceError(string? ReferenceId, string Code, string? Message, IReadOnlyList<string>? Fields = null)
 {
-    public override string ToString() => ReferenceId is null ? $"{Code} {Message}" : $"{ReferenceId}: {Code} {Message}";
+    public override string ToString()
+    {
+        return ReferenceId is null ? $"{Code} {Message}" : $"{ReferenceId}: {Code} {Message}";
+    }
 }

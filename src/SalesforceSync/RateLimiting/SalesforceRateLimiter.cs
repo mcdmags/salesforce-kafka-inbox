@@ -76,21 +76,36 @@ public sealed class SalesforceRateLimiter(
                 await db.Database.ExecuteAsync(RateLimitSql.Lock, t);
                 return await db.Database.QuerySingleAsync<AcquireResult>(RateLimitSql.Acquire, t, Param("n", (double)permits));
             }, ct);
-            if (r.DailyBudget > 0) Volatile.Write(ref _ownDailyRatio, r.Used24h / r.DailyBudget.Value);
-            if (r.Granted) return;
+            if (r.DailyBudget > 0)
+            {
+                Volatile.Write(ref _ownDailyRatio, r.Used24h / r.DailyBudget.Value);
+            }
+
+            if (r.Granted)
+            {
+                return;
+            }
 
             var wait = TimeSpan.FromSeconds(Math.Max(r.WaitSeconds, 0.05))
                        + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100)); // jitter
-            if (DateTime.UtcNow + wait > deadline) throw new RateLimitedException(wait);
+            if (DateTime.UtcNow + wait > deadline)
+            {
+                throw new RateLimitedException(wait);
+            }
+
             await Task.Delay(wait, ct);
         }
     }
 
     public Task<bool> IsPausedAsync(CancellationToken ct)
-        => contexts.RunAsync((db, t) => db.Database.QuerySingleAsync<bool>(RateLimitSql.IsPaused, t), ct);
+    {
+        return contexts.RunAsync((db, t) => db.Database.QuerySingleAsync<bool>(RateLimitSql.IsPaused, t), ct);
+    }
 
     public Task PauseAsync(TimeSpan duration, CancellationToken ct)
-        => contexts.RunAsync((db, t) => db.Database.ExecuteAsync(RateLimitSql.Pause, t, Param("duration", duration)), ct);
+    {
+        return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(RateLimitSql.Pause, t, Param("duration", duration)), ct);
+    }
 
     /// <summary>
     /// Records the limits Salesforce reported and adjusts the shared bucket: slows down near the daily or per-app
@@ -106,9 +121,16 @@ public sealed class SalesforceRateLimiter(
         lock (_reportLock)
         {
             var now = DateTime.UtcNow;
-            if (decision == _lastDecision && now - _lastReportUtc < _opt.ReportInterval) return;
+            if (decision == _lastDecision && now - _lastReportUtc < _opt.ReportInterval)
+            {
+                return;
+            }
+
             if (decision != _lastDecision)
+            {
                 LogTransition(_lastDecision, decision, info);
+            }
+
             _lastDecision = decision;
             _lastReportUtc = now;
         }
@@ -126,15 +148,11 @@ public sealed class SalesforceRateLimiter(
     internal ThrottleDecision Decide(SalesforceLimitInfo info, double ownDailyRatio = 0)
     {
         var daily = Math.Max(info.DailyRatio, ownDailyRatio);
-        if (daily >= _opt.DailyHardRatio)
-        {
-            return new ThrottleDecision(ThrottleLevel.DailyExhausted, _opt.DailySoftSpeed, _opt.DailyHardPause);
-        }
-        if (daily >= _opt.DailySoftRatio)
-        {
-            return new ThrottleDecision(ThrottleLevel.DailyLow, _opt.DailySoftSpeed, TimeSpan.Zero);
-        }
-        return ThrottleDecision.Normal;
+        return daily >= _opt.DailyHardRatio
+            ? new ThrottleDecision(ThrottleLevel.DailyExhausted, _opt.DailySoftSpeed, _opt.DailyHardPause)
+            : daily >= _opt.DailySoftRatio
+            ? new ThrottleDecision(ThrottleLevel.DailyLow, _opt.DailySoftSpeed, TimeSpan.Zero)
+            : ThrottleDecision.Normal;
     }
 
     /// <summary>Logs which allocation the budget follows, once per process and again whenever Salesforce's changes.</summary>

@@ -18,14 +18,22 @@ internal sealed class FakeRecords
     public Dictionary<string, JsonObject> Table(string sobject)
     {
         if (!_tables.TryGetValue(sobject, out var t))
+        {
             _tables[sobject] = t = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        }
+
         return t;
     }
 
     public JsonObject? Find(string sobject, string field, string? value)
-        => Table(sobject).Values.FirstOrDefault(r => FakeJson.Str(r[field]) == value);
+    {
+        return Table(sobject).Values.FirstOrDefault(r => FakeJson.Str(r[field]) == value);
+    }
 
-    public List<JsonObject> HistoryOf(string id) => _history[id];
+    public List<JsonObject> HistoryOf(string id)
+    {
+        return _history[id];
+    }
 
     /// <summary>A valid 18-character id: key prefix, "FAKE", a counter, and the suffix that encodes their case.</summary>
     public string NewId(string sobject)
@@ -38,7 +46,7 @@ internal sealed class FakeRecords
             var bits = 0;
             for (var i = 0; i < 5; i++)
             {
-                if (char.IsAsciiLetterUpper(id[chunk * 5 + i]))
+                if (char.IsAsciiLetterUpper(id[(chunk * 5) + i]))
                 {
                     bits |= 1 << i;
                 }
@@ -67,7 +75,11 @@ internal sealed class FakeRecords
         var table = Table(sobject);
         var existing = table[id];
         var before = existing.DeepClone().AsObject();
-        foreach (var (k, v) in storedValues) existing[k] = v?.DeepClone();
+        foreach (var (k, v) in storedValues)
+        {
+            existing[k] = v?.DeepClone();
+        }
+
         existing["LastModifiedDate"] = FakeSchema.FormatDateTime(DateTimeOffset.UtcNow);
         var history = _history[id];
         history.Add(storedValues);

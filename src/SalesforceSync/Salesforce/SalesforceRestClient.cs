@@ -28,10 +28,17 @@ public sealed class SalesforceRestClient(HttpClient http)
     public async Task<DescribeResult> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, $"{DataPath}/sobjects/{sobject}/describe");
-        if (ifModifiedSince is { } since) request.Headers.IfModifiedSince = since;
+        if (ifModifiedSince is { } since)
+        {
+            request.Headers.IfModifiedSince = since;
+        }
 
         using var res = await http.SendAsync(request, ct);
-        if (res.StatusCode == HttpStatusCode.NotModified) return new DescribeResult(null);
+        if (res.StatusCode == HttpStatusCode.NotModified)
+        {
+            return new DescribeResult(null);
+        }
+
         await EnsureSuccessAsync(res, ct);
 
         var body = await res.Content.ReadFromJsonAsync<DescribeBody>(Json, ct)
@@ -47,7 +54,9 @@ public sealed class SalesforceRestClient(HttpClient http)
     public async Task<Dictionary<string, List<JsonElement>>> QueryAsync(IReadOnlyList<CompositeQuery> queries, CancellationToken ct)
     {
         if (queries.Count is 0 or > MaxCompositeQueries)
+        {
             throw new ArgumentOutOfRangeException(nameof(queries), $"1 to {MaxCompositeQueries} queries per request");
+        }
 
         var payload = new
         {
@@ -66,7 +75,9 @@ public sealed class SalesforceRestClient(HttpClient http)
         foreach (var sub in subresponses)
         {
             if (sub.HttpStatusCode >= 400)
+            {
                 throw new SalesforceQueryException(sub.ReferenceId, ParseErrors(sub.ReferenceId, sub.Body));
+            }
 
             var page = sub.Body.Deserialize<QueryPage>(Json)
                        ?? throw new InvalidOperationException($"Empty query result {sub.ReferenceId}");
@@ -96,10 +107,15 @@ public sealed class SalesforceRestClient(HttpClient http)
         bool allOrNone, CancellationToken ct)
     {
         if (collections.Count is 0 or > MaxCompositeCollections)
+        {
             throw new ArgumentOutOfRangeException(nameof(collections), $"1 to {MaxCompositeCollections} collections per request");
+        }
+
         if (collections.FirstOrDefault(c => c.Records.Count is 0 or > MaxCollectionRecords) is { } tooLarge)
+        {
             throw new ArgumentOutOfRangeException(nameof(collections),
                 $"{tooLarge.ReferenceId}: {tooLarge.Records.Count} records; a collection takes 1 to {MaxCollectionRecords}");
+        }
 
         var payload = new
         {
@@ -115,14 +131,13 @@ public sealed class SalesforceRestClient(HttpClient http)
 
         var subresponses = await PostCompositeAsync(payload, ct);
 
-        return subresponses.Select(sub =>
+        return [.. subresponses.Select(sub =>
         {
             // A subrequest that failed as a whole answers with an error list instead of one result per record
-            if (sub.HttpStatusCode >= 400 || sub.Body.ValueKind != JsonValueKind.Array)
-                return new CollectionResult(sub.ReferenceId, null, ParseErrors(sub.ReferenceId, sub.Body));
-
-            return new CollectionResult(sub.ReferenceId, sub.Body.EnumerateArray().Select(ParseRecordResult).ToList(), []);
-        }).ToList();
+            return sub.HttpStatusCode >= 400 || sub.Body.ValueKind != JsonValueKind.Array
+                ? new CollectionResult(sub.ReferenceId, null, ParseErrors(sub.ReferenceId, sub.Body))
+                : new CollectionResult(sub.ReferenceId, [.. sub.Body.EnumerateArray().Select(ParseRecordResult)], []);
+        })];
     }
 
     /// <summary>Posts a Composite request and returns its subresponses, in request order.</summary>
@@ -136,42 +151,58 @@ public sealed class SalesforceRestClient(HttpClient http)
     }
 
     public static string Soql(string sobject, IEnumerable<string> fields, string whereField, IEnumerable<string> values)
-        => $"SELECT {string.Join(",", fields)} FROM {sobject} WHERE {whereField} IN " +
-           $"({string.Join(",", values.Select(v => $"'{EscapeSoql(v)}'"))})";
+    {
+        return $"SELECT {string.Join(",", fields)} FROM {sobject} WHERE {whereField} IN " +
+               $"({string.Join(",", values.Select(v => $"'{EscapeSoql(v)}'"))})";
+    }
 
-    private static string EscapeSoql(string s) => s.Replace("\\", "\\\\").Replace("'", "\\'");
+    private static string EscapeSoql(string s)
+    {
+        return s.Replace("\\", "\\\\").Replace("'", "\\'");
+    }
 
     private static List<SalesforceError> ParseErrors(string? referenceId, JsonElement body)
     {
-        if (body.ValueKind != JsonValueKind.Array)
-            return [new SalesforceError(referenceId, "UNKNOWN_ERROR", body.ValueKind == JsonValueKind.Undefined ? null : body.GetRawText())];
-
-        return body.EnumerateArray().Select(e => ParseError(referenceId, e, "errorCode")).ToList();
+        return body.ValueKind != JsonValueKind.Array
+            ? [new SalesforceError(referenceId, "UNKNOWN_ERROR", body.ValueKind == JsonValueKind.Undefined ? null : body.GetRawText())]
+            : [.. body.EnumerateArray().Select(e => ParseError(referenceId, e, "errorCode"))];
     }
 
-    private static RecordResult ParseRecordResult(JsonElement record) => new(
+    private static RecordResult ParseRecordResult(JsonElement record)
+    {
+        return new(
         record.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True,
         record.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
         record.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
             ? errors.EnumerateArray().Select(e => ParseError(null, e, "statusCode")).ToList()
             : []);
+    }
 
     /// <param name="codeProperty">"errorCode" in an error response, "statusCode" in a collection's per-record errors.</param>
-    private static SalesforceError ParseError(string? referenceId, JsonElement e, string codeProperty) => new(
+    private static SalesforceError ParseError(string? referenceId, JsonElement e, string codeProperty)
+    {
+        return new(
         referenceId,
         StringProperty(e, codeProperty) ?? "UNKNOWN_ERROR",
         StringProperty(e, "message"),
         e.ValueKind == JsonValueKind.Object && e.TryGetProperty("fields", out var f) && f.ValueKind == JsonValueKind.Array
             ? f.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList() : null);
+    }
 
     private static string? StringProperty(JsonElement e, string name)
-        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
+    {
+        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+    }
 
     private static async Task EnsureSuccessAsync(HttpResponseMessage res, CancellationToken ct)
     {
-        if (res.IsSuccessStatusCode) return;
+        if (res.IsSuccessStatusCode)
+        {
+            return;
+        }
+
         throw new SalesforceResponseException(res.StatusCode, await res.Content.ReadAsStringAsync(ct));
     }
 

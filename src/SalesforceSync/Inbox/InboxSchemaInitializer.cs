@@ -14,12 +14,15 @@ public sealed class InboxSchemaInitializer(IDbContextFactory<SyncDbContext> cont
         string[] tables;
         using (var db = contexts.CreateDbContext())
         {
-            tables = db.InboxTables.ToArray();
+            tables = [.. db.InboxTables];
         }
 
         await InboxSchema.EnsureCreatedAsync(contexts, tables, cancellationToken);
         log.LogInformation("Inbox schema is up to date ({Tables})", string.Join(", ", tables));
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        return Task.CompletedTask;
+    }
 }

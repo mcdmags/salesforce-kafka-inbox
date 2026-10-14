@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
@@ -28,7 +27,10 @@ public sealed class SalesforceBatchUpsertServiceTests
     private readonly Fixture _any = new();
     private readonly SalesforceBatchUpsertService _upserter;
 
-    public SalesforceBatchUpsertServiceTests() => _upserter = Upserter();
+    public SalesforceBatchUpsertServiceTests()
+    {
+        _upserter = Upserter();
+    }
 
     /// <summary>An upserter on the same org and its own caches, with the given settings.</summary>
     private SalesforceBatchUpsertService Upserter(SalesforceOptions? salesforce = null, SyncOptions? sync = null)
@@ -59,7 +61,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task A_batch_costs_one_composite_read_and_one_composite_write()
     {
-        await Account("A1", new() { ["name"] = _any.Create<string>() }, new());  // warms the describe cache
+        await Account("A1", new() { ["name"] = _any.Create<string>() }, []);  // warms the describe cache
         var before = _org.GetStats();
 
         await Accounts(
@@ -99,9 +101,9 @@ public sealed class SalesforceBatchUpsertServiceTests
     public async Task Full_record_with_one_changed_field_sends_only_that_field()
     {
         var (name, description) = (_any.Create<string>(), _any.Create<string>());
-        await Account("A1", new() { ["name"] = name, ["rating"] = "Hot", ["description"] = description }, new());
+        await Account("A1", new() { ["name"] = name, ["rating"] = "Hot", ["description"] = description }, []);
 
-        await Account("A1", new() { ["name"] = name, ["rating"] = "Cold", ["description"] = description }, new());
+        await Account("A1", new() { ["name"] = name, ["rating"] = "Cold", ["description"] = description }, []);
 
         _org.History("Account", "A1")![^1].Select(kv => kv.Key).Should().Equal("Rating");
     }
@@ -114,7 +116,7 @@ public sealed class SalesforceBatchUpsertServiceTests
             new() { ["tier"] = "Gold", ["optIn"] = true });
 
         // rating is null; description, isActive and the profile's fields are absent
-        (await Account("A1", new() { ["name"] = name, ["rating"] = null }, new())).Outcome.Should().Be(SyncOutcome.Saved);
+        (await Account("A1", new() { ["name"] = name, ["rating"] = null }, [])).Outcome.Should().Be(SyncOutcome.Saved);
 
         var account = _org.FindByExternalId("Account", "A1")!;
         account["Rating"].Should().BeNull();
@@ -123,14 +125,14 @@ public sealed class SalesforceBatchUpsertServiceTests
         _org.History("Account", "A1")![^1].Select(kv => kv.Key).Should().BeEquivalentTo("Rating", "Description", "Active__c");
         _org.History("Profile__c", "P-A1")![^1].Select(kv => kv.Key).Should().BeEquivalentTo("Tier__c", "Opt_In__c");
 
-        (await Account("A1", new() { ["name"] = name }, new())).Outcome.Should().Be(SyncOutcome.Unchanged,
+        (await Account("A1", new() { ["name"] = name }, [])).Outcome.Should().Be(SyncOutcome.Unchanged,
             "empty fields that are already empty are not written again");
     }
 
     [Fact]
     public async Task New_record_is_created_without_its_empty_fields()
     {
-        await Account("A1", new() { ["name"] = "Acme" }, new());
+        await Account("A1", new() { ["name"] = "Acme" }, []);
 
         _org.History("Account", "A1")!.Single().Select(kv => kv.Key).Should().BeEquivalentTo(
             ["Name", "External_Id__c", "Active__c"], "nothing to clear on a new record; a checkbox is sent as false");
@@ -141,7 +143,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     {
         await Account("A1", new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" });
 
-        var withoutProfile = Event(new() { ["name"] = "Acme", ["rating"] = "Hot" }, new());
+        var withoutProfile = Event(new() { ["name"] = "Acme", ["rating"] = "Hot" }, []);
         withoutProfile["account"]!.AsObject().Remove("profile");
         withoutProfile["account"]!["externalId"] = "A1";
         (await Upsert(AccountStrategy, ("A1", Read<AccountEvent>(withoutProfile)))).Single().Outcome.Should().Be(SyncOutcome.Saved);
@@ -153,10 +155,10 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task Required_field_missing_from_the_full_record_fails_before_any_call()
     {
-        await Account("A1", new() { ["name"] = "Acme" }, new());
+        await Account("A1", new() { ["name"] = "Acme" }, []);
         var before = _org.GetStats();
 
-        var result = await Account("A1", new() { ["rating"] = "Hot" }, new());
+        var result = await Account("A1", new() { ["rating"] = "Hot" }, []);
 
         result.Outcome.Should().Be(SyncOutcome.PermanentFailure);
         (result.PrimaryError?.Code).Should().Be("REQUIRED_FIELD_MISSING", "a full record without a name would empty Account.Name");
@@ -174,7 +176,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [InlineData("NumberOfEmployees", "lots", "INVALID_TYPE_ON_FIELD_IN_RECORD")]
     public async Task A_value_Salesforce_would_reject_fails_only_its_own_unit_before_any_call(string field, string value, string code)
     {
-        await Account("WARM", new() { ["name"] = "Warm" }, new());
+        await Account("WARM", new() { ["name"] = "Warm" }, []);
         var before = _org.GetStats();
 
         var units = new List<(string Key, UpsertUnit Unit)>
@@ -183,7 +185,7 @@ public sealed class SalesforceBatchUpsertServiceTests
             ("GOOD", RawAccount("GOOD", new() { ["Name"] = "Good" }))
         };
         var results = await _upserter.WriteToSalesforceAsync(units,
-            AccountSyncService.Queries(units.Select(u => u.Unit).ToList()).ToList(), CancellationToken.None);
+            [.. AccountSyncService.Queries([.. units.Select(u => u.Unit)])], CancellationToken.None);
 
         var bad = results.Should().ContainSingle(r => r.Key == "BAD").Subject;
         bad.Outcome.Should().Be(SyncOutcome.PermanentFailure);
@@ -197,10 +199,10 @@ public sealed class SalesforceBatchUpsertServiceTests
     public async Task Validation_rule_error_is_permanent_for_that_unit_only()
     {
         var keys = new[] { "A1", "A2", "A3", "A4" };
-        await Accounts(keys.Select(k => (k, Event(new() { ["name"] = "Before" }, new() { ["tier"] = "Gold" }))).ToArray());
+        await Accounts([.. keys.Select(k => (k, Event(new() { ["name"] = "Before" }, new() { ["tier"] = "Gold" })))]);
         _org.InjectFault("Account", "A2", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Industry is required", int.MaxValue);
 
-        var results = await Accounts(keys.Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" }))).ToArray());
+        var results = await Accounts([.. keys.Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" })))]);
 
         var failed = results.Should().ContainSingle(r => r.Key == "A2").Subject;
         failed.Outcome.Should().Be(SyncOutcome.PermanentFailure);
@@ -214,14 +216,14 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task Row_lock_is_transient_for_that_unit_only()
     {
-        await Accounts(("A1", Event(new() { ["name"] = "Before" }, new())), ("A2", Event(new() { ["name"] = "Before" }, new())));
+        await Accounts(("A1", Event(new() { ["name"] = "Before" }, [])), ("A2", Event(new() { ["name"] = "Before" }, [])));
         _org.InjectFault("Account", "A1", "UNABLE_TO_LOCK_ROW", "unable to obtain exclusive access", 1);
 
-        var results = await Accounts(("A1", Event(new() { ["name"] = "After" }, new())), ("A2", Event(new() { ["name"] = "After" }, new())));
+        var results = await Accounts(("A1", Event(new() { ["name"] = "After" }, [])), ("A2", Event(new() { ["name"] = "After" }, [])));
 
         results.Should().ContainSingle(r => r.Key == "A1").Which.Outcome.Should().Be(SyncOutcome.TransientFailure);
         results.Should().ContainSingle(r => r.Key == "A2").Which.Outcome.Should().Be(SyncOutcome.Saved);
-        (await Account("A1", new() { ["name"] = "After" }, new())).Outcome.Should().Be(SyncOutcome.Saved, "the lock was released");
+        (await Account("A1", new() { ["name"] = "After" }, [])).Outcome.Should().Be(SyncOutcome.Saved, "the lock was released");
     }
 
     [Fact]
@@ -246,13 +248,13 @@ public sealed class SalesforceBatchUpsertServiceTests
     {
         // Another writer creates A1 between our read and our create
         _org.InjectFault("Account", "A1", "DUPLICATE_VALUE", "duplicate value found: External_Id__c duplicates value A1", 1);
-        var lost = await Account("A1", new() { ["name"] = "Ours" }, new());
+        var lost = await Account("A1", new() { ["name"] = "Ours" }, []);
         lost.Outcome.Should().Be(SyncOutcome.TransientFailure);
         (lost.PrimaryError?.Code).Should().Be("DUPLICATE_VALUE");
         await Upserter().WriteToSalesforceAsync([("A1", RawAccount("A1", new() { ["Name"] = "Theirs" }))],
             [new SoqlQuery("Account", "External_Id__c", ["A1"])], CancellationToken.None);
 
-        (await Account("A1", new() { ["name"] = "Ours" }, new())).Outcome.Should().Be(SyncOutcome.Saved);
+        (await Account("A1", new() { ["name"] = "Ours" }, [])).Outcome.Should().Be(SyncOutcome.Saved);
 
         Sub(_org.WriteRequests[^1], 0)["method"]!.GetValue<string>().Should().Be("PATCH", "the retry read the record and updated it");
         ((string?)_org.FindByExternalId("Account", "A1")!["Name"]).Should().Be("Ours");
@@ -350,7 +352,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         var profiles = Sub(_org.WriteRequests.Should().ContainSingle().Subject, 1);
         ((string?)profiles["referenceId"]).Should().Be("Profile__c_create");
         var second = Records(profiles)[1];
-        second["Account__r"]!.ToJsonString().Should().Be("""{"External_Id__c":"A2"}""");
+        second["Account__r"]!.ToJsonString().Should().Be(/*lang=json,strict*/ """{"External_Id__c":"A2"}""");
         second.ContainsKey("Account__c").Should().BeFalse();
 
         results.Should().ContainSingle(r => r.Key == "A2").Which.Outcome.Should().Be(SyncOutcome.Saved);
@@ -379,7 +381,9 @@ public sealed class SalesforceBatchUpsertServiceTests
     public async Task More_than_five_collections_are_split_over_requests_with_each_units_records_together()
     {
         // Account + Profile + relationship per unit: new units need 3 collections, existing ones 3 others
-        UpsertUnit Unit(string key, string name) => new(
+        UpsertUnit Unit(string key, string name)
+        {
+            return new(
         [
             new SObjectRecord("acct", "Account", "External_Id__c", key, new Dictionary<string, object?> { ["Name"] = name }),
             new SObjectRecord("prof", "Profile__c", "External_Id__c", $"P-{key}", new Dictionary<string, object?> { ["Tier__c"] = name },
@@ -387,12 +391,18 @@ public sealed class SalesforceBatchUpsertServiceTests
             new SObjectRecord("rel", "Account_Relationship__c", "External_Id__c", $"R-{key}", new Dictionary<string, object?> { ["Type__c"] = name },
                 [new SObjectLookup("Account__c", "Account", "External_Id__c", key), new SObjectLookup("Related_Account__c", "Account", "External_Id__c", key)])
         ]);
-        Task<List<UpsertResult>> Send(params (string Key, UpsertUnit Unit)[] units) => _upserter.WriteToSalesforceAsync(units,
-        [
-            new SoqlQuery("Account", "External_Id__c", units.Select(u => u.Key).ToList()),
-            new SoqlQuery("Profile__c", "External_Id__c", units.Select(u => $"P-{u.Key}").ToList()),
-            new SoqlQuery("Account_Relationship__c", "External_Id__c", units.Select(u => $"R-{u.Key}").ToList())
-        ], CancellationToken.None);
+        }
+
+        Task<List<UpsertResult>> Send(params (string Key, UpsertUnit Unit)[] units)
+        {
+            return _upserter.WriteToSalesforceAsync(units,
+                [
+                    new SoqlQuery("Account", "External_Id__c", [.. units.Select(u => u.Key)]),
+            new SoqlQuery("Profile__c", "External_Id__c", [.. units.Select(u => $"P-{u.Key}")]),
+            new SoqlQuery("Account_Relationship__c", "External_Id__c", [.. units.Select(u => $"R-{u.Key}")])
+                ], CancellationToken.None);
+        }
+
         await Send(("OLD1", Unit("OLD1", "Gold")), ("OLD2", Unit("OLD2", "Gold")));
         var before = _org.GetStats();
 
@@ -424,11 +434,11 @@ public sealed class SalesforceBatchUpsertServiceTests
     {
         var upserter = Upserter(new SalesforceOptions { AllOrNone = true });
         var keys = new[] { "A1", "A2", "A3" };
-        await Accounts(keys.Select(k => (k, Event(new() { ["name"] = "Before" }, new() { ["tier"] = "Gold" }))).ToArray());
+        await Accounts([.. keys.Select(k => (k, Event(new() { ["name"] = "Before" }, new() { ["tier"] = "Gold" })))]);
         _org.InjectFault("Account", "A2", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Industry is required", int.MaxValue);
 
         var results = await Accounts(upserter, null,
-            keys.Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" }))).ToArray());
+            [.. keys.Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" })))]);
 
         var write = _org.WriteRequests[^1];
         write["allOrNone"]!.GetValue<bool>().Should().BeTrue();
@@ -441,7 +451,7 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         // The next claim: A2 is dead-lettered, the others go through
         var retried = await Accounts(upserter, null,
-            keys.Where(k => k != "A2").Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" }))).ToArray());
+            [.. keys.Where(k => k != "A2").Select(k => (k, Event(new() { ["name"] = "After" }, new() { ["tier"] = "Silver" })))]);
         retried.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
     }
 
@@ -453,7 +463,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         _org.InjectFault("Account", "A1", "ALL_OR_NONE_OPERATION_ROLLED_BACK", "Record rolled back", int.MaxValue);
 
         var results = await Accounts(upserter, null,
-            ("A1", Event(new() { ["name"] = "One" }, new())), ("A2", Event(new() { ["name"] = "Two" }, new())));
+            ("A1", Event(new() { ["name"] = "One" }, [])), ("A2", Event(new() { ["name"] = "Two" }, [])));
 
         results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.TransientFailure,
             "released as 'not attempted' they would be claimed and rolled back again forever");
@@ -469,10 +479,14 @@ public sealed class SalesforceBatchUpsertServiceTests
     [InlineData(EventType.Updated, false, "POST")]    // mismatch: the record is missing
     public async Task Create_or_update_is_decided_by_Salesforce_whatever_the_event_type_says(EventType type, bool exists, string verb)
     {
-        if (exists) await Account("A1", new() { ["name"] = "Before", ["rating"] = "Hot" }, new());
+        if (exists)
+        {
+            await Account("A1", new() { ["name"] = "Before", ["rating"] = "Hot" }, []);
+        }
+
         var before = _org.WriteRequests.Count;
 
-        var result = (await Accounts(_upserter, type, ("A1", Event(new() { ["name"] = "After" }, new())))).Single();
+        var result = (await Accounts(_upserter, type, ("A1", Event(new() { ["name"] = "After" }, [])))).Single();
 
         result.Outcome.Should().Be(SyncOutcome.Saved);
         _org.WriteRequests.Should().HaveCount(before + 1);
@@ -481,7 +495,11 @@ public sealed class SalesforceBatchUpsertServiceTests
         var stored = _org.FindByExternalId("Account", "A1")!;
         ((string?)stored["Name"]).Should().Be("After");
         stored["Rating"].Should().BeNull("the event is the full record, whichever way it is written");
-        if (exists) Records(account).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "id", "Name", "Rating");
+        if (exists)
+        {
+            Records(account).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "id", "Name", "Rating");
+        }
+
         _org.All("Account").Should().ContainSingle();
     }
 
@@ -505,12 +523,16 @@ public sealed class SalesforceBatchUpsertServiceTests
     public async Task Event_type_mismatch_can_be_dead_lettered_instead(EventType type, bool exists)
     {
         var upserter = Upserter(sync: new SyncOptions { EventTypeMismatch = EventTypeMismatch.DeadLetter });
-        if (exists) await Account("A1", new() { ["name"] = "Before" }, new());
+        if (exists)
+        {
+            await Account("A1", new() { ["name"] = "Before" }, []);
+        }
+
         var before = _org.GetStats().WriteRequests;
 
         var results = await Accounts(upserter, type,
-            ("A1", Event(new() { ["name"] = "After" }, new())),
-            ("A2", Event(new() { ["name"] = "Fine" }, new())));
+            ("A1", Event(new() { ["name"] = "After" }, [])),
+            ("A2", Event(new() { ["name"] = "Fine" }, [])));
 
         var mismatch = results.Should().ContainSingle(r => r.Key == "A1").Subject;
         mismatch.Outcome.Should().Be(SyncOutcome.PermanentFailure);
@@ -525,11 +547,11 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task Profile_moved_to_another_Account_is_relinked()
     {
-        await Account("A1", new() { ["name"] = "One" }, new());
-        await Account("A2", new() { ["name"] = "Two" }, new());
+        await Account("A1", new() { ["name"] = "One" }, []);
+        await Account("A2", new() { ["name"] = "Two" }, []);
 
         // The same profile, now owned by A2
-        var result = (await Accounts(("A2", Event(new() { ["name"] = "Two" }, new(), profileId: "P-A1")))).Single();
+        var result = (await Accounts(("A2", Event(new() { ["name"] = "Two" }, [], profileId: "P-A1")))).Single();
 
         result.Outcome.Should().Be(SyncOutcome.Saved);
         ((string?)_org.FindByExternalId("Profile__c", "P-A1")!["Account__c"]).Should().Be(IdOf("Account", "A2"));
@@ -539,7 +561,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     public async Task Large_requests_are_sent_gzip_compressed()
     {
         var items = Enumerable.Range(0, 20)
-            .Select(i => ($"A{i:D2}", Event(new() { ["name"] = $"Account number {i}", ["description"] = new string('x', 200) }, new())))
+            .Select(i => ($"A{i:D2}", Event(new() { ["name"] = $"Account number {i}", ["description"] = new string('x', 200) }, [])))
             .ToArray();
 
         (await Accounts(items)).Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved,
@@ -551,7 +573,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task Relationship_links_two_existing_Accounts()
     {
-        await Accounts(("A1", Event(new() { ["name"] = "Parent" }, new())), ("A2", Event(new() { ["name"] = "Child" }, new())));
+        await Accounts(("A1", Event(new() { ["name"] = "Parent" }, [])), ("A2", Event(new() { ["name"] = "Child" }, [])));
 
         var result = await Relationship("R1", "A1", "A2", new() { ["type"] = "Parent", ["isActive"] = true });
 
@@ -565,7 +587,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task Relationship_whose_Account_is_not_synced_yet_is_retried_later()
     {
-        await Account("A1", new() { ["name"] = "Parent" }, new());
+        await Account("A1", new() { ["name"] = "Parent" }, []);
         var writesBefore = _org.GetStats().WriteRequests;
 
         var early = await Relationship("R1", "A1", "A2", new() { ["type"] = "Parent" });
@@ -575,7 +597,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         (early.PrimaryError?.Message).Should().Contain("A2");
         _org.GetStats().WriteRequests.Should().Be(writesBefore, "nothing was sent");
 
-        await Account("A2", new() { ["name"] = _any.Create<string>() }, new());
+        await Account("A2", new() { ["name"] = _any.Create<string>() }, []);
         (await Relationship("R1", "A1", "A2", new() { ["type"] = "Parent" })).Outcome.Should().Be(SyncOutcome.Saved);
     }
 
@@ -585,7 +607,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [InlineData("ENTITY_IS_DELETED", "entity is deleted")]
     public async Task Relationship_whose_Account_Salesforce_cannot_find_at_write_time_waits_the_same_way(string code, string message)
     {
-        await Accounts(("A1", Event(new() { ["name"] = "Parent" }, new())), ("A2", Event(new() { ["name"] = "Child" }, new())));
+        await Accounts(("A1", Event(new() { ["name"] = "Parent" }, [])), ("A2", Event(new() { ["name"] = "Child" }, [])));
         _org.InjectFault("Account_Relationship__c", "R1", code, message, 1);
 
         var rejected = await Relationship("R1", "A1", "A2", new() { ["type"] = "Parent" });
@@ -602,8 +624,8 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task Relationship_update_sends_only_what_changed_and_relinks()
     {
-        await Accounts(("A1", Event(new() { ["name"] = "1" }, new())), ("A2", Event(new() { ["name"] = "2" }, new())),
-            ("A3", Event(new() { ["name"] = "3" }, new())));
+        await Accounts(("A1", Event(new() { ["name"] = "1" }, [])), ("A2", Event(new() { ["name"] = "2" }, [])),
+            ("A3", Event(new() { ["name"] = "3" }, [])));
         await Relationship("R1", "A1", "A2", new() { ["type"] = "Partner", ["isActive"] = true });
 
         await Relationship("R1", "A1", "A2", new() { ["type"] = "Reseller", ["isActive"] = true });
@@ -620,19 +642,26 @@ public sealed class SalesforceBatchUpsertServiceTests
     // ---------- Helpers ----------
 
     private async Task<UpsertResult> Account(string key, Dictionary<string, object?> account, Dictionary<string, object?> profile)
-        => (await Accounts((key, Event(account, profile)))).Single();
+    {
+        return (await Accounts((key, Event(account, profile)))).Single();
+    }
 
-    private Task<List<UpsertResult>> Accounts(params (string Key, JsonObject Event)[] items) => Accounts(_upserter, null, items);
+    private Task<List<UpsertResult>> Accounts(params (string Key, JsonObject Event)[] items)
+    {
+        return Accounts(_upserter, null, items);
+    }
 
     /// <summary>Profiles are keyed "P-{account}" unless the event says otherwise.</summary>
     private Task<List<UpsertResult>> Accounts(SalesforceBatchUpsertService upserter, EventType? type, params (string Key, JsonObject Event)[] items)
-        => Upsert(upserter, AccountStrategy, type, items.Select(i =>
-        {
-            var account = i.Event["account"]!.AsObject();
-            account["externalId"] = i.Key;
-            account["profile"]!["externalId"] ??= $"P-{i.Key}";
-            return (i.Key, Read<AccountEvent>(i.Event));
-        }).ToArray());
+    {
+        return Upsert(upserter, AccountStrategy, type, [.. items.Select(i =>
+            {
+                var account = i.Event["account"]!.AsObject();
+                account["externalId"] = i.Key;
+                account["profile"]!["externalId"] ??= $"P-{i.Key}";
+                return (i.Key, Read<AccountEvent>(i.Event));
+            })]);
+    }
 
     private async Task<UpsertResult> Relationship(string key, string account, string related, Dictionary<string, object?> fields)
     {
@@ -645,47 +674,68 @@ public sealed class SalesforceBatchUpsertServiceTests
     }
 
     private Task<List<UpsertResult>> Upsert<TEvent>(UpsertStrategy<TEvent> strategy, params (string Key, TEvent Event)[] items)
-        => Upsert(_upserter, strategy, null, items);
+    {
+        return Upsert(_upserter, strategy, null, items);
+    }
 
     /// <summary>What the engine does with a strategy, minus the inbox: map (with the event's type), query, upsert.</summary>
     private static Task<List<UpsertResult>> Upsert<TEvent>(SalesforceBatchUpsertService upserter, UpsertStrategy<TEvent> strategy,
         EventType? type, params (string Key, TEvent Event)[] items)
     {
         var units = items.Select(i => (i.Key, strategy.Map(i.Key, i.Event) with { EventType = type })).ToList();
-        return upserter.WriteToSalesforceAsync(units, strategy.Queries(units.Select(u => u.Item2).ToList()).ToList(), CancellationToken.None);
+        return upserter.WriteToSalesforceAsync(units, [.. strategy.Queries([.. units.Select(u => u.Item2)])], CancellationToken.None);
     }
 
     private static JsonObject WithoutProfile(string key, string name)
     {
-        var e = Event(new() { ["name"] = name }, new());
+        var e = Event(new() { ["name"] = name }, []);
         e["account"]!.AsObject().Remove("profile");
         e["account"]!["externalId"] = key;
         return e;
     }
 
     /// <summary>The i-th subrequest of a recorded composite write.</summary>
-    private static JsonObject Sub(JsonObject write, int i) => write["compositeRequest"]![i]!.AsObject();
+    private static JsonObject Sub(JsonObject write, int i)
+    {
+        return write["compositeRequest"]![i]!.AsObject();
+    }
 
     private static List<JsonObject> Records(JsonNode collection)
-        => collection["body"]!["records"]!.AsArray().Select(r => r!.AsObject()).ToList();
+    {
+        return [.. collection["body"]!["records"]!.AsArray().Select(r => r!.AsObject())];
+    }
 
     /// <summary>An account event envelope (externalId and the profile's default id are filled in by <see cref="Accounts"/>).</summary>
     private static JsonObject Event(Dictionary<string, object?> account, Dictionary<string, object?> profile, string? profileId = null)
     {
         var body = Body(account);
         body["profile"] = Body(profile);
-        if (profileId is not null) body["profile"]!["externalId"] = profileId;
+        if (profileId is not null)
+        {
+            body["profile"]!["externalId"] = profileId;
+        }
+
         return new JsonObject { ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z", ["type"] = "updated" }, ["account"] = body };
     }
 
     private static UpsertUnit RawAccount(string key, Dictionary<string, object?> fields)
-        => new([new SObjectRecord("acct", "Account", "External_Id__c", key, fields)]);
+    {
+        return new([new SObjectRecord("acct", "Account", "External_Id__c", key, fields)]);
+    }
 
     private static JsonObject Body(Dictionary<string, object?> fields)
-        => JsonSerializer.SerializeToNode(fields)!.AsObject();
+    {
+        return JsonSerializer.SerializeToNode(fields)!.AsObject();
+    }
 
     /// <summary>The event as the engine reads it from the inbox.</summary>
-    private static TEvent Read<TEvent>(JsonObject json) => json.Deserialize<TEvent>(SalesforceBatchUpsertService.EventJson)!;
+    private static TEvent Read<TEvent>(JsonObject json)
+    {
+        return json.Deserialize<TEvent>(SalesforceBatchUpsertService.EventJson)!;
+    }
 
-    private string? IdOf(string sobject, string externalId) => (string?)_org.FindByExternalId(sobject, externalId)?["Id"];
+    private string? IdOf(string sobject, string externalId)
+    {
+        return (string?)_org.FindByExternalId(sobject, externalId)?["Id"];
+    }
 }

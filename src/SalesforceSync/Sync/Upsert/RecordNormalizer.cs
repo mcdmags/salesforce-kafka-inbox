@@ -17,8 +17,14 @@ internal static class RecordNormalizer
         foreach (var (key, unit) in units)
         {
             var candidate = Normalize(key, unit, schemas, out var problems);
-            if (problems.Count > 0) rejected.Add(new(key, SyncOutcome.PermanentFailure, problems));
-            else normalized.Add(candidate);
+            if (problems.Count > 0)
+            {
+                rejected.Add(new(key, SyncOutcome.PermanentFailure, problems));
+            }
+            else
+            {
+                normalized.Add(candidate);
+            }
         }
         return (normalized, rejected);
     }
@@ -40,7 +46,9 @@ internal static class RecordNormalizer
         var lookups = CheckLookups(record, schema, schemas, problems);
 
         if (schema.Find(record.ExternalIdField) is null)
+        {
             problems.Add(NoSuchColumn(record, record.ExternalIdField, schema));
+        }
 
         return new NormalizedRecord(record, schema, fields, lookups);
     }
@@ -52,11 +60,17 @@ internal static class RecordNormalizer
         foreach (var (name, value) in record.Fields)
         {
             if (schema.Find(name) is not { } field)
+            {
                 problems.Add(NoSuchColumn(record, name, schema));
+            }
             else if (FieldValues.TryNormalize(field, value, out var normalized, out var error))
+            {
                 fields[field] = normalized;
+            }
             else
+            {
                 problems.Add(new(record.ReferenceId, error.Code, $"{field.Name}: {error.Message}"));
+            }
         }
         return fields;
     }
@@ -69,14 +83,20 @@ internal static class RecordNormalizer
         foreach (var lookup in record.Lookups ?? [])
         {
             if (schema.Find(lookup.Field) is { Type: "reference" } field && schemas[lookup.SObject].Find(lookup.ExternalIdField) is not null)
+            {
                 lookups.Add(new NormalizedLookup(field, lookup));
+            }
             else
+            {
                 problems.Add(new(record.ReferenceId, "INVALID_FIELD",
                     $"{schema.Name}.{lookup.Field} is not a lookup, or {lookup.SObject}.{lookup.ExternalIdField} doesn't exist"));
+            }
         }
         return lookups;
     }
 
     private static SalesforceError NoSuchColumn(SObjectRecord record, string column, SObjectSchema schema)
-        => new(record.ReferenceId, "INVALID_FIELD", $"No such column '{column}' on {schema.Name}");
+    {
+        return new(record.ReferenceId, "INVALID_FIELD", $"No such column '{column}' on {schema.Name}");
+    }
 }

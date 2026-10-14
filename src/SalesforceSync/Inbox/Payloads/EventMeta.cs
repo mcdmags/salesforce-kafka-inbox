@@ -33,14 +33,18 @@ public sealed partial class EventMeta
 
     /// <summary><see cref="Type"/> as an <see cref="EventType"/>, or null if it is missing or anything else (e.g. "deleted").</summary>
     public EventType? Kind()
-        => "inserted".Equals(Type, StringComparison.OrdinalIgnoreCase) ? EventType.Inserted
-            : "updated".Equals(Type, StringComparison.OrdinalIgnoreCase) ? EventType.Updated
-            : null;
+    {
+        return "inserted".Equals(Type, StringComparison.OrdinalIgnoreCase) ? EventType.Inserted
+                : "updated".Equals(Type, StringComparison.OrdinalIgnoreCase) ? EventType.Updated
+                : null;
+    }
 
     /// <summary><see cref="Time"/> as an instant, or null if it is missing or not an ISO-8601 time with an offset.</summary>
     public DateTimeOffset? Timestamp()
-        => Time is not null && IsoTimeWithOffset().IsMatch(Time) &&
-           DateTimeOffset.TryParse(Time, CultureInfo.InvariantCulture, DateTimeStyles.None, out var time)
-            ? time
-            : null;
+    {
+        return Time is not null && IsoTimeWithOffset().IsMatch(Time) &&
+               DateTimeOffset.TryParse(Time, CultureInfo.InvariantCulture, DateTimeStyles.None, out var time)
+                ? time
+                : null;
+    }
 }

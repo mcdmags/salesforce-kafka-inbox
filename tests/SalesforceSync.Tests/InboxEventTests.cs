@@ -29,7 +29,10 @@ public sealed class InboxEventTests
             ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z", ["type"] = "updated" },
             ["account"] = new JsonObject
             {
-                ["externalId"] = key, ["name"] = name, ["rating"] = null, ["tags"] = new JsonArray("B2B", "Retail"),
+                ["externalId"] = key,
+                ["name"] = name,
+                ["rating"] = null,
+                ["tags"] = new JsonArray("B2B", "Retail"),
                 ["profile"] = new JsonObject { ["tier"] = "Gold", ["score"] = score }
             }
         }));
@@ -81,8 +84,11 @@ public sealed class InboxEventTests
             ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z", ["type"] = "updated" },
             ["accountRelationship"] = new JsonObject
             {
-                ["externalId"] = key, ["accountExternalId"] = account, ["relatedAccountExternalId"] = related,
-                ["type"] = "Parent", ["startDate"] = "2026-01-31"
+                ["externalId"] = key,
+                ["accountExternalId"] = account,
+                ["relatedAccountExternalId"] = related,
+                ["type"] = "Parent",
+                ["startDate"] = "2026-01-31"
             }
         }));
 
@@ -90,7 +96,10 @@ public sealed class InboxEventTests
         (rel.SObject, rel.ExternalId).Should().Be(("Account_Relationship__c", key));
         rel.Fields.Should().BeEquivalentTo(new Dictionary<string, object?>
         {
-            ["Name"] = null, ["Type__c"] = "Parent", ["Start_Date__c"] = new DateOnly(2026, 1, 31), ["Active__c"] = null
+            ["Name"] = null,
+            ["Type__c"] = "Parent",
+            ["Start_Date__c"] = new DateOnly(2026, 1, 31),
+            ["Active__c"] = null
         });
         rel.Lookups.Should().Equal(
             new SObjectLookup("Account__c", "Account", "External_Id__c", account),
@@ -98,9 +107,9 @@ public sealed class InboxEventTests
     }
 
     [Theory]
-    [InlineData("""{ "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-1" } }""")]
-    [InlineData("""{ "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-1", "relatedAccountExternalId": "" } }""")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" } }""")]
+    [InlineData(/*lang=json,strict*/ """{ "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-1" } }""")]
+    [InlineData(/*lang=json,strict*/ """{ "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-1", "relatedAccountExternalId": "" } }""")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" } }""")]
     public void Relationship_without_both_accounts_cannot_be_mapped(string json)
     {
         var map = () => Relationships.Map("REL-1", Read<AccountRelationshipEvent>(json));
@@ -111,11 +120,11 @@ public sealed class InboxEventTests
     [Fact]
     public void CamelCase_is_the_contract_but_a_PascalCase_body_binds_to_the_same_sObject()
     {
-        const string camel = """
+        const string camel = /*lang=json,strict*/ """
             { "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "Acme", "isActive": true,
               "annualRevenue": 12.5, "customerSince": "2020-01-15", "profile": { "tier": "Gold", "discountPercent": 5 } } }
             """;
-        const string pascal = """
+        const string pascal = /*lang=json,strict*/ """
             { "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "ExternalId": "ACC-1", "Name": "Acme", "IsActive": true,
               "AnnualRevenue": 12.5, "CustomerSince": "2020-01-15", "Profile": { "Tier": "Gold", "DiscountPercent": 5 } } }
             """;
@@ -132,7 +141,7 @@ public sealed class InboxEventTests
     [Fact]
     public void Value_of_the_wrong_type_makes_the_event_unreadable()
     {
-        var read = () => Read<AccountEvent>("""{ "account": { "externalId": "ACC-1", "name": "Acme", "numberOfEmployees": "lots" } }""");
+        var read = () => Read<AccountEvent>(/*lang=json,strict*/ """{ "account": { "externalId": "ACC-1", "name": "Acme", "numberOfEmployees": "lots" } }""");
 
         read.Should().Throw<JsonException>("the engine dead-letters an event it can't deserialize (INVALID_EVENT)");
     }
@@ -170,8 +179,8 @@ public sealed class InboxEventTests
     public void The_newest_full_record_replaces_older_events_rather_than_merging_with_them()
     {
         var batch = Prepare(
-            Row(1, """{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "Acme", "rating": "Hot", "profile": { "tier": "Gold" } } }"""),
-            Row(2, """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "Acme Ltd", "profile": { "score": 9 } } }"""));
+            Row(1, /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "Acme", "rating": "Hot", "profile": { "tier": "Gold" } } }"""),
+            Row(2, /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "Acme Ltd", "profile": { "score": 9 } } }"""));
 
         var unit = batch.Work.Should().ContainSingle().Subject.Unit;
         unit.Records[0].Fields.Should().Contain("Name", "Acme Ltd").And.Contain("Rating", null, "the newest record has no rating any more");
@@ -219,8 +228,8 @@ public sealed class InboxEventTests
         var batch = Prepare(
             Row(1, Account("ACC-1", "good", "2026-10-14T01:00:00Z")),
             Row(2, "not json"),
-            Row(3, """{ "meta": { "time": "2026-10-14T05:00:00", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "no offset" } }"""),
-            Row(4, """{ "meta": { "time": "2026-10-14T05:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "x", "numberOfEmployees": "lots" } }"""));
+            Row(3, /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T05:00:00", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "no offset" } }"""),
+            Row(4, /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T05:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "x", "numberOfEmployees": "lots" } }"""));
 
         batch.Invalid.Select(i => i.Id).Should().Equal(2L, 3L, 4L);
         batch.Work.Should().ContainSingle().Which.EventId.Should().Be(1);
@@ -242,8 +251,8 @@ public sealed class InboxEventTests
     {
         var batch = BatchPreparer.Prepare(Relationships,
         [
-            new InboxEvent(1, "REL-1", """{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A", "relatedAccountExternalId": "B" } }""", 1),
-            new InboxEvent(2, "REL-1", """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""", 1)
+            new InboxEvent(1, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A", "relatedAccountExternalId": "B" } }""", 1),
+            new InboxEvent(2, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""", 1)
         ], new Dictionary<string, long>());
 
         batch.Invalid.Should().ContainSingle().Which.Id.Should().Be(2);
@@ -254,9 +263,9 @@ public sealed class InboxEventTests
     // ---------- What the consumer admits (the same typed read the engine uses) ----------
 
     [Theory]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "ACC-1", 456)]
-    [InlineData("""{ "account": { "externalId": "ACC-2" }, "meta": { "time": "2026-10-14T03:02:03+02:00", "type": "updated" } }""", "ACC-2", 0)]
-    [InlineData("""{ "Meta": { "Time": "2026-10-14T01:02:03Z", "Type": "INSERTED" }, "Account": { "ExternalId": "ACC-3" }, "somethingElse": 1 }""", "ACC-3", 0)]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "ACC-1", 456)]
+    [InlineData(/*lang=json,strict*/ """{ "account": { "externalId": "ACC-2" }, "meta": { "time": "2026-10-14T03:02:03+02:00", "type": "updated" } }""", "ACC-2", 0)]
+    [InlineData(/*lang=json,strict*/ """{ "Meta": { "Time": "2026-10-14T01:02:03Z", "Type": "INSERTED" }, "Account": { "ExternalId": "ACC-3" }, "somethingElse": 1 }""", "ACC-3", 0)]
     public void Valid_event_yields_its_entity_id_and_time(string json, string entityId, int millisecond)
     {
         Accounts.TryRead(json, out var read, out var problem).Should().BeTrue("the event is valid, but: {0}", problem);
@@ -276,7 +285,7 @@ public sealed class InboxEventTests
         Accounts.TryRead(older, out var first, out _).Should().BeTrue();
         Accounts.TryRead(newer, out var second, out _).Should().BeTrue();
 
-        var newest = BatchPreparer.Coalesce<AccountEvent>([(new InboxEvent(1, "ACC-1", newer, 1), second!), (new InboxEvent(2, "ACC-1", older, 1), first!)]);
+        var newest = BatchPreparer.Coalesce([(new InboxEvent(1, "ACC-1", newer, 1), second!), (new InboxEvent(2, "ACC-1", older, 1), first!)]);
 
         newest.Read.Type.Should().Be(expected);
     }
@@ -285,23 +294,23 @@ public sealed class InboxEventTests
     [InlineData("not json", "Not a valid account event")]
     [InlineData("[1, 2]", "Not a valid account event")]
     [InlineData("null", "null")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" } }""", "entity object")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "accountRelationship": { "externalId": "R" } }""", "entity object")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": "ACC-1" }""", "Not a valid account event")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "name": "Acme" } }""", "non-empty id")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": " " } }""", "non-empty id")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": 17 } }""", "Not a valid account event")]
-    [InlineData("""{ "account": { "externalId": "ACC-1" } }""", "event time")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
-    [InlineData("""{ "meta": { "time": "2026-10-14 01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
-    [InlineData("""{ "meta": { "time": "now", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
-    [InlineData("""{ "meta": { "time": "2026-13-14T01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
-    [InlineData("""{ "meta": { "time": 1791939723456, "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "Not a valid account event")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": "ACC-1" } }""", "event type")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": null }, "account": { "externalId": "ACC-1" } }""", "event type")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "deleted" }, "account": { "externalId": "ACC-1" } }""", "event type")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "upsert" }, "account": { "externalId": "ACC-1" } }""", "event type")]
-    [InlineData("""{ "meta": { "time": "2026-10-14T01:02:03Z", "type": 1 }, "account": { "externalId": "ACC-1" } }""", "Not a valid account event")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" } }""", "entity object")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "accountRelationship": { "externalId": "R" } }""", "entity object")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": "ACC-1" }""", "Not a valid account event")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "name": "Acme" } }""", "non-empty id")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": " " } }""", "non-empty id")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": 17 } }""", "Not a valid account event")]
+    [InlineData(/*lang=json,strict*/ """{ "account": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14 01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "now", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-13-14T01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": 1791939723456, "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "Not a valid account event")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": "ACC-1" } }""", "event type")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": null }, "account": { "externalId": "ACC-1" } }""", "event type")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "deleted" }, "account": { "externalId": "ACC-1" } }""", "event type")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "upsert" }, "account": { "externalId": "ACC-1" } }""", "event type")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": 1 }, "account": { "externalId": "ACC-1" } }""", "Not a valid account event")]
     public void Invalid_event_is_rejected_with_the_reason(string json, string reason)
     {
         Accounts.TryRead(json, out var read, out var problem).Should().BeFalse();
@@ -312,7 +321,7 @@ public sealed class InboxEventTests
     [Fact]
     public void Each_entity_type_reads_only_its_own_events()
     {
-        const string account = """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""";
+        const string account = /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""";
 
         Relationships.TryRead(account, out _, out var problem).Should().BeFalse("an account event on the relationship topic is skipped at ingest");
         problem.Should().Contain("accountRelationship");
@@ -330,8 +339,14 @@ public sealed class InboxEventTests
     {
         var use = () => InboxSql.For(table);
 
-        if (valid) use.Should().NotThrow().Which.LockHeads.Should().Contain($"from {table} ");
-        else use.Should().Throw<ArgumentException>();
+        if (valid)
+        {
+            use.Should().NotThrow().Which.LockHeads.Should().Contain($"from {table} ");
+        }
+        else
+        {
+            use.Should().Throw<ArgumentException>();
+        }
     }
 
     [Fact]
@@ -358,25 +373,42 @@ public sealed class InboxEventTests
     }
 
     private static string Account(string id, string name, string time)
-        => new JsonObject
+    {
+        return new JsonObject
         {
             ["meta"] = new JsonObject { ["time"] = time, ["type"] = "updated" },
             ["account"] = new JsonObject { ["externalId"] = id, ["name"] = name }
         }.ToJsonString();
+    }
 
     private static PreparedBatch Prepare(params InboxEvent[] rows)
-        => BatchPreparer.Prepare(Accounts, rows, new Dictionary<string, long>());
+    {
+        return BatchPreparer.Prepare(Accounts, rows, new Dictionary<string, long>());
+    }
 
     private static PreparedBatch Prepare(Dictionary<string, long> synced, params InboxEvent[] rows)
-        => BatchPreparer.Prepare(Accounts, rows, synced);
+    {
+        return BatchPreparer.Prepare(Accounts, rows, synced);
+    }
 
-    private static long Micros(string time) => BatchPreparer.ToMicroseconds(DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
+    private static long Micros(string time)
+    {
+        return BatchPreparer.ToMicroseconds(DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
+    }
 
     /// <summary>A claimed row of the entity its payload names.</summary>
     private static InboxEvent Row(long id, string payload)
-        => new(id, Accounts.TryRead(payload, out var read, out _) ? read.EntityId : "ACC-1", payload, 1);
+    {
+        return new(id, Accounts.TryRead(payload, out var read, out _) ? read.EntityId : "ACC-1", payload, 1);
+    }
 
-    private static TEvent Read<TEvent>(string json) => JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchUpsertService.EventJson)!;
+    private static TEvent Read<TEvent>(string json)
+    {
+        return JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchUpsertService.EventJson)!;
+    }
 
-    private static TEvent Read<TEvent>(JsonObject json) => json.Deserialize<TEvent>(SalesforceBatchUpsertService.EventJson)!;
+    private static TEvent Read<TEvent>(JsonObject json)
+    {
+        return json.Deserialize<TEvent>(SalesforceBatchUpsertService.EventJson)!;
+    }
 }

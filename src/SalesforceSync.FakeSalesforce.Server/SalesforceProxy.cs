@@ -14,18 +14,24 @@ public static class SalesforceProxy
     {
         var invoker = ctx.RequestServices.GetRequiredService<HttpMessageInvoker>();
         if (ctx.Request.Path.Value?.EndsWith("/composite", StringComparison.OrdinalIgnoreCase) == true)
+        {
             ctx.RequestServices.GetRequiredService<ClientLog>().RecordCompositeRequest(ctx.Request.Headers.UserAgent);
+        }
 
         using var request = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), ctx.Request.GetEncodedUrl());
         foreach (var (name, values) in ctx.Request.Headers.Where(h => ForwardedHeaders.Contains(h.Key)))
-            request.Headers.TryAddWithoutValidation(name, values.ToArray());
+        {
+            request.Headers.TryAddWithoutValidation(name, [.. values]);
+        }
 
         // Request decompression (UseRequestDecompression) drops Content-Length, so go by method
         if (!HttpMethods.IsGet(ctx.Request.Method) && !HttpMethods.IsHead(ctx.Request.Method) && !HttpMethods.IsDelete(ctx.Request.Method))
         {
             request.Content = new StreamContent(ctx.Request.Body);
             if (ctx.Request.ContentType is { } contentType)
+            {
                 request.Content.Headers.TryAddWithoutValidation("Content-Type", contentType);
+            }
         }
 
         HttpResponseMessage response;
@@ -43,7 +49,10 @@ public static class SalesforceProxy
 
         ctx.Response.StatusCode = (int)response.StatusCode;
         foreach (var (name, values) in response.Headers.Concat(response.Content.Headers))
+        {
             ctx.Response.Headers[name] = values.ToArray();
+        }
+
         ctx.Response.Headers.Remove("Transfer-Encoding");
         ctx.Response.Headers.Remove("Content-Length"); // the response may be compressed on the way out
 

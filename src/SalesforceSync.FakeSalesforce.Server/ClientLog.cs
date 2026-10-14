@@ -11,14 +11,23 @@ public sealed class ClientLog
     private readonly ConcurrentDictionary<string, long> _compositeRequests = new(StringComparer.Ordinal);
     private long _requests, _gzipRequests, _acceptGzip;
 
-    public void RecordCompositeRequest(string? userAgent) =>
+    public void RecordCompositeRequest(string? userAgent)
+    {
         _compositeRequests.AddOrUpdate(string.IsNullOrEmpty(userAgent) ? "(none)" : userAgent, 1, (_, n) => n + 1);
+    }
 
     public void RecordRequest(bool gzipBody, bool acceptsGzip)
     {
         Interlocked.Increment(ref _requests);
-        if (gzipBody) Interlocked.Increment(ref _gzipRequests);
-        if (acceptsGzip) Interlocked.Increment(ref _acceptGzip);
+        if (gzipBody)
+        {
+            Interlocked.Increment(ref _gzipRequests);
+        }
+
+        if (acceptsGzip)
+        {
+            Interlocked.Increment(ref _acceptGzip);
+        }
     }
 
     public IReadOnlyDictionary<string, long> CompositeRequests => _compositeRequests;

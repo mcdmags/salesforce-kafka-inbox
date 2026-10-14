@@ -6,7 +6,13 @@ namespace SalesforceSync.RateLimiting;
 /// </summary>
 public sealed class RateLimitInitializer(SalesforceRateLimiter limiter) : IHostedService
 {
-    public Task StartAsync(CancellationToken cancellationToken) => limiter.ApplyConfigurationAsync(cancellationToken);
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        return limiter.ApplyConfigurationAsync(cancellationToken);
+    }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        return Task.CompletedTask;
+    }
 }

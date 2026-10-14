@@ -92,5 +92,7 @@ public sealed class MapperTests
     }
 
     private static IEnumerable<string> NullProperties(object sobject)
-        => sobject.GetType().GetProperties().Where(p => p.GetValue(sobject) is null).Select(p => p.Name);
+    {
+        return sobject.GetType().GetProperties().Where(p => p.GetValue(sobject) is null).Select(p => p.Name);
+    }
 }

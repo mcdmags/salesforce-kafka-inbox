@@ -20,12 +20,18 @@ public sealed class SalesforceTokenProvider(IHttpClientFactory httpFactory, IOpt
     /// </param>
     public async Task<string> GetTokenAsync(string? rejected, CancellationToken ct)
     {
-        if (Usable(_token, rejected) is { } cached) return cached;
+        if (Usable(_token, rejected) is { } cached)
+        {
+            return cached;
+        }
 
         await _lock.WaitAsync(ct);
         try
         {
-            if (Usable(_token, rejected) is { } refreshed) return refreshed; // another request just refreshed it
+            if (Usable(_token, rejected) is { } refreshed)
+            {
+                return refreshed; // another request just refreshed it
+            }
 
             var o = options.Value;
             using var client = httpFactory.CreateClient(HttpClientName);
@@ -38,8 +44,10 @@ public sealed class SalesforceTokenProvider(IHttpClientFactory httpFactory, IOpt
             using var res = await client.PostAsync(o.TokenUrl, form, ct);
 
             if (!res.IsSuccessStatusCode)
+            {
                 throw new HttpRequestException(
                     $"Salesforce token request failed {(int)res.StatusCode}: {await res.Content.ReadAsStringAsync(ct)}");
+            }
 
             var body = await res.Content.ReadFromJsonAsync<TokenResponse>(cancellationToken: ct)
                        ?? throw new InvalidOperationException("Empty token response");
@@ -54,7 +62,9 @@ public sealed class SalesforceTokenProvider(IHttpClientFactory httpFactory, IOpt
     }
 
     private static string? Usable(CachedToken? token, string? rejected)
-        => token is not null && token.Value != rejected && DateTimeOffset.UtcNow < token.ExpiresAt ? token.Value : null;
+    {
+        return token is not null && token.Value != rejected && DateTimeOffset.UtcNow < token.ExpiresAt ? token.Value : null;
+    }
 
     private sealed record TokenResponse([property: JsonPropertyName("access_token")] string AccessToken);
 }

@@ -1,9 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
-using SalesforceSync.Inbox;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
@@ -16,12 +14,14 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class WriteOutcomeTests
 {
-    private const string SalesforceBody = """[{"errorCode":"SERVER_UNAVAILABLE","message":"Servers are temporarily unable to respond"}]""";
+    private const string SalesforceBody = /*lang=json,strict*/ """[{"errorCode":"SERVER_UNAVAILABLE","message":"Servers are temporarily unable to respond"}]""";
 
-    public static TheoryData<string, Exception, bool> Failures() => new()
+    public static TheoryData<string, Exception, bool> Failures()
+    {
+        return new()
     {
         // Proven not applied
-        { "400 from Salesforce", new SalesforceResponseException(HttpStatusCode.BadRequest, """[{"errorCode":"JSON_PARSER_ERROR","message":"x"}]"""), false },
+        { "400 from Salesforce", new SalesforceResponseException(HttpStatusCode.BadRequest, /*lang=json,strict*/ """[{"errorCode":"JSON_PARSER_ERROR","message":"x"}]"""), false },
         { "401 without a body", new SalesforceResponseException(HttpStatusCode.Unauthorized, ""), false },
         { "403 REQUEST_LIMIT_EXCEEDED", new RateLimitedException(TimeSpan.FromSeconds(30)), false },
         { "no rate-limit token (never sent)", new RateLimitedException(TimeSpan.FromSeconds(1)), false },
@@ -45,17 +45,22 @@ public sealed class WriteOutcomeTests
         { "unreadable response", new System.Text.Json.JsonException("unexpected end of data"), true },
         { "empty response", new InvalidOperationException("Empty composite response"), true }
     };
+    }
 
     [Theory, MemberData(nameof(Failures))]
     public void A_failed_write_is_unknown_unless_the_failure_proves_it_was_not_applied(string what, Exception failure, bool unknown)
-        => WriteOutcome.IsUnknown(failure).Should().Be(unknown, what);
+    {
+        WriteOutcome.IsUnknown(failure).Should().Be(unknown, what);
+    }
 
     [Theory]
-    [InlineData("""[{"errorCode":"X","message":"y"}]""", true)]
+    [InlineData(/*lang=json,strict*/ """[{"errorCode":"X","message":"y"}]""", true)]
     [InlineData("<html>503 Service Unavailable</html>", false)]
     [InlineData("", false)]
     public void Only_a_body_with_Salesforce_errors_counts_as_Salesforces_own_answer(string body, bool own)
-        => new SalesforceResponseException(HttpStatusCode.ServiceUnavailable, body).IsSalesforceError.Should().Be(own);
+    {
+        new SalesforceResponseException(HttpStatusCode.ServiceUnavailable, body).IsSalesforceError.Should().Be(own);
+    }
 
     // ---------- Read vs write, through the upserter ----------
 
@@ -110,7 +115,7 @@ public sealed class WriteOutcomeTests
     private static Task<List<UpsertResult>> Upsert(SalesforceBatchUpsertService upserter, string key)
     {
         var unit = new UpsertUnit([new SObjectRecord("acct", "Account", "External_Id__c", key, new Dictionary<string, object?> { ["Name"] = "Acme" })]);
-        return upserter.WriteToSalesforceAsync([(key, unit)], AccountSyncService.Queries([unit]).ToList(), CancellationToken.None);
+        return upserter.WriteToSalesforceAsync([(key, unit)], [.. AccountSyncService.Queries([unit])], CancellationToken.None);
     }
 
     private static (SalesforceBatchUpsertService, FakeSalesforceStore, FailingHandler) Upserter()
@@ -133,15 +138,20 @@ public sealed class WriteOutcomeTests
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             if (!request.RequestUri!.AbsolutePath.EndsWith("/composite", StringComparison.Ordinal))
-                return await base.SendAsync(request, ct);
-            var isWrite = (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
-            if (isWrite ? !FailWrites : !FailReads) return await base.SendAsync(request, ct);
-            if (Cancel) throw new TaskCanceledException("timed out");
-            return new HttpResponseMessage(Status)
             {
-                RequestMessage = request,
-                Content = new StringContent("""[{"errorCode":"JSON_PARSER_ERROR","message":"injected"}]""")
-            };
+                return await base.SendAsync(request, ct);
+            }
+
+            var isWrite = (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
+            return isWrite ? !FailWrites : !FailReads
+                ? await base.SendAsync(request, ct)
+                : Cancel
+                ? throw new TaskCanceledException("timed out")
+                : new HttpResponseMessage(Status)
+                {
+                    RequestMessage = request,
+                    Content = new StringContent(/*lang=json,strict*/ """[{"errorCode":"JSON_PARSER_ERROR","message":"injected"}]""")
+                };
         }
     }
 }

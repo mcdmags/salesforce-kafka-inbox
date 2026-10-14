@@ -28,7 +28,8 @@ public sealed class ClaimRetryTests(SyncFixture app)
         }
         var connectionString = new NpgsqlConnectionStringBuilder(app.ConnectionString)
         {
-            SearchPath = Schema, ApplicationName = SyncFixture.TestsApplicationName
+            SearchPath = Schema,
+            ApplicationName = SyncFixture.TestsApplicationName
         }.ConnectionString;
         await using var db = NpgsqlDataSource.Create(connectionString);
 

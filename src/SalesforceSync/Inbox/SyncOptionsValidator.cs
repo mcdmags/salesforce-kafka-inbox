@@ -14,24 +14,36 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
         var errors = new List<string>();
         void AtLeastOne(string setting, int value)
         {
-            if (value < 1) errors.Add($"{SyncOptions.Section}:{setting} must be at least 1.");
+            if (value < 1)
+            {
+                errors.Add($"{SyncOptions.Section}:{setting} must be at least 1.");
+            }
         }
         void Positive(string setting, TimeSpan value)
         {
-            if (value <= TimeSpan.Zero) errors.Add($"{SyncOptions.Section}:{setting} must be positive.");
+            if (value <= TimeSpan.Zero)
+            {
+                errors.Add($"{SyncOptions.Section}:{setting} must be positive.");
+            }
         }
 
         AtLeastOne(nameof(o.Workers), o.Workers);
         AtLeastOne(nameof(o.MaxConcurrentRequests), o.MaxConcurrentRequests);
         if (o.BatchSize is < 1 or > ReadQueryBuilder.MaxEntitiesPerBatch)
+        {
             errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {ReadQueryBuilder.MaxEntitiesPerBatch} " +
                        "(a batch is read with one Composite request: 5 queries of 100 external ids).");
+        }
+
         AtLeastOne(nameof(o.MaxEventsPerEntity), o.MaxEventsPerEntity);
         Positive(nameof(o.Lease), o.Lease);
         Positive(nameof(o.UnknownOutcomeHold), o.UnknownOutcomeHold);
         AtLeastOne(nameof(o.MaxRetries), o.MaxRetries);
         if (o.RetryBaseDelay < TimeSpan.Zero || o.MaxRetryDelay < o.RetryBaseDelay)
+        {
             errors.Add($"{SyncOptions.Section}:RetryBaseDelay must be >= 0 and at most MaxRetryDelay.");
+        }
+
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);
     }
 }

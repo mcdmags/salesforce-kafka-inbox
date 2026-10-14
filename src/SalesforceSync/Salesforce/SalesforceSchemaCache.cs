@@ -25,12 +25,18 @@ public sealed class SalesforceSchemaCache(TimeProvider clock)
         Func<DateTimeOffset?, CancellationToken, Task<DescribeResult>> fetch, CancellationToken ct)
     {
         var entry = _entries.GetOrAdd(sobject, _ => new Entry());
-        if (Fresh(entry, refreshInterval) is { } cached) return cached;
+        if (Fresh(entry, refreshInterval) is { } cached)
+        {
+            return cached;
+        }
 
         await entry.Gate.WaitAsync(ct);
         try
         {
-            if (Fresh(entry, refreshInterval) is { } refreshed) return refreshed; // another caller just refreshed it
+            if (Fresh(entry, refreshInterval) is { } refreshed)
+            {
+                return refreshed; // another caller just refreshed it
+            }
 
             var state = entry.State;
             var invalidated = entry.Invalidated;
@@ -52,7 +58,10 @@ public sealed class SalesforceSchemaCache(TimeProvider clock)
     /// <summary>Forces a full describe on next use (e.g. Salesforce rejected a field the cached schema has).</summary>
     public void Invalidate(string sobject)
     {
-        if (_entries.TryGetValue(sobject, out var entry)) entry.Invalidated = true;
+        if (_entries.TryGetValue(sobject, out var entry))
+        {
+            entry.Invalidated = true;
+        }
     }
 
     private SObjectSchema? Fresh(Entry entry, TimeSpan refreshInterval)

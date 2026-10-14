@@ -49,10 +49,22 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
             var missing = new List<SalesforceError>();
             var writes = PlanUnit(unit, current, schemas, problems, missing, rewrites);
 
-            if (problems.Count > 0) decided.Add(new(unit.Key, SyncOutcome.PermanentFailure, problems));
-            else if (missing.Count > 0) decided.Add(new(unit.Key, SyncOutcome.TransientFailure, missing));
-            else if (writes.Count == 0) decided.Add(new(unit.Key, SyncOutcome.Unchanged, []));
-            else planned.Add(new PlannedUnit(unit.Key, writes));
+            if (problems.Count > 0)
+            {
+                decided.Add(new(unit.Key, SyncOutcome.PermanentFailure, problems));
+            }
+            else if (missing.Count > 0)
+            {
+                decided.Add(new(unit.Key, SyncOutcome.TransientFailure, missing));
+            }
+            else if (writes.Count == 0)
+            {
+                decided.Add(new(unit.Key, SyncOutcome.Unchanged, []));
+            }
+            else
+            {
+                planned.Add(new PlannedUnit(unit.Key, writes));
+            }
         }
 
         var (requests, tooLarge) = CompositeWrite.Pack(planned);
@@ -80,7 +92,11 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
             var existing = current.Find(record.Record);
             var sent = new List<FieldWrite>();
             var changes = RecordDiffer.Changes(record, existing, sent, problems);
-            if (existing is not null) rewrites.AddRange(sent);
+            if (existing is not null)
+            {
+                rewrites.AddRange(sent);
+            }
+
             var links = new List<NewParentLink>();
             var depth = 0;
 
@@ -94,19 +110,32 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
                 }
                 depth = Math.Max(depth, target.Depth + 1);
 
-                if (target.Create is null && LinkedId(existing, lookup.Field) == target.Id) continue; // already points at it
+                if (target.Create is null && LinkedId(existing, lookup.Field) == target.Id)
+                {
+                    continue; // already points at it
+                }
+
                 if (RecordDiffer.NotWritable(record, lookup.Field, existing) is { } problem)
                 {
                     problems.Add(problem);
                     continue;
                 }
 
-                if (target.Create is null) changes[lookup.Field.Name] = target.Id;
-                else links.Add(LinkTo(target.Create, lookup, schemas));
+                if (target.Create is null)
+                {
+                    changes[lookup.Field.Name] = target.Id;
+                }
+                else
+                {
+                    links.Add(LinkTo(target.Create, lookup, schemas));
+                }
             }
 
             var write = Write(record, existing, changes, links, sent, depth);
-            if (write is not null) writes.Add(write);
+            if (write is not null)
+            {
+                writes.Add(write);
+            }
 
             earlier[(record.Record.SObject.ToLowerInvariant(), record.Record.ExternalId)] = existing is null
                 ? new LookupTarget(null, write, depth)
@@ -125,16 +154,18 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
     private static LookupTarget? FindTarget(SObjectLookup lookup, CurrentRecords current,
         Dictionary<(string SObject, string ExternalId), LookupTarget> earlier)
     {
-        if (earlier.TryGetValue((lookup.SObject.ToLowerInvariant(), lookup.ExternalId), out var sibling)) return sibling;
-        if (current.Find(lookup) is { } inSalesforce) return new LookupTarget(inSalesforce.Id18, null, -1);
-        return null;
+        return earlier.TryGetValue((lookup.SObject.ToLowerInvariant(), lookup.ExternalId), out var sibling)
+            ? sibling
+            : current.Find(lookup) is { } inSalesforce ? new LookupTarget(inSalesforce.Id18, null, -1) : (LookupTarget?)null;
     }
 
     /// <summary>The Id the lookup field holds in Salesforce now, in its 18-character form.</summary>
     private static string? LinkedId(CurrentRecord? existing, SalesforceField field)
-        => existing is not null && existing.TryGetValue(field.Name, out var linked) && linked.ValueKind == JsonValueKind.String
-            ? FieldValues.To18CharId(linked.GetString()!)
-            : null;
+    {
+        return existing is not null && existing.TryGetValue(field.Name, out var linked) && linked.ValueKind == JsonValueKind.String
+                ? FieldValues.To18CharId(linked.GetString()!)
+                : null;
+    }
 
     /// <summary>By external id only if the lookup can be addressed that way; a reference always can.</summary>
     private NewParentLink LinkTo(PlannedWrite parent, NormalizedLookup lookup, IReadOnlyDictionary<string, SObjectSchema> schemas)
@@ -148,13 +179,20 @@ internal sealed class WritePlanner(SalesforceOptions options, SyncOptions syncOp
     private static PlannedWrite? Write(NormalizedRecord record, CurrentRecord? existing, Dictionary<string, object?> changes,
         List<NewParentLink> links, List<FieldWrite> sent, int depth)
     {
-        if (existing is not null && changes.Count == 0 && links.Count == 0) return null;
+        if (existing is not null && changes.Count == 0 && links.Count == 0)
+        {
+            return null;
+        }
 
         var lookupFields = record.Lookups.Where(l => changes.ContainsKey(l.Field.Name)).Select(l => l.Field.Name)
             .Concat(links.SelectMany(l => new[] { l.Field.Name, l.Field.RelationshipName ?? l.Field.Name }))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        if (existing is null) changes[record.Schema.Find(record.Record.ExternalIdField)!.Name] = record.Record.ExternalId;
+        if (existing is null)
+        {
+            changes[record.Schema.Find(record.Record.ExternalIdField)!.Name] = record.Record.ExternalId;
+        }
+
         return new PlannedWrite(record, existing?.Id, changes, links, lookupFields, sent, depth);
     }
 }

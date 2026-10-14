@@ -24,9 +24,12 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         for (var v = 1; v <= Versions; v++)
         {
             foreach (var id in ids)
+            {
                 app.Publish(id, v,
                     new JsonObject { ["name"] = $"Concurrent {id}", ["description"] = $"v{v}" },
                     new JsonObject { ["score"] = v });
+            }
+
             app.Flush();
             await Task.Delay(150);
         }
@@ -58,14 +61,14 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             from sf_claim_overlaps where entity_id = any(@ids)
             """,
             new { ids })).ToList();
-        var audit = await conn.QuerySingleAsync<(long Claims, long Unreleased, long ReclaimedAccounts)>("""
+        var (Claims, Unreleased, ReclaimedAccounts) = await conn.QuerySingleAsync<(long Claims, long Unreleased, long ReclaimedAccounts)>("""
             select count(*),
                    count(*) filter (where release_seq is null),
                    (select count(*) from (select 1 from sf_claim_audit where entity_id = any(@ids)
                                           group by entity_id having count(*) > 1) x)
             from sf_claim_audit where entity_id = any(@ids)
             """, new { ids });
-        output.WriteLine($"claims={audit.Claims} unreleased={audit.Unreleased} accountsClaimedMoreThanOnce={audit.ReclaimedAccounts} overlaps={overlaps.Count}");
+        output.WriteLine($"claims={Claims} unreleased={Unreleased} accountsClaimedMoreThanOnce={ReclaimedAccounts} overlaps={overlaps.Count}");
         overlaps.Should().BeEmpty("no two claims on the same account may overlap, e.g. {0}", string.Join(" | ", overlaps.Take(3)));
 
         // 2. Nothing in Salesforce prevents an out-of-order write, so it would show up in the write history:
@@ -83,7 +86,9 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
                 .Where(w => w.ContainsKey("Score__c"))
                 .Select(w => (long)w["Score__c"]!).ToList();
             if (!IsIncreasing(accountVersions) || !IsIncreasing(profileVersions))
+            {
                 regressions.Add($"{id}: account writes v[{string.Join(",", accountVersions)}], profile writes v[{string.Join(",", profileVersions)}]");
+            }
         }
         regressions.Should().BeEmpty("no account may receive an older version after a newer one, e.g. {0}",
             string.Join(" | ", regressions.Take(3)));
@@ -93,8 +98,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         statuses.Keys.Should().BeSubsetOf(["done", "superseded"], "nothing may be left pending or dead-lettered");
         statuses.Values.Sum().Should().Be(Accounts * Versions);
         statuses["done"].Should().BeGreaterThanOrEqualTo(Accounts, "each account's newest event is written");
-        audit.Unreleased.Should().Be(0, "every claim must be released");
-        audit.ReclaimedAccounts.Should().BeGreaterThan(Accounts / 2,
+        Unreleased.Should().Be(0, "every claim must be released");
+        ReclaimedAccounts.Should().BeGreaterThan(Accounts / 2,
             "most of the {0} accounts should be claimed repeatedly (real contention)", Accounts);
 
         // 4. Every account and profile holds the newest values
@@ -111,7 +116,11 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         // 5. The work really was spread across pods
         var clients = await app.Salesforce.GetFromJsonAsync<Dictionary<string, long>>("/__fake/clients");
         clients.Should().NotBeNull();
-        foreach (var (client, requests) in clients!) output.WriteLine($"{client}: {requests} composite requests");
+        foreach (var (client, requests) in clients!)
+        {
+            output.WriteLine($"{client}: {requests} composite requests");
+        }
+
         clients.Should().HaveCount(MultiPodFixture.PodCount, "every pod should have written to Salesforce");
     }
 
@@ -129,9 +138,12 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         foreach (var wave in events.Chunk(accounts))
         {
             foreach (var (id, v) in wave)
+            {
                 await app.PublishRawAsync(random.Next(3) == 0 ? null : Any.String("k-"),
                     SyncFixture.AccountEvent(id, v, new JsonObject { ["name"] = $"Shuffled {id}", ["description"] = $"v{v}" },
                         new JsonObject { ["score"] = v }).ToJsonString());
+            }
+
             await Task.Delay(50);
         }
 
@@ -152,7 +164,10 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         }
     }
 
-    private static bool IsIncreasing(List<long> versions) => versions.Zip(versions.Skip(1)).All(p => p.First < p.Second);
+    private static bool IsIncreasing(List<long> versions)
+    {
+        return versions.Zip(versions.Skip(1)).All(p => p.First < p.Second);
+    }
 
     [Fact]
     public async Task Pods_survive_their_Postgres_connections_being_dropped()
@@ -168,12 +183,15 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             while (!chaos.IsCancellationRequested)
             {
                 await using (var conn = await app.Db.OpenConnectionAsync())
+                {
                     killed += await conn.ExecuteScalarAsync<long>("""
                         select count(*) filter (where pg_terminate_backend(pid))
                         from pg_stat_activity
                         where datname = current_database() and pid <> pg_backend_pid()
                           and backend_type = 'client backend' and application_name <> @me
                         """, new { me = SyncFixture.TestsApplicationName });
+                }
+
                 try { await Task.Delay(200, chaos.Token); } catch (OperationCanceledException) { }
             }
         });
@@ -183,8 +201,11 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             for (var v = 1; v <= versions; v++)
             {
                 foreach (var id in ids)
+                {
                     app.Publish(id, v, new JsonObject { ["name"] = $"Chaos {id}", ["description"] = $"v{v}" },
                         new JsonObject { ["score"] = v });
+                }
+
                 app.Flush();
                 await Task.Delay(300);
             }

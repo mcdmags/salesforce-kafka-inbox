@@ -26,7 +26,11 @@ internal static partial class CompositeReferences
                 {
                     if (FakeJson.Str(obj[key]) is { } text && Reference().Match(text) is { Success: true } m)
                     {
-                        if (ValueAt(m.Groups["path"].Value, results) is not { } value) return m.Groups["path"].Value;
+                        if (ValueAt(m.Groups["path"].Value, results) is not { } value)
+                        {
+                            return m.Groups["path"].Value;
+                        }
+
                         obj[key] = value.DeepClone();
                     }
                     else if (obj[key] is JsonObject or JsonArray && Resolve(obj[key]!, results) is { } unresolved)
@@ -37,7 +41,13 @@ internal static partial class CompositeReferences
                 return null;
             case JsonArray array:
                 foreach (var item in array)
-                    if (item is not null && Resolve(item, results) is { } unresolved) return unresolved;
+                {
+                    if (item is not null && Resolve(item, results) is { } unresolved)
+                    {
+                        return unresolved;
+                    }
+                }
+
                 return null;
             default:
                 return null;
@@ -48,12 +58,22 @@ internal static partial class CompositeReferences
     private static JsonNode? ValueAt(string path, IReadOnlyDictionary<string, JsonNode?> results)
     {
         var parts = ReferencePart().Matches(path);
-        if (parts.Count == 0 || !results.TryGetValue(parts[0].Groups["name"].Value, out var current)) return null;
+        if (parts.Count == 0 || !results.TryGetValue(parts[0].Groups["name"].Value, out var current))
+        {
+            return null;
+        }
+
         for (var i = 0; i < parts.Count && current is not null; i++)
         {
-            if (i > 0) current = current is JsonObject o && o.TryGetPropertyValue(parts[i].Groups["name"].Value, out var next) ? next : null;
+            if (i > 0)
+            {
+                current = current is JsonObject o && o.TryGetPropertyValue(parts[i].Groups["name"].Value, out var next) ? next : null;
+            }
+
             foreach (Capture index in parts[i].Groups["index"].Captures)
+            {
                 current = current is JsonArray a && int.Parse(index.Value) < a.Count ? a[int.Parse(index.Value)] : null;
+            }
         }
         return current;
     }

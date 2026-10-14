@@ -42,11 +42,20 @@ public static class SyncServiceCollectionExtensions
         // Handler order: rate limiter (outermost, so every attempt costs a token) -> gzip -> auth.
         var salesforce = services.AddSalesforceClient()
             .AddSalesforceRateLimiting(); // its initializer runs after the schema's, before the workers
-        if (config.GetValue<bool>("Salesforce:UseFake")) UseInMemoryOrg(salesforce);
-        else UseSalesforceOrg(salesforce);
+        if (config.GetValue<bool>("Salesforce:UseFake"))
+        {
+            UseInMemoryOrg(salesforce);
+        }
+        else
+        {
+            UseSalesforceOrg(salesforce);
+        }
 
         // Kafka -> inbox (only when a Kafka connection string is configured)
-        if (!string.IsNullOrWhiteSpace(config.GetConnectionString("kafka"))) AddKafkaIngest(builder);
+        if (!string.IsNullOrWhiteSpace(config.GetConnectionString("kafka")))
+        {
+            AddKafkaIngest(builder);
+        }
 
         // Inbox -> Salesforce: one engine, one strategy per synced object
         services.AddInboxSync();
