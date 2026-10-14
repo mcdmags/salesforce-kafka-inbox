@@ -24,7 +24,8 @@ public static class SyncServiceCollectionExtensions
     /// <summary>
     /// The worker: options (validated at startup), the Postgres data source (<c>ConnectionStrings:inboxdb</c>), the
     /// inbox schema, the Salesforce client (real OAuth endpoint, or the in-memory org with
-    /// <c>Salesforce:UseFake</c>), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the worker loops.
+    /// <c>Salesforce:UseFake</c>) with its Describe cache shared through Redis (when <c>ConnectionStrings:redis</c> is
+    /// set), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the worker loops.
     /// </summary>
     public static IHostApplicationBuilder AddSalesforceSyncWorker(this IHostApplicationBuilder builder)
     {
@@ -36,6 +37,13 @@ public static class SyncServiceCollectionExtensions
         // Postgres (ConnectionStrings:inboxdb, injected by Aspire, appsettings or the tests)
         builder.AddNpgsqlDataSource("inboxdb");
         services.AddHostedService<InboxSchemaInitializer>(); // must be registered before the workers
+
+        // Describe results shared by all pods (ConnectionStrings:redis, injected by Aspire); without it each process
+        // keeps its own (AddSalesforceClient falls back to an in-memory IDistributedCache)
+        if (!string.IsNullOrWhiteSpace(config.GetConnectionString("redis")))
+        {
+            builder.AddRedisDistributedCache("redis");
+        }
 
         // Salesforce client. Handler order: gzip -> auth.
         var salesforce = services.AddSalesforceClient();
@@ -118,14 +126,17 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Salesforce REST client and what the engine's Salesforce step needs (Describe cache, error classification).
+    /// Salesforce REST client and what the engine's Salesforce step needs (Describe cache, error classification). The
+    /// Describe cache's shared layer is the registered <see cref="Microsoft.Extensions.Caching.Distributed.IDistributedCache"/>,
+    /// or an in-memory one (this process only) when none is.
     /// Handler order: gzip -> (auth and primary handler, added by the caller). Each call times out after
     /// <see cref="SalesforceOptions.RequestTimeout"/>.
     /// </summary>
     public static IHttpClientBuilder AddSalesforceClient(this IServiceCollection services)
     {
         services.AddSingleton(TimeProvider.System);
-        services.AddSingleton<SalesforceSchemaCache>(); // Describe results, shared by all workers in the process
+        services.AddDistributedMemoryCache(); // only if no IDistributedCache (Redis) is registered
+        services.AddSingleton<SalesforceSchemaCache>(); // Describe results, shared by all workers in the process (and pods)
         services.AddSingleton<SalesforceErrors>();
         services.AddTransient<GzipRequestHandler>();
 

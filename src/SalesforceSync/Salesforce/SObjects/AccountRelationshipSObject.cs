@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 namespace SalesforceSync.Salesforce.SObjects;
 
 /// <summary>Account_Relationship__c between two Accounts (complete desired state, like <see cref="AccountSObject"/>).</summary>
-[SObject("Account_Relationship__c", ExternalIdField = "External_Id__c")]
+[SObject("Account_Relationship__c", ExternalIdField = "External_Id__c", RecordType = "Standard")]
 public sealed class AccountRelationshipSObject
 {
     [JsonPropertyName("External_Id__c")] public string? ExternalId { get; set; }

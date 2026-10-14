@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
+using SalesforceSync.FakeSalesforce;
 
 namespace SalesforceSync.IntegrationTests;
 
@@ -36,6 +37,14 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         ((string?)profile!["Tier__c"]).Should().Be("Gold");
         ((decimal?)profile["Score__c"]).Should().Be(score);
         ((string?)profile["Account__c"]).Should().Be((string?)account["Id"], "the reference to the new Account is resolved to its Id");
+
+        ((string?)account["RecordTypeId"]).Should().Be(RecordTypeId("Account", "Business"), "every record gets its class's record type");
+        ((string?)profile["RecordTypeId"]).Should().Be(RecordTypeId("Profile__c", "Standard"));
+    }
+
+    private static string RecordTypeId(string sobject, string developerName)
+    {
+        return FakeSchema.RecordTypes[sobject].Single(r => r.DeveloperName == developerName).Id;
     }
 
     [Fact]

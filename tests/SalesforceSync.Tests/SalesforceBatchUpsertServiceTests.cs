@@ -1,9 +1,11 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.Salesforce;
+using SalesforceSync.Salesforce.SObjects;
 using SalesforceSync.Sync;
 using SalesforceSync.Sync.Mapping;
 
@@ -134,7 +136,8 @@ public sealed class SalesforceBatchUpsertServiceTests
         await Account("A1", new() { ["name"] = "Acme" }, []);
 
         _org.History("Account", "A1")!.Single().Select(kv => kv.Key).Should().BeEquivalentTo(
-            ["Name", "External_Id__c", "Active__c"], "nothing to clear on a new record; a checkbox is sent as false");
+            ["Name", "External_Id__c", "Active__c", "RecordTypeId"],
+            "nothing to clear on a new record; a checkbox is sent as false, the record type always");
     }
 
     [Fact]
@@ -386,6 +389,96 @@ public sealed class SalesforceBatchUpsertServiceTests
         }
         ((string?)_org.FindByExternalId("Account_Relationship__c", "R-NEW2")!["Related_Account__c"]).Should().Be(IdOf("Account", "NEW2"));
         ((string?)_org.FindByExternalId("Profile__c", "P-OLD2")!["Tier__c"]).Should().Be("Silver");
+    }
+
+    // ---------- Record types ----------
+
+    [Fact]
+    public async Task Describe_returns_the_record_types_of_the_object()
+    {
+        var http = new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
+
+        var schema = (await new SalesforceRestClient(http).DescribeAsync("Account", null, CancellationToken.None)).Schema!;
+
+        schema.RecordTypes.Should().ContainKey("business").WhoseValue.Should().Be(
+            new SalesforceRecordType("Business", RecordTypeId("Account", "Business"), Active: true, Available: true));
+        schema.RecordTypes["Master"].Available.Should().BeFalse();
+        schema.Find(SObjectSchema.RecordTypeIdField)!.Type.Should().Be("reference");
+    }
+
+    [Fact]
+    public async Task Every_record_is_created_with_its_classes_record_type()
+    {
+        await Account("A1", new() { ["name"] = "One" }, new() { ["tier"] = "Gold" });
+        await Account("A2", new() { ["name"] = "Two" }, []);
+
+        (await Relationship("R1", "A1", "A2", [])).Outcome.Should().Be(SyncOutcome.Saved);
+
+        ((string?)_org.FindByExternalId("Account", "A1")!["RecordTypeId"]).Should().Be(RecordTypeId("Account", "Business"));
+        ((string?)_org.FindByExternalId("Profile__c", "P-A1")!["RecordTypeId"]).Should().Be(RecordTypeId("Profile__c", "Standard"));
+        ((string?)_org.FindByExternalId("Account_Relationship__c", "R1")!["RecordTypeId"])
+            .Should().Be(RecordTypeId("Account_Relationship__c", "Standard"));
+    }
+
+    [Fact]
+    public async Task The_record_type_is_written_only_when_Salesforce_has_another()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        (await Account("A1", new() { ["name"] = "Acme" }, [])).Outcome.Should().Be(SyncOutcome.Unchanged, "the record type is the same");
+
+        _org.Edit("Account", "A1", new JsonObject { ["RecordTypeId"] = RecordTypeId("Account", "Master") });
+        (await Account("A1", new() { ["name"] = "Acme" }, [])).Outcome.Should().Be(SyncOutcome.Saved);
+
+        _org.History("Account", "A1")![^1].Select(kv => kv.Key).Should().Equal("RecordTypeId");
+        ((string?)_org.FindByExternalId("Account", "A1")!["RecordTypeId"]).Should().Be(RecordTypeId("Account", "Business"));
+    }
+
+    [Fact]
+    public async Task A_record_type_the_org_lacks_fails_before_any_call_is_retried_and_describes_again()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);  // warms the describe cache
+        var before = _org.GetStats();
+
+        var result = (await _upserter.WriteToSalesforceAsync(
+            [("X1", new UpsertUnit([SObjectRecord.From("acct", new UnknownRecordTypeAccount { ExternalId = "X1" })]))],
+            [new SoqlQuery("Account", "External_Id__c", ["X1"])], CancellationToken.None)).Single();
+
+        result.Outcome.Should().Be(SyncOutcome.TransientFailure, "the record type may be created or assigned any time");
+        result.PrimaryError!.Code.Should().Be(SalesforceErrors.InvalidRecordType);
+        result.PrimaryError.Message.Should().Contain("'Nope'").And.Contain("Account");
+        var afterFailure = _org.GetStats();
+        (afterFailure.ApiCalls - before.ApiCalls).Should().Be(0, "nothing is read or written");
+
+        await Account("A2", new() { ["name"] = "Two" }, []);
+        var after = _org.GetStats();
+        (after.Describes - afterFailure.Describes).Should().Be(1, "the cached describe of Account was invalidated");
+        (after.DescribesNotModified - afterFailure.DescribesNotModified).Should().Be(0, "an invalidated describe is unconditional");
+    }
+
+    [Fact]
+    public async Task A_record_type_Id_Salesforce_rejects_is_retried_not_dead_lettered()
+    {
+        var unknownId = "012FAKE00000099";   // deactivated or unassigned after the describe, say
+
+        var result = (await _upserter.WriteToSalesforceAsync(
+            [("A1", RawAccount("A1", new() { ["Name"] = "Acme", ["RecordTypeId"] = unknownId }))],
+            [new SoqlQuery("Account", "External_Id__c", ["A1"])], CancellationToken.None)).Single();
+
+        result.Outcome.Should().Be(SyncOutcome.TransientFailure);
+        result.PrimaryError!.Code.Should().Be(SalesforceErrors.InvalidRecordType);
+        result.PrimaryError.Message.Should().StartWith("INVALID_CROSS_REFERENCE_KEY");
+        _org.FindByExternalId("Account", "A1").Should().BeNull();
+    }
+
+    [SObject("Account", ExternalIdField = "External_Id__c", RecordType = "Nope")]
+    private sealed class UnknownRecordTypeAccount
+    {
+        [JsonPropertyName("External_Id__c")] public string? ExternalId { get; set; }
+    }
+
+    private static string RecordTypeId(string sobject, string developerName)
+    {
+        return FakeSchema.RecordTypes[sobject].Single(r => r.DeveloperName == developerName).Id;
     }
 
     // ---------- Records that fail without a cause ----------

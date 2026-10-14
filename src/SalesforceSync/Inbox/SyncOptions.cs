@@ -22,6 +22,12 @@ public sealed class SyncOptions
     /// </summary>
     public int MaxEventsPerEntity { get; set; } = 20;
 
+    /// <summary>
+    /// How long a claim owns its entities' rows (locked_until; lock_token says who). Between the claim transaction and
+    /// the outcome transaction nothing else holds them: no transaction or row lock spans the Salesforce calls. The
+    /// worker stops calling Salesforce at 80% of it, and a worker that crashes needs no cleanup: the lease expires
+    /// and the rows are claimable again. Must be longer than <c>Salesforce:RequestTimeout</c>.
+    /// </summary>
     public TimeSpan Lease { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>

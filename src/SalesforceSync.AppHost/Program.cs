@@ -19,10 +19,18 @@ if (!testMode)
     kafka.WithKafkaUI();
 }
 
+// Describe results shared by every salesforce-sync replica (ConnectionStrings:redis)
+var redis = builder.AddRedis("redis");
+if (!testMode)
+{
+    redis.WithRedisInsight();
+}
+
 // Kafka -> Postgres inbox -> Salesforce, through the real OAuth + REST client
 var sync = builder.AddProject<Projects.SalesforceSync>("salesforce-sync")
     .WithReference(inboxDb).WaitFor(inboxDb)
     .WithReference(kafka).WaitFor(kafka)
+    .WithReference(redis).WaitFor(redis)
     .WithEnvironment("Salesforce__UseFake", "false")
     .WithEnvironment("Sync__Workers", "4");
 

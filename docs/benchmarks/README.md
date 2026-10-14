@@ -9,6 +9,9 @@ These numbers come from the claim and outcome tuning merged in PR #13 and re-mea
 (PR #12). Later changes (PR #14 formatting, PR #15 simplification of the write path) do not touch the inbox SQL;
 they can change the API call counts of the drain benchmarks, so re-run them before comparing call counts.
 
+[Sequential, limiter-only vs full](#sequential-limiter-only-vs-full) compares `main`'s version with one that has no
+parallel processing or race-condition handling, measured on `main` at 01b53b3.
+
 ## Environment
 
 | | |
@@ -398,6 +401,58 @@ Within noise: streaming keeps the inbox small, so the claim is cheap either way.
   (`DEPENDENCY_NOT_SYNCED`, 450 to 990 retries with 8 workers) and idle workers poll every 2 ms. A property of
   the benchmark's data (100 accounts, many relationships), not of the claim.
 - Allocation grows with retries and claims, not with pods.
+
+## Sequential, limiter-only vs full
+
+This inbox sync core branch has no rate limiter; both versions compared here are `main`'s, which has one, and the
+numbers were measured on `main`.
+
+Is the parallel processing and race-condition handling worth it? The branch `benchmark/sequential-limiter-only` has
+a version with one worker loop per process and no leases, claim lock or concurrency slots, only the rate limiter.
+Everything else is the same as `main` (01b53b3). Both versions drained the same 5,000 events with the same
+correctness checks, back to back, on 2026-10-14. The full report, with every configuration, allocations and load
+averages, is [on that branch](https://github.com/mcdmags/salesforce-kafka-inbox/blob/benchmark/sequential-limiter-only/docs/benchmarks/sequential-vs-full.md).
+
+**Times are only indicative.** The machine was busy (load average 9 to 27 during the runs), and two runs of the same
+sequential code differed by up to 6x. The work counts (API calls, write requests, coalescing) were identical in every
+iteration of a configuration and are the reliable part.
+
+Mean time per drain of 5,000 events, and API calls per drain (latency 0 ms / 25 ms per simulated Salesforce call):
+
+| Version | Pods x workers | 100 accounts | 1,000 accounts | API calls (100 / 1,000 accounts) |
+|---|---|---|---|---|
+| Sequential | 1 x 1 | 0.64 s / 1.57 s (second run: 3.82 s / 4.93 s) | 1.52 s / 2.89 s (second run: 4.85 s / 3.27 s) | 28 / 56 |
+| Full | 1 x 1 | 1.55 s / 2.04 s | 3.52 s / 4.10 s | 26 / 58 |
+| Full | 1 x 4 | 0.70 s / 0.96 s | 1.37 s / 1.25 s | 34 to 38 / 56 |
+| Full | 1 x 8 | 0.94 s / 1.01 s | 1.03 s / 1.36 s | 38 to 44 / 54 to 62 |
+| Full | 3 x 4 | 1.77 s / 1.63 s | 0.91 s / 1.09 s | 39 to 49 / 54 to 60 |
+
+Coalescing was the same in both versions: 5.69 events per entity sync with 100 accounts, 3.09 with 1,000. Every
+iteration above passed its correctness checks.
+
+**Race demo.** The sequential version with 3 pods on one inbox, nothing keeping the workers off each other's
+entities:
+
+| Accounts | Latency | Result |
+|---|---|---|
+| 100 | 0 ms | Check failed: **396 duplicate writes**, 633 records rejected |
+| 100 | 25 ms | Check failed: **620 duplicate writes**, 1,076 records rejected |
+| 1,000 | 0 ms | Final data correct, but 127 to 139 API calls (56 for one worker), 1,140 to 1,565 rejected creates, 6.96 s |
+| 1,000 | 25 ms | Final data correct, but 145 to 161 API calls, 2,059 to 2,760 rejected creates, 8.68 s |
+
+No older version overwrote a newer one in these runs, but nothing in the sequential version prevents it.
+
+What it means:
+
+- **One sequential worker is enough** for a single process at a modest event rate: it makes the same API calls as
+  the full version with one worker and coalesces as much, with no locking code. Its throughput is one batch at a
+  time, so it slows down as Salesforce latency and the number of distinct entities grow.
+- **Parallel workers buy throughput, not efficiency.** The full version with 4 or 8 workers, or 3 pods x 4, drained
+  1.25x to 3.9x faster than its own single worker (one exception: 3 x 4 with 100 accounts at 0 ms), at the cost of a
+  few more API calls (more, smaller batches). With real Salesforce latency (hundreds of ms per call) the gain grows.
+- **The race handling is what makes more than one worker safe.** Without it, a second worker or pod caused hundreds
+  of duplicate writes or create collisions and up to 2.9x the API calls. The sequential version must run as exactly
+  one worker.
 
 ## Micro benchmarks
 

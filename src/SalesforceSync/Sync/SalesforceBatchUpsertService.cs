@@ -55,6 +55,7 @@ public sealed class SalesforceBatchUpsertService(
     private readonly SyncOptions _opt = options.Value;
     private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
     private readonly WriteResultInterpreter _interpreter = new(errors);
+    private readonly SalesforceErrors _errors = errors;
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do).</returns>
@@ -66,7 +67,8 @@ public sealed class SalesforceBatchUpsertService(
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
 
-        // 1. Claim events from the inbox table (short transaction)
+        // 1. Claim events from the inbox table (short transaction; the lease, not a transaction, protects the rows
+        // until step 4)
         var claim = await inbox.ClaimAsync(strategy.EntityType, ct);
         if (claim.Events.Count == 0)
         {
@@ -76,7 +78,12 @@ public sealed class SalesforceBatchUpsertService(
         // 2. Per entity: keep the newest event, drop it if it isn't newer than what is synced, map it to records
         var batch = BatchPreparer.Prepare(strategy, claim.Events, claim.SyncedTimes);
 
-        // 3. Salesforce (outside any transaction): read, decide, send, interpret
+        // 3. Salesforce (outside any transaction): read, decide, send, interpret. Not inside one on purpose: Salesforce
+        // can't take part in a Postgres transaction (a rollback can't undo a saved write), the execution strategy
+        // re-runs its whole delegate on a transient Postgres error (the HTTP calls would be sent again), and a
+        // transaction held for up to the request timeout keeps locks, a pooled connection per worker and autovacuum's
+        // horizon on a high-churn table. A crash between here and step 4 leaves the rows pending under an expiring
+        // lease; the retry reads Salesforce and writes only what still differs.
         Dictionary<string, UpsertResult> results;
         try
         {
@@ -143,11 +150,13 @@ public sealed class SalesforceBatchUpsertService(
         // 1. Field metadata of every object involved (cached per process, revalidated with If-Modified-Since)
         var schemas = await DescribeAsync(units, queries, ct);
 
-        // 2. Normalize; a unit Salesforce would reject fails on its own without reaching the query
-        var (normalized, rejected) = RecordNormalizer.Normalize(units, schemas);
+        // 2. Normalize (and set each record's RecordTypeId); a unit Salesforce would reject fails on its own without
+        // reaching the query
+        var (normalized, rejected) = RecordNormalizer.Normalize(units, schemas, _errors);
         results.AddRange(rejected);
         if (normalized.Count == 0)
         {
+            await InvalidateRecordTypesAsync(units, results, ct);
             return results;
         }
 
@@ -166,7 +175,32 @@ public sealed class SalesforceBatchUpsertService(
             results.AddRange(_interpreter.Interpret(request, answers));
         }
 
+        await InvalidateRecordTypesAsync(units, results, ct);
         return results;
+    }
+
+    /// <summary>
+    /// A record type the cached describe doesn't have (or not as active and available), or whose Id Salesforce
+    /// rejected, may just have been created, activated or assigned: its object is described again next time.
+    /// </summary>
+    private async Task InvalidateRecordTypesAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units, IEnumerable<UpsertResult> results,
+        CancellationToken ct)
+    {
+        var failed = results
+            .SelectMany(r => r.Errors.Where(e => e.Code == SalesforceErrors.InvalidRecordType).Select(e => (r.Key, e.ReferenceId)))
+            .ToHashSet();
+        if (failed.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var (key, unit) in units)
+        {
+            foreach (var record in unit.Records.Where(r => failed.Contains((key, r.ReferenceId))))
+            {
+                await schemaCache.InvalidateAsync(record.SObject, ct);
+            }
+        }
     }
 
     private async Task<Dictionary<string, SObjectSchema>> DescribeAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
@@ -205,7 +239,7 @@ public sealed class SalesforceBatchUpsertService(
             // The cached describe is out of date (a field was removed or renamed): describe again next time
             foreach (var sobject in describedSObjects)
             {
-                schemaCache.Invalidate(sobject);
+                await schemaCache.InvalidateAsync(sobject, ct);
             }
 
             throw;

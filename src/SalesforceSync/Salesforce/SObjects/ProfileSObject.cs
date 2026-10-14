@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 namespace SalesforceSync.Salesforce.SObjects;
 
 /// <summary>Profile__c, the detail record of an Account (complete desired state, like <see cref="AccountSObject"/>).</summary>
-[SObject("Profile__c", ExternalIdField = "External_Id__c")]
+[SObject("Profile__c", ExternalIdField = "External_Id__c", RecordType = "Standard")]
 public sealed class ProfileSObject
 {
     [JsonPropertyName("External_Id__c")] public string? ExternalId { get; set; }

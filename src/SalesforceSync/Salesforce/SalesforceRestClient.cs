@@ -24,7 +24,10 @@ public sealed class SalesforceRestClient(HttpClient http)
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
-    /// <summary>sObject Describe; with <paramref name="ifModifiedSince"/>, returns a null schema on 304 Not Modified.</summary>
+    /// <summary>
+    /// sObject Describe: the fields and the record types (<c>recordTypeInfos</c>); with
+    /// <paramref name="ifModifiedSince"/>, returns a null schema on 304 Not Modified.
+    /// </summary>
     public async Task<DescribeResult> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, $"{DataPath}/sobjects/{sobject}/describe");
@@ -44,7 +47,8 @@ public sealed class SalesforceRestClient(HttpClient http)
         var body = await res.Content.ReadFromJsonAsync<DescribeBody>(Json, ct)
                    ?? throw new InvalidOperationException($"Empty describe response for {sobject}");
         return new DescribeResult(new SObjectSchema(body.Name, body.Fields.Select(f => new SalesforceField(
-            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable, f.Digits))));
+            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable, f.Digits)),
+            body.RecordTypeInfos));
     }
 
     /// <summary>
@@ -208,7 +212,7 @@ public sealed class SalesforceRestClient(HttpClient http)
 
     // ---------- DTOs ----------
 
-    private sealed record DescribeBody(string Name, List<DescribeField> Fields);
+    private sealed record DescribeBody(string Name, List<DescribeField> Fields, List<SalesforceRecordType>? RecordTypeInfos);
     private sealed record DescribeField(string Name, string Type, int Length, int Precision, int Scale,
         bool Createable, bool Updateable, bool Nillable, int Digits);
     private sealed record CompositeBody(List<SubResponse> CompositeResponse);

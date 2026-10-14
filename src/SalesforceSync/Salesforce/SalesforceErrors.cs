@@ -11,6 +11,13 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     /// </summary>
     public const string DependencyNotSynced = "DEPENDENCY_NOT_SYNCED";
 
+    /// <summary>
+    /// Our own code: the record's record type (its sObject class's <c>RecordType</c>) is not in the object's Describe,
+    /// not active, or not available to the running user, or Salesforce rejected its Id. Transient (not in
+    /// <see cref="DefaultPermanentCodes"/>): an admin fixes the org, and the next describe sees it.
+    /// </summary>
+    public const string InvalidRecordType = "INVALID_RECORD_TYPE";
+
     /// <summary>Our own code: the inbox event can't be mapped to records (malformed payload). Permanent.</summary>
     public const string InvalidEvent = "INVALID_EVENT";
 
