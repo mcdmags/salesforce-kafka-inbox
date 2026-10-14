@@ -5,7 +5,7 @@ using SalesforceSync.Inbox.Payloads;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// What varies per synced object: where its events are stored, how to read an event's entity id and time, how an
+/// What varies per synced object: how to read an event's entity id and time, how an
 /// event becomes Salesforce records, and what to read from Salesforce to diff them and resolve their lookups.
 /// Everything else (claiming, ordering, coalescing, rate limits, batching, retries, dead-lettering) is
 /// <see cref="SalesforceBatchUpsertService"/>'s. The engine, the Kafka consumer and the SQL never name an event
@@ -13,7 +13,6 @@ namespace SalesforceSync.Sync;
 /// </summary>
 /// <typeparam name="TEvent">The inbox payload (the whole event envelope).</typeparam>
 /// <param name="EntityType">The strategy's name, e.g. "account": the key of its watermarks and of its topic setting.</param>
-/// <param name="InboxTable">The inbox table holding this type's events (a code constant; see sql/schema.sql).</param>
 /// <param name="EntityId">The id of the entity an event is about (e.g. account.externalId), or null if it has none.</param>
 /// <param name="EventTime">When the event happened (meta.time), or null if it is missing or has no explicit offset.</param>
 /// <param name="EventType">What the source says happened (meta.type: inserted or updated), or null if it is missing or anything else.</param>
@@ -21,7 +20,6 @@ namespace SalesforceSync.Sync;
 /// <param name="Queries">The batch's units -> the reads (at most 5 after chunking) the diff and lookups need.</param>
 public sealed record UpsertStrategy<TEvent>(
     string EntityType,
-    string InboxTable,
     Func<TEvent, string?> EntityId,
     Func<TEvent, DateTimeOffset?> EventTime,
     Func<TEvent, EventType?> EventType,

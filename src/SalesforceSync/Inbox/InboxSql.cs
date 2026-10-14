@@ -8,7 +8,7 @@ namespace SalesforceSync.Inbox;
 /// statement reads inside the payload: a row's entity is its entity_id column, and which event of an entity is the
 /// newest is decided in C#. Rows are leased per entity. While a row is leased its next_attempt_at is the end of the
 /// lease, so leased rows drop out of the claim's scan and come back on their own if the lease expires.
-/// Every statement is safe to run again after an unknown commit (see PostgresExecutionStrategy): updates are
+/// Every statement is safe to run again after an unknown commit (see PostgresRetryStrategy): updates are
 /// conditional on the lease token and the watermark only moves forward. Outcome statements take arrays, so recording
 /// a batch costs a fixed number of round trips, not two per entity.
 /// </summary>
@@ -45,13 +45,8 @@ public sealed partial class InboxSql
         ClaimEntities = Template.ClaimEntities.Replace("{inbox}", table);
         ReleaseLostClaims = Template.ReleaseLostClaims.Replace("{inbox}", table);
         MarkSynced = Template.MarkSynced.Replace("{inbox}", table);
-        Complete = Template.Complete.Replace("{inbox}", table);
         Fail = Template.Fail.Replace("{inbox}", table);
         Dead = Template.Dead.Replace("{inbox}", table);
-        Defer = Template.Defer.Replace("{inbox}", table);
-        Release = Template.Release.Replace("{inbox}", table);
-        Hold = Template.Hold.Replace("{inbox}", table);
-        Insert = Template.Insert.Replace("{inbox}", table);
     }
 
     public string Table { get; }
@@ -68,32 +63,11 @@ public sealed partial class InboxSql
     /// <inheritdoc cref="Template.MarkSynced"/>
     public string MarkSynced { get; }
 
-    /// <inheritdoc cref="Template.Complete"/>
-    public string Complete { get; }
-
     /// <inheritdoc cref="Template.Fail"/>
     public string Fail { get; }
 
     /// <inheritdoc cref="Template.Dead"/>
     public string Dead { get; }
-
-    /// <inheritdoc cref="Template.Defer"/>
-    public string Defer { get; }
-
-    /// <inheritdoc cref="Template.Release"/>
-    public string Release { get; }
-
-    /// <inheritdoc cref="Template.Hold"/>
-    public string Hold { get; }
-
-    /// <inheritdoc cref="Template.Insert"/>
-    public string Insert { get; }
-
-    /// <summary>The entities' watermarks. Not per table: sf_sync_state is keyed by entity type.</summary>
-    public const string SyncedTimes = """
-        select entity_id as EntityId, synced_time as Time
-        from sf_sync_state where entity_type = @entityType and entity_id = any(@entityIds)
-        """;
 
     /// <summary>The statements with <c>{inbox}</c> for the table name.</summary>
     public static class Template
@@ -224,14 +198,6 @@ public sealed partial class InboxSql
             set synced_time = greatest(sf_sync_state.synced_time, excluded.synced_time), synced_at = now()
             """;
 
-        /// <summary>Done or superseded (@status): the row leaves the queue.</summary>
-        public const string Complete = """
-            update {inbox}
-            set status = @status, locked_until = null, lock_token = null,
-                last_updated = now(), last_error = null, last_error_code = null
-            where id = any(@ids) and lock_token = @token
-            """;
-
         /// <summary>
         /// Transient failure: retry with exponential backoff; dead-letter once retries are used up. @errors is a JSON
         /// object, row id -> [error, code], so a whole batch's failures are one statement. Parsed once (the
@@ -258,45 +224,6 @@ public sealed partial class InboxSql
                 status = 'dead'
             from e
             where i.id = any(@ids) and i.lock_token = @token
-            """;
-
-        /// <summary>Rate limited (all claimed rows): hand back without spending a retry, not before @delay.</summary>
-        public const string Defer = """
-            update {inbox}
-            set locked_until = null, lock_token = null, last_updated = now(),
-                retry_count = greatest(retry_count - 1, 0),
-                next_attempt_at = now() + @delay
-            where id = any(@ids) and lock_token = @token
-            """;
-
-        /// <summary>
-        /// The write's outcome is unknown (all claimed rows): nobody may touch these entities until @hold has passed,
-        /// by when Salesforce has applied the lost write or dropped it. The rows stay pending and leased, but under no
-        /// token, so the old worker can't record anything on them either; the claim skips an entity whose head is
-        /// leased, which also makes events arriving meanwhile wait. No retry is spent.
-        /// </summary>
-        public const string Hold = """
-            update {inbox}
-            set locked_until = now() + @hold, next_attempt_at = now() + @hold, lock_token = null, last_updated = now(),
-                retry_count = greatest(retry_count - 1, 0), last_error = @error, last_error_code = @code
-            where id = any(@ids) and lock_token = @token
-            """;
-
-        /// <summary>Not attempted (rolled back or skipped because of another entity's record): hand back for the next claim, no retry spent.</summary>
-        public const string Release = """
-            update {inbox}
-            set locked_until = null, lock_token = null, last_updated = now(), next_attempt_at = now(),
-                retry_count = greatest(retry_count - 1, 0)
-            where id = any(@ids) and lock_token = @token
-            """;
-
-        /// <summary>
-        /// One event. Nothing makes a row unique: a Kafka redelivery is stored again and ends superseded (its time is
-        /// not newer than what was synced), which is harmless; a uniqueness rule on the payload would wrongly drop the
-        /// last event of A -> B -> A.
-        /// </summary>
-        public const string Insert = """
-            insert into {inbox} (entity_id, payload) values (@entityId, @payload::jsonb)
             """;
     }
 }

@@ -1,6 +1,8 @@
-using Dapper;
+using System.ComponentModel.DataAnnotations.Schema;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
+using static SalesforceSync.Data.SqlCommands;
 
 namespace SalesforceSync.RateLimiting;
 
@@ -12,7 +14,7 @@ namespace SalesforceSync.RateLimiting;
 /// Salesforce reports in that header (<c>api-usage=25/5000</c>: 5,000).
 /// </summary>
 public sealed class SalesforceRateLimiter(
-    PostgresExecutionStrategy pg,
+    IDbContextFactory<SyncDbContext> contexts,
     IOptions<RateLimitOptions> options,
     IOptions<SalesforceLimitsOptions> limits,
     ILogger<SalesforceRateLimiter> log)
@@ -49,13 +51,9 @@ public sealed class SalesforceRateLimiter(
     /// </summary>
     public async Task ApplyConfigurationAsync(CancellationToken ct)
     {
-        await pg.ExecuteAsync(RateLimitSql.ApplyConfiguration, new
-        {
-            rate = _opt.MaxRequestsPerSecond,
-            capacity = _opt.BurstCapacity,
-            budget = DailyBudget,
-            share = _opt.DailyBudgetShare
-        }, ct);
+        await contexts.RunAsync((db, t) => db.Database.ExecuteAsync(RateLimitSql.ApplyConfiguration, t,
+            Param("rate", _opt.MaxRequestsPerSecond), Param("capacity", _opt.BurstCapacity),
+            Param("budget", DailyBudget), Param("share", _opt.DailyBudgetShare)), ct);
 
         log.LogInformation(
             "Salesforce limits: {OrgType} {Edition} org, at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls/24h " +
@@ -73,25 +71,26 @@ public sealed class SalesforceRateLimiter(
             // increment committed by whoever held the lock before (a single statement would read sf_api_usage
             // from a snapshot taken before it waited for the lock). Retried as a whole on transient errors; a
             // retry after an unknown commit can only over-count usage, the safe direction.
-            (bool granted, double waitSeconds, double used24h, double? budget) r = await pg.ExecuteInTransactionAsync(async (conn, tx, t) =>
+            var r = await contexts.RunInTransactionAsync(async (db, t) =>
             {
-                await conn.ExecuteAsync(new CommandDefinition(RateLimitSql.Lock, transaction: tx, cancellationToken: t));
-                return await conn.QuerySingleAsync<(bool, double, double, double?)>(
-                    new CommandDefinition(RateLimitSql.Acquire, new { n = (double)permits }, tx, cancellationToken: t));
+                await db.Database.ExecuteAsync(RateLimitSql.Lock, t);
+                return await db.Database.QuerySingleAsync<AcquireResult>(RateLimitSql.Acquire, t, Param("n", (double)permits));
             }, ct);
-            if (r.budget > 0) Volatile.Write(ref _ownDailyRatio, r.used24h / r.budget.Value);
-            if (r.granted) return;
+            if (r.DailyBudget > 0) Volatile.Write(ref _ownDailyRatio, r.Used24h / r.DailyBudget.Value);
+            if (r.Granted) return;
 
-            var wait = TimeSpan.FromSeconds(Math.Max(r.waitSeconds, 0.05))
+            var wait = TimeSpan.FromSeconds(Math.Max(r.WaitSeconds, 0.05))
                        + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100)); // jitter
             if (DateTime.UtcNow + wait > deadline) throw new RateLimitedException(wait);
             await Task.Delay(wait, ct);
         }
     }
 
-    public Task<bool> IsPausedAsync(CancellationToken ct) => pg.ExecuteScalarAsync<bool>(RateLimitSql.IsPaused, null, ct);
+    public Task<bool> IsPausedAsync(CancellationToken ct)
+        => contexts.RunAsync((db, t) => db.Database.QuerySingleAsync<bool>(RateLimitSql.IsPaused, t), ct);
 
-    public Task PauseAsync(TimeSpan duration, CancellationToken ct) => pg.ExecuteAsync(RateLimitSql.Pause, new { duration }, ct);
+    public Task PauseAsync(TimeSpan duration, CancellationToken ct)
+        => contexts.RunAsync((db, t) => db.Database.ExecuteAsync(RateLimitSql.Pause, t, Param("duration", duration)), ct);
 
     /// <summary>
     /// Records the limits Salesforce reported and adjusts the shared bucket: slows down near the daily or per-app
@@ -114,19 +113,13 @@ public sealed class SalesforceRateLimiter(
             _lastReportUtc = now;
         }
 
-        await pg.ExecuteAsync(RateLimitSql.ReportLimits, new
-        {
-            apiUsed = info.ApiUsage?.Used,
-            apiMax = info.ApiUsage?.Max,
-            burstUsed = info.ApiBursts?.Used,
-            burstMax = info.ApiBursts?.Max,
-            appUsed = info.PerAppUsage?.Used,
-            appMax = info.PerAppUsage?.Max,
-            appName = info.AppName,
-            budget = info.ApiUsage is { Max: > 0 } usage ? BudgetFor(usage.Max) : (long?)null,
-            speed = decision.Speed,
-            pauseSeconds = decision.Pause.TotalSeconds
-        }, ct);
+        await contexts.RunAsync((db, t) => db.Database.ExecuteAsync(RateLimitSql.ReportLimits, t,
+            Param("apiUsed", info.ApiUsage?.Used), Param("apiMax", info.ApiUsage?.Max),
+            Param("burstUsed", info.ApiBursts?.Used), Param("burstMax", info.ApiBursts?.Max),
+            Param("appUsed", info.PerAppUsage?.Used), Param("appMax", info.PerAppUsage?.Max),
+            Param("appName", info.AppName),
+            Param("budget", info.ApiUsage is { Max: > 0 } usage ? BudgetFor(usage.Max) : (long?)null),
+            Param("speed", decision.Speed), Param("pauseSeconds", decision.Pause.TotalSeconds)), ct);
     }
 
     /// <param name="ownDailyRatio">This integration's rolling 24h calls / its daily budget.</param>
@@ -170,6 +163,15 @@ public sealed class SalesforceRateLimiter(
             "Salesforce throttle {From} -> {To} (speed x{Speed}, pause {Pause}). api-usage={Api} api-bursts={Bursts} per-app={App} ({AppName})",
             from.Level, to.Level, to.Speed, to.Pause,
             info.ApiUsage, info.ApiBursts, info.PerAppUsage, info.AppName);
+    }
+
+    /// <summary>The row <see cref="RateLimitSql.Acquire"/> returns.</summary>
+    private sealed class AcquireResult
+    {
+        [Column("granted")] public bool Granted { get; set; }
+        [Column("wait_seconds")] public double WaitSeconds { get; set; }
+        [Column("used_24h")] public double Used24h { get; set; }
+        [Column("daily_budget")] public double? DailyBudget { get; set; }
     }
 
     internal enum ThrottleLevel { Normal, DailyLow, DailyExhausted }
