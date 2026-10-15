@@ -383,7 +383,8 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>The account inbox through the worker's own repository, to play a worker by hand.</summary>
-    public IRepository<AccountInboxRow> AccountInbox => new InboxRepository<AccountInboxRow>(Contexts, Options.Create(new SyncOptions()));
+    public IRepository<AccountInboxRow> AccountInbox => new InboxRepository<AccountInboxRow>(Contexts,
+        Options.Create(new SyncOptions { CoalesceDelay = TimeSpan.Zero }));
 
     /// <summary>(version, status) of every inbox row for the entity, by version then arrival (version N = meta.time BaseTime + N ms).</summary>
     public async Task<IReadOnlyList<(long Version, string Status)>> GetInboxAsync(string key, string entityType = Accounts)
