@@ -50,7 +50,7 @@ public sealed class ClaimRetryTests(SyncFixture app)
         var inbox = new InboxRepository<AccountInboxRow>(
             new PooledDbContextFactory<SyncDbContext>(options.AddInterceptors(lostCommit).Options), Options.Create(new SyncOptions()));
 
-        var claim = await inbox.ClaimAsync(AccountSyncService.Type, CancellationToken.None);
+        var claim = await inbox.ClaimAsync(AccountSync.Type, CancellationToken.None);
 
         lostCommit.Commits.Should().Be(2, "the claim ran again");
         claim.Events.Should().HaveCount(3);

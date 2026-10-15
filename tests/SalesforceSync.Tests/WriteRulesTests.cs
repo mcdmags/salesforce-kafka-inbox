@@ -7,7 +7,7 @@ using SalesforceSync.Sync.Upsert;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The write path's rules on their own, from hand-built Salesforce state and results: <see cref="RecordDiffer"/>,
+/// The write path's rules on their own, from hand-built Salesforce state and results: <see cref="WritePlanner.Changes"/>,
 /// <see cref="WritePlanner"/> and <see cref="WriteResultInterpreter"/>. No org, no HTTP.
 /// </summary>
 public sealed class WriteRulesTests
@@ -34,7 +34,7 @@ public sealed class WriteRulesTests
         ])
     };
 
-    // ---------- RecordDiffer ----------
+    // ---------- WritePlanner.Changes ----------
 
     public static TheoryData<string, object?, string, string[]> Diffs()
     {
@@ -54,7 +54,7 @@ public sealed class WriteRulesTests
         var record = Normalized(Account("A1", name, active: null)).Records[0];
         var problems = new List<SalesforceError>();
 
-        var changes = RecordDiffer.Changes(record, Current(stored), problems);
+        var changes = WritePlanner.Changes(record, Current(stored), problems);
 
         changes.Keys.Should().BeEquivalentTo(expected, what);
         problems.Should().BeEmpty();
@@ -65,7 +65,7 @@ public sealed class WriteRulesTests
     {
         var record = Normalized(Account("A1", "Acme", active: null)).Records[0];
 
-        var changes = RecordDiffer.Changes(record, null, []);
+        var changes = WritePlanner.Changes(record, null, []);
 
         changes.Should().BeEquivalentTo(new Dictionary<string, object?> { ["Name"] = "Acme", ["Active__c"] = false });
     }
@@ -76,10 +76,10 @@ public sealed class WriteRulesTests
         var record = Normalized(Account("A1", "Acme", locked: "new")).Records[0];
         var problems = new List<SalesforceError>();
 
-        RecordDiffer.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"new"}"""), problems);
+        WritePlanner.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"new"}"""), problems);
         problems.Should().BeEmpty();
 
-        RecordDiffer.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"old"}"""), problems);
+        WritePlanner.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"old"}"""), problems);
         problems.Should().ContainSingle().Which.Code.Should().Be("INVALID_FIELD_FOR_INSERT_UPDATE");
     }
 

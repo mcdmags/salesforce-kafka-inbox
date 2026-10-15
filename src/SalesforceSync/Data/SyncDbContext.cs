@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Npgsql;
 using SalesforceSync.Inbox;
+using SalesforceSync.Sync;
 
 namespace SalesforceSync.Data;
 
@@ -89,4 +90,18 @@ public class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(
         e.Property(r => r.LockToken).HasColumnName("lock_token");
         e.Property(r => r.ReceivedAt).HasColumnName("received_at").HasDefaultValueSql("now()");
     }
+}
+
+/// <summary>A row of <c>sf_sync_state</c>: the newest event time synced to Salesforce for an entity.</summary>
+public sealed class SyncStateRow
+{
+    /// <summary>The strategy's entity type, e.g. 'account'.</summary>
+    public string EntityType { get; set; } = "";
+
+    public string EntityId { get; set; } = "";
+
+    /// <summary>The newest synced event's time, microseconds since the epoch.</summary>
+    public long SyncedTime { get; set; }
+
+    public DateTimeOffset SyncedAt { get; set; }
 }

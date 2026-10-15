@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.Extensions.Options;
 
 namespace SalesforceSync.Salesforce;
@@ -56,4 +57,33 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     {
         return _permanent.Contains(code);
     }
+}
+
+/// <summary>An error Salesforce reported for one record (or for a whole subrequest), or one found before sending.</summary>
+/// <param name="Fields">The fields Salesforce blames, when it says.</param>
+public sealed record SalesforceError(string? ReferenceId, string Code, string? Message, IReadOnlyList<string>? Fields = null)
+{
+    public override string ToString()
+    {
+        return ReferenceId is null ? $"{Code} {Message}" : $"{ReferenceId}: {Code} {Message}";
+    }
+}
+
+/// <summary>A query subrequest failed, e.g. INVALID_FIELD because a field was deleted after it was described.</summary>
+public sealed class SalesforceQueryException(string referenceId, IReadOnlyList<SalesforceError> errors)
+    : Exception($"Query {referenceId} failed: {string.Join("; ", errors)}")
+{
+    public string ReferenceId { get; } = referenceId;
+    public IReadOnlyList<SalesforceError> Errors { get; } = errors;
+}
+
+/// <summary>Salesforce answered with an error status. <see cref="IsSalesforceError"/>: the body is Salesforce's own error list.</summary>
+public sealed class SalesforceResponseException(HttpStatusCode status, string body)
+    : HttpRequestException($"Salesforce {(int)status}: {body}", null, status)
+{
+    /// <summary>
+    /// True when Salesforce itself produced the response (<c>[{ "errorCode": ..., "message": ... }]</c>), as opposed to a
+    /// gateway or load balancer in front of it, which can't know whether the request was processed.
+    /// </summary>
+    public bool IsSalesforceError { get; } = body.Contains("\"errorCode\"", StringComparison.Ordinal);
 }

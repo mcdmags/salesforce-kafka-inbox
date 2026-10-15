@@ -303,12 +303,12 @@ public abstract class DrainBenchmarkBase
 
                 var relKey = $"REL-{a[4..]}-{b[4..]}";
                 _relationships[relKey] = (a, b);
-                var relVersion = versions[(AccountRelationshipSyncService.Type, relKey)] =
-                    versions.GetValueOrDefault((AccountRelationshipSyncService.Type, relKey)) + 1;
+                var relVersion = versions[(AccountRelationshipSync.Type, relKey)] =
+                    versions.GetValueOrDefault((AccountRelationshipSync.Type, relKey)) + 1;
                 var relPayload = new JsonObject
                 {
                     ["meta"] = Meta(relVersion),
-                    [AccountRelationshipSyncService.Type] = new JsonObject
+                    [AccountRelationshipSync.Type] = new JsonObject
                     {
                         ["externalId"] = relKey,
                         ["accountExternalId"] = a,
@@ -327,7 +327,7 @@ public abstract class DrainBenchmarkBase
 
             for (var i = 0; i < burst && events.Count < Events; i++)
             {
-                var version = versions[(AccountSyncService.Type, key)] = versions.GetValueOrDefault((AccountSyncService.Type, key)) + 1;
+                var version = versions[(AccountSync.Type, key)] = versions.GetValueOrDefault((AccountSync.Type, key)) + 1;
                 if (version == 1)
                 {
                     seen.Add(key);
@@ -336,7 +336,7 @@ public abstract class DrainBenchmarkBase
                 var payload = new JsonObject
                 {
                     ["meta"] = Meta(version),
-                    [AccountSyncService.Type] = new JsonObject
+                    [AccountSync.Type] = new JsonObject
                     {
                         ["externalId"] = key,
                         ["name"] = $"Account {key}",
@@ -375,7 +375,7 @@ public abstract class DrainBenchmarkBase
         var regressions = 0;
         foreach (var ((type, acct), expected) in _expected)
         {
-            if (type == AccountRelationshipSyncService.Type)
+            if (type == AccountRelationshipSync.Type)
             {
                 if (!VerifyRelationship(acct, expected, ref regressions, out var problem))
                 {

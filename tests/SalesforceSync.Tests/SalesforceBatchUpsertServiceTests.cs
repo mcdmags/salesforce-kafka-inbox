@@ -3,26 +3,23 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
-using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Salesforce.SObjects;
 using SalesforceSync.Sync;
-using SalesforceSync.Sync.Mapping;
 
 namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The generic Salesforce half of the engine (Describe, composite read, diff, lookups, collections write, classification)
-/// driven by the real Account and AccountRelationship strategies and mappers, against the in-memory org. Events are
+/// driven by the real Account and AccountRelationship strategies and mappings, against the in-memory org. Events are
 /// written as the source sends them (camelCase payload names, full records); assertions read Salesforce names.
 /// </summary>
 public sealed class SalesforceBatchUpsertServiceTests
 {
     private static readonly UpsertStrategy<AccountEvent> AccountStrategy =
-        AccountSyncService.CreateStrategy(new AccountMapper(), new ProfileMapper());
+        AccountSync.Strategy;
 
     private static readonly UpsertStrategy<AccountRelationshipEvent> RelationshipStrategy =
-        AccountRelationshipSyncService.CreateStrategy(new AccountRelationshipMapper());
+        AccountRelationshipSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly Fixture _any = new();
@@ -187,7 +184,7 @@ public sealed class SalesforceBatchUpsertServiceTests
             ("GOOD", RawAccount("GOOD", new() { ["Name"] = "Good" }))
         };
         var results = await _upserter.WriteToSalesforceAsync(units,
-            [.. AccountSyncService.Queries([.. units.Select(u => u.Unit)])], CancellationToken.None);
+            [.. AccountSync.Queries([.. units.Select(u => u.Unit)])], CancellationToken.None);
 
         var bad = results.Should().ContainSingle(r => r.Key == "BAD").Subject;
         bad.Outcome.Should().Be(SyncOutcome.PermanentFailure);

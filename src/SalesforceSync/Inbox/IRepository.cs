@@ -31,3 +31,37 @@ public interface IRepository<TEntity> where TEntity : InboxRow, new()
     /// </summary>
     Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct);
 }
+
+/// <summary>A batch of entities leased to this worker: their claimed rows, and what was already synced for them.</summary>
+/// <param name="Token">Identifies the lease; every outcome statement is conditional on it.</param>
+/// <param name="SyncedTimes">Entity id -> the time (microseconds since the epoch) of its newest synced event.</param>
+public sealed record InboxClaim(
+    string EntityType,
+    Guid Token,
+    IReadOnlyList<InboxEvent> Events,
+    IReadOnlyDictionary<string, long> SyncedTimes)
+{
+    public long[] EventIds => [.. Events.Select(e => e.Id)];
+}
+
+/// <summary>A pending inbox row as claimed: the entity it belongs to and the raw event.</summary>
+public sealed record InboxEvent(long Id, string EntityId, string Payload, int RetryCount);
+
+/// <summary>An entity whose newest event (row <paramref name="EventId"/>) is in Salesforce; its watermark moves to <paramref name="EventTime"/>.</summary>
+public sealed record SyncedEntity(string EntityId, long EventTime, long EventId);
+
+/// <summary>An inbox row with the error to store on it.</summary>
+public sealed record FailedEvent(long EventId, string Error, string? Code);
+
+/// <summary>What to record for the rows of a claim, by kind of outcome.</summary>
+/// <param name="Synced">Done; the entity's watermark advances.</param>
+/// <param name="Superseded">Not written: an event of the same entity is newer, or as new was already synced.</param>
+/// <param name="Released">Back to the inbox for the next claim, no retry spent.</param>
+/// <param name="Dead">Dead-lettered at once.</param>
+/// <param name="Failed">Retried with backoff, dead-lettered after <see cref="SyncOptions.MaxRetries"/>.</param>
+public sealed record BatchOutcomes(
+    IReadOnlyList<SyncedEntity> Synced,
+    IReadOnlyList<long> Superseded,
+    IReadOnlyList<long> Released,
+    IReadOnlyList<FailedEvent> Dead,
+    IReadOnlyList<FailedEvent> Failed);
