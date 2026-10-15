@@ -119,12 +119,14 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     /// <para>
     /// Salesforce rejecting the RecordTypeId (the record type was deactivated or unassigned after the describe) is an
     /// <see cref="SalesforceErrors.InvalidRecordType"/>, like the describe not offering it: retried, not dead-lettered.
+    /// Salesforce often leaves <c>fields</c> empty on this error ("Record Type ID: this ID value isn't valid for the
+    /// user"), so the message identifies it too; it is checked before lookups, or a record with lookups would wait
+    /// for a parent with the stale record type Id still cached.
     /// </para>
     /// </summary>
     private static SalesforceError Translate(PlannedWrite write, SalesforceError e)
     {
-        if (e.Code is "INVALID_CROSS_REFERENCE_KEY"
-            && e.Fields?.Contains(SObjectSchema.RecordTypeIdField, StringComparer.OrdinalIgnoreCase) == true)
+        if (e.Code is "INVALID_CROSS_REFERENCE_KEY" && RejectsRecordType(e))
         {
             return new SalesforceError(write.ReferenceId, SalesforceErrors.InvalidRecordType, $"{e.Code}: {e.Message}", e.Fields);
         }
@@ -135,6 +137,12 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
         return targetMissing
             ? new SalesforceError(write.ReferenceId, SalesforceErrors.DependencyNotSynced, $"{e.Code}: {e.Message}", e.Fields)
             : e with { ReferenceId = write.ReferenceId };
+    }
+
+    private static bool RejectsRecordType(SalesforceError e)
+    {
+        return e.Fields?.Contains(SObjectSchema.RecordTypeIdField, StringComparer.OrdinalIgnoreCase) == true
+               || e.Message?.Contains("Record Type", StringComparison.OrdinalIgnoreCase) == true;
     }
 
     /// <summary>The record was deleted between the read and the update: the next read finds it gone and creates it.</summary>

@@ -470,6 +470,24 @@ public sealed class SalesforceBatchUpsertServiceTests
         _org.FindByExternalId("Account", "A1").Should().BeNull();
     }
 
+    /// <summary>Salesforce often names no field on this error; the message still identifies the record type.</summary>
+    [Fact]
+    public async Task A_record_type_rejection_without_fields_is_an_invalid_record_type_and_describes_again()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        var before = _org.GetStats();
+        _org.InjectFault("Profile__c", "P-A2", "INVALID_CROSS_REFERENCE_KEY",
+            "Record Type ID: this ID value isn't valid for the user: 012000000000001AAA", 1);
+
+        var rejected = await Account("A2", new() { ["name"] = "Two" }, []);
+
+        rejected.Outcome.Should().Be(SyncOutcome.TransientFailure);
+        (rejected.PrimaryError?.Code).Should().Be(SalesforceErrors.InvalidRecordType,
+            "not a missing parent, although the profile has a lookup");
+        (await Account("A2", new() { ["name"] = "Two" }, [])).Outcome.Should().Be(SyncOutcome.Saved);
+        (_org.GetStats().Describes - before.Describes).Should().BeGreaterThan(0, "the cached describe was invalidated");
+    }
+
     [SObject("Account", ExternalIdField = "External_Id__c", RecordType = "Nope")]
     private sealed class UnknownRecordTypeAccount
     {
