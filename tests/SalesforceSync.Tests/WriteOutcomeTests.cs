@@ -114,7 +114,7 @@ public sealed class WriteOutcomeTests
 
     private static Task<List<UpsertResult>> Upsert(SalesforceBatchUpsertService upserter, string key)
     {
-        var unit = new UpsertUnit([new SObjectRecord("acct", "Account", "External_Id__c", key, new Dictionary<string, object?> { ["Name"] = "Acme" })]);
+        var unit = new UpsertUnit([new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = "Acme" })]);
         return upserter.WriteToSalesforceAsync([(key, unit)], [.. AccountSync.Queries([unit])], CancellationToken.None);
     }
 

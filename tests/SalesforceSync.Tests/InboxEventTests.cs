@@ -36,14 +36,15 @@ public sealed class InboxEventTests
         }));
 
         var (account, profile) = (unit.Records[0], unit.Records[1]);
-        (account.SObject, account.ExternalIdField, account.ExternalId).Should().Be(("Account", "External_Id__c", key));
+        (account.SObject, account.ExternalIdField, account.ExternalId).Should().Be(("Account", "ExternalId__c", key));
         account.Fields.Should().Contain("Name", name).And.Contain("Tags__c", "B2B;Retail");
         account.Fields.Should().Contain("Rating", null).And.Contain("Description", null,
             "the event is the full record: null and absent both mean empty, and are sent on to the diff");
         (profile.SObject, profile.ExternalId).Should().Be(("Profile__c", key));
         profile.Fields.Should().Contain("Tier__c", "Gold").And.Contain("Score__c", (decimal)score).And.Contain("Notes__c", null);
-        profile.Lookups.Should().ContainSingle()
-            .Which.Should().Be(new SObjectLookup("Account__c", "Account", "External_Id__c", key));
+        profile.Fields.Should().Contain("AccountId__c", key, "the Account's key, as text");
+        profile.ForeignKeys.Should().ContainSingle()
+            .Which.Should().Be(new SObjectLookup("AccountId__c", "Account", "ExternalId__c", key));
     }
 
     [Theory, AutoData]
@@ -59,7 +60,7 @@ public sealed class InboxEventTests
         }));
 
         unit.Records[1].ExternalId.Should().Be(profileKey);
-        unit.Records[1].Lookups.Should().ContainSingle().Which.ExternalId.Should().Be(key, "it still belongs to the event's account");
+        unit.Records[1].Fields["AccountId__c"].Should().Be(key, "it still belongs to the event's account");
     }
 
     [Theory, AutoData]
@@ -95,13 +96,15 @@ public sealed class InboxEventTests
         rel.Fields.Should().BeEquivalentTo(new Dictionary<string, object?>
         {
             ["Name"] = null,
+            ["AccountId__c"] = account,
+            ["RelatedAccountId__c"] = related,
             ["Type__c"] = "Parent",
             ["Start_Date__c"] = new DateOnly(2026, 1, 31),
             ["Active__c"] = null
         });
-        rel.Lookups.Should().Equal(
-            new SObjectLookup("Account__c", "Account", "External_Id__c", account),
-            new SObjectLookup("Related_Account__c", "Account", "External_Id__c", related));
+        rel.ForeignKeys.Should().Equal(
+            new SObjectLookup("AccountId__c", "Account", "ExternalId__c", account),
+            new SObjectLookup("RelatedAccountId__c", "Account", "ExternalId__c", related));
     }
 
     [Theory]
@@ -126,11 +129,11 @@ public sealed class InboxEventTests
 
         var contact = unit.Records.Should().ContainSingle().Subject;
         (contact.SObject, contact.ExternalIdField, contact.ExternalId, contact.RecordType).Should()
-            .Be(("Contact", "External_Id__c", key, "Standard"));
-        contact.Fields.Should().Contain("LastName", lastName).And.Contain("Email", null);
-        contact.Lookups.Should().Equal(new SObjectLookup("AccountId", "Account", "External_Id__c", account));
+            .Be(("Contact", "ExternalId__c", key, "Standard"));
+        contact.Fields.Should().Contain("LastName", lastName).And.Contain("Email", null).And.Contain("AccountId__c", account);
+        contact.ForeignKeys.Should().Equal(new SObjectLookup("AccountId__c", "Account", "ExternalId__c", account));
         ContactSync.Strategy.Queries([unit]).Select(q => (q.SObject, q.WhereField, q.Values.Single())).Should()
-            .Equal(("Contact", "External_Id__c", key), ("Account", "External_Id__c", account));
+            .Equal(("Contact", "ExternalId__c", key), ("Account", "ExternalId__c", account));
     }
 
     [Theory]

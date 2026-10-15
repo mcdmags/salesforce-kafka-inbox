@@ -24,9 +24,15 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
         // Parents were sent first, so a child is classified after its parent
         foreach (var (referenceId, writes) in collections)
         {
-            ClassifyCollection(referenceId, writes, answers.FirstOrDefault(a => a.ReferenceId == referenceId));
+            Classify(referenceId, writes, answers.FirstOrDefault(a => a.ReferenceId == referenceId));
         }
 
+        return Results(units);
+    }
+
+    /// <summary>One outcome per unit, from its records' statuses (every collection with its writes classified).</summary>
+    public List<UpsertResult> Results(IReadOnlyList<PlannedUnit> units)
+    {
         // Records failed, but none says why (every one of them reports being skipped because of another, or has no
         // answer): handing the units straight back would repeat the same request forever, so they spend a retry and
         // back off instead.
@@ -37,8 +43,8 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
         return [.. units.Select(unit => UnitResult(unit, causeUnknown))];
     }
 
-    /// <summary>Sets the status and errors of every record of one collection from its subrequest's answer.</summary>
-    private void ClassifyCollection(string referenceId, List<PlannedWrite> writes, CollectionResult? answer)
+    /// <summary>Sets the status and errors of every record of one collection from its subrequest's (or call's) answer.</summary>
+    public void Classify(string referenceId, List<PlannedWrite> writes, CollectionResult? answer)
     {
         var subrequestErrors = SubrequestErrors(referenceId, writes.Count, answer);
         // A reference to a parent that wasn't saved has no value, which fails every record of the subrequest
@@ -93,7 +99,8 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     /// <param name="hasOwnResult">False when the record's subrequest failed as a whole.</param>
     private WriteStatus FailureStatus(PlannedWrite write, bool hasOwnResult, bool brokenReference)
     {
-        if (write.Links.Any(l => l.Parent.Status != WriteStatus.Saved))
+        // E.g. the org rejecting a child whose new parent wasn't saved, in the same Composite request
+        if (write.Parents.Any(p => p.Status != WriteStatus.Saved))
         {
             return WriteStatus.ParentNotSaved;
         }
@@ -134,9 +141,11 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     }
 
     /// <summary>
-    /// Salesforce rejecting a lookup because its target isn't there (the target was deleted after the read) is the
-    /// same situation as the read not finding it: the target is expected to arrive through its own sync, so the record
-    /// waits for it rather than being dead-lettered.
+    /// Salesforce rejecting a lookup because its target isn't there (the target was deleted after the read), or the
+    /// org rejecting a record because its foreign key's parent isn't there (a message listed in
+    /// <see cref="SalesforceOptions.ParentMissingMessages"/>, whatever the code), is the same situation as the read not
+    /// finding it: the parent is expected to arrive through its own sync, so the record waits for it rather than being
+    /// dead-lettered.
     /// <para>
     /// Salesforce rejecting the RecordTypeId (the record type was deactivated or unassigned after the describe) is an
     /// <see cref="SalesforceErrors.InvalidRecordType"/>, like the describe not offering it: retried, not dead-lettered.
@@ -145,31 +154,20 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     /// for a parent with the stale record type Id still cached.
     /// </para>
     /// </summary>
-    private static SalesforceError Translate(PlannedWrite write, SalesforceError e)
+    private SalesforceError Translate(PlannedWrite write, SalesforceError e)
     {
         if (e.Code is "INVALID_CROSS_REFERENCE_KEY" && RejectsRecordType(e))
         {
             return new SalesforceError(write.ReferenceId, SalesforceErrors.InvalidRecordType, $"{e.Code}: {e.Message}", e.Fields);
         }
 
-        var targetMissing = write.LookupFields.Count > 0
-                            && ((e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED"
-                                 && (e.Fields is not { Count: > 0 } || e.Fields.Any(write.LookupFields.Contains)))
-                                || IsForeignKeyNotFound(e));
+        var targetMissing = (write.LookupFields.Count > 0
+                             && e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED"
+                             && (e.Fields is not { Count: > 0 } || e.Fields.Any(write.LookupFields.Contains)))
+                            || errors.IsParentMissing(e);
         return targetMissing
             ? new SalesforceError(write.ReferenceId, SalesforceErrors.DependencyNotSynced, $"{e.Code}: {e.Message}", e.Fields)
             : e with { ReferenceId = write.ReferenceId };
-    }
-
-    /// <summary>
-    /// A lookup set by the parent's external id (an upsert's <c>"Account": { "External_Id__c": "A1" }</c>) whose parent
-    /// isn't in Salesforce: <c>INVALID_FIELD</c>, "Foreign key external ID: A1 not found for field External_Id__c in
-    /// entity Account". Salesforce has no code of its own for it, so the message tells it apart from a field that
-    /// really is invalid (which stays permanent).
-    /// </summary>
-    private static bool IsForeignKeyNotFound(SalesforceError e)
-    {
-        return e.Code == "INVALID_FIELD" && e.Message?.Contains("Foreign key external ID", StringComparison.OrdinalIgnoreCase) == true;
     }
 
     private static bool RejectsRecordType(SalesforceError e)

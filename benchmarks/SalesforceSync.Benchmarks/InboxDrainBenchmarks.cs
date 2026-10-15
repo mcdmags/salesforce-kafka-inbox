@@ -456,17 +456,17 @@ public abstract class DrainBenchmarkBase
         }
 
         var (account, related) = _relationships[key];
+        // Linked by the Accounts' external ids (Text foreign keys), both of which exist
         var record = _store.FindByExternalId(RelationshipObject, key);
-        var accountId = (string?)_store.FindByExternalId("Account", account)?["Id"];
-        var relatedId = (string?)_store.FindByExternalId("Account", related)?["Id"];
-        if (versions.LastOrDefault() == expected && record is not null && accountId is not null &&
-            (string?)record["Account__c"] == accountId && (string?)record["Related_Account__c"] == relatedId)
+        if (versions.LastOrDefault() == expected && record is not null &&
+            _store.FindByExternalId("Account", account) is not null && _store.FindByExternalId("Account", related) is not null &&
+            (string?)record["AccountId__c"] == account && (string?)record["RelatedAccountId__c"] == related)
         {
             return true;
         }
 
         problem = $"{key}: expected v{expected} linking {account}->{related}, got v{versions.LastOrDefault()} " +
-                  $"linking {record?["Account__c"]}->{record?["Related_Account__c"]}";
+                  $"linking {record?["AccountId__c"]}->{record?["RelatedAccountId__c"]}";
         return false;
     }
 

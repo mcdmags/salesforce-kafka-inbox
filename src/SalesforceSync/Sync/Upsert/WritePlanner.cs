@@ -13,11 +13,26 @@ internal sealed record WritePlan(IReadOnlyList<CompositeWrite> Requests, IReadOn
 
 /// <summary>
 /// One sObject Collections upsert (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>): up to 200 records
-/// of one object, matched by their external id. Not a Composite request: one call of its own, one per object of a
-/// request without references.
+/// of one object, matched by their external id. Not a Composite request: one call of its own, one per level and object
+/// of a request without references.
 /// </summary>
 internal sealed record UpsertCall(string ReferenceId, string SObject, string ExternalIdField, List<PlannedWrite> Writes)
 {
+    /// <summary>
+    /// Takes out of the call (as <see cref="WriteStatus.ParentNotSaved"/>) the writes whose parent, a new record of
+    /// their unit sent in an earlier call, wasn't saved: Salesforce would reject them (no parent), and the parent's
+    /// result already decides the unit. Called once the earlier calls' results are classified.
+    /// </summary>
+    public void DropOrphans()
+    {
+        foreach (var orphan in Writes.Where(w => w.Parents.Any(p => p.Status != WriteStatus.Saved)))
+        {
+            orphan.Status = WriteStatus.ParentNotSaved;
+        }
+
+        Writes.RemoveAll(w => w.Status == WriteStatus.ParentNotSaved);
+    }
+
     public List<IReadOnlyDictionary<string, object?>> Bodies()
     {
         return [.. Writes.Select(w => w.UpsertBody())];
@@ -27,8 +42,8 @@ internal sealed record UpsertCall(string ReferenceId, string SObject, string Ext
 /// <summary>
 /// Turns units and Salesforce's current records into the collection requests to send. Whether a record is created or
 /// updated is decided by what the read found. A lookup becomes a literal Id, or a reference to a create in the same
-/// request (<c>@{Account_create[3].id}</c>). Compares a record's normalized values with what Salesforce has
-/// (<see cref="Changes"/>). No I/O.
+/// request (<c>@{Account_create[3].id}</c>); a foreign key stays the text it is, and only puts its record after its
+/// parent. Compares a record's normalized values with what Salesforce has (<see cref="Changes"/>). No I/O.
 /// </summary>
 internal static class WritePlanner
 {
@@ -69,10 +84,11 @@ internal static class WritePlanner
     /// <summary>
     /// The unit's writes: a create for each record Salesforce doesn't have, an update for each one that differs, nothing
     /// for the rest. A lookup becomes the target's Id when the target exists, and a link to the target's create when
-    /// the target is an earlier record of this unit that is new.
+    /// the target is an earlier record of this unit that is new. Lookups and foreign keys both put a record one level
+    /// below the records of the unit they point at (so it is sent after them), and make a new one of those its parent.
     /// </summary>
     /// <param name="problems">Receives what Salesforce would reject (a field that can't be written).</param>
-    /// <param name="missing">Receives the lookups whose target is neither in Salesforce nor in the unit.</param>
+    /// <param name="missing">Receives the lookups and foreign keys whose target is neither in Salesforce nor in the unit.</param>
     private static List<PlannedWrite> PlanUnit(NormalizedUnit unit, CurrentRecords current, List<SalesforceError> problems,
         List<SalesforceError> missing)
     {
@@ -85,17 +101,40 @@ internal static class WritePlanner
             var existing = current.Find(record.Record);
             var changes = Changes(record, existing, problems);
             var links = new List<ParentReference>();
+            var parents = new List<PlannedWrite>();
             var depth = 0;
+
+            // The record the lookup or foreign key points at, which it follows; null (and missing) if there is none
+            LookupTarget? Parent(SObjectLookup pointer)
+            {
+                if (FindTarget(pointer, current, earlier) is not { } target)
+                {
+                    missing.Add(new(record.ReferenceId, SalesforceErrors.DependencyNotSynced,
+                        $"{record.Schema.Name}.{pointer.Field}: {pointer.SObject} {pointer.ExternalIdField}={pointer.ExternalId} is not in Salesforce yet"));
+                    return null;
+                }
+
+                depth = Math.Max(depth, target.Depth + 1);
+                if (target.Create is not null)
+                {
+                    parents.Add(target.Create);
+                }
+
+                return target;
+            }
+
+            // A foreign key is written like any field (in changes already): it only orders the record after its parent
+            foreach (var key in record.Record.ForeignKeys ?? [])
+            {
+                Parent(key);
+            }
 
             foreach (var lookup in record.Lookups)
             {
-                if (FindTarget(lookup.Target, current, earlier) is not { } target)
+                if (Parent(lookup.Target) is not { } target)
                 {
-                    missing.Add(new(record.ReferenceId, SalesforceErrors.DependencyNotSynced,
-                        $"{record.Schema.Name}.{lookup.Field.Name}: {lookup.Target.SObject} {lookup.Target.ExternalIdField}={lookup.Target.ExternalId} is not in Salesforce yet"));
                     continue;
                 }
-                depth = Math.Max(depth, target.Depth + 1);
 
                 if (target.Create is null && LinkedId(existing, lookup.Field) == target.Id)
                 {
@@ -118,7 +157,7 @@ internal static class WritePlanner
                 }
             }
 
-            var write = Write(record, existing, changes, links, depth);
+            var write = Write(record, existing, changes, links, parents, depth);
             if (write is not null)
             {
                 writes.Add(write);
@@ -132,9 +171,9 @@ internal static class WritePlanner
     }
 
     /// <summary>
-    /// What a lookup points at: a record with an Id, or the create of an earlier record of the same unit.
-    /// <paramref name="Depth"/> is that record's level in the unit (-1 for a record outside it), which puts the
-    /// record looking it up one level below.
+    /// What a lookup or foreign key points at: a record with an Id, or the create of an earlier record of the same
+    /// unit. <paramref name="Depth"/> is that record's level in the unit (-1 for a record outside it), which puts the
+    /// record pointing at it one level below.
     /// </summary>
     private readonly record struct LookupTarget(string? Id, PlannedWrite? Create, int Depth);
 
@@ -156,7 +195,7 @@ internal static class WritePlanner
 
     /// <summary>A create for a new record (with its external id), an update if anything differs, else null.</summary>
     private static PlannedWrite? Write(NormalizedRecord record, CurrentRecord? existing, Dictionary<string, object?> changes,
-        List<ParentReference> links, int depth)
+        List<ParentReference> links, List<PlannedWrite> parents, int depth)
     {
         if (existing is not null && changes.Count == 0 && links.Count == 0)
         {
@@ -172,7 +211,7 @@ internal static class WritePlanner
             changes[record.Schema.Find(record.Record.ExternalIdField)!.Name] = record.Record.ExternalId;
         }
 
-        return new PlannedWrite(record, existing?.Id, changes, links, lookupFields, depth);
+        return new PlannedWrite(record, existing?.Id, changes, links, parents, lookupFields, depth);
     }
 
     /// <summary>

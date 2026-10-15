@@ -14,11 +14,12 @@ public sealed record FakeField(
     bool Updateable = true,
     bool Nillable = true,
     string? ReferenceTo = null,
-    int Digits = 0)
+    int Digits = 0,
+    string? KeyOf = null)
 {
     /// <summary>
     /// A reference field's relationship name, by Salesforce's convention: <c>AccountId</c> -> <c>Account</c>,
-    /// <c>Account__c</c> -> <c>Account__r</c>. A write can set the field through it by the parent's external id.
+    /// <c>Parent__c</c> -> <c>Parent__r</c>.
     /// </summary>
     public string? RelationshipName => Type != "reference" ? null
         : Name.EndsWith("__c", StringComparison.Ordinal) ? $"{Name[..^3]}__r"
@@ -42,9 +43,22 @@ public sealed record FakeRecordType(
 /// multi-select values are kept in picklist order, text is length-checked, a record type must be one of the object's
 /// that is active and available. Deliberately independent of the client's
 /// normalization, so tests catch a client that would make fields flap.
+/// <para>
+/// A Text field with <see cref="FakeField.KeyOf"/> is a foreign key: it holds the external id of a record of that
+/// object, stored as plain text. Like the org's automation, a create or update that sets it to an external id no such
+/// record has is rejected (<see cref="ParentMissingCode"/>, <see cref="ParentMissingMessage"/>).
+/// </para>
 /// </summary>
 public static class FakeSchema
 {
+    /// <summary>
+    /// What the mock org answers for a foreign key whose parent doesn't exist. A real org's automation decides its
+    /// own (most likely this code, a validation rule's or trigger's, with a message of its own): verify in a sandbox.
+    /// </summary>
+    public const string ParentMissingCode = "FIELD_CUSTOM_VALIDATION_EXCEPTION";
+
+    public const string ParentMissingMessage = "Parent record not found";
+
     public const string RecordTypeIdField = "RecordTypeId";
 
     /// <summary>The Master record type (its Id is the same in every org).</summary>
@@ -57,7 +71,7 @@ public static class FakeSchema
             [
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
                 new(RecordTypeIdField, "reference", 18, ReferenceTo: "RecordType"),
-                new("External_Id__c", "string", 255),
+                new("ExternalId__c", "string", 255),
                 new("Name", "string", 255, Nillable: false),
                 new("Rating", "picklist", 255),
                 new("Industry", "picklist", 255),
@@ -78,8 +92,8 @@ public static class FakeSchema
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
                 new(RecordTypeIdField, "reference", 18, ReferenceTo: "RecordType"),
                 new("Name", "string", 80),
-                new("External_Id__c", "string", 255),
-                new("Account__c", "reference", 18, ReferenceTo: "Account"),
+                new("ExternalId__c", "string", 255),
+                new("AccountId__c", "string", 255, KeyOf: "Account"),
                 new("Tier__c", "picklist", 255),
                 new("Score__c", "double", Precision: 18, Scale: 2),
                 new("Discount__c", "percent", Precision: 5, Scale: 2),
@@ -94,9 +108,9 @@ public static class FakeSchema
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
                 new(RecordTypeIdField, "reference", 18, ReferenceTo: "RecordType"),
                 new("Name", "string", 80),
-                new("External_Id__c", "string", 255),
-                new("Account__c", "reference", 18, ReferenceTo: "Account"),
-                new("Related_Account__c", "reference", 18, ReferenceTo: "Account"),
+                new("ExternalId__c", "string", 255),
+                new("AccountId__c", "string", 255, KeyOf: "Account"),
+                new("RelatedAccountId__c", "string", 255, KeyOf: "Account"),
                 new("Type__c", "picklist", 255),
                 new("Start_Date__c", "date"),
                 new("Active__c", "boolean", Nillable: false),
@@ -107,8 +121,10 @@ public static class FakeSchema
             [
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
                 new(RecordTypeIdField, "reference", 18, ReferenceTo: "RecordType"),
-                new("External_Id__c", "string", 255),
+                new("ExternalId__c", "string", 255),
+                // The standard lookup every org's Contact has; this org's sync leaves it alone and uses AccountId__c
                 new("AccountId", "reference", 18, ReferenceTo: "Account"),
+                new("AccountId__c", "string", 255, KeyOf: "Account"),
                 new("FirstName", "string", 40),
                 new("LastName", "string", 80, Nillable: false),
                 new("Email", "email", 80),

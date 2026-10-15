@@ -8,7 +8,8 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// What varies per synced object: how to read an event's entity id and meta (time and type), how an
-/// event becomes Salesforce records, and what to read from Salesforce to diff them and resolve their lookups.
+/// event becomes Salesforce records, and what to read from Salesforce to diff them, resolve their lookups and find
+/// their parents.
 /// Everything else (claiming, ordering, coalescing, rate limits, batching, retries, dead-lettering) is
 /// <see cref="SalesforceBatchUpsertService"/>'s. The engine, the Kafka consumer and the SQL never name an event
 /// field: they go through <paramref name="EntityId"/> and <paramref name="Meta"/>.
@@ -87,7 +88,10 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
         return new SoqlQuery(meta.SObject, meta.ExternalIdField, ExternalIdsOf(units, meta.SObject));
     }
 
-    /// <summary>Reads the <typeparamref name="TSObject"/> records the units' lookups point at (for their Ids).</summary>
+    /// <summary>
+    /// Reads the <typeparamref name="TSObject"/> records the units' lookups and foreign keys point at: for a lookup's
+    /// Id, and to know that a parent exists before its child is sent.
+    /// </summary>
     public static SoqlQuery LookupTargetsOf<TSObject>(IEnumerable<UpsertUnit> units) where TSObject : class
     {
         var meta = SObjectMetadata<TSObject>.Instance;
@@ -103,11 +107,11 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
                 .Distinct(StringComparer.Ordinal)];
     }
 
-    /// <summary>The external ids every lookup of the units points at in <paramref name="sobject"/>.</summary>
+    /// <summary>The external ids every lookup and foreign key of the units points at in <paramref name="sobject"/>.</summary>
     public static IReadOnlyCollection<string> LookupIdsOf(IEnumerable<UpsertUnit> units, string sobject)
     {
         return [.. units.SelectMany(u => u.Records)
-                .SelectMany(r => r.Lookups ?? [])
+                .SelectMany(r => r.Parents)
                 .Where(l => l.SObject.Equals(sobject, StringComparison.OrdinalIgnoreCase))
                 .Select(l => l.ExternalId)
                 .Distinct(StringComparer.Ordinal)];
