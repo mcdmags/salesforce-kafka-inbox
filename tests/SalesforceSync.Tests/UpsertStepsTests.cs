@@ -208,7 +208,7 @@ public sealed class UpsertStepsTests
     // ---------- CompositeWrite.Pack ----------
 
     [Fact]
-    public void Units_that_need_the_same_collections_share_one_request_parents_and_creates_first()
+    public void Units_that_need_the_same_collections_share_one_request_parents_first()
     {
         var (Requests, TooLarge) = CompositeWrite.Pack(
         [
@@ -220,8 +220,8 @@ public sealed class UpsertStepsTests
         TooLarge.Should().BeEmpty();
         var request = Requests.Should().ContainSingle().Subject;
         request.Units.Select(u => u.Key).Should().Equal("NEW", "OLD", "NEW2");
-        request.BuildRequests().Select(r => (r.ReferenceId, r.Create, r.Records.Count)).Should().Equal(
-            ("Account_create", true, 2), ("Account_update", false, 1), ("Profile__c_create", true, 1), ("Profile__c_update", false, 1));
+        request.BuildRequests().Select(r => (r.ReferenceId, r.Records.Count)).Should().Equal([("Account", 3), ("Profile__c", 2)],
+            "one upsert per level and object, creates and updates together");
     }
 
     [Fact]
@@ -229,8 +229,8 @@ public sealed class UpsertStepsTests
     {
         var (Requests, TooLarge) = CompositeWrite.Pack(
         [
-            new PlannedUnit("A", [Write("Account", true), Write("Account", false), Write("Profile__c", true, 1), Write("Profile__c", false, 1)]),
-            new PlannedUnit("B", [Write("Account_Relationship__c", true), Write("Account_Relationship__c", false)]),
+            new PlannedUnit("A", [Write("Account", true), Write("Account", false, 1), Write("Profile__c", true, 1), Write("Profile__c", false, 2)]),
+            new PlannedUnit("B", [Write("Account_Relationship__c", true), Write("Account_Relationship__c", false, 1)]),
             new PlannedUnit("C", [Write("Account", true)])
         ]);
 
@@ -279,7 +279,8 @@ public sealed class UpsertStepsTests
     {
         var record = new NormalizedRecord(
             new SObjectRecord("r", sobject, "ExternalId__c", "X", new Dictionary<string, object?>()),
-            new SObjectSchema(sobject, []), new Dictionary<SalesforceField, object?>(), []);
+            new SObjectSchema(sobject, [new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true)]),
+            new Dictionary<SalesforceField, object?>(), []);
         return new PlannedWrite(record, create ? null : "001000000000001AAA", new Dictionary<string, object?>(), [], [],
             new HashSet<string>(), depth);
     }

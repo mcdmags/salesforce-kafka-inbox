@@ -5,44 +5,16 @@ namespace SalesforceSync.Sync.Upsert;
 
 /// <summary>What to do with a batch after the read.</summary>
 /// <param name="Requests">
-/// The write requests, each with its units and their writes by collection: sent as one Composite request, or as one
-/// Collections upsert per object when no write needs a reference (<see cref="CompositeWrite.AsUpserts"/>).
+/// The write requests, each with its units and their writes by collection (one upsert each), each one API call: one
+/// Collections upsert, or one Composite request of several (<see cref="CompositeWrite"/>).
 /// </param>
 /// <param name="NotSent">The units that won't be sent, with their outcome: unchanged, rejected, too large, or waiting for a lookup target.</param>
 internal sealed record WritePlan(IReadOnlyList<CompositeWrite> Requests, IReadOnlyList<UpsertResult> NotSent);
 
 /// <summary>
-/// One sObject Collections upsert (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>): up to 200 records
-/// of one object, matched by their external id. Not a Composite request: one call of its own, one per level and object
-/// of a request without references.
-/// </summary>
-internal sealed record UpsertCall(string ReferenceId, string SObject, string ExternalIdField, List<PlannedWrite> Writes)
-{
-    /// <summary>
-    /// Takes out of the call (as <see cref="WriteStatus.ParentNotSaved"/>) the writes whose parent, a new record of
-    /// their unit sent in an earlier call, wasn't saved: Salesforce would reject them (no parent), and the parent's
-    /// result already decides the unit. Called once the earlier calls' results are classified.
-    /// </summary>
-    public void DropOrphans()
-    {
-        foreach (var orphan in Writes.Where(w => w.Parents.Any(p => p.Status != WriteStatus.Saved)))
-        {
-            orphan.Status = WriteStatus.ParentNotSaved;
-        }
-
-        Writes.RemoveAll(w => w.Status == WriteStatus.ParentNotSaved);
-    }
-
-    public List<IReadOnlyDictionary<string, object?>> Bodies()
-    {
-        return [.. Writes.Select(w => w.UpsertBody())];
-    }
-}
-
-/// <summary>
 /// Turns units and Salesforce's current records into the collection requests to send. Whether a record is created or
-/// updated is decided by what the read found. A lookup becomes a literal Id, or a reference to a create in the same
-/// request (<c>@{Account_create[3].id}</c>); a foreign key stays the text it is, and only puts its record after its
+/// updated is decided by what the read found. A lookup becomes a literal Id, or a reference to a new record's upsert in
+/// the same request (<c>@{Account[3].id}</c>); a foreign key stays the text it is, and only puts its record after its
 /// parent. Compares a record's normalized values with what Salesforce has (<see cref="Changes"/>). No I/O.
 /// </summary>
 internal static class WritePlanner
@@ -193,7 +165,7 @@ internal static class WritePlanner
                 : null;
     }
 
-    /// <summary>A create for a new record (with its external id), an update if anything differs, else null.</summary>
+    /// <summary>A create for a new record, an update if anything differs, else null.</summary>
     private static PlannedWrite? Write(NormalizedRecord record, CurrentRecord? existing, Dictionary<string, object?> changes,
         List<ParentReference> links, List<PlannedWrite> parents, int depth)
     {
@@ -205,11 +177,6 @@ internal static class WritePlanner
         var lookupFields = record.Lookups.Where(l => changes.ContainsKey(l.Field.Name)).Select(l => l.Field.Name)
             .Concat(links.Select(l => l.Field.Name))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        if (existing is null)
-        {
-            changes[record.Schema.Find(record.Record.ExternalIdField)!.Name] = record.Record.ExternalId;
-        }
 
         return new PlannedWrite(record, existing?.Id, changes, links, parents, lookupFields, depth);
     }

@@ -25,7 +25,7 @@ internal static class LookupStrategies
 {
     /// <summary>
     /// An Account and its Contact "C-{key}" (named after the account) that looks it up: a new pair goes in one
-    /// Composite request, the Contact pointing at <c>@{Account_create[i].id}</c>.
+    /// Composite request, the Contact pointing at <c>@{Account[i].id}</c>.
     /// </summary>
     public static readonly UpsertStrategy<AccountEvent> AccountWithContact = new("accountWithContact", e => e.Account?.ExternalId,
         e => e.Meta,

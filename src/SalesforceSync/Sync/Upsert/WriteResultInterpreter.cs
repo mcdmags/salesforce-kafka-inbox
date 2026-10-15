@@ -8,30 +8,20 @@ namespace SalesforceSync.Sync.Upsert;
 /// </summary>
 internal sealed class WriteResultInterpreter(SalesforceErrors errors)
 {
+    /// <summary>One outcome per unit of the request, from its upserts' answers by reference id.</summary>
     public List<UpsertResult> Interpret(CompositeWrite request, IReadOnlyList<CollectionResult> answers)
     {
-        return Interpret([.. request.Collections.Select(c => (c.ReferenceId, c.Writes))], request.Units, answers);
-    }
-
-    /// <summary>
-    /// The same for any collections of writes and their answers by reference id: the subrequests of a Composite
-    /// request, or sObject Collections upserts (each its own call, its answer filed under its reference id).
-    /// </summary>
-    /// <param name="units">Every unit with writes in <paramref name="collections"/>; one result each.</param>
-    public List<UpsertResult> Interpret(IReadOnlyList<(string ReferenceId, List<PlannedWrite> Writes)> collections,
-        IReadOnlyList<PlannedUnit> units, IReadOnlyList<CollectionResult> answers)
-    {
         // Parents were sent first, so a child is classified after its parent
-        foreach (var (referenceId, writes) in collections)
+        foreach (var (referenceId, _, writes) in request.Collections)
         {
             Classify(referenceId, writes, answers.FirstOrDefault(a => a.ReferenceId == referenceId));
         }
 
-        return Results(units);
+        return Results(request.Units);
     }
 
     /// <summary>One outcome per unit, from its records' statuses (every collection with its writes classified).</summary>
-    public List<UpsertResult> Results(IReadOnlyList<PlannedUnit> units)
+    private List<UpsertResult> Results(IReadOnlyList<PlannedUnit> units)
     {
         // Records failed, but none says why (every one of them reports being skipped because of another, or has no
         // answer): handing the units straight back would repeat the same request forever, so they spend a retry and
@@ -43,8 +33,8 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
         return [.. units.Select(unit => UnitResult(unit, causeUnknown))];
     }
 
-    /// <summary>Sets the status and errors of every record of one collection from its subrequest's (or call's) answer.</summary>
-    public void Classify(string referenceId, List<PlannedWrite> writes, CollectionResult? answer)
+    /// <summary>Sets the status and errors of every record of one collection from its upsert's answer.</summary>
+    private void Classify(string referenceId, List<PlannedWrite> writes, CollectionResult? answer)
     {
         var subrequestErrors = SubrequestErrors(referenceId, writes.Count, answer);
         // A reference to a parent that wasn't saved has no value, which fails every record of the subrequest
@@ -99,7 +89,8 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     /// <param name="hasOwnResult">False when the record's subrequest failed as a whole.</param>
     private WriteStatus FailureStatus(PlannedWrite write, bool hasOwnResult, bool brokenReference)
     {
-        // E.g. the org rejecting a child whose new parent wasn't saved, in the same Composite request
+        // E.g. the org rejecting a child whose new parent, an earlier upsert of the same Composite request, wasn't
+        // saved (children are sent regardless, and the org decides): the parent's result decides the unit
         if (write.Parents.Any(p => p.Status != WriteStatus.Saved))
         {
             return WriteStatus.ParentNotSaved;
@@ -177,13 +168,12 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     }
 
     /// <summary>
-    /// The record was deleted between the read and the update: the next read finds it gone and creates it. An update
-    /// sent as an upsert then tries to create the record from the changed fields alone, which fails on a required field
-    /// the update didn't need to send.
+    /// The record was deleted between the read and the update: the next read finds it gone and creates it. The update,
+    /// an upsert, then tries to create the record from the changed fields alone, which fails on a required field the
+    /// update didn't need to send.
     /// </summary>
     private static bool IsStaleUpdate(PlannedWrite write, SalesforceError e)
     {
-        return !write.Create && (e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED"
-                                 || (write.ByUpsert && e.Code == "REQUIRED_FIELD_MISSING"));
+        return !write.Create && e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED" or "REQUIRED_FIELD_MISSING";
     }
 }

@@ -40,7 +40,10 @@ public sealed class WriteRulesTests
             Field("ExternalId__c", "string"),
             Field("LastName", "string"),
             Field("AccountId", "reference")
-        ])
+        ]),
+        // Objects the sync has no strategy for: the write rule knows no object by name
+        ["Widget__c"] = new("Widget__c", [Field("Id", "id", createable: false, updateable: false), Field("Key__c", "string"), Field("Label__c", "string")]),
+        ["Gadget__c"] = new("Gadget__c", [Field("Id", "id", createable: false, updateable: false), Field("Key__c", "string"), Field("Widget__c", "string")])
     };
 
     // ---------- WritePlanner.Changes ----------
@@ -105,15 +108,15 @@ public sealed class WriteRulesTests
             current);
 
         plan.NotSent.Should().ContainSingle().Which.Should().Match<UpsertResult>(r => r.Key == "SAME" && r.Outcome == SyncOutcome.Unchanged);
-        var bodies = plan.Requests.Should().ContainSingle().Subject.BuildRequests();
-        bodies.Select(b => (b.ReferenceId, b.Create)).Should().Equal(("Account_create", true), ("Account_update", false));
-        bodies[0].Records.Single()["ExternalId__c"].Should().Be("NEW", "a create carries its external id");
-        bodies[1].Records.Single().Should().ContainKey("id").WhoseValue.Should().Be(AccountId);
-        bodies[1].Records.Single().Keys.Should().BeEquivalentTo(["attributes", "id", "Name"], "an update sends only what differs");
+        var upsert = plan.Requests.Should().ContainSingle().Subject.BuildRequests().Should().ContainSingle().Subject;
+        upsert.ReferenceId.Should().Be("Account");
+        upsert.Records.Select(r => r["ExternalId__c"]).Should().Equal("NEW", "OLD");
+        upsert.Records[0].Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "Name", "Active__c"], "a create sends every field");
+        upsert.Records[1].Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "Name"], "an update sends only what differs, never an Id");
     }
 
     [Theory]
-    [InlineData("new parent, by reference", "", "@{Account_create[0].id}")]
+    [InlineData("new parent, by reference", "", "@{Account[0].id}")]
     [InlineData("existing parent, literal Id", AccountId, AccountId)]
     public void A_child_is_linked_to_its_parent_by_reference_or_Id(string what, string existingAccountId, string value)
     {
@@ -158,20 +161,44 @@ public sealed class WriteRulesTests
     // ---------- Foreign keys ----------
 
     [Fact]
-    public void A_new_Account_and_its_new_Profile_are_two_upserts_Account_first_with_the_key_as_text()
+    public void A_new_Account_and_its_new_Profile_are_one_request_of_two_upserts_Account_first_with_the_key_as_text()
     {
         var request = Request(AccountWithProfile("A1"), AccountWithProfile("A2"));
 
-        var upserts = request.AsUpserts();
+        var upserts = request.BuildRequests();
 
-        upserts.Should().NotBeNull("a foreign key needs no reference, so nothing is Composite");
-        upserts!.Select(u => (u.ReferenceId, u.SObject)).Should().Equal(("Account_upsert_0", "Account"), ("Profile__c_upsert_1", "Profile__c"));
-        JsonSerializer.Serialize(upserts[1].Bodies()).Should().Be(JsonSerializer.Serialize(new object[]
+        upserts.Select(u => (u.ReferenceId, u.SObject, u.ExternalIdField)).Should().Equal(
+            ("Account", "Account", "ExternalId__c"), ("Profile__c", "Profile__c", "ExternalId__c"));
+        JsonSerializer.Serialize(upserts[1].Records).Should().Be(JsonSerializer.Serialize(new object[]
         {
             new Dictionary<string, object?> { ["attributes"] = new { type = "Profile__c" }, ["ExternalId__c"] = "P-A1", ["Tier__c"] = "Gold", ["AccountId__c"] = "A1" },
             new Dictionary<string, object?> { ["attributes"] = new { type = "Profile__c" }, ["ExternalId__c"] = "P-A2", ["Tier__c"] = "Gold", ["AccountId__c"] = "A2" }
-        }), "the Account's key is written as the text it is");
-        upserts[1].Writes.Select(w => w.Parents.Single()).Should().Equal(upserts[0].Writes, "each Profile follows its own new Account");
+        }), "the Account's key is written as the text it is, no reference");
+        request.Collections[1].Writes.Select(w => w.Parents.Single()).Should().Equal(request.Collections[0].Writes,
+            "each Profile follows its own new Account");
+    }
+
+    [Fact]
+    public void Writes_of_one_object_are_one_upsert_and_writes_of_several_objects_one_request_of_an_upsert_each_whatever_the_objects()
+    {
+        var widget = Widget("W1");
+        var gadget = new SObjectRecord("gadget", "Gadget__c", "Key__c", "G1", new Dictionary<string, object?> { ["Widget__c"] = "W1" },
+            ForeignKeys: [new SObjectLookup("Widget__c", "Widget__c", "Key__c", "W1")]);
+
+        var widgetsOnly = WritePlanner.Plan([Normalized(new UpsertUnit([widget])), Normalized(new UpsertUnit([Widget("W2")]))],
+            CurrentRecords.None).Requests.Should().ContainSingle().Subject;
+        var both = WritePlanner.Plan([Normalized(new UpsertUnit([widget, gadget]))], CurrentRecords.None).Requests.Should().ContainSingle().Subject;
+
+        widgetsOnly.BuildRequests().Select(u => (u.ReferenceId, u.Url, u.Records.Count)).Should().Equal(
+            [("Widget__c", "/services/data/v62.0/composite/sobjects/Widget__c/Key__c", 2)], "one object: one upsert, a call of its own");
+        both.BuildRequests().Select(u => (u.ReferenceId, u.Url)).Should().Equal(
+            [("Widget__c", "/services/data/v62.0/composite/sobjects/Widget__c/Key__c"), ("Gadget__c", "/services/data/v62.0/composite/sobjects/Gadget__c/Key__c")],
+            "two objects: one request (Composite) of an upsert each, the parent first by its foreign key");
+
+        static SObjectRecord Widget(string key)
+        {
+            return new("widget", "Widget__c", "Key__c", key, new Dictionary<string, object?> { ["Label__c"] = "w" });
+        }
     }
 
     [Theory]
@@ -188,9 +215,9 @@ public sealed class WriteRulesTests
 
         if (written)
         {
-            var upsert = plan.Requests.Single().AsUpserts()!.Should().ContainSingle().Subject;
-            upsert.Bodies().Single().Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "AccountId__c"]);
-            upsert.Bodies().Single()["AccountId__c"].Should().Be("A1");
+            var upsert = plan.Requests.Single().BuildRequests().Should().ContainSingle().Subject;
+            upsert.Records.Single().Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "AccountId__c"]);
+            upsert.Records.Single()["AccountId__c"].Should().Be("A1");
         }
         else
         {
@@ -200,24 +227,25 @@ public sealed class WriteRulesTests
     }
 
     [Fact]
-    public void A_child_whose_new_parent_failed_in_an_earlier_upsert_is_not_sent_and_the_parent_decides_the_unit()
+    public void A_child_whose_new_parent_failed_in_an_earlier_upsert_is_sent_the_org_decides_and_the_parent_decides_the_unit()
     {
         var request = Request(AccountWithProfile("A1"), AccountWithProfile("A2"));
-        var upserts = request.AsUpserts()!;
-        var interpreter = Interpreter();
+        request.BuildRequests()[1].Records.Should().HaveCount(2, "both Profiles are in the Composite request, A1's too");
 
-        interpreter.Classify(upserts[0].ReferenceId, upserts[0].Writes, new CollectionResult(upserts[0].ReferenceId,
-        [
-            new RecordResult(false, null, [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "bad")]),
-            new RecordResult(true, AccountId, [], true)
-        ], []));
-        upserts[1].DropOrphans();
-        upserts[1].Writes.Select(w => w.ReferenceId).Should().Equal(["prof"], "only A2's Profile is sent");
-        interpreter.Classify(upserts[1].ReferenceId, upserts[1].Writes,
-            new CollectionResult(upserts[1].ReferenceId, [new RecordResult(true, "a00000000000002AAA", [], true)], []));
-        var results = interpreter.Results(request.Units).ToDictionary(r => r.Key);
+        var results = Interpret(request,
+            new CollectionResult("Account",
+            [
+                new RecordResult(false, null, [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "bad")]),
+                new RecordResult(true, AccountId, [], true)
+            ], []),
+            new CollectionResult("Profile__c",
+            [
+                new RecordResult(false, null, [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Parent Account A1 does not exist")]),
+                new RecordResult(true, "a00000000000002AAA", [], true)
+            ], [])).ToDictionary(r => r.Key);
 
-        (results["A1"].Outcome, results["A1"].Errors.Single().ReferenceId).Should().Be((SyncOutcome.PermanentFailure, "acct"));
+        (results["A1"].Outcome, results["A1"].Errors.Single().ReferenceId).Should().Be((SyncOutcome.PermanentFailure, "acct"),
+            "the org rejecting the Profile is the Account's fault");
         results["A2"].Outcome.Should().Be(SyncOutcome.Saved);
     }
 
@@ -228,12 +256,11 @@ public sealed class WriteRulesTests
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
         var request = WritePlanner.Plan([Normalized(new UpsertUnit([Profile("P1", "Gold", "A1")]))], current).Requests.Single();
-        var upsert = request.AsUpserts()!.Single();
         var errors = new SalesforceErrors(Options.Create(new SalesforceOptions { ParentMissingMessages = messages }));
 
-        var result = new WriteResultInterpreter(errors).Interpret([(upsert.ReferenceId, upsert.Writes)], request.Units,
+        var result = new WriteResultInterpreter(errors).Interpret(request,
         [
-            new CollectionResult(upsert.ReferenceId, [new RecordResult(false, null,
+            new CollectionResult("Profile__c", [new RecordResult(false, null,
                 [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Parent Account A1 does not exist")])], [])
         ]).Single();
 
@@ -260,7 +287,7 @@ public sealed class WriteRulesTests
         var request = plan.Requests.Single();
 
         JsonSerializer.Serialize(request.BuildRequests()).Should().Be(JsonSerializer.Serialize(request.BuildRequests()));
-        request.Collections.Select(c => c.ReferenceId).Should().Equal("Account_create", "Contact_create_ref");
+        request.Collections.Select(c => c.ReferenceId).Should().Equal("Account", "Contact_ref");
     }
 
     // ---------- WriteResultInterpreter ----------
@@ -270,7 +297,7 @@ public sealed class WriteRulesTests
     {
         var request = Request(AccountWithContact("A1"));
 
-        var results = Interpret(request, Ok("Account_create"), Ok("Contact_create_ref"));
+        var results = Interpret(request, Ok("Account"), Ok("Contact_ref"));
 
         results.Single().Outcome.Should().Be(SyncOutcome.Saved);
     }
@@ -281,14 +308,14 @@ public sealed class WriteRulesTests
     {
         { "no answer for the subrequest", [], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
         { "the subrequest failed as a whole, even with a permanent code",
-            [new CollectionResult("Account_create", null, [new SalesforceError("Account_create", "INVALID_FIELD", "x")])],
+            [new CollectionResult("Account", null, [new SalesforceError("Account", "INVALID_FIELD", "x")])],
             SyncOutcome.TransientFailure, "INVALID_FIELD" },
-        { "fewer results than records", [new CollectionResult("Account_create", [], [])], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
-        { "a record failed without details", [new CollectionResult("Account_create", [new RecordResult(false, null, [])], [])],
+        { "fewer results than records", [new CollectionResult("Account", [], [])], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
+        { "a record failed without details", [new CollectionResult("Account", [new RecordResult(false, null, [])], [])],
             SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
-        { "a validation rule", [Failed("Account_create", "FIELD_CUSTOM_VALIDATION_EXCEPTION")], SyncOutcome.PermanentFailure, "FIELD_CUSTOM_VALIDATION_EXCEPTION" },
-        { "a create that lost a race", [Failed("Account_create", "DUPLICATE_VALUE")], SyncOutcome.TransientFailure, "DUPLICATE_VALUE" },
-        { "only skipped, nobody says why", [Failed("Account_create", "PROCESSING_HALTED")], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" }
+        { "a validation rule", [Failed("Account", "FIELD_CUSTOM_VALIDATION_EXCEPTION")], SyncOutcome.PermanentFailure, "FIELD_CUSTOM_VALIDATION_EXCEPTION" },
+        { "a create that lost a race", [Failed("Account", "DUPLICATE_VALUE")], SyncOutcome.TransientFailure, "DUPLICATE_VALUE" },
+        { "only skipped, nobody says why", [Failed("Account", "PROCESSING_HALTED")], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" }
     };
     }
 
@@ -307,7 +334,7 @@ public sealed class WriteRulesTests
     [InlineData(new[] { "SOMETHING_NEW" }, SyncOutcome.TransientFailure, "SOMETHING_NEW")]
     public void A_records_own_errors_are_permanent_if_any_is_and_skipping_is_not_one_of_them(string[] codes, SyncOutcome outcome, string code)
     {
-        var result = Interpret(Request(Account("A1", "Acme")), Failed("Account_create", codes)).Single();
+        var result = Interpret(Request(Account("A1", "Acme")), Failed("Account", codes)).Single();
 
         (result.Outcome, result.PrimaryError?.Code).Should().Be((outcome, code));
     }
@@ -315,7 +342,7 @@ public sealed class WriteRulesTests
     [Fact]
     public void A_record_only_skipped_because_of_another_records_failure_is_not_attempted()
     {
-        var results = Interpret(Request(Account("A1", "Acme"), Account("A2", "Acme")), new CollectionResult("Account_create",
+        var results = Interpret(Request(Account("A1", "Acme"), Account("A2", "Acme")), new CollectionResult("Account",
         [
             new RecordResult(false, null, [new SalesforceError(null, "UNABLE_TO_LOCK_ROW", "locked")]),
             new RecordResult(false, null, [new SalesforceError(null, "PROCESSING_HALTED", "skipped")])
@@ -330,9 +357,9 @@ public sealed class WriteRulesTests
     {
         var options = new SalesforceOptions { PermanentErrorCodes = ["UNABLE_TO_LOCK_ROW"] };
 
-        Interpret(options, Request(Account("A1", "Acme")), Failed("Account_create", "UNABLE_TO_LOCK_ROW")).Single().Outcome
+        Interpret(options, Request(Account("A1", "Acme")), Failed("Account", "UNABLE_TO_LOCK_ROW")).Single().Outcome
             .Should().Be(SyncOutcome.PermanentFailure);
-        Interpret(options, Request(Account("A1", "Acme")), Failed("Account_create", "REQUIRED_FIELD_MISSING")).Single().Outcome
+        Interpret(options, Request(Account("A1", "Acme")), Failed("Account", "REQUIRED_FIELD_MISSING")).Single().Outcome
             .Should().Be(SyncOutcome.TransientFailure, "a code is permanent only when listed, and setting the list replaces the defaults");
     }
 
@@ -342,7 +369,7 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
         var request = WritePlanner.Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
 
-        var result = Interpret(request, Failed("Account_update", "ENTITY_IS_DELETED")).Single();
+        var result = Interpret(request, Failed("Account", "ENTITY_IS_DELETED")).Single();
 
         result.Outcome.Should().Be(SyncOutcome.TransientFailure, "the next read finds it gone and creates it");
     }
@@ -353,13 +380,13 @@ public sealed class WriteRulesTests
         var request = Request(AccountWithContact("A1"), AccountWithContact("A2"));
 
         var results = Interpret(request,
-            new CollectionResult("Account_create",
+            new CollectionResult("Account",
             [
                 new RecordResult(false, null, [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "bad")]),
                 new RecordResult(true, AccountId, [])
             ], []),
             // A reference without a value fails the whole subrequest of children that use references
-            new CollectionResult("Contact_create_ref", null, [new SalesforceError("Contact_create_ref", "PROCESSING_HALTED", "No value for Account_create[0].id")])
+            new CollectionResult("Contact_ref", null, [new SalesforceError("Contact_ref", "PROCESSING_HALTED", "No value for Account[0].id")])
         ).ToDictionary(r => r.Key);
 
         results["A1"].Outcome.Should().Be(SyncOutcome.PermanentFailure);
@@ -373,13 +400,13 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
         var request = WritePlanner.Plan([Normalized(new UpsertUnit([Contact("C1", "A1")]))], current).Requests.Single();
 
-        var result = Interpret(request, new CollectionResult("Contact_create",
+        var result = Interpret(request, new CollectionResult("Contact",
             [new RecordResult(false, null, [new SalesforceError(null, "INVALID_CROSS_REFERENCE_KEY", "invalid cross reference id", ["AccountId"])])], [])).Single();
 
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced));
     }
 
-    // ---------- Requests sent as upserts, one per object ----------
+    // ---------- Requests: one upsert per level and object ----------
 
     [Fact]
     public void A_request_of_one_object_without_references_is_one_upsert_carrying_the_planned_fields()
@@ -387,18 +414,18 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
         var request = WritePlanner.Plan([Normalized(Account("A1", "New")), Normalized(Account("A2", "Created"))], current).Requests.Single();
 
-        var upsert = request.AsUpserts().Should().ContainSingle().Subject;
+        var upsert = request.BuildRequests().Should().ContainSingle().Subject;
 
-        (upsert.ReferenceId, upsert.SObject, upsert.ExternalIdField).Should().Be(("Account_upsert_0", "Account", "ExternalId__c"));
-        JsonSerializer.Serialize(upsert.Bodies()).Should().Be(JsonSerializer.Serialize(new object[]
+        (upsert.ReferenceId, upsert.SObject, upsert.ExternalIdField).Should().Be(("Account", "Account", "ExternalId__c"));
+        JsonSerializer.Serialize(upsert.Records).Should().Be(JsonSerializer.Serialize(new object[]
         {
-            new Dictionary<string, object?> { ["attributes"] = new { type = "Account" }, ["ExternalId__c"] = "A2", ["Name"] = "Created", ["Active__c"] = false },
-            new Dictionary<string, object?> { ["attributes"] = new { type = "Account" }, ["ExternalId__c"] = "A1", ["Name"] = "New" }
+            new Dictionary<string, object?> { ["attributes"] = new { type = "Account" }, ["ExternalId__c"] = "A1", ["Name"] = "New" },
+            new Dictionary<string, object?> { ["attributes"] = new { type = "Account" }, ["ExternalId__c"] = "A2", ["Name"] = "Created", ["Active__c"] = false }
         }), "a new record whole, an existing one by its external id with what differs, never an Id");
     }
 
     [Fact]
-    public void Account_only_and_Profile_only_changes_are_two_upserts_Accounts_first()
+    public void Account_only_and_Profile_only_changes_are_one_request_of_two_upserts_Accounts_first()
     {
         var current = Rows(
             ("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""),
@@ -406,47 +433,46 @@ public sealed class WriteRulesTests
             ("Profile__c", /*lang=json,strict*/ """{"Id":"a00000000000002AAA","ExternalId__c":"P-A2","Tier__c":"Silver","AccountId__c":"A2"}"""));
         var request = WritePlanner.Plan([Normalized(Account("A1", "New")), Normalized(AccountWithProfile("A2"))], current).Requests.Single();
 
-        var upserts = request.AsUpserts()!;
+        var upserts = request.BuildRequests();
 
-        upserts.Select(u => (u.ReferenceId, u.SObject, u.Writes.Count)).Should().Equal(("Account_upsert_0", "Account", 1), ("Profile__c_upsert_1", "Profile__c", 1));
-        JsonSerializer.Serialize(upserts[1].Bodies()).Should().Be(JsonSerializer.Serialize(new object[]
+        upserts.Select(u => (u.ReferenceId, u.SObject, u.Records.Count)).Should().Equal(("Account", "Account", 1), ("Profile__c", "Profile__c", 1));
+        JsonSerializer.Serialize(upserts[1].Records).Should().Be(JsonSerializer.Serialize(new object[]
         {
             new Dictionary<string, object?> { ["attributes"] = new { type = "Profile__c" }, ["ExternalId__c"] = "P-A2", ["Tier__c"] = "Gold" }
         }), "only what differs: the Profile already points at its Account");
     }
 
     [Fact]
-    public void One_write_that_links_a_new_child_to_its_new_parent_keeps_the_whole_request_Composite()
+    public void A_new_child_linked_to_its_new_parent_by_reference_shares_the_request_with_the_other_writes()
     {
-        Request(AccountWithContact("A1")).AsUpserts().Should().BeNull("the Contact's lookup points at @{Account_create[0].id}");
+        Request(AccountWithContact("A1")).BuildRequests().Select(u => u.ReferenceId).Should().Equal("Account", "Contact_ref");
 
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A2","Name":"Old","Active__c":false}"""));
         var request = WritePlanner.Plan([Normalized(AccountWithContact("A1")), Normalized(Account("A2", "New"))], current).Requests.Single();
-        request.AsUpserts().Should().BeNull("A2's update needs no reference, but goes in the same Composite request as A1");
+        request.BuildRequests().Select(u => (u.ReferenceId, u.Records.Count)).Should().Equal([("Account", 2), ("Contact_ref", 1)],
+            "A2's update goes in the same upsert as A1's create");
     }
 
     [Fact]
-    public void More_than_200_records_of_one_object_are_upserted_200_per_call_each_record_once()
+    public void More_than_200_records_of_one_object_are_upserted_200_per_request_each_record_once()
     {
         var existing = Enumerable.Range(0, 150).Select(i => ("Account", $$"""{"Id":"001{{i:D12}}","ExternalId__c":"OLD{{i}}","Name":"Old","Active__c":false}"""));
         var units = Enumerable.Range(0, 150).Select(i => Normalized(Account($"NEW{i}", "New")))
             .Concat(Enumerable.Range(0, 150).Select(i => Normalized(Account($"OLD{i}", "New")))).ToList();
-        var request = WritePlanner.Plan(units, Rows([.. existing])).Requests.Single();
-        request.Collections.Select(c => c.Writes.Count).Should().Equal([150, 150], "a create and an update collection of one request");
 
-        var upserts = request.AsUpserts()!;
+        var requests = WritePlanner.Plan(units, Rows([.. existing])).Requests;
 
-        upserts.Select(u => (u.ReferenceId, u.Writes.Count)).Should().Equal(("Account_upsert_0", 200), ("Account_upsert_1", 100));
-        upserts.SelectMany(u => u.Writes).Should().Equal(request.Collections.SelectMany(c => c.Writes), "every record once, in collection order");
+        requests.Select(r => r.BuildRequests().Single().Records.Count).Should().Equal([200, 100], "one upsert each");
+        requests.SelectMany(r => r.Collections.SelectMany(c => c.Writes)).Should().HaveCount(300).And.OnlyHaveUniqueItems();
     }
 
     public static TheoryData<string, CollectionResult, SyncOutcome> ProfileAnswers()
     {
         return new()
         {
-            { "saved", Ok("Profile__c_upsert_1"), SyncOutcome.Saved },
-            { "a validation rule", Failed("Profile__c_upsert_1", "FIELD_CUSTOM_VALIDATION_EXCEPTION"), SyncOutcome.PermanentFailure },
-            { "a row lock", Failed("Profile__c_upsert_1", "UNABLE_TO_LOCK_ROW"), SyncOutcome.TransientFailure }
+            { "saved", Ok("Profile__c"), SyncOutcome.Saved },
+            { "a validation rule", Failed("Profile__c", "FIELD_CUSTOM_VALIDATION_EXCEPTION"), SyncOutcome.PermanentFailure },
+            { "a row lock", Failed("Profile__c", "UNABLE_TO_LOCK_ROW"), SyncOutcome.TransientFailure }
         };
     }
 
@@ -459,17 +485,13 @@ public sealed class WriteRulesTests
             ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"A2","Name":"Old","Active__c":false}"""),
             ("Profile__c", /*lang=json,strict*/ """{"Id":"a00000000000001AAA","ExternalId__c":"P-A1","Tier__c":"Silver","AccountId__c":"A1"}"""));
         var request = WritePlanner.Plan([Normalized(AccountWithProfile("A1")), Normalized(Account("A2", "Acme"))], current).Requests.Single();
-        var upserts = request.AsUpserts()!;
-
-        var results = Interpreter().Interpret([.. upserts.Select(u => (u.ReferenceId, u.Writes))], request.Units,
-        [
-            new CollectionResult("Account_upsert_0", [new RecordResult(true, AccountId, [], false), new RecordResult(true, "001000000000002AAA", [], false)], []),
-            profileAnswer
-        ]).ToDictionary(r => r.Key);
+        var results = Interpret(request,
+            new CollectionResult("Account", [new RecordResult(true, AccountId, [], false), new RecordResult(true, "001000000000002AAA", [], false)], []),
+            profileAnswer).ToDictionary(r => r.Key);
 
         results.Should().HaveCount(2);
         results["A1"].Outcome.Should().Be(outcome, $"its Account is saved and its Profile {what}");
-        results["A2"].Outcome.Should().Be(SyncOutcome.Saved, "its Account was saved; the Profile call is not its business");
+        results["A2"].Outcome.Should().Be(SyncOutcome.Saved, "its Account was saved; the Profile upsert is not its business");
     }
 
     [Fact]
@@ -477,10 +499,8 @@ public sealed class WriteRulesTests
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
         var request = WritePlanner.Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
-        var upsert = request.AsUpserts()!.Single();
 
-        var result = Interpreter().Interpret([(upsert.ReferenceId, upsert.Writes)], request.Units,
-            [new CollectionResult(upsert.ReferenceId, [new RecordResult(true, AccountId, [], Created: true)], [])]).Single();
+        var result = Interpret(request, new CollectionResult("Account", [new RecordResult(true, AccountId, [], Created: true)], [])).Single();
 
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, "ENTITY_IS_DELETED"),
             "the record was deleted after the read, and the upsert created it from the changed fields alone");
@@ -493,20 +513,12 @@ public sealed class WriteRulesTests
     {
         var current = exists ? Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}""")) : CurrentRecords.None;
         var request = WritePlanner.Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
-        var upsert = request.AsUpserts()!.Single();
-
-        var result = Interpreter().Interpret([(upsert.ReferenceId, upsert.Writes)], request.Units,
-            [Failed(upsert.ReferenceId, "REQUIRED_FIELD_MISSING")]).Single();
+        var result = Interpret(request, Failed("Account", "REQUIRED_FIELD_MISSING")).Single();
 
         result.Outcome.Should().Be(outcome);
     }
 
     // ---------- Helpers ----------
-
-    private static WriteResultInterpreter Interpreter()
-    {
-        return new(new SalesforceErrors(Options.Create(new SalesforceOptions())));
-    }
 
     private static SalesforceField Field(string name, string type, bool createable = true, bool updateable = true, bool nillable = true)
     {

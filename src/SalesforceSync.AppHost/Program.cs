@@ -1,3 +1,8 @@
+// The dashboard prompt of the benchmarks' "Run benchmarks..." command (IInteractionService) is still experimental
+#pragma warning disable ASPIREINTERACTION001
+
+using Microsoft.Extensions.DependencyInjection;
+
 var builder = DistributedApplication.CreateBuilder(args);
 
 // --AppHost:TestMode=true runs a minimal app: no persistent volume, admin UIs, load generator or benchmarks.
@@ -76,12 +81,52 @@ if (!testMode)
             .WithEnvironment("LoadGenerator__EventsPerSecond", "5");
     }
 
-    // Benchmarks against the same Postgres (separate DB so they never touch the live inbox); start from the dashboard
+    // Benchmarks against the same Postgres (separate DB so they never touch the live inbox). Start them from the
+    // dashboard with "Run benchmarks...", which asks which run (quick, drain or full); ▶ repeats the last one chosen.
     var benchDb = postgres.AddDatabase("benchdb");
+    var benchmarkRun = "quick";
     builder.AddProject<Projects.SalesforceSync_Benchmarks>("benchmarks")
         .WithReference(benchDb).WaitFor(benchDb)
-        .WithArgs("--filter", "*InboxDrain*", "*StreamingIngest*")
-        .WithExplicitStart();
+        .WithArgs(c =>
+        {
+            c.Args.Add("--run");
+            c.Args.Add(benchmarkRun);
+        })
+        .WithExplicitStart()
+        .WithCommand("run-benchmarks", "Run benchmarks...", async c =>
+        {
+            var choice = await c.ServiceProvider.GetRequiredService<IInteractionService>().PromptInputAsync(
+                "Run benchmarks", "Which run? Times are for an idle machine.",
+                new InteractionInput
+                {
+                    Name = "run",
+                    Label = "Run",
+                    InputType = InputType.Choice,
+                    Required = true,
+                    Value = benchmarkRun,
+                    Options = [
+                        new("quick", "Quick: 5 drain cases, 3 iterations (about 2 minutes)"),
+                        new("drain", "Drain: every drain and streaming case (about 20 minutes)"),
+                        new("full", "Full: drain, streaming and micro benchmarks (about 30 minutes)")
+                    ]
+                },
+                cancellationToken: c.CancellationToken);
+            if (choice.Canceled)
+            {
+                return CommandResults.Canceled();
+            }
+            benchmarkRun = choice.Data.Value!;
+            return await c.ServiceProvider.GetRequiredService<ResourceCommandService>()
+                .ExecuteCommandAsync(c.ResourceName, KnownResourceCommands.StartCommand, c.CancellationToken);
+        }, new CommandOptions
+        {
+            IconName = "Play",
+            IsHighlighted = true,
+            // Not while a run is in progress: stop it first
+            UpdateState = c => c.ResourceSnapshot.State?.Text == KnownResourceStates.Running
+                ? ResourceCommandState.Disabled
+                : ResourceCommandState.Enabled
+        });
 }
 
 builder.Build().Run();

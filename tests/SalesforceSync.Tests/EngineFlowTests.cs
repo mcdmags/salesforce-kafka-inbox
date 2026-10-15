@@ -168,10 +168,10 @@ public sealed class EngineFlowTests
         _http.FailWrite = null;
         _http.Writes = 0;
 
-        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(3);
 
-        _http.Writes.Should().Be(3, "NEW is unchanged now: only OLD's change is written, one upsert per object");
-        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().BeEquivalentTo(["NEW", "OLD"]);
+        _http.Writes.Should().Be(1, "NEW is unchanged now: only OLD's and KIDS's changes are written, in one Composite request");
+        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().BeEquivalentTo(["NEW", "OLD", "KIDS"]);
         _org.History("Account", "NEW").Should().ContainSingle("NEW was written once, not twice");
     }
 
@@ -179,7 +179,7 @@ public sealed class EngineFlowTests
     public async Task A_later_call_whose_answer_is_lost_holds_the_whole_batch()
     {
         await CreateOldAsync();
-        _org.LoseResponsesFor("Account", "OLD", 1);
+        _org.LoseResponsesFor("Contact", "C-KIDS", 1);
 
         await TwoCallBatchAsync();
 
@@ -199,7 +199,7 @@ public sealed class EngineFlowTests
     }
 
     [Fact]
-    public async Task A_Profile_upsert_whose_answer_is_lost_after_the_Account_upsert_was_saved_holds_the_whole_batch()
+    public async Task An_Account_and_Profile_write_whose_answer_is_lost_holds_the_whole_batch()
     {
         _inbox.Rows.AddRange([AccountRow(1, "ACC-1", "2026-10-14T01:00:00Z", "One", "Gold"), AccountRow(2, "ACC-2", "2026-10-14T01:00:00Z", "Two", "Gold")]);
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
@@ -211,8 +211,8 @@ public sealed class EngineFlowTests
 
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
 
-        _http.Writes.Should().Be(2, "ACC-1's Account, then ACC-2's Profile");
-        _inbox.Calls.Should().Equal(["claim", "hold"], "ACC-1's call succeeded, but the batch's outcome is unknown until the held rows are read again");
+        _http.Writes.Should().Be(1, "ACC-1's Account and ACC-2's Profile in one Composite request");
+        _inbox.Calls.Should().Equal(["claim", "hold"], "the org applied it, but the batch's outcome is unknown until the held rows are read again");
         ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("One!");
 
         _inbox.Calls.Clear();
@@ -293,16 +293,17 @@ public sealed class EngineFlowTests
     // ---------- Helpers ----------
 
     /// <summary>
-    /// Account, Contact and Profile per entity: a new entity needs three collections (creates), an existing one three
-    /// others (updates), so the two together take two write requests (5 collections each at most): the new one's a
-    /// Composite call (its Contact looks its Account up by reference), the existing one's three upserts, one per object.
+    /// Account, Contact and Profile per entity, except for a KIDS entity, whose Account is not written (only its Contact
+    /// and Profile). A new entity needs the Account, Contact_ref (it looks its new Account up by reference) and level-1
+    /// Profile upserts, an existing one a level-1 Contact upsert besides, and KIDS level-0 Contact and Profile upserts:
+    /// 6 in all, so NEW, OLD and KIDS together take two write requests (5 upserts each at most), KIDS's the second.
     /// </summary>
     private static readonly UpsertStrategy<AccountEvent> ThreeObjects = new("account",
         e => e.Account?.ExternalId, e => e.Meta,
         (key, e) => new UpsertUnit(
         [
-            new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = e.Account!.Name }),
-            new SObjectRecord("contact", "Contact", "ExternalId__c", $"C-{key}", new Dictionary<string, object?> { ["LastName"] = e.Account.Name },
+            .. key == "KIDS" ? [] : new[] { new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = e.Account!.Name }) },
+            new SObjectRecord("contact", "Contact", "ExternalId__c", $"C-{key}", new Dictionary<string, object?> { ["LastName"] = e.Account!.Name },
                 [new SObjectLookup("AccountId", "Account", "ExternalId__c", key)]),
             new SObjectRecord("prof", "Profile__c", "ExternalId__c", $"P-{key}",
                 new Dictionary<string, object?> { ["Tier__c"] = e.Account.Name, ["AccountId__c"] = key },
@@ -310,29 +311,31 @@ public sealed class EngineFlowTests
         ]),
         units =>
         [
-            new SoqlQuery("Account", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Account")),
+            new SoqlQuery("Account", "ExternalId__c", SoqlQuery.LookupIdsOf(units, "Account")),
             new SoqlQuery("Contact", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Contact")),
             new SoqlQuery("Profile__c", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Profile__c"))
         ]);
 
-    /// <summary>Creates the entity OLD, so that changing it takes the second write call.</summary>
+    /// <summary>Creates the entities OLD and KIDS (its Account first, through the account strategy), so that changing KIDS takes the second write call.</summary>
     private async Task CreateOldAsync()
     {
-        _inbox.Rows.Add(Row(9, "OLD", "2026-10-14T01:00:00Z", "Gold"));
-        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(1);
-        _inbox.Recorded!.Synced.Should().ContainSingle();
+        await CreateAccountAsync("KIDS");
+        _inbox.Rows.AddRange([Row(8, "OLD", "2026-10-14T01:00:00Z", "Gold"), Row(9, "KIDS", "2026-10-14T01:00:00Z", "Gold")]);
+        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
+        _inbox.Recorded!.Synced.Should().HaveCount(2);
         _inbox.Rows.Clear();
         _inbox.Calls.Clear();
         _http.Writes = 0;
     }
 
-    /// <summary>NEW (row 1, first call) and a change of OLD (row 2, from the second call on: its Account first).</summary>
+    /// <summary>NEW and a change of OLD (rows 1 and 2, the first call) and of KIDS's Contact and Profile (row 3, the second call).</summary>
     private async Task TwoCallBatchAsync()
     {
-        _inbox.Rows.AddRange([Row(1, "NEW", "2026-10-14T02:00:00Z", "Gold"), Row(2, "OLD", "2026-10-14T02:00:00Z", "Silver")]);
+        _inbox.Rows.AddRange([Row(1, "NEW", "2026-10-14T02:00:00Z", "Gold"), Row(2, "OLD", "2026-10-14T02:00:00Z", "Silver"),
+            Row(3, "KIDS", "2026-10-14T02:00:00Z", "Silver")]);
         var before = _org.GetStats().WriteRequests;
 
-        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(3);
 
         _http.Writes.Should().Be(2, "the batch stops at its failed second call");
         _org.FindByExternalId("Account", "NEW").Should().NotBeNull("the first call's records are in Salesforce");

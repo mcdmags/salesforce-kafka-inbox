@@ -1,23 +1,24 @@
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using static SalesforceSync.FakeSalesforce.FakeJson;
 
 namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
-/// In-memory Salesforce org: sObject Describe, SOQL "WHERE field IN (...)" queries, Composite requests with
-/// sObject Collections create/update subrequests (per-record results with allOrNone false, references between
-/// subrequests), and sObject Collections upserts by external id. Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
+/// In-memory Salesforce org: sObject Describe, SOQL "WHERE field IN (...)" queries, and sObject Collections upserts
+/// by external id, as calls of their own or as Composite subrequests (per-record results with allOrNone false,
+/// references between subrequests). Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
 /// values are stored the way Salesforce stores them. Every committed create/update is kept in a per-record write
 /// history (stored values), so tests can check what reached the org and in which order. Errors can be injected per
 /// record. Thread-safe (single lock), which also mimics Salesforce serializing writes to the same rows.
 /// <para>
 /// This class is the org's surface and its lock. The parts are their own classes: <see cref="FakeRecords"/> (data and
-/// write history), <see cref="FakeSoql"/> (queries), <see cref="FakeCollectionWriter"/> (creates and updates),
+/// write history), <see cref="FakeSoql"/> (queries), <see cref="FakeCollectionWriter"/> (upserts),
 /// <see cref="CompositeReferences"/> (references between subrequests), <see cref="FakeFaults"/> (injected failures)
 /// and <see cref="FakeCounters"/> (stats).
 /// </para>
 /// </summary>
-public sealed class FakeSalesforceStore
+public sealed partial class FakeSalesforceStore
 {
     public const string ExternalIdField = "ExternalId__c";
 
@@ -260,8 +261,8 @@ public sealed class FakeSalesforceStore
 
     /// <summary>
     /// Composite: the subrequests run one after another and the whole request is one API call. Supported subrequests:
-    /// SOQL queries (GET .../query) and sObject Collections create (POST .../composite/sobjects) and update (PATCH
-    /// .../composite/sobjects, each record with its id). A later subrequest can use an earlier one's result as
+    /// SOQL queries (GET .../query) and sObject Collections upserts (PATCH .../composite/sobjects/{SObject}/{ExternalIdField},
+    /// as <see cref="Upsert"/>). A later subrequest can use an earlier one's result as
     /// <c>@{referenceId.field}</c> or <c>@{referenceId[i].field}</c> (case-sensitive). Every record succeeds or fails
     /// on its own (allOrNone false: the sync never sends true, so that mode is not modelled).
     /// </summary>
@@ -317,15 +318,7 @@ public sealed class FakeSalesforceStore
     /// </summary>
     public JsonArray Upsert(string sobject, string externalIdField, string path, JsonObject payload)
     {
-        if (!FakeSchema.Objects.ContainsKey(sobject))
-        {
-            throw new FakeSalesforceException(404, "NOT_FOUND", $"The requested resource does not exist: {sobject}");
-        }
-
-        if (FakeSchema.Find(sobject, externalIdField) is not { Type: "string" } field)
-        {
-            throw new FakeSalesforceException(404, "NOT_FOUND", $"Provided external ID field does not exist or is not accessible: {externalIdField}");
-        }
+        var field = ExternalIdFieldOf(sobject, externalIdField);
 
         JsonArray results;
         bool lost;
@@ -334,11 +327,31 @@ public sealed class FakeSalesforceStore
             _faults.LoseResponse = false;
             _counters.UpsertRequests++;
             RecordWriteRequest(new JsonObject { ["method"] = "PATCH", ["url"] = path, ["body"] = payload.DeepClone() });
-            results = _collections.Upsert(sobject, field.Name, payload);
+            results = _collections.Upsert(sobject, field, payload);
             lost = _faults.LoseResponse;
         }
 
         return lost ? throw new FakeResponseLostException() : results;
+    }
+
+    /// <summary>The object and external id field of an upsert's path (<c>.../composite/sobjects/{SObject}/{ExternalIdField}</c>), or null.</summary>
+    public static (string SObject, string ExternalIdField)? UpsertTarget(string path)
+    {
+        var match = UpsertUrl().Match(path);
+        return match.Success ? (match.Groups["obj"].Value, match.Groups["field"].Value) : null;
+    }
+
+    [GeneratedRegex(@"/composite/sobjects/(?<obj>\w+)/(?<field>\w+)/?$", RegexOptions.IgnoreCase)]
+    private static partial Regex UpsertUrl();
+
+    /// <summary>The external id field's name as the org spells it; an unknown object or field is a 404, as Salesforce answers.</summary>
+    private static string ExternalIdFieldOf(string sobject, string externalIdField)
+    {
+        return !FakeSchema.Objects.ContainsKey(sobject)
+            ? throw new FakeSalesforceException(404, "NOT_FOUND", $"The requested resource does not exist: {sobject}")
+            : FakeSchema.Find(sobject, externalIdField) is { Type: "string" } field
+            ? field.Name
+            : throw new FakeSalesforceException(404, "NOT_FOUND", $"Provided external ID field does not exist or is not accessible: {externalIdField}");
     }
 
     private void RecordWriteRequest(JsonObject payload)
@@ -358,7 +371,7 @@ public sealed class FakeSalesforceStore
 
     private static bool IsCollection(JsonNode? sub)
     {
-        return (sub?["url"]?.GetValue<string>() ?? "").TrimEnd('/').EndsWith("/composite/sobjects", StringComparison.OrdinalIgnoreCase);
+        return (sub?["url"]?.GetValue<string>() ?? "").Contains("/composite/sobjects", StringComparison.OrdinalIgnoreCase);
     }
 
     private (int Status, JsonNode? Body) ExecuteSubrequest(JsonObject sub, Dictionary<string, JsonNode?> results)
@@ -373,8 +386,9 @@ public sealed class FakeSalesforceStore
                                    ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q")));
             }
 
-            if (IsCollection(sub) && method is "POST" or "PATCH")
+            if (method == "PATCH" && UpsertTarget(url.AbsolutePath) is (var sobject, var externalIdField))
             {
+                var field = ExternalIdFieldOf(sobject, externalIdField);
                 var body = sub["body"] as JsonObject ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing body");
                 body = body.DeepClone().AsObject();
                 if (CompositeReferences.Resolve(body, results) is { } unresolved)
@@ -383,7 +397,7 @@ public sealed class FakeSalesforceStore
                     return (400, Errors("PROCESSING_HALTED", $"Invalid reference specified. No value for {unresolved} found."));
                 }
 
-                return (200, _collections.Execute(method == "POST", body));
+                return (200, _collections.Upsert(sobject, field, body));
             }
 
             throw new FakeSalesforceException(400, "NOT_SUPPORTED", $"Fake composite does not support {method} {url.AbsolutePath}");
