@@ -39,11 +39,11 @@ public sealed class ClaimRetryTests(SyncFixture app)
         {
             for (var i = 0; i < 3; i++)
             {
-                await conn.ExecuteAsync(PgSql.Insert(SyncFixture.InboxTable()), new { entityId = entity, payload = "{}" });
+                await conn.StoreAsync(SyncFixture.InboxTable(), SyncFixture.Accounts, entity, "{}");
             }
         }
 
-        // The claim commits, and then the commit "fails": the rows are leased, but the worker can't know it
+        // The claim commits, and then the commit "fails": the entity is leased, but the worker can't know it
         var lostCommit = new LoseFirstCommit();
         var options = new DbContextOptionsBuilder<SyncDbContext>();
         SyncDbContext.Configure(options, db, new PostgresRetryOptions { BaseDelay = TimeSpan.FromMilliseconds(1) });
@@ -55,10 +55,8 @@ public sealed class ClaimRetryTests(SyncFixture app)
         lostCommit.Commits.Should().Be(2, "the claim ran again");
         claim.Events.Should().HaveCount(3);
         await using var check = await db.OpenConnectionAsync();
-        var leases = await check.QueryAsync<(Guid? Token, int Retries)>(
-            $"select lock_token, retry_count from {SyncFixture.InboxTable()} where entity_id = @entity", new { entity });
-        leases.Should().OnlyContain(l => l.Token == claim.Token, "the lost attempt's leases were released, not left to expire");
-        leases.Should().OnlyContain(l => l.Retries == 1, "the lost attempt's retry was given back");
+        (await check.QuerySingleAsync<Guid?>("select lock_token from sf_sync_state where entity_id = @entity", new { entity }))
+            .Should().Be(claim.Token, "the lost attempt's lease was released, not left to expire, and the retry leased the entity");
 
         await check.ExecuteAsync($"drop schema {Schema} cascade");
     }

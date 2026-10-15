@@ -42,10 +42,18 @@ public static class PgSql
         return rows.FirstOrDefault();
     }
 
-    /// <summary>One event into an inbox table, as the consumer stores it.</summary>
-    public static string Insert(string table)
+    /// <summary>Events into an inbox table as the consumer stores them, their entities made due (InboxSql.Store).</summary>
+    public static Task<int> StoreAsync(this NpgsqlConnection conn, string table, string entityType, string[] entityIds, string[] payloads,
+        NpgsqlTransaction? transaction = null)
     {
-        return $"insert into {table} (entity_id, payload) values (@entityId, @payload::jsonb)";
+        return conn.ExecuteAsync(Inbox.InboxSql.For(table).Store, new { entityType, entityIds, payloads }, transaction);
+    }
+
+    /// <summary>One event, as the consumer stores it.</summary>
+    public static Task<int> StoreAsync(this NpgsqlConnection conn, string table, string entityType, string entityId, string payload,
+        NpgsqlTransaction? transaction = null)
+    {
+        return conn.StoreAsync(table, entityType, [entityId], [payload], transaction);
     }
 
     /// <summary>The sync's schema on a connection the test owns (inside a transaction, in a schema of its own).</summary>

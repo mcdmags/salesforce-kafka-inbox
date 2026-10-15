@@ -67,14 +67,18 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
 
         // Work that didn't fit is deferred, not failed: still pending, retries not spent, nothing dead-lettered
         await using var conn = await app.Db.OpenConnectionAsync();
-        var rows = (await conn.QueryAsync<(string Status, int RetryCount, DateTime NextAttempt)>(
-            "select status, retry_count, next_attempt_at from sf_account_inbox where entity_id = any(@ids)",
+        var rows = (await conn.QueryAsync<(string Status, int AttemptCount, DateTime? NextAttempt)>(
+            """
+            select i.status, i.attempt_count, s.next_attempt_at
+            from sf_account_inbox i join sf_sync_state s on s.entity_type = 'account' and s.entity_id = i.entity_id
+            where i.entity_id = any(@ids)
+            """,
             new { ids })).ToList();
         var pending = rows.Where(r => r.Status == "pending").ToList();
         output.WriteLine($"done={rows.Count(r => r.Status == "done")} pending={pending.Count}");
         pending.Should().NotBeEmpty("the budget can't cover every event");
         rows.Should().NotContain(r => r.Status == "dead", "work that didn't fit is deferred, not dead-lettered");
-        pending.Should().OnlyContain(r => r.RetryCount == 0, "a deferred event doesn't spend a retry");
+        pending.Should().OnlyContain(r => r.AttemptCount == 0, "a deferred event doesn't spend an attempt");
         pending.Select(r => r.NextAttempt).Should().OnlyContain(next => next > DateTime.UtcNow.AddSeconds(30),
             "events are deferred until the budget frees up");
     }
@@ -142,7 +146,7 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
         // Rate-limited attempts are handed back without spending a retry
         await using var conn = await app.Db.OpenConnectionAsync();
         var maxRetry = await conn.ExecuteScalarAsync<int>(
-            "select max(retry_count) from sf_account_inbox where entity_id = any(@ids)", new { ids });
+            "select max(attempt_count) from sf_account_inbox where entity_id = any(@ids)", new { ids });
         maxRetry.Should().Be(1, "rate-limited attempts are handed back without spending a retry");
 
         async Task<long> DoneAsync()

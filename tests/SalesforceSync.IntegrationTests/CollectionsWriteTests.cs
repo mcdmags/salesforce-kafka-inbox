@@ -46,8 +46,9 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         await Eventually.ValueAsync(() => app.GetRecordAsync("Account", acct), a => a is not null, "the Account to be created");
         await using (var conn = await app.Db.OpenConnectionAsync())
         {
-            var (status, code, syncedTime) = await conn.QuerySingleAsync<(string, string?, long?)>(
-                $"select status, last_error_code, synced_time from {SyncFixture.InboxTable()} where entity_id = @acct", new { acct });
+            var (status, code) = await conn.QuerySingleAsync<(string, string?)>(
+                $"select status, last_error_code from {SyncFixture.InboxTable()} where entity_id = @acct", new { acct });
+            var syncedTime = (await app.GetSyncStateAsync(acct))?.SyncedTime;
             status.Should().Be("pending", "the entity is not synced while one of its records is missing");
             syncedTime.Should().BeNull("the watermark advances only when the Account and the Profile are both in");
             code.Should().BeOneOf("UNABLE_TO_LOCK_ROW", null);
@@ -55,12 +56,10 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         (await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().BeNull();
 
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
-        (await app.GetInboxRowsAsync(acct))[0].RetryCount.Should().BePositive();
+        (await app.GetInboxRowsAsync(acct))[0].AttemptCount.Should().BePositive();
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("the retries had nothing left to write on the Account");
         ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["AccountId__c"]).Should().Be(acct);
-        await using var after = await app.Db.OpenConnectionAsync();
-        (await after.ExecuteScalarAsync<long?>(
-            $"select synced_time from {SyncFixture.InboxTable()} where entity_id = @acct", new { acct })).Should().Be(SyncFixture.SyncedTime(1));
+        (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(SyncFixture.SyncedTime(1));
     }
 
     [Fact]
