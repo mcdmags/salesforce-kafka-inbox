@@ -19,6 +19,9 @@ public static class DbContextFactoryExtensions
         Func<SyncDbContext, CancellationToken, Task<T>> unit, CancellationToken ct)
     {
         await using var db = await contexts.CreateDbContextAsync(ct);
+        // A SaveChanges that fails fails the unit, which is retried from the start: a savepoint to roll back to would
+        // only add two round trips (SAVEPOINT, RELEASE) to every SaveChanges. Reset when the context returns to the pool.
+        db.Database.AutoSavepointsEnabled = false;
         var strategy = db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async t =>
         {

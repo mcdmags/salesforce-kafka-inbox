@@ -26,6 +26,9 @@ public sealed partial class FakeSalesforceStore
     public const int MaxCompositeCollectionsAndQueries = 5;
     public const int MaxCollectionRecords = FakeCollectionWriter.MaxRecords;
 
+    /// <summary>A call's URI and headers together, at most (a Composite subrequest's URL is held to it alone).</summary>
+    public const int MaxUriAndHeadersBytes = 16_384;
+
     private const int MaxRecordedWrites = 200;
 
     private readonly object _gate = new();
@@ -380,6 +383,11 @@ public sealed partial class FakeSalesforceStore
         var url = new Uri(new Uri("https://fake"), sub["url"]!.GetValue<string>());
         try
         {
+            if (System.Text.Encoding.UTF8.GetByteCount(url.PathAndQuery) > MaxUriAndHeadersBytes)
+            {
+                throw new FakeSalesforceException(414, "URI_TOO_LONG", $"The URI exceeds the {MaxUriAndHeadersBytes:N0}-byte limit");
+            }
+
             if (method == "GET" && IsQuery(sub))
             {
                 return (200, Query(System.Web.HttpUtility.ParseQueryString(url.Query)["q"]

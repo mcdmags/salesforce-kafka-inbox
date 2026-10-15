@@ -20,9 +20,10 @@ namespace SalesforceSync.Sync;
 /// order plays no part, so events may come out of order, over any partitions. An event that can't be read or
 /// mapped is dead-lettered on its own.</item>
 /// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
-/// one Composite request reads the current records, then what differs is written with sObject Collections upserts,
-/// one per level and object: one upsert call when the writes are of one object, else one Composite request of them,
-/// parents first (Accounts, then their Profiles: 1 call), whatever the objects.</item>
+/// one Composite request reads the current records (more only when very long ids need more than 5 queries), then
+/// what differs is written with sObject Collections upserts, one per level and object: one upsert call when the
+/// writes are of one object, else one Composite request of them, parents first (Accounts, then their Profiles: 1
+/// call), whatever the objects.</item>
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
 /// every claimed event is held (the write's outcome is unknown) or retried.</item>
@@ -123,8 +124,9 @@ public sealed class SalesforceBatchUpsertService(
     }
 
     /// <summary>
-    /// The Salesforce half of a batch, for any sObjects: one Composite request reads the current records, then what
-    /// differs is written with sObject Collections upserts by external id, one per level and object (and 200 records).
+    /// The Salesforce half of a batch, for any sObjects: one Composite request reads the current records (one per 5
+    /// queries; only very long ids make more than 5, as each query's URL must fit a call), then what differs is
+    /// written with sObject Collections upserts by external id, one per level and object (and 200 records).
     /// Each write request (more than 5 upserts are split over further requests) is one call: its upsert on its own when
     /// it has one (a single object), else one Composite request of them, parents first. Returns one outcome per unit.
     /// Nothing here touches the inbox.
@@ -166,7 +168,7 @@ public sealed class SalesforceBatchUpsertService(
             return results;
         }
 
-        // 3. Read: one Composite call with the strategy's queries
+        // 3. Read: one Composite call with the strategy's queries (more only if long ids split them into more than 5)
         var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas), schemas.Keys, ct);
 
         // 4. Decide per record: unchanged, create or update (by what the read found), and how each lookup is linked;
@@ -242,7 +244,16 @@ public sealed class SalesforceBatchUpsertService(
 
         try
         {
-            var rows = await salesforce.QueryAsync([.. queries.Select(q => q.Query)], ct);
+            // One Composite request (call) per 5 queries: normally one
+            var rows = new Dictionary<string, List<JsonElement>>(StringComparer.Ordinal);
+            foreach (var request in queries.Chunk(SalesforceRestClient.MaxCompositeQueries))
+            {
+                foreach (var (referenceId, found) in await salesforce.QueryAsync([.. request.Select(q => q.Query)], ct))
+                {
+                    rows[referenceId] = found;
+                }
+            }
+
             return CurrentRecords.From(rows, queries);
         }
         catch (SalesforceQueryException ex) when (ex.Errors.Any(e => e.Code == "INVALID_FIELD"))
