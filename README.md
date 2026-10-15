@@ -34,7 +34,7 @@ each contact as a **Contact** of its Account, which may not be synced yet either
 |---|---|
 | Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to that object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, and marks the entity due in `sf_sync_state` in the same statement, before storing its offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. A redelivery is simply stored again and ends `superseded`. A message that isn't a valid event of its topic's type (see below) is logged with its offset and skipped, rather than blocking its partition. |
 | Ordering across parallel batches | Workers claim **entities, not events**: every entity has one row in **`sf_sync_state`** (all object types), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due, unleased ones, which it then leases (`locked_until`, `lock_token`) before reading their oldest pending events (`attempt_count + 1`). Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
-| Bursts of updates to one entity | Pending events for an entity are **coalesced**: every event carries the full record, so of the events claimed together only the one with the newest `meta.time` is written (ties: the one stored later) and the others are marked `superseded`. Five updates in five seconds become one Salesforce write with the newest data. At most `Sync:MaxEventsPerEntity` (20) events of an entity are taken per claim, so a deep backlog is never leased or loaded whole. |
+| Bursts of updates to one entity | Pending events for an entity are **coalesced**: every event carries the full record, so of the events claimed together only the one with the newest `meta.time` is written (ties: the one stored later) and the others are marked `superseded`. Five updates in five seconds become one Salesforce write with the newest data. An idle entity is due `Sync:CoalesceDelay` after its first new event, so the rest of a burst is claimed with it: fewer calls, for a sync up to that much later. At most `Sync:MaxEventsPerEntity` (20) events of an entity are taken per claim, so a deep backlog is never leased or loaded whole. |
 | Late or replayed older events | **Sync watermark** in the entity's `sf_sync_state` row: when the event written to Salesforce ends `done`, its `meta.time` becomes the entity's `synced_time` (never moving back), in the same statement and only while the worker still holds the lease. A claimed event at or before the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement and the watermark are conditional on its `lock_token` on the entity's `sf_sync_state` row. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
@@ -298,9 +298,12 @@ which ends `superseded` (its time is not newer than what was synced); a rule on 
 last event of A → B → A. The sync's own bookkeeping is the entity's `sf_sync_state` row: `synced_time` is set, to the
 written event's `meta.time` in microseconds (supplied by C#), when that event ends `done`.
 
-**Store** (`InboxSql.Store`, one statement): insert the event, and upsert the entity's state row: a new entity is
-created due now, an idle one (`next_attempt_at` null) becomes due now, and one that is already due, backing off or
-held keeps its time.
+**Store** (`InboxSql.Store`, one statement): insert the event, and upsert the entity's state row: a new entity, or an
+idle one (`next_attempt_at` null), becomes due after `Sync:CoalesceDelay`, and one that is already due, backing off
+or held keeps its time. The delay is what lets a burst coalesce: the events of an entity that arrive within
+it are claimed together and written once, so a longer delay means fewer Salesforce calls, and each entity synced up
+to that much later. Events left pending when a lease ends get no delay: they arrived during the batch's Salesforce
+calls, so they have already waited, and more of the burst that arrive before the next claim merge with them anyway.
 
 **Claim** (`InboxSql`, the same statements for every type), one transaction:
 
@@ -1207,7 +1210,8 @@ retries, overlaps and regressions.
   `Accounts` (100/1000), `LatencyMs` (0/25), `Events` (5000).
 - `StreamingIngestBenchmarks`: events keep arriving while the pods drain (batches of 10 accounts), so the
   same account is claimed, released and re-claimed by different workers in different pods. Params: `Pods`
-  (1/3), `Workers` (4/8), 50 accounts, 5000 events, 5 ms latency.
+  (1/3), `Workers` (4/8), 50 accounts, 5000 events, 5 ms latency, `CoalesceDelayMs` (the `Sync:CoalesceDelay`
+  default).
 
 ```bash
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*StreamingIngest*'

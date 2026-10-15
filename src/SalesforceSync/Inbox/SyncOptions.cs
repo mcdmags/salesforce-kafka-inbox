@@ -52,6 +52,14 @@ public sealed class SyncOptions
     public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromSeconds(30);
 
     public TimeSpan MaxRetryDelay { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// How long an idle entity waits after a new event before it is due (one already due or backing off keeps its
+    /// time), so the rest of a burst of its events is claimed with it and merged into one write: fewer Salesforce
+    /// calls, for an entity synced up to this much later. Zero: due at once. Less than <see cref="Lease"/>.
+    /// </summary>
+    public TimeSpan CoalesceDelay { get; set; } = TimeSpan.Zero;
+
     public TimeSpan IdleDelay { get; set; } = TimeSpan.FromSeconds(1);
 }
 
@@ -93,6 +101,11 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
         if (o.RetryBaseDelay < TimeSpan.Zero || o.MaxRetryDelay < o.RetryBaseDelay)
         {
             errors.Add($"{SyncOptions.Section}:RetryBaseDelay must be >= 0 and at most MaxRetryDelay.");
+        }
+
+        if (o.CoalesceDelay < TimeSpan.Zero || o.CoalesceDelay >= o.Lease)
+        {
+            errors.Add($"{SyncOptions.Section}:CoalesceDelay must be >= 0 and less than Lease.");
         }
 
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);

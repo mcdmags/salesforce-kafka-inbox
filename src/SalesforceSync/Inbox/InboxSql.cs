@@ -118,10 +118,12 @@ public sealed partial class InboxSql
     {
         /// <summary>
         /// Stores events (@entityIds[i], @payloads[i], in that order) and makes their entities due, in one statement:
-        /// the state row is created for a new entity, and an idle one (next_attempt_at null) is due now. An entity that
-        /// is already due, backing off or held keeps its time. Upserting the state row takes its row lock,
-        /// which is what makes storing safe against an outcome transaction ending the entity's lease at the same time
-        /// (see <see cref="EndLease"/>). Entities in id order, so two stores never lock rows in opposite orders.
+        /// a new entity's state row is created, and a new or idle one (next_attempt_at null) is due after @coalesceDelay
+        /// (<see cref="SyncOptions.CoalesceDelay"/>), so the rest of a burst of its events is claimed with it and merged
+        /// into one write. An entity that is already due, backing off or held keeps its time. Upserting the
+        /// state row takes its row lock, which is what makes storing safe against an outcome transaction ending the
+        /// entity's lease at the same time (see <see cref="EndLease"/>). Entities in id order, so two stores never lock
+        /// rows in opposite orders.
         /// </summary>
         public const string Store = """
             with stored as (
@@ -132,8 +134,10 @@ public sealed partial class InboxSql
               returning entity_id
             )
             insert into sf_sync_state as s (entity_type, entity_id, next_attempt_at)
-            select @entityType, stored.entity_id, now() from stored group by stored.entity_id order by stored.entity_id
-            on conflict (entity_type, entity_id) do update set next_attempt_at = coalesce(s.next_attempt_at, now())
+            select @entityType, stored.entity_id, now() + @coalesceDelay
+            from stored group by stored.entity_id order by stored.entity_id
+            on conflict (entity_type, entity_id)
+            do update set next_attempt_at = coalesce(s.next_attempt_at, now() + @coalesceDelay)
             """;
 
         /// <summary>
@@ -218,13 +222,16 @@ public sealed partial class InboxSql
         /// <summary>
         /// Last in an outcome transaction: ends the lease on @entityIds. An entity with pending events left is due
         /// again: now, or when a failure's backoff (<see cref="Fail"/>) ends, whichever is later; one with none is idle
-        /// (next_attempt_at null) until a consumer stores its next event.
+        /// (next_attempt_at null) until a consumer stores its next event. Events left pending get no coalesce delay
+        /// (<see cref="Store"/>): they arrived during the lease, so they have already waited as long as the batch's
+        /// Salesforce calls took, and more of the burst that arrive before the next claim merge with them.
         /// <para>
         /// Why an event stored meanwhile is never left behind: storing upserts the entity's state row
         /// (<see cref="Store"/>), and this transaction locked that row first (<see cref="LockHeld"/>). A store that got
         /// the row lock before that had committed by the time this transaction got it, so this statement, which takes
         /// its snapshot later, sees the event and keeps the entity due. A store that comes later waits for this
-        /// transaction to commit and then updates the row as it left it: next_attempt_at null becomes now.
+        /// transaction to commit and then updates the row as it left it: next_attempt_at null becomes now +
+        /// @coalesceDelay.
         /// </para>
         /// </summary>
         public const string EndLease = """

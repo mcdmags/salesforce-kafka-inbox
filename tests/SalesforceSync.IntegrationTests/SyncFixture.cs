@@ -96,6 +96,9 @@ public class SyncFixture : IAsyncLifetime
         ["Sync:RetryBaseDelay"] = "00:00:01",
         // Seconds instead of the production 10 minutes, so the unknown-outcome test can watch a hold end
         ["Sync:UnknownOutcomeHold"] = "00:00:04",
+        // A stored event is claimable at once, so the tests that wait for a sync or count claims don't depend on the
+        // delay (CoalesceDelayTests covers it)
+        ["Sync:CoalesceDelay"] = "00:00:00",
         ["Logging:LogLevel:Default"] = "Warning"
     };
 
