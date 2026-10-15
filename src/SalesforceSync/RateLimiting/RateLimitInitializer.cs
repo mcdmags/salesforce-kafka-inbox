@@ -2,7 +2,7 @@ namespace SalesforceSync.RateLimiting;
 
 /// <summary>
 /// Applies the configured Salesforce limits to the shared rate-limit row. Registered after
-/// <see cref="Inbox.InboxSchemaInitializer"/> and before the workers (hosted services start in registration order).
+/// <see cref="Data.SyncSchemaInitializer"/> and before the workers (hosted services start in registration order).
 /// </summary>
 public sealed class RateLimitInitializer(SalesforceRateLimiter limiter) : IHostedService
 {

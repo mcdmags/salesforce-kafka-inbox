@@ -17,7 +17,7 @@ public sealed class SalesforceConcurrencySlots(
 {
     // Advisory lock keys share one number space per database with any other code that uses them, so ours sit in
     // a distinctive range instead of small numbers like 1 or 42 that others pick:
-    // - high 16 bits 0x5346 are ASCII "SF" (Salesforce), the namespace; InboxSchema's lock is 0x5346_5348 "SFSH";
+    // - high 16 bits 0x5346 are ASCII "SF" (Salesforce), the namespace; SyncSchema's migration lock is 0x5346_5348 "SFSH";
     // - low 16 bits are the slot index, key = KeyBase + i (up to 65,536 slots; the org limit is at most 25);
     // - the key fits in 32 bits, so pg_locks shows classid = 0 and objid = the key (1397096448 + slot).
     // The value is a convention: it must only be identical in every pod and unused by other applications.
