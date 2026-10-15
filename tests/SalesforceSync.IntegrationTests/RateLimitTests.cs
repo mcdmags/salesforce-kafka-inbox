@@ -24,7 +24,7 @@ public sealed class DailyBudgetFixture : SyncFixture
         WorkerSettings["RateLimit:DailyHardRatio"] = "2";
         WorkerSettings["RateLimit:MaxRequestsPerSecond"] = "1000";
         WorkerSettings["RateLimit:BurstCapacity"] = "1000";
-        WorkerSettings["Sync:BatchSize"] = "1"; // 3 calls per account, so the budget runs out mid-way
+        WorkerSettings["Sync:BatchSize"] = "1"; // 2 calls per account (the read, one write), so the budget runs out mid-way
         WorkerSettings["Sync:IdleDelay"] = "00:00:00.050";
     }
 }

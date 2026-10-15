@@ -100,14 +100,18 @@ public sealed class SalesforceRestClient(HttpClient http)
     }
 
     /// <summary>
-    /// Sends up to 5 sObject Collections creates/updates as the subrequests of one Composite request (one API call),
-    /// in the given order; a later one may refer to an earlier one's results (<c>@{referenceId[i].id}</c>).
-    /// <c>allOrNone: false</c> is sent on the composite request and on every collection: every record succeeds or
-    /// fails on its own.
+    /// Sends sObject Collections upserts in one API call: a single one as a call of its own
+    /// (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>), 2 to 5 as the subrequests of one Composite
+    /// request, in the given order, where a later one may refer to an earlier one's results
+    /// (<c>@{referenceId[i].id}</c>). Each record is created or updated by its external id. <c>allOrNone: false</c> is
+    /// sent on the Composite request and on every upsert: every record succeeds or fails on its own.
     /// </summary>
-    /// <returns>One result per subrequest Salesforce answered (HTTP 200 does not mean any record was saved).</returns>
-    public async Task<IReadOnlyList<CollectionResult>> SendCollectionsAsync(IReadOnlyList<CollectionRequest> collections,
-        CancellationToken ct)
+    /// <returns>
+    /// One result per upsert Salesforce answered (HTTP 200 does not mean any record was saved), each record's with
+    /// <c>created</c> set. A single upsert that fails as a whole throws; a Composite subrequest that does answers with
+    /// its errors instead of per-record results.
+    /// </returns>
+    public async Task<IReadOnlyList<CollectionResult>> UpsertAsync(IReadOnlyList<CollectionRequest> collections, CancellationToken ct)
     {
         if (collections.Count is 0 or > MaxCompositeCollections)
         {
@@ -120,13 +124,23 @@ public sealed class SalesforceRestClient(HttpClient http)
                 $"{tooLarge.ReferenceId}: {tooLarge.Records.Count} records; a collection takes 1 to {MaxCollectionRecords}");
         }
 
+        if (collections is [var single])
+        {
+            using var res = await http.PatchAsJsonAsync(single.Url, new { allOrNone = false, records = single.Records }, Json, ct);
+            await EnsureSuccessAsync(res, ct);
+            var body = await res.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
+            return body.ValueKind == JsonValueKind.Array
+                ? [new CollectionResult(single.ReferenceId, [.. body.EnumerateArray().Select(ParseRecordResult)], [])]
+                : throw new InvalidOperationException($"Upsert of {single.SObject} answered without per-record results");
+        }
+
         var payload = new
         {
             allOrNone = false,
             compositeRequest = collections.Select(c => new
             {
-                method = c.Create ? "POST" : "PATCH",
-                url = $"{DataPath}/composite/sobjects",
+                method = "PATCH",
+                url = c.Url,
                 referenceId = c.ReferenceId,
                 body = new { allOrNone = false, records = c.Records }
             })
@@ -141,32 +155,6 @@ public sealed class SalesforceRestClient(HttpClient http)
                 ? new CollectionResult(sub.ReferenceId, null, ParseErrors(sub.ReferenceId, sub.Body))
                 : new CollectionResult(sub.ReferenceId, [.. sub.Body.EnumerateArray().Select(ParseRecordResult)], []);
         })];
-    }
-
-    /// <summary>
-    /// sObject Collections upsert: up to 200 records of one object in one call, each created or updated by its
-    /// <paramref name="externalIdField"/> (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>, each record
-    /// <c>{ "attributes": { "type": ... }, externalIdField: ..., field: value, ... }</c>). Not a Composite request: one
-    /// call of its own, so no references to other requests' results. <c>allOrNone: false</c>: every record succeeds or
-    /// fails on its own. A lookup can be set by the parent's external id through the field's relationship,
-    /// <c>"Account": { "ExternalId__c": "A1" }</c>.
-    /// </summary>
-    /// <returns>One result per record, in request order, with <c>created</c> set.</returns>
-    public async Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdField,
-        IReadOnlyList<IReadOnlyDictionary<string, object?>> records, CancellationToken ct)
-    {
-        if (records.Count is 0 or > MaxCollectionRecords)
-        {
-            throw new ArgumentOutOfRangeException(nameof(records), $"{records.Count} records; an upsert takes 1 to {MaxCollectionRecords}");
-        }
-
-        using var res = await http.PatchAsJsonAsync($"{DataPath}/composite/sobjects/{sobject}/{externalIdField}",
-            new { allOrNone = false, records }, Json, ct);
-        await EnsureSuccessAsync(res, ct);
-        var body = await res.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
-        return body.ValueKind == JsonValueKind.Array
-            ? [.. body.EnumerateArray().Select(ParseRecordResult)]
-            : throw new InvalidOperationException($"Upsert of {sobject} answered without per-record results");
     }
 
     /// <summary>Posts a Composite request and returns its subresponses, in request order.</summary>
@@ -252,10 +240,16 @@ public sealed class SalesforceRestClient(HttpClient http)
 public sealed record CompositeQuery(string ReferenceId, string Soql);
 
 /// <summary>
-/// An sObject Collections subrequest: creates (POST) or updates (PATCH) up to 200 records, each
-/// <c>{ "attributes": { "type": ... }, field: value, ... }</c>, with its <c>id</c> when updating.
+/// An sObject Collections upsert: up to 200 records of <paramref name="SObject"/>, each
+/// <c>{ "attributes": { "type": ... }, externalIdField: ..., field: value, ... }</c>, created or updated by
+/// <paramref name="ExternalIdField"/>. A lookup can be set by the parent's external id through the field's
+/// relationship, <c>"Account": { "ExternalId__c": "A1" }</c>.
 /// </summary>
-public sealed record CollectionRequest(string ReferenceId, bool Create, IReadOnlyList<IReadOnlyDictionary<string, object?>> Records);
+public sealed record CollectionRequest(string ReferenceId, string SObject, string ExternalIdField,
+    IReadOnlyList<IReadOnlyDictionary<string, object?>> Records)
+{
+    public string Url => $"{SalesforceRestClient.DataPath}/composite/sobjects/{SObject}/{ExternalIdField}";
+}
 
 /// <summary>One record's result within a collection, in request order.</summary>
 /// <param name="Created">Upserts only: whether the record was created (true) or updated (false).</param>
