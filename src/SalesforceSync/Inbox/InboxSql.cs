@@ -8,9 +8,10 @@ namespace SalesforceSync.Inbox;
 /// statement reads inside the payload: a row's entity is its entity_id column, and which event of an entity is the
 /// newest is decided in C#. Rows are leased per entity. While a row is leased its next_attempt_at is the end of the
 /// lease, so leased rows drop out of the claim's scan and come back on their own if the lease expires.
-/// Every statement is safe to run again after an unknown commit (see PostgresRetryStrategy): updates are
-/// conditional on the lease token and the watermark only moves forward. Outcome statements take arrays, so recording
-/// a batch costs a fixed number of round trips, not two per entity.
+/// An entity's watermark is the newest synced_time of its done rows, kept in the same table: it only moves forward, and
+/// only with a row the lease still holds. Every statement is safe to run again after an unknown commit (see
+/// PostgresRetryStrategy): updates are conditional on the lease token. Outcome statements take arrays, so recording a
+/// batch costs a fixed number of round trips, not two per entity.
 /// </summary>
 public sealed partial class InboxSql
 {
@@ -49,7 +50,8 @@ public sealed partial class InboxSql
         LockHeads = Template.LockHeads.Replace("{inbox}", table);
         ClaimEntities = Template.ClaimEntities.Replace("{inbox}", table);
         ReleaseLostClaims = Template.ReleaseLostClaims.Replace("{inbox}", table);
-        MarkSynced = Template.MarkSynced.Replace("{inbox}", table);
+        SyncedTimes = Template.SyncedTimes.Replace("{inbox}", table);
+        Done = Template.Done.Replace("{inbox}", table);
         Fail = Template.Fail.Replace("{inbox}", table);
         Dead = Template.Dead.Replace("{inbox}", table);
     }
@@ -65,8 +67,11 @@ public sealed partial class InboxSql
     /// <inheritdoc cref="Template.ReleaseLostClaims"/>
     public string ReleaseLostClaims { get; }
 
-    /// <inheritdoc cref="Template.MarkSynced"/>
-    public string MarkSynced { get; }
+    /// <inheritdoc cref="Template.SyncedTimes"/>
+    public string SyncedTimes { get; }
+
+    /// <inheritdoc cref="Template.Done"/>
+    public string Done { get; }
 
     /// <inheritdoc cref="Template.Fail"/>
     public string Fail { get; }
@@ -212,20 +217,30 @@ public sealed partial class InboxSql
             """;
 
         /// <summary>
-        /// Advances the watermarks of entities (@entityIds[i] to @times[i]), but only while this worker still holds the
-        /// lease on the entity's rows, so a worker whose lease expired cannot move them. The lease check is a scalar
-        /// LIMIT 1 probe of the leased index per entity (as EXISTS it can turn into a join over every leased row),
-        /// in the index's own order so that it is read as an index scan.
+        /// The watermarks of @entityIds: per entity, the newest synced_time of its done rows (entities with none are
+        /// left out). A LATERAL ... LIMIT 1 probe of the synced index per entity, read from the top, so its cost
+        /// doesn't grow with the entity's history.
         /// </summary>
-        public const string MarkSynced = """
-            insert into sf_sync_state (entity_type, entity_id, synced_time)
-            select @entityType, s.entity_id, s.synced_time
-            from unnest(@entityIds, @times) as s(entity_id, synced_time)
-            where (select true from {inbox} l
-                   where l.entity_id = s.entity_id and l.locked_until is not null and l.lock_token = @token
-                   order by l.entity_id, l.locked_until limit 1)
-            on conflict (entity_type, entity_id) do update
-            set synced_time = greatest(sf_sync_state.synced_time, excluded.synced_time), synced_at = now()
+        public const string SyncedTimes = """
+            select e.entity_id as EntityId, s.synced_time as SyncedTime
+            from unnest(@entityIds) as e(entity_id)
+            cross join lateral (
+              select d.synced_time from {inbox} d
+              where d.entity_id = e.entity_id and d.status = 'done' and d.synced_time is not null
+              order by d.entity_id desc, d.synced_time desc limit 1) s
+            """;
+
+        /// <summary>
+        /// The entity's newest event is in Salesforce: its row is done, and its synced_time (@times, a JSON object
+        /// row id -> event time, bound once as in <see cref="Fail"/>) is the entity's watermark from now on. Like
+        /// every outcome, only for rows this lease still holds, so a worker whose lease expired neither completes
+        /// them nor moves the watermark.
+        /// </summary>
+        public const string Done = """
+            update {inbox} i
+            set status = 'done', synced_time = ((select @times::jsonb) ->> i.id::text)::bigint,
+                locked_until = null, lock_token = null, last_updated = now(), last_error = null, last_error_code = null
+            where i.id = any(@ids) and i.lock_token = @token
             """;
 
         /// <summary>

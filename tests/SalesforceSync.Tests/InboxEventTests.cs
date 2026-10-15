@@ -380,7 +380,7 @@ public sealed class InboxEventTests
             .And.Contain("create index if not exists sf_account_inbox_ready on sf_account_inbox")
             .And.NotContain("{inbox}");
         script.Should().NotContain("->", "no statement reads inside the payload");
-        var bad = () => InboxSchema.Script(["sf_inbox; drop table sf_sync_state"]);
+        var bad = () => InboxSchema.Script(["sf_inbox; drop table sf_rate_limit"]);
         bad.Should().Throw<ArgumentException>();
     }
 
@@ -388,7 +388,7 @@ public sealed class InboxEventTests
     public void No_inbox_statement_reads_inside_the_payload()
     {
         var sql = InboxSql.For("sf_account_inbox");
-        string[] claimAndOutcomes = [sql.LockHeads, sql.ClaimEntities, sql.ReleaseLostClaims, sql.MarkSynced];
+        string[] claimAndOutcomes = [sql.LockHeads, sql.ClaimEntities, sql.ReleaseLostClaims, sql.SyncedTimes];
 
         claimAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
     }

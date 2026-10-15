@@ -261,7 +261,7 @@ public abstract class DrainBenchmarkBase
         {
             await db.Database.ExecuteAsync($"truncate {table} restart identity", default);
         }
-        await db.Database.ExecuteAsync("truncate sf_sync_state; truncate sf_api_usage; truncate sf_claim_audit", default);
+        await db.Database.ExecuteAsync("truncate sf_api_usage; truncate sf_claim_audit", default);
         // Effectively unlimited bucket and no daily budget: measure the pipeline, not the throttle
         await db.Database.ExecuteAsync("""
             update sf_rate_limit

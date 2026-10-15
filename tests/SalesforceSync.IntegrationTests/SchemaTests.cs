@@ -16,13 +16,14 @@ public sealed class SchemaTests(SyncFixture app)
     {
         // The worker already applied the schema at startup; a restart against a persisted volume applies it again
         var before = await TablesAndIndexesAsync();
-        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_contact_inbox", "sf_sync_state", "sf_rate_limit",
-            "sf_api_usage"]);
+        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_contact_inbox", "sf_rate_limit", "sf_api_usage"]);
         before.Should().Contain([
-            "sf_account_inbox_ready", "sf_account_inbox_pending", "sf_account_inbox_leased", "sf_account_inbox_pkey",
+            "sf_account_inbox_ready", "sf_account_inbox_pending", "sf_account_inbox_leased", "sf_account_inbox_synced", "sf_account_inbox_pkey",
             "sf_account_relationship_inbox_ready", "sf_account_relationship_inbox_pending", "sf_account_relationship_inbox_leased",
-            "sf_contact_inbox_ready", "sf_contact_inbox_pending", "sf_contact_inbox_leased"]);
+            "sf_account_relationship_inbox_synced", "sf_contact_inbox_ready", "sf_contact_inbox_pending", "sf_contact_inbox_leased",
+            "sf_contact_inbox_synced"]);
         before.Should().NotContain("sf_inbox", "there is no shared inbox any more");
+        before.Should().NotContain("sf_sync_state", "every table holds one type of event: the watermarks are in the inboxes");
 
         await InboxSchema.EnsureCreatedAsync(app.Contexts, InboxTables);
         await InboxSchema.EnsureCreatedAsync(app.Contexts, InboxTables);
@@ -44,7 +45,7 @@ public sealed class SchemaTests(SyncFixture app)
         var account = await Columns(SyncFixture.InboxTable());
         account.Select(c => c.Split(' ')[0]).Should().Equal(
             "id", "entity_id", "payload", "status", "retry_count", "last_updated", "last_error", "last_error_code",
-            "next_attempt_at", "locked_until", "lock_token", "received_at");
+            "next_attempt_at", "locked_until", "lock_token", "received_at", "synced_time");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await Columns(SyncFixture.InboxTable(SyncFixture.Contacts))).Should().Equal(account);
         (await conn.ExecuteScalarAsync<long>("select count(*) from pg_proc where proname like 'sf\\_event\\_%'"))
@@ -123,13 +124,63 @@ public sealed class SchemaTests(SyncFixture app)
         (await conn.ExecuteScalarAsync<long>(
                 "select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = current_schema() and proname like 'sf\\_event\\_%'", transaction: tx))
             .Should().Be(0, "the functions that read the payload are dropped (with the legacy index built on them)");
-        (await conn.ExecuteScalarAsync<long>("select synced_time from sf_sync_state where entity_type = 'account' and entity_id = 'ACC-1'", transaction: tx))
-            .Should().Be(1791939723000000, "watermarks survive under their new column names");
+        (await conn.ExecuteScalarAsync<long>("select synced_time from sf_account_inbox where entity_id = 'ACC-1' and status = 'done'", transaction: tx))
+            .Should().Be(1791939723000000, "a watermark under the first column names survives, in its object's inbox");
+        relations.Should().NotContain("sf_sync_state");
 
         // A second upgrade (an sf_inbox appears again next to an existing legacy table) doesn't collide
         await conn.ExecuteAsync("create table sf_inbox (id bigserial primary key, payload jsonb not null)", transaction: tx);
         await PgSql.ApplySchemaAsync(conn, tx, InboxTables);
         (await TablesAndIndexesAsync(conn, tx)).Should().Contain(["sf_inbox_legacy", "sf_inbox_legacy_2"]).And.NotContain("sf_inbox");
+
+        await tx.RollbackAsync();
+    }
+
+    [Fact]
+    public async Task Watermarks_of_sf_sync_state_move_into_their_inboxes_as_done_rows_and_the_table_goes()
+    {
+        await using var conn = await app.Db.OpenConnectionAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        var schema = $"sync_state_{Guid.NewGuid():N}";
+        await conn.ExecuteAsync($"create schema {schema}; set local search_path to {schema}", transaction: tx);
+        await PgSql.ApplySchemaAsync(conn, tx, InboxTables);
+        // The inboxes as an earlier version left them: done rows without a synced time, next to the shared watermark table
+        await conn.ExecuteAsync("""
+            insert into sf_account_inbox (entity_id, payload, status) values ('ACC-1', '{}', 'done'), ('ACC-2', '{}', 'done');
+            insert into sf_account_inbox (entity_id, payload, status, synced_time) values ('ACC-2', '{}', 'done', 900);
+            create table sf_sync_state (entity_type text not null, entity_id text not null, synced_time bigint not null,
+              synced_at timestamptz not null default now(), constraint sf_sync_state_pkey primary key (entity_type, entity_id));
+            insert into sf_sync_state (entity_type, entity_id, synced_time) values
+              ('account', 'ACC-1', 100), ('account', 'ACC-2', 800), ('accountRelationship', 'REL-1', 200), ('contact', 'CON-1', 300),
+              ('opportunity', 'OPP-1', 400);
+            """, transaction: tx);
+
+        async Task<List<(string Table, string EntityId, long SyncedTime)>> Watermarks()
+        {
+            return await conn.QueryAsync<(string, string, long)>("""
+                select t, entity_id, synced_time from (
+                  select 'account' t, * from sf_account_inbox union all
+                  select 'accountRelationship', * from sf_account_relationship_inbox union all
+                  select 'contact', * from sf_contact_inbox) i
+                where status = 'done' and synced_time is not null order by 1, 2, 3
+                """, transaction: tx);
+        }
+
+        await PgSql.ApplySchemaAsync(conn, tx, InboxTables);
+
+        var moved = await Watermarks();
+        moved.Should().Equal(("account", "ACC-1", 100), ("account", "ACC-2", 900), ("accountRelationship", "REL-1", 200), ("contact", "CON-1", 300));
+        (await conn.QueryAsync<string>("select entity_type || ' ' || entity_id from sf_sync_state", transaction: tx))
+            .Should().Equal(["opportunity OPP-1"], "a type without an inbox here keeps its row, and the table stays for it");
+
+        await PgSql.ApplySchemaAsync(conn, tx, InboxTables);
+        (await Watermarks()).Should().Equal(moved, "applying the schema again moves nothing twice");
+
+        await conn.ExecuteAsync("delete from sf_sync_state", transaction: tx);
+        await PgSql.ApplySchemaAsync(conn, tx, InboxTables);
+        (await TablesAndIndexesAsync(conn, tx)).Should().NotContain("sf_sync_state");
+        await PgSql.ApplySchemaAsync(conn, tx, InboxTables);
+        (await Watermarks()).Should().Equal(moved);
 
         await tx.RollbackAsync();
     }

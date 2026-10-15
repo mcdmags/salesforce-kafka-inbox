@@ -11,7 +11,7 @@ public interface IRepository<TEntity> where TEntity : InboxRow, new()
     Task AddAsync(string entityId, string payload, CancellationToken ct);
 
     /// <summary>Leases up to <see cref="SyncOptions.BatchSize"/> entities of the table; no events = nothing to do.</summary>
-    Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct);
+    Task<InboxClaim> ClaimAsync(CancellationToken ct);
 
     /// <summary>Records every entity's outcome in one transaction.</summary>
     Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct);
@@ -34,9 +34,11 @@ public interface IRepository<TEntity> where TEntity : InboxRow, new()
 
 /// <summary>A batch of entities leased to this worker: their claimed rows, and what was already synced for them.</summary>
 /// <param name="Token">Identifies the lease; every outcome statement is conditional on it.</param>
-/// <param name="SyncedTimes">Entity id -> the time (microseconds since the epoch) of its newest synced event.</param>
+/// <param name="SyncedTimes">
+/// Entity id -> the time (microseconds since the epoch) of its newest synced event: the newest synced_time of its done
+/// rows.
+/// </param>
 public sealed record InboxClaim(
-    string EntityType,
     Guid Token,
     IReadOnlyList<InboxEvent> Events,
     IReadOnlyDictionary<string, long> SyncedTimes)
@@ -47,7 +49,10 @@ public sealed record InboxClaim(
 /// <summary>A pending inbox row as claimed: the entity it belongs to and the raw event.</summary>
 public sealed record InboxEvent(long Id, string EntityId, string Payload, int RetryCount);
 
-/// <summary>An entity whose newest event (row <paramref name="EventId"/>) is in Salesforce; its watermark moves to <paramref name="EventTime"/>.</summary>
+/// <summary>
+/// An entity whose newest event (row <paramref name="EventId"/>) is in Salesforce: the row ends done with
+/// <paramref name="EventTime"/> as its synced_time, the entity's watermark.
+/// </summary>
 public sealed record SyncedEntity(string EntityId, long EventTime, long EventId);
 
 /// <summary>An inbox row with the error to store on it.</summary>

@@ -80,7 +80,7 @@ public sealed class SalesforceBatchUpsertService(
 
         // 1. Claim events from the inbox table (short transaction; the lease, not a transaction, protects the rows
         // until step 4)
-        var claim = await inbox.ClaimAsync(strategy.EntityType, ct);
+        var claim = await inbox.ClaimAsync(ct);
         if (claim.Events.Count == 0)
         {
             return 0;
