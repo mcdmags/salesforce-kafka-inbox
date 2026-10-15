@@ -5,7 +5,7 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Account + its Profile__c, written in the same request (Accounts first); the Profile looks up its Account.
+/// Account + its Profile__c, written in the same batch (Accounts first); the Profile looks up its Account.
 /// Typed event -> mapping -> sObjects -> records. An event without a <c>profile</c> writes only the Account.
 /// Everything that is particular to accounts is in this file: the event as the source sends it, the sObjects as the org
 /// has them, the mapping between the two, and the inbox row type.

@@ -170,7 +170,7 @@ public sealed class EngineFlowTests
 
         (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
 
-        _http.Writes.Should().Be(1, "NEW is unchanged now: only OLD's change is written");
+        _http.Writes.Should().Be(3, "NEW is unchanged now: only OLD's change is written, one upsert per object");
         _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().BeEquivalentTo(["NEW", "OLD"]);
         _org.History("Account", "NEW").Should().ContainSingle("NEW was written once, not twice");
     }
@@ -196,6 +196,31 @@ public sealed class EngineFlowTests
         await TwoCallBatchAsync();
 
         _inbox.Calls.Should().Equal("claim", $"fail all: Salesforce 403: {body} ()");
+    }
+
+    [Fact]
+    public async Task A_Profile_upsert_whose_answer_is_lost_after_the_Account_upsert_was_saved_holds_the_whole_batch()
+    {
+        _inbox.Rows.AddRange([AccountRow(1, "ACC-1", "2026-10-14T01:00:00Z", "One", "Gold"), AccountRow(2, "ACC-2", "2026-10-14T01:00:00Z", "Two", "Gold")]);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
+        _inbox.Rows.Clear();
+        _inbox.Calls.Clear();
+        _http.Writes = 0;
+        _inbox.Rows.AddRange([AccountRow(3, "ACC-1", "2026-10-14T02:00:00Z", "One!", "Gold"), AccountRow(4, "ACC-2", "2026-10-14T02:00:00Z", "Two", "Silver")]);
+        _org.LoseResponsesFor("Profile__c", "ACC-2", 1);
+
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
+
+        _http.Writes.Should().Be(2, "ACC-1's Account, then ACC-2's Profile");
+        _inbox.Calls.Should().Equal(["claim", "hold"], "ACC-1's call succeeded, but the batch's outcome is unknown until the held rows are read again");
+        ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("One!");
+
+        _inbox.Calls.Clear();
+        _http.Writes = 0;
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
+
+        _http.Writes.Should().Be(0, "the read finds both writes applied, the lost one included");
+        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().BeEquivalentTo(["ACC-1", "ACC-2"]);
     }
 
     // ---------- Failures of the read ----------
@@ -269,7 +294,9 @@ public sealed class EngineFlowTests
 
     /// <summary>
     /// Account, Profile and relationship per entity: a new entity needs three collections (creates), an existing one
-    /// three others (updates), so the two together take two Composite write calls (5 collections each at most).
+    /// three others (updates), so the two together take two write requests (5 collections each at most): the new one's
+    /// a Composite call (its Profile and relationship refer to its Account), the existing one's three upserts, one per
+    /// object.
     /// </summary>
     private static readonly UpsertStrategy<AccountEvent> ThreeObjects = new("account",
         e => e.Account?.ExternalId, e => e.Meta,
@@ -299,7 +326,7 @@ public sealed class EngineFlowTests
         _http.Writes = 0;
     }
 
-    /// <summary>NEW (row 1, first call) and a change of OLD (row 2, second call).</summary>
+    /// <summary>NEW (row 1, first call) and a change of OLD (row 2, from the second call on: its Account first).</summary>
     private async Task TwoCallBatchAsync()
     {
         _inbox.Rows.AddRange([Row(1, "NEW", "2026-10-14T02:00:00Z", "Gold"), Row(2, "OLD", "2026-10-14T02:00:00Z", "Silver")]);
@@ -307,7 +334,7 @@ public sealed class EngineFlowTests
 
         (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
 
-        _http.Writes.Should().Be(2, "the batch takes two write calls");
+        _http.Writes.Should().Be(2, "the batch stops at its failed second call");
         _org.FindByExternalId("Account", "NEW").Should().NotBeNull("the first call's records are in Salesforce");
         (_org.GetStats().WriteRequests - before).Should().BeGreaterThanOrEqualTo(1, "the first call reached the org");
     }
@@ -320,6 +347,13 @@ public sealed class EngineFlowTests
         return new SalesforceBatchUpsertService(new SalesforceRestClient(http), SalesforceStep.SchemaCache(),
             new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
             NullLogger<SalesforceBatchUpsertService>.Instance);
+    }
+
+    /// <summary>An account event with its Profile (keyed like the account).</summary>
+    private static InboxEvent AccountRow(long id, string account, string time, string name, string tier)
+    {
+        return new(id, account,
+        $$"""{ "meta": { "time": "{{time}}", "type": "updated" }, "account": { "externalId": "{{account}}", "name": "{{name}}", "profile": { "tier": "{{tier}}" } } }""", 1);
     }
 
     private static InboxEvent Row(long id, string account, string time, string name = "Acme")

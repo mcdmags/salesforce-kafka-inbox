@@ -258,7 +258,8 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         (await Account("A1", new() { ["name"] = "Ours" }, [])).Outcome.Should().Be(SyncOutcome.Saved);
 
-        Sub(_org.WriteRequests[^1], 0)["method"]!.GetValue<string>().Should().Be("PATCH", "the retry read the record and updated it");
+        ((string?)Upserted(_org.WriteRequests[^2], "Account").Single()["Name"]).Should().Be("Ours");
+        _org.History("Account", "A1").Should().HaveCount(2, "the retry read the record and updated it");
         ((string?)_org.FindByExternalId("Account", "A1")!["Name"]).Should().Be("Ours");
         _org.All("Account").Should().ContainSingle();
     }
@@ -326,7 +327,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     }
 
     [Fact]
-    public async Task Accounts_with_and_without_Profile_changes_stay_in_one_Composite_request()
+    public async Task Account_only_and_Profile_only_changes_are_one_upsert_per_object_Accounts_first()
     {
         await Accounts(("A1", Event(new() { ["name"] = "One" }, new() { ["tier"] = "Gold" })),
             ("A2", Event(new() { ["name"] = "Two" }, new() { ["tier"] = "Gold" })));
@@ -337,10 +338,29 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
         var after = _org.GetStats();
-        (after.WriteRequests - before.WriteRequests).Should().Be(1, "not split into extra calls");
-        (after.UpsertRequests - before.UpsertRequests).Should().Be(0, "two objects need Composite");
-        _org.WriteRequests[^1]["compositeRequest"]!.AsArray().Select(s => (string?)s!["referenceId"])
-            .Should().Equal("Account_update", "Profile__c_update");
+        (after.ApiCalls - before.ApiCalls).Should().Be(3, "one read, then one write per object");
+        (after.UpsertRequests - before.UpsertRequests).Should().Be(2, "no reference: never Composite");
+        (after.CompositeRequests - before.CompositeRequests).Should().Be(1, "only the read is a Composite request");
+        ((string?)Upserted(_org.WriteRequests[^2], "Account").Single()["Name"]).Should().Be("One!");
+        ((string?)Upserted(_org.WriteRequests[^1], "Profile__c").Single()["Tier__c"]).Should().Be("Silver");
+    }
+
+    [Fact]
+    public async Task An_entity_written_in_two_upserts_is_saved_only_when_both_are_and_costs_the_others_nothing()
+    {
+        await Accounts(("A1", Event(new() { ["name"] = "One" }, new() { ["tier"] = "Gold" })),
+            ("A2", Event(new() { ["name"] = "Two" }, new() { ["tier"] = "Gold" })));
+        _org.InjectFault("Profile__c", "P-A1", "UNABLE_TO_LOCK_ROW", "unable to obtain exclusive access", 1);
+
+        var results = (await Accounts(("A1", Event(new() { ["name"] = "One!" }, new() { ["tier"] = "Silver" })),
+            ("A2", Event(new() { ["name"] = "Two!" }, new() { ["tier"] = "Gold" })))).ToDictionary(r => r.Key);
+
+        (results["A1"].Outcome, results["A1"].PrimaryError?.ReferenceId).Should().Be((SyncOutcome.TransientFailure, "prof"),
+            "its Account is in, its Profile is not");
+        results["A2"].Outcome.Should().Be(SyncOutcome.Saved, "the failed Profile is A1's alone");
+        ((string?)_org.FindByExternalId("Account", "A1")!["Name"]).Should().Be("One!");
+        (await Account("A1", new() { ["name"] = "One!" }, new() { ["tier"] = "Silver" })).Outcome.Should().Be(SyncOutcome.Saved);
+        Upserted(_org.WriteRequests[^1], "Profile__c").Should().ContainSingle("the retry writes only what is still missing");
     }
 
     [Fact]
@@ -400,17 +420,16 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
         var after = _org.GetStats();
-        (after.WriteRequests - before.WriteRequests).Should().Be(2, "6 collections don't fit one request (5)");
-        (after.ApiCalls - before.ApiCalls).Should().Be(3, "one read, two writes");
-        var writes = _org.WriteRequests.TakeLast(2).Select(w => (Json: w.ToJsonString(), Collections: w["compositeRequest"]!.AsArray().Count)).ToList();
-        writes.Select(w => w.Collections).Should().OnlyContain(n => n <= SalesforceRestClient.MaxCompositeCollections);
-        // Each unit's three records are in the same request
-        foreach (var key in new[] { "NEW1", "NEW2", "OLD1", "OLD2" })
+        (after.ApiCalls - before.ApiCalls).Should().Be(5, "one read; 6 collections don't fit one request (5): the new units' "
+            + "is Composite (references), the existing ones' one upsert per object");
+        var writes = _org.WriteRequests.TakeLast(4).ToList();
+        var composite = writes[0]["compositeRequest"]!.AsArray();
+        composite.Select(s => (string?)s!["referenceId"]).Should().Equal("Account_create", "Account_Relationship__c_create_ref", "Profile__c_create_ref");
+        composite.SelectMany(s => Records(s!)).Select(r => (string?)r["External_Id__c"]).Should().BeEquivalentTo(
+            ["NEW1", "NEW2", "R-NEW1", "R-NEW2", "P-NEW1", "P-NEW2"], "each unit's records are in the same request");
+        foreach (var (write, sobject, prefix) in writes.Skip(1).Zip(["Account", "Account_Relationship__c", "Profile__c"], ["", "R-", "P-"]))
         {
-            var id = IdOf("Account", key)!;
-            var own = writes.Where(w => w.Json.Contains($"\"{key}\"") || w.Json.Contains($"\"id\":\"{id}\"")).Should().ContainSingle(key).Subject;
-            writes.Where(w => w.Json.Contains(IdOf("Profile__c", $"P-{key}")!) || w.Json.Contains($"P-{key}")).Should().Equal(own);
-            writes.Where(w => w.Json.Contains(IdOf("Account_Relationship__c", $"R-{key}")!) || w.Json.Contains($"R-{key}")).Should().Equal(own);
+            Upserted(write, sobject).Select(r => (string?)r["External_Id__c"]).Should().Equal($"{prefix}OLD1", $"{prefix}OLD2");
         }
         ((string?)_org.FindByExternalId("Account_Relationship__c", "R-NEW2")!["Related_Account__c"]).Should().Be(IdOf("Account", "NEW2"));
         ((string?)_org.FindByExternalId("Profile__c", "P-OLD2")!["Tier__c"]).Should().Be("Silver");
