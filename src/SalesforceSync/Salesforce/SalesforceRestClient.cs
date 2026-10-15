@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 
 namespace SalesforceSync.Salesforce;
@@ -21,6 +22,28 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// <summary>sObject Collections: max records in one create or update.</summary>
     public const int MaxCollectionRecords = 200;
 
+    /// <summary>
+    /// A REST call's URI and headers together may be at most 16,384 bytes: over it Salesforce answers 414 URI Too Long
+    /// (the URI alone) or 431 Request Header Fields Too Large (URI and headers). Salesforce Developer Limits and
+    /// Allocations Quick Reference, "API Request Limits and Allocations"
+    /// (https://developer.salesforce.com/docs/platform/salesforce-app-limits-cheatsheet/guide/salesforce-app-limits-platform-api.html);
+    /// REST API Developer Guide, "Status Codes and Error Responses"
+    /// (https://developer.salesforce.com/docs/platform/api-rest/guide/errorcodes.html).
+    /// </summary>
+    public const int MaxUriAndHeadersBytes = 16_384;
+
+    /// <summary>
+    /// The part of <see cref="MaxUriAndHeadersBytes"/> left to the headers this client sends: Authorization (a Bearer
+    /// access token, about 100 bytes opaque, a JWT-based one a few times that), Host (the instance), User-Agent,
+    /// Accept-Encoding, Content-Type, Content-Length, Content-Encoding, If-Modified-Since, and their framing. They come
+    /// to well under 1 KB; 4 KB leaves room for a long token or a proxy's additions. A Composite subrequest's URL is
+    /// held to the same budget: it is sent with the outer request's headers.
+    /// </summary>
+    public const int HeaderAllowanceBytes = 4_096;
+
+    /// <summary>The longest URL (path and query) a call or Composite subrequest is sent with.</summary>
+    public const int MaxUrlBytes = MaxUriAndHeadersBytes - HeaderAllowanceBytes;
+
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
     /// <summary>
@@ -29,7 +52,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// </summary>
     public async Task<DescribeResult> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"{DataPath}/sobjects/{sobject}/describe");
+        using var request = new HttpRequestMessage(HttpMethod.Get, EnsureFits($"{DataPath}/sobjects/{sobject}/describe"));
         if (ifModifiedSince is { } since)
         {
             request.Headers.IfModifiedSince = since;
@@ -54,6 +77,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// Runs up to 5 queries in one Composite request (one API call). Results are keyed by reference id;
     /// a failed subrequest throws <see cref="SalesforceQueryException"/>.
     /// </summary>
+    /// <exception cref="ArgumentException">A query's URL is longer than <see cref="MaxUrlBytes"/>.</exception>
     public async Task<Dictionary<string, List<JsonElement>>> QueryAsync(IReadOnlyList<CompositeQuery> queries, CancellationToken ct)
     {
         if (queries.Count is 0 or > MaxCompositeQueries)
@@ -67,9 +91,9 @@ public sealed class SalesforceRestClient(HttpClient http)
             compositeRequest = queries.Select(q => new
             {
                 method = "GET",
-                url = $"{DataPath}/query?q={Uri.EscapeDataString(q.Soql)}",
+                url = EnsureFits(QueryUrl(q.Soql)),
                 referenceId = q.ReferenceId
-            })
+            }).ToList() // checked before anything is sent
         };
 
         var subresponses = await PostCompositeAsync(payload, ct);
@@ -89,7 +113,7 @@ public sealed class SalesforceRestClient(HttpClient http)
             // follow nextRecordsUrl anyway rather than silently dropping rows
             for (var next = page.NextRecordsUrl; next is not null;)
             {
-                var more = await http.GetFromJsonAsync<QueryPage>(next, Json, ct)
+                var more = await http.GetFromJsonAsync<QueryPage>(EnsureFits(next), Json, ct)
                            ?? throw new InvalidOperationException("Empty query page");
                 records.AddRange(more.Records);
                 next = more.NextRecordsUrl;
@@ -167,10 +191,39 @@ public sealed class SalesforceRestClient(HttpClient http)
         return body.CompositeResponse;
     }
 
+    /// <summary>The URL a query is sent with, as a Composite subrequest or a call of its own.</summary>
+    public static string QueryUrl(string soql)
+    {
+        return $"{DataPath}/query?q={Uri.EscapeDataString(soql)}";
+    }
+
+    /// <summary>
+    /// Whether a URL is within <see cref="MaxUrlBytes"/>, counted in bytes as sent (UTF-8; an escaped query is ASCII,
+    /// so its bytes are its characters).
+    /// </summary>
+    public static bool FitsUrlLimit(string url)
+    {
+        return Encoding.UTF8.GetByteCount(url) <= MaxUrlBytes;
+    }
+
+    private static string EnsureFits(string url)
+    {
+        return FitsUrlLimit(url)
+            ? url
+            : throw new ArgumentException($"The URL is {Encoding.UTF8.GetByteCount(url):N0} bytes; a call allows {MaxUrlBytes:N0} " +
+                $"({MaxUriAndHeadersBytes:N0} for the URI and headers together): {url[..Math.Min(url.Length, 200)]}...", nameof(url));
+    }
+
     public static string Soql(string sobject, IEnumerable<string> fields, string whereField, IEnumerable<string> values)
     {
         return $"SELECT {string.Join(",", fields)} FROM {sobject} WHERE {whereField} IN " +
-               $"({string.Join(",", values.Select(v => $"'{EscapeSoql(v)}'"))})";
+               $"({string.Join(",", values.Select(SoqlLiteral))})";
+    }
+
+    /// <summary>A value as a SOQL string literal: quoted, with backslashes and quotes escaped.</summary>
+    public static string SoqlLiteral(string value)
+    {
+        return $"'{EscapeSoql(value)}'";
     }
 
     private static string EscapeSoql(string s)

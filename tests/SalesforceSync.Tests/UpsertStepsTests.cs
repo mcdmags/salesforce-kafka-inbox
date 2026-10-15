@@ -195,14 +195,47 @@ public sealed class UpsertStepsTests
     }
 
     [Fact]
-    public void More_queries_than_a_composite_request_takes_is_refused_before_any_call()
+    public void A_hundred_short_ids_are_one_query()
     {
-        var ids = Enumerable.Range(0, 501).Select(i => $"A{i}").ToList();
+        var ids = Enumerable.Range(0, ReadQueryBuilder.MaxValuesPerQuery).Select(i => $"A{i}").ToList();
 
-        var build = () => ReadQueryBuilder.Build(Normalized(new UpsertUnit([AccountRecord("A1", "Acme")])),
-            [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas);
+        var queries = BuildAccountRead(ids);
 
-        build.Should().Throw<InvalidOperationException>().WithMessage("*6 SOQL queries*Sync:BatchSize*");
+        queries.Should().ContainSingle();
+    }
+
+    [Theory]
+    [InlineData('a')] // 1 byte escaped
+    [InlineData('é')] // 2 bytes of UTF-8, 6 escaped
+    public void Long_ids_are_split_by_URL_length_each_query_fitting_and_full(char c)
+    {
+        var ids = Enumerable.Range(0, ReadQueryBuilder.MaxValuesPerQuery).Select(i => $"{i:D3}{new string(c, 247)}").ToList();
+
+        var queries = BuildAccountRead(ids);
+
+        queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(q.Query.Soql)));
+        var chunks = queries.Select(q => ids.Where(id => q.Query.Soql.Contains($"'{id}'")).ToList()).ToList();
+        chunks.SelectMany(c => c).Should().Equal(ids, "every id is read once, in order");
+        chunks.Zip(chunks.Skip(1)).Select(p => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(
+                SalesforceRestClient.Soql("Account", ["Name", "ExternalId__c", "Id"], "ExternalId__c", [.. p.First, p.Second[0]]))))
+            .Should().AllBeEquivalentTo(false, "a query is closed only when the next id would not fit");
+    }
+
+    [Fact]
+    public void A_value_whose_query_alone_does_not_fit_a_URL_fails_naming_the_read()
+    {
+        var build = () => BuildAccountRead(["A1", new string('x', SalesforceRestClient.MaxUrlBytes)]);
+
+        build.Should().Throw<InvalidOperationException>().WithMessage("The read of Account by ExternalId__c does not fit a URL*");
+    }
+
+    [Fact]
+    public void A_URL_fits_up_to_the_budget_left_after_the_headers()
+    {
+        SalesforceRestClient.MaxUrlBytes.Should().Be(SalesforceRestClient.MaxUriAndHeadersBytes - SalesforceRestClient.HeaderAllowanceBytes);
+        SalesforceRestClient.FitsUrlLimit(new string('a', SalesforceRestClient.MaxUrlBytes)).Should().BeTrue();
+        SalesforceRestClient.FitsUrlLimit(new string('a', SalesforceRestClient.MaxUrlBytes + 1)).Should().BeFalse();
+        SalesforceRestClient.FitsUrlLimit(new string('a', SalesforceRestClient.MaxUrlBytes - 1) + "é").Should().BeFalse("bytes count, not characters");
     }
 
     // ---------- CompositeWrite.Pack ----------
@@ -266,6 +299,13 @@ public sealed class UpsertStepsTests
     private static SObjectRecord AccountRecord(string key, string name)
     {
         return new("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = name });
+    }
+
+    /// <summary>The read of Accounts by external id, selecting Name, ExternalId__c and Id.</summary>
+    private static List<ReadQuery> BuildAccountRead(IReadOnlyList<string> ids)
+    {
+        return ReadQueryBuilder.Build(Normalized(new UpsertUnit([AccountRecord("A1", "Acme")])),
+            [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas);
     }
 
     private static List<NormalizedUnit> Normalized(UpsertUnit unit)

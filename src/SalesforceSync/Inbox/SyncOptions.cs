@@ -15,7 +15,7 @@ public sealed class SyncOptions
 
     /// <summary>
     /// Entities per batch, 1 to <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/> (100): a batch is read with one
-    /// Composite request, which carries 5 queries of 100 external ids.
+    /// Composite request, which carries 5 queries of up to 100 external ids (very long ids split the read over more).
     /// </summary>
     public int BatchSize { get; set; } = 75;
 
@@ -87,7 +87,7 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
         if (o.BatchSize is < 1 or > ReadQueryBuilder.MaxEntitiesPerBatch)
         {
             errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {ReadQueryBuilder.MaxEntitiesPerBatch} " +
-                       "(a batch is read with one Composite request: 5 queries of 100 external ids).");
+                       "(a batch is read with one Composite request: 5 queries of up to 100 external ids).");
         }
 
         AtLeastOne(nameof(o.MaxEventsPerEntity), o.MaxEventsPerEntity);
