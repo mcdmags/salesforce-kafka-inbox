@@ -5,8 +5,8 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Contact of an Account, looked up by the Account's external id. If the Account isn't in Salesforce yet, the contact
-/// is retried until the account sync has created it. Like <see cref="AccountSync"/>, everything particular to contacts
+/// Contact of an Account, named by the Account's external id (a Text foreign key). If the Account isn't in Salesforce
+/// yet, nothing is sent and the contact is retried until the account sync has created it. Like <see cref="AccountSync"/>, everything particular to contacts
 /// is in this file.
 /// </summary>
 public static class ContactSync
@@ -26,7 +26,7 @@ public static class ContactSync
             : new UpsertUnit([SObjectRecord.From("contact", ToContact(payload))]);
     }
 
-    // What to read: the contacts themselves (to diff) and the Accounts they point at (for their Ids)
+    // What to read: the contacts themselves (to diff) and the Accounts they point at (to know they exist)
     public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
     {
         return [
@@ -41,7 +41,7 @@ public static class ContactSync
         return new()
         {
             ExternalId = payload.ExternalId,
-            AccountExternalId = payload.AccountExternalId,
+            AccountId = payload.AccountExternalId,
             FirstName = payload.FirstName,
             LastName = payload.LastName,
             Email = payload.Email,
@@ -77,14 +77,14 @@ public sealed class ContactPayload
 }
 
 /// <summary>The Salesforce Contact as this sync writes it (complete desired state, like <see cref="AccountSObject"/>).</summary>
-[SObject("Contact", ExternalIdField = "External_Id__c", RecordType = "Standard")]
+[SObject("Contact", ExternalIdField = "ExternalId__c", RecordType = "Standard")]
 public sealed class ContactSObject
 {
-    [JsonPropertyName("External_Id__c")] public string? ExternalId { get; set; }
+    [JsonPropertyName("ExternalId__c")] public string? ExternalId { get; set; }
 
-    /// <summary>The Account, by its external id: the read finds its Id, which the diff compares with AccountId.</summary>
-    [JsonPropertyName("AccountId"), SObjectLookup(typeof(AccountSObject))]
-    public string? AccountExternalId { get; set; }
+    /// <summary>The Account, by its external id (a Text field; the standard AccountId lookup is left alone).</summary>
+    [JsonPropertyName("AccountId__c"), SObjectForeignKey(typeof(AccountSObject))]
+    public string? AccountId { get; set; }
 
     [JsonPropertyName("FirstName")] public string? FirstName { get; set; }
     [JsonPropertyName("LastName")] public string? LastName { get; set; }

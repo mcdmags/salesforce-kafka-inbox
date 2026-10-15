@@ -3,32 +3,31 @@ using System.Text.Json.Nodes;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// What is sent to Salesforce and what per-record results do to an entity: one Composite request of sObject
-/// Collections creates and updates when a record links to a record created in the same request, otherwise one
-/// Collections upsert per object; each record saved or rejected on its own (allOrNone false).
+/// What is sent to Salesforce and what per-record results do to an entity: the example objects name their parents by
+/// Text foreign keys, so their records go as one Collections upsert per object, parents first (Composite with
+/// <c>@{reference}</c> is only for lookups, see the unit tests); each record saved or rejected on its own (allOrNone false).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class CollectionsWriteTests(SyncFixture app)
 {
     [Fact]
-    public async Task New_Account_and_Profile_are_created_in_one_request_with_the_Profile_referring_to_its_Account()
+    public async Task New_Account_and_Profile_are_an_Account_upsert_then_a_Profile_upsert_carrying_the_Accounts_key()
     {
         var acct = SyncFixture.NewAccountId();
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, new JsonObject { ["tier"] = "Gold" });
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
 
-        var write = (await app.GetWriteRequestsAsync(acct)).Should().ContainSingle().Subject;
-        write["allOrNone"]!.GetValue<bool>().Should().BeFalse();
-        var subrequests = write["compositeRequest"]!.AsArray();
-        subrequests.Select(s => ((string?)s!["method"], (string?)s["referenceId"], s["body"]!["allOrNone"]!.GetValue<bool>()))
-            .Should().Equal(("POST", "Account_create", false), ("POST", "Profile__c_create_ref", false));
-        var position = Records(subrequests[0]!).FindIndex(r => (string?)r["External_Id__c"] == acct);
-        var profile = Records(subrequests[1]!).Single(r => (string?)r["External_Id__c"] == SyncFixture.ProfileIdFor(acct));
-        ((string?)profile["Account__c"]).Should().Be($"@{{Account_create[{position}].id}}");
+        var writes = await app.GetWriteRequestsAsync(acct);
+        writes.Select(w => ((string?)w["method"], (string?)w["url"])).Should().Equal(
+            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/ExternalId__c"),
+            ("PATCH", "/services/data/v62.0/composite/sobjects/Profile__c/ExternalId__c"));
+        writes.Should().OnlyContain(w => !w["body"]!["allOrNone"]!.GetValue<bool>());
+        var profile = Records(writes[1]).Single(r => (string?)r["ExternalId__c"] == SyncFixture.ProfileIdFor(acct));
+        ((string?)profile["AccountId__c"]).Should().Be(acct, "the Account's key as text: no Composite request, no reference");
+        writes.Select(w => w.ToJsonString()).Should().NotContain(w => w.Contains("@{"));
 
-        ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Account__c"])
-            .Should().Be((string?)(await app.GetRecordAsync("Account", acct))!["Id"]);
+        ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["AccountId__c"]).Should().Be(acct);
     }
 
     [Fact]
@@ -53,16 +52,15 @@ public sealed class CollectionsWriteTests(SyncFixture app)
 
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
         (await app.GetInboxRowsAsync(acct))[0].RetryCount.Should().BePositive();
-        ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Account__c"])
-            .Should().Be((string?)(await app.GetRecordAsync("Account", acct))!["Id"]);
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("the retries had nothing left to write on the Account");
+        ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["AccountId__c"]).Should().Be(acct);
         await using var after = await app.Db.OpenConnectionAsync();
         (await after.ExecuteScalarAsync<long?>(
             $"select synced_time from {SyncFixture.InboxTable()} where entity_id = @acct", new { acct })).Should().Be(SyncFixture.SyncedTime(1));
     }
 
     [Fact]
-    public async Task Failing_Account_is_dead_lettered_alone_without_its_Profile_while_others_are_saved()
+    public async Task Failing_Account_is_dead_lettered_alone_and_its_Profile_never_sent_while_others_are_saved()
     {
         var (bad, good) = (SyncFixture.NewAccountId(), SyncFixture.NewAccountId());
         await app.InjectFaultAsync("Account", bad, "FIELD_CUSTOM_VALIDATION_EXCEPTION", times: int.MaxValue);
@@ -75,10 +73,11 @@ public sealed class CollectionsWriteTests(SyncFixture app)
             "the Account's own error, not the Profile's missing parent");
         (await app.GetRecordAsync("Account", bad)).Should().BeNull();
         (await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(bad))).Should().BeNull();
+        (await app.GetWriteRequestsAsync(SyncFixture.ProfileIdFor(bad))).Should().BeEmpty(
+            "the Profile's call comes after its Account's, which failed: the org would reject it");
 
         (await app.WaitForInboxSettledAsync(good, expectedRows: 1)).Should().Equal((1L, "done"));
-        ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(good)))!["Account__c"])
-            .Should().Be((string?)(await app.GetRecordAsync("Account", good))!["Id"]);
+        ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(good)))!["AccountId__c"]).Should().Be(good);
     }
 
     [Fact]
@@ -91,8 +90,8 @@ public sealed class CollectionsWriteTests(SyncFixture app)
             SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = "v2" }, []));
 
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().Equal((1L, "superseded"), (2L, "done"));
-        var write = (await app.GetWriteRequestsAsync(acct)).Should().ContainSingle().Subject;
-        ((string?)write["compositeRequest"]![0]!["method"]).Should().Be("POST",
+        var write = (await AccountWritesAsync(acct)).Should().ContainSingle().Subject;
+        Records(write).Single().Should().ContainKey("Name").And.NotContainKey("Rating",
             "the newest event says updated, but Salesforce doesn't have the record: it is created from the full record");
         var history = (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle().Subject;
         ((string?)history["Name"]).Should().Be("v2");
@@ -114,18 +113,18 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         await app.InsertIntoInboxAsync(acct, again);
 
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().OnlyContain(r => r.Status == "done");
-        var writes = await app.GetWriteRequestsAsync(acct, (string)(await app.GetRecordAsync("Account", acct))!["Id"]!);
+        var writes = await AccountWritesAsync(acct);
         writes.Should().HaveCount(2);
         ((string?)writes[1]["method"], (string?)writes[1]["url"]).Should().Be(
-            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/External_Id__c"),
+            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/ExternalId__c"),
             "only the Account differs (the Profile is unchanged): one upsert by external id, not a Composite request");
-        Records(writes[1]).Single().Select(kv => kv.Key).Should().BeEquivalentTo(["attributes", "External_Id__c", "Rating"],
+        Records(writes[1]).Single().Select(kv => kv.Key).Should().BeEquivalentTo(["attributes", "ExternalId__c", "Rating"],
             "the existing record is found by its external id and gets only what differs");
         (await app.GetHistoryAsync("Account", acct))[1].Select(kv => kv.Key).Should().Equal("Rating");
     }
 
     [Fact]
-    public async Task A_change_of_the_Account_alone_is_one_upsert_and_a_new_Account_with_its_Profile_stays_Composite()
+    public async Task A_change_of_the_Account_alone_is_one_upsert_and_the_unchanged_Profile_and_its_key_are_not_written()
     {
         var acct = SyncFixture.NewAccountId();
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "Acme", ["rating"] = "Hot" }, new JsonObject { ["tier"] = "Gold" });
@@ -135,12 +134,11 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
 
         var writes = await app.GetWriteRequestsAsync(acct);
-        writes.Should().HaveCount(2);
-        writes[0]["compositeRequest"]!.AsArray().Select(s => (string?)s!["referenceId"]).Should().Equal(
-            ["Account_create", "Profile__c_create_ref"], "the new Profile links to its new Account by @{reference}");
-        ((string?)writes[1]["method"], (string?)writes[1]["url"]).Should().Be(
-            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/External_Id__c"));
-        Records(writes[1]).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "External_Id__c", "Rating");
+        writes.Select(w => (string?)w["url"]).Should().Equal(
+            "/services/data/v62.0/composite/sobjects/Account/ExternalId__c",
+            "/services/data/v62.0/composite/sobjects/Profile__c/ExternalId__c",
+            "/services/data/v62.0/composite/sobjects/Account/ExternalId__c");
+        Records(writes[2]).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "ExternalId__c", "Rating");
         (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().ContainSingle("the Profile is not written");
     }
 
@@ -155,15 +153,21 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().OnlyContain(r => r.Status == "done");
 
         var writes = await app.GetWriteRequestsAsync(acct, SyncFixture.ProfileIdFor(acct));
-        writes.Should().HaveCount(3, "the creates in one Composite request, then the change in two upserts");
-        writes.Skip(1).Select(w => ((string?)w["method"], (string?)w["url"])).Should().Equal(
-            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/External_Id__c"),
-            ("PATCH", "/services/data/v62.0/composite/sobjects/Profile__c/External_Id__c"));
-        Records(writes[1]).Single(r => (string?)r["External_Id__c"] == acct).Select(kv => kv.Key).Should()
-            .BeEquivalentTo("attributes", "External_Id__c", "Rating");
-        Records(writes[2]).Single(r => (string?)r["External_Id__c"] == SyncFixture.ProfileIdFor(acct)).Select(kv => kv.Key).Should()
-            .BeEquivalentTo("attributes", "External_Id__c", "Tier__c");
+        writes.Should().HaveCount(4, "the creates in two upserts, then the change in two more");
+        writes.Skip(2).Select(w => ((string?)w["method"], (string?)w["url"])).Should().Equal(
+            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/ExternalId__c"),
+            ("PATCH", "/services/data/v62.0/composite/sobjects/Profile__c/ExternalId__c"));
+        Records(writes[2]).Single(r => (string?)r["ExternalId__c"] == acct).Select(kv => kv.Key).Should()
+            .BeEquivalentTo("attributes", "ExternalId__c", "Rating");
+        Records(writes[3]).Single(r => (string?)r["ExternalId__c"] == SyncFixture.ProfileIdFor(acct)).Select(kv => kv.Key).Should()
+            .BeEquivalentTo("attributes", "ExternalId__c", "Tier__c");
         ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Tier__c"]).Should().Be("Silver");
+    }
+
+    /// <summary>The upserts of Accounts that wrote <paramref name="acct"/> (its Profile's carry its key too).</summary>
+    private async Task<List<JsonObject>> AccountWritesAsync(string acct)
+    {
+        return [.. (await app.GetWriteRequestsAsync(acct)).Where(w => (string?)w["url"] == "/services/data/v62.0/composite/sobjects/Account/ExternalId__c")];
     }
 
     private static List<JsonObject> Records(JsonNode collection)

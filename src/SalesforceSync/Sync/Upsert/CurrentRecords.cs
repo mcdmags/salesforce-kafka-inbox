@@ -8,7 +8,7 @@ internal sealed record ReadQuery(CompositeQuery Query, string SObject);
 
 /// <summary>
 /// Builds the batch's read: the strategy's queries as SOQL, each selecting every field the diff compares and the Ids
-/// the lookups need, split into chunks of 100 values.
+/// the lookups need (or the external ids that show a parent exists), split into chunks of 100 values.
 /// </summary>
 internal static class ReadQueryBuilder
 {
@@ -49,8 +49,8 @@ internal static class ReadQueryBuilder
     }
 
     /// <summary>
-    /// Every field of <paramref name="target"/> the diff compares, the external ids its records and the lookups to it
-    /// are matched by, the field the query filters on, and the Id.
+    /// Every field of <paramref name="target"/> the diff compares, the external ids its records and the lookups and
+    /// foreign keys to it are matched by, the field the query filters on, and the Id.
     /// </summary>
     private static List<string> FieldsToSelect(SObjectSchema target, SoqlQuery query, IReadOnlyList<NormalizedRecord> records)
     {
@@ -58,7 +58,7 @@ internal static class ReadQueryBuilder
             .SelectMany(r => r.Fields.Keys.Select(f => f.Name)
                 .Concat(r.Lookups.Select(l => l.Field.Name))
                 .Append(r.Record.ExternalIdField));
-        var lookedUpBy = records.SelectMany(r => r.Lookups.Select(l => l.Target))
+        var lookedUpBy = records.SelectMany(r => r.Record.Parents)
             .Where(l => target.Name.Equals(l.SObject, StringComparison.OrdinalIgnoreCase))
             .Select(l => l.ExternalIdField);
 
@@ -129,7 +129,7 @@ internal sealed class CurrentRecords
         return Find(record.SObject, record.ExternalIdField, record.ExternalId);
     }
 
-    /// <summary>The record a lookup points at, or null if it isn't in Salesforce.</summary>
+    /// <summary>The record a lookup or foreign key points at, or null if it isn't in Salesforce.</summary>
     public CurrentRecord? Find(SObjectLookup lookup)
     {
         return Find(lookup.SObject, lookup.ExternalIdField, lookup.ExternalId);

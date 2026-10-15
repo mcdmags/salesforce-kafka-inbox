@@ -4,7 +4,8 @@ namespace SalesforceSync.Sync.Upsert;
 
 /// <summary>
 /// Checks a unit against the Describe metadata and normalizes its values (<see cref="FieldValues"/>), before any call:
-/// an unknown field, a value Salesforce would reject, a lookup that isn't one, or a record type the org doesn't offer
+/// an unknown field, a value Salesforce would reject, a lookup that isn't one (or a foreign key that is one), or a record
+/// type the org doesn't offer
 /// is a problem of that unit alone. A record's record type becomes its RecordTypeId here, a field like any other.
 /// </summary>
 internal static class RecordNormalizer
@@ -116,7 +117,11 @@ internal static class RecordNormalizer
         return fields;
     }
 
-    /// <summary>A lookup needs a reference field on the record's object and the external id field on the target's.</summary>
+    /// <summary>
+    /// A lookup needs a reference field on the record's object and the external id field on the target's. A foreign key
+    /// needs the external id field on its parent's, and a field that is not a reference (it holds text, not an Id; the
+    /// field itself is checked with the values).
+    /// </summary>
     private static List<NormalizedLookup> CheckLookups(SObjectRecord record, SObjectSchema schema,
         IReadOnlyDictionary<string, SObjectSchema> schemas, List<SalesforceError> problems)
     {
@@ -131,6 +136,15 @@ internal static class RecordNormalizer
             {
                 problems.Add(new(record.ReferenceId, "INVALID_FIELD",
                     $"{schema.Name}.{lookup.Field} is not a lookup, or {lookup.SObject}.{lookup.ExternalIdField} doesn't exist"));
+            }
+        }
+
+        foreach (var key in record.ForeignKeys ?? [])
+        {
+            if (schema.Find(key.Field) is { Type: "reference" } || schemas[key.SObject].Find(key.ExternalIdField) is null)
+            {
+                problems.Add(new(record.ReferenceId, "INVALID_FIELD",
+                    $"{schema.Name}.{key.Field} is a lookup, not a foreign key, or {key.SObject}.{key.ExternalIdField} doesn't exist"));
             }
         }
         return lookups;

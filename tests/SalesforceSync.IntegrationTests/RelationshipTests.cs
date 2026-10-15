@@ -19,10 +19,13 @@ public sealed class RelationshipTests(SyncFixture app)
         await app.PublishRelationshipAsync(rel, 1, parent, child, new JsonObject { ["type"] = "Parent", ["isActive"] = true });
         (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Equal((1L, "done"));
 
+        var write = (await app.GetWriteRequestsAsync(rel)).Should().ContainSingle("one upsert, the Accounts' keys as text").Subject;
+        ((string?)write["url"]).Should().Be("/services/data/v62.0/composite/sobjects/Account_Relationship__c/ExternalId__c");
+        var sent = write["body"]!["records"]!.AsArray().Single()!;
+        ((string?)sent["AccountId__c"], (string?)sent["RelatedAccountId__c"]).Should().Be((parent, child));
         var record = await app.GetRecordAsync("Account_Relationship__c", rel);
         record.Should().NotBeNull();
-        ((string?)record!["Account__c"]).Should().Be((string?)(await app.GetRecordAsync("Account", parent))!["Id"]);
-        ((string?)record["Related_Account__c"]).Should().Be((string?)(await app.GetRecordAsync("Account", child))!["Id"]);
+        ((string?)record!["AccountId__c"], (string?)record["RelatedAccountId__c"]).Should().Be((parent, child));
         ((string?)record["Type__c"]).Should().Be("Parent");
         ((string?)record["RecordTypeId"]).Should().Be(
             FakeSchema.RecordTypes["Account_Relationship__c"].Single(r => r.DeveloperName == "Standard").Id);
@@ -31,7 +34,16 @@ public sealed class RelationshipTests(SyncFixture app)
         await app.WaitForInboxSettledAsync(rel, 2, SyncFixture.Relationships);
         var writes = await app.GetHistoryAsync("Account_Relationship__c", rel);
         writes.Should().HaveCount(2);
-        writes[1].Select(kv => kv.Key).Should().Equal(["Type__c"], "only the changed field is sent");
+        writes[1].Select(kv => kv.Key).Should().Equal(["Type__c"], "only the changed field is sent: the unchanged keys are not");
+
+        var other = SyncFixture.NewAccountId();
+        await app.PublishAsync(other, 1, new JsonObject { ["name"] = Any.String("Other ") }, []);
+        await app.WaitForInboxSettledAsync(other, 1);
+        await app.PublishRelationshipAsync(rel, 3, parent, other, new JsonObject { ["type"] = "Partner", ["isActive"] = true });
+        await app.WaitForInboxSettledAsync(rel, 3, SyncFixture.Relationships);
+        (await app.GetHistoryAsync("Account_Relationship__c", rel))[2].Select(kv => kv.Key).Should().Equal(["RelatedAccountId__c"],
+            "a changed key is written");
+        ((string?)(await app.GetRecordAsync("Account_Relationship__c", rel))!["RelatedAccountId__c"]).Should().Be(other);
     }
 
     [Fact]
@@ -48,6 +60,7 @@ public sealed class RelationshipTests(SyncFixture app)
             "the relationship to wait for its accounts");
         waiting[0].Status.Should().Be("pending", "a missing dependency is retried, not dead-lettered");
         (await app.GetRecordAsync("Account_Relationship__c", rel)).Should().BeNull();
+        (await app.GetWriteRequestsAsync(rel)).Should().BeEmpty("the read found no Account: nothing is sent");
 
         await app.PublishAsync(parent, 1, new JsonObject { ["name"] = Any.String("Late parent ") }, []);
         await app.PublishAsync(child, 1, new JsonObject { ["name"] = Any.String("Late child ") }, []);
@@ -59,7 +72,7 @@ public sealed class RelationshipTests(SyncFixture app)
         settled[0].Status.Should().Be("done");
         var record = await app.GetRecordAsync("Account_Relationship__c", rel);
         record.Should().NotBeNull();
-        ((string?)record!["Related_Account__c"]).Should().Be((string?)(await app.GetRecordAsync("Account", child))!["Id"]);
+        ((string?)record!["RelatedAccountId__c"]).Should().Be(child);
     }
 
     [Fact]

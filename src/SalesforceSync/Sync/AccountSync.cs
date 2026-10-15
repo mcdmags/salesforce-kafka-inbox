@@ -5,7 +5,8 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Account + its Profile__c, written in the same batch (Accounts first); the Profile looks up its Account.
+/// Account + its Profile__c, written in the same batch (Accounts first); the Profile names its Account by the Account's
+/// external id (a Text foreign key).
 /// Typed event -> mapping -> sObjects -> records. An event without a <c>profile</c> writes only the Account.
 /// Everything that is particular to accounts is in this file: the event as the source sends it, the sObjects as the org
 /// has them, the mapping between the two, and the inbox row type.
@@ -28,7 +29,7 @@ public static class AccountSync
             var profile = ToProfile(payload.Profile);
             // What the profile takes from its account: its id unless it has its own, and the Account it belongs to
             profile.ExternalId ??= accountKey;
-            profile.AccountExternalId = accountKey;
+            profile.AccountId = accountKey;
             records.Add(SObjectRecord.From("prof", profile));
         }
         return new UpsertUnit(records);
@@ -69,7 +70,7 @@ public static class AccountSync
     }
 
     /// <summary>
-    /// The profile on its own. What it takes from its account (the default external id and the Account lookup) is filled
+    /// The profile on its own. What it takes from its account (the default external id and the Account's key) is filled
     /// in by <see cref="Map"/>, which has both.
     /// </summary>
     public static ProfileSObject ToProfile(ProfilePayload payload)
@@ -139,10 +140,10 @@ public sealed class ProfilePayload
 /// The Salesforce Account as this sync writes it. An instance is the record's complete desired state: a null
 /// property means "empty", and the diff clears the field if Salesforce has a value.
 /// </summary>
-[SObject("Account", ExternalIdField = "External_Id__c", RecordType = "Business")]
+[SObject("Account", ExternalIdField = "ExternalId__c", RecordType = "Business")]
 public sealed class AccountSObject
 {
-    [JsonPropertyName("External_Id__c")] public string? ExternalId { get; set; }
+    [JsonPropertyName("ExternalId__c")] public string? ExternalId { get; set; }
     [JsonPropertyName("Name")] public string? Name { get; set; }
     [JsonPropertyName("Rating")] public string? Rating { get; set; }
     [JsonPropertyName("Industry")] public string? Industry { get; set; }
@@ -161,15 +162,18 @@ public sealed class AccountSObject
 }
 
 /// <summary>Profile__c, the detail record of an Account (complete desired state, like <see cref="AccountSObject"/>).</summary>
-[SObject("Profile__c", ExternalIdField = "External_Id__c", RecordType = "Standard")]
+[SObject("Profile__c", ExternalIdField = "ExternalId__c", RecordType = "Standard")]
 public sealed class ProfileSObject
 {
-    [JsonPropertyName("External_Id__c")] public string? ExternalId { get; set; }
+    [JsonPropertyName("ExternalId__c")] public string? ExternalId { get; set; }
     [JsonPropertyName("Name")] public string? Name { get; set; }
 
-    /// <summary>The Account this Profile belongs to, by the Account's external id.</summary>
-    [JsonPropertyName("Account__c"), SObjectLookup(typeof(AccountSObject))]
-    public string? AccountExternalId { get; set; }
+    /// <summary>
+    /// The Account this Profile belongs to: a Text field holding the Account's external id. Its Account is in the same
+    /// unit, so the Account's write goes first and no query checks it.
+    /// </summary>
+    [JsonPropertyName("AccountId__c"), SObjectForeignKey(typeof(AccountSObject))]
+    public string? AccountId { get; set; }
 
     [JsonPropertyName("Tier__c")] public string? Tier { get; set; }
     [JsonPropertyName("Score__c")] public decimal? Score { get; set; }

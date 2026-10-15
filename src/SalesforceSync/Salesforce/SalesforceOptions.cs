@@ -42,4 +42,14 @@ public sealed class SalesforceOptions
     /// Codes not listed (and not <see cref="SalesforceErrors.ProcessingHalted"/>) are treated as transient and retried with backoff.
     /// </summary>
     public string[]? PermanentErrorCodes { get; set; }
+
+    /// <summary>
+    /// How the org says a record's parent is missing when the parent is named by a Text foreign key
+    /// (<see cref="SObjectForeignKeyAttribute"/>): the org's own automation rejects such a child (a validation rule,
+    /// a trigger's addError or a flow's Custom Error: FIELD_CUSTOM_VALIDATION_EXCEPTION with the org's message; an
+    /// unhandled trigger exception: CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY). A record error whose message contains one of
+    /// these (case-insensitive) is <see cref="SalesforceErrors.DependencyNotSynced"/>, whatever its code: retried like
+    /// a parent the read didn't find, not dead-lettered. Empty (the default) = no message means that.
+    /// </summary>
+    public string[] ParentMissingMessages { get; set; } = [];
 }

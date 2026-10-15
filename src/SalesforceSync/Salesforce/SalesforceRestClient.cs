@@ -149,7 +149,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// <c>{ "attributes": { "type": ... }, externalIdField: ..., field: value, ... }</c>). Not a Composite request: one
     /// call of its own, so no references to other requests' results. <c>allOrNone: false</c>: every record succeeds or
     /// fails on its own. A lookup can be set by the parent's external id through the field's relationship,
-    /// <c>"Account": { "External_Id__c": "A1" }</c>.
+    /// <c>"Account": { "ExternalId__c": "A1" }</c>.
     /// </summary>
     /// <returns>One result per record, in request order, with <c>created</c> set.</returns>
     public async Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdField,

@@ -5,9 +5,8 @@ namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
 /// sObject Collections create (POST), update (PATCH) and upsert by external id (PATCH .../{SObject}/{field}): each
-/// record is checked the way Salesforce checks it (type, id, fields, lookups, uniqueness, injected faults) and gets a
-/// result of its own (allOrNone false, the only mode the sync uses). A lookup can also be given by the parent's
-/// external id through its relationship (<c>"Account": { "External_Id__c": "A1" }</c>). Not thread-safe;
+/// record is checked the way Salesforce checks it (type, id, fields, lookups, foreign keys, uniqueness, injected
+/// faults) and gets a result of its own (allOrNone false, the only mode the sync uses). Not thread-safe;
 /// <see cref="FakeSalesforceStore"/> holds its lock.
 /// </summary>
 internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults faults, FakeCounters counters)
@@ -66,8 +65,6 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             ? (400, Errors("MISSING_ARGUMENT", "Id not specified in an update call"))
             : create && id is not null
             ? (400, Errors("INVALID_FIELD_FOR_INSERT_UPDATE", "cannot specify Id in an insert call", "Id"))
-            : ResolveRelationships(sobject, record) is { } unresolved
-            ? (400, unresolved)
             : create ? Create(sobject, record) : Update(sobject, id!, record);
 
         return Result(outcome, id);
@@ -91,8 +88,6 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             ? (400, Errors("INVALID_FIELD", "Id can't be set in an upsert by external id", "Id"))
             : extId is null
             ? (400, Errors("MISSING_ARGUMENT", $"{externalIdField} not specified", externalIdField))
-            : ResolveRelationships(sobject, record) is { } unresolved
-            ? (400, unresolved)
             : existing is null ? Create(sobject, record) : Update(sobject, id!, record);
 
         var result = Result(outcome, id);
@@ -119,34 +114,6 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         };
     }
 
-    /// <summary>
-    /// Replaces each <c>"Relationship": { "External_Id__c": "A1" }</c> by the lookup field set to that parent's Id.
-    /// A parent that doesn't exist is Salesforce's INVALID_FIELD "Foreign key external ID: A1 not found ...".
-    /// </summary>
-    private JsonNode? ResolveRelationships(string sobject, JsonObject record)
-    {
-        foreach (var name in record.Where(kv => kv.Value is JsonObject).Select(kv => kv.Key).ToList())
-        {
-            var parent = record[name]!.AsObject();
-            var field = FakeSchema.Objects[sobject].FirstOrDefault(f => string.Equals(f.RelationshipName, name, StringComparison.OrdinalIgnoreCase));
-            var keys = parent.Where(kv => kv.Key != "attributes").ToList();
-            if (field?.ReferenceTo is not { } target || keys.Count != 1 || FakeSchema.Find(target, keys[0].Key) is not { } key)
-            {
-                return Errors("INVALID_FIELD", $"No such relationship '{name}' by an external id field on entity '{sobject}'");
-            }
-
-            var value = Str(keys[0].Value);
-            if (records.Find(target, key.Name, value) is not { } found)
-            {
-                return Errors("INVALID_FIELD", $"Foreign key external ID: {value} not found for field {key.Name} in entity {target}");
-            }
-
-            record.Remove(name);
-            record[field.Name] = found["Id"]!.DeepClone();
-        }
-        return null;
-    }
-
     private (int Status, JsonNode? Body) Create(string sobject, JsonObject body)
     {
         var extId = Str(body[ExternalIdField]);
@@ -161,7 +128,7 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             return (400, error);
         }
 
-        if (MissingLookupTarget(sobject, stored) is { } missingTarget)
+        if (MissingParent(sobject, stored) is { } missingTarget)
         {
             return (400, missingTarget);
         }
@@ -203,7 +170,7 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             return (400, error);
         }
 
-        if (MissingLookupTarget(sobject, stored) is { } missingTarget)
+        if (MissingParent(sobject, stored) is { } missingTarget)
         {
             return (400, missingTarget);
         }
@@ -217,18 +184,30 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
 
     /// <summary>
     /// A lookup must point at a record that exists (and is of the right object); a record type must be one of the
-    /// object's that is active and available to the user.
+    /// object's that is active and available to the user; a foreign key must hold the external id of a record that
+    /// exists (the org's automation, simulated).
     /// </summary>
-    private JsonNode? MissingLookupTarget(string sobject, JsonObject stored)
+    private JsonNode? MissingParent(string sobject, JsonObject stored)
     {
         foreach (var (name, value) in stored)
         {
-            if (Str(value) is not { } id || FakeSchema.Find(sobject, name) is not { Type: "reference", ReferenceTo: { } target })
+            if (Str(value) is not { } id || FakeSchema.Find(sobject, name) is not { } field)
             {
                 continue;
             }
 
-            if (name == FakeSchema.RecordTypeIdField)
+            if (field.KeyOf is { } parent)
+            {
+                if (records.Find(parent, ExternalIdField, id) is null)
+                {
+                    return Errors(FakeSchema.ParentMissingCode, $"{FakeSchema.ParentMissingMessage}: {parent} {ExternalIdField}={id}", name);
+                }
+            }
+            else if (field is not { Type: "reference", ReferenceTo: { } target })
+            {
+                continue;
+            }
+            else if (name == FakeSchema.RecordTypeIdField)
             {
                 if (!FakeSchema.IsAssignableRecordType(sobject, id))
                 {

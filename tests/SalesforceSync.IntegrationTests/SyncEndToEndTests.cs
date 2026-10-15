@@ -36,7 +36,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         profile.Should().NotBeNull();
         ((string?)profile!["Tier__c"]).Should().Be("Gold");
         ((decimal?)profile["Score__c"]).Should().Be(score);
-        ((string?)profile["Account__c"]).Should().Be((string?)account["Id"], "the reference to the new Account is resolved to its Id");
+        ((string?)profile["AccountId__c"]).Should().Be(acct, "the Account's external id, as text");
 
         ((string?)account["RecordTypeId"]).Should().Be(RecordTypeId("Account", "Business"), "every record gets its class's record type");
         ((string?)profile["RecordTypeId"]).Should().Be(RecordTypeId("Profile__c", "Standard"));
@@ -392,7 +392,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task A_batch_costs_one_composite_read_and_one_composite_write()
+    public async Task A_batch_costs_one_composite_read_and_one_upsert_per_object()
     {
         // Warm-up: the first batch after start also describes Account and Profile__c (then cached for 15 minutes)
         var warm = SyncFixture.NewAccountId();
@@ -411,10 +411,11 @@ public sealed class SyncEndToEndTests(SyncFixture app)
             return after.GetProperty(counter).GetInt64() - before.GetProperty(counter).GetInt64();
         }
 
-        Delta("apiCalls").Should().Be(2, "a batch is one composite read plus one composite write");
-        Delta("compositeRequests").Should().Be(2);
+        Delta("apiCalls").Should().Be(3, "a batch is one composite read, then the Account's upsert and the Profile's");
+        Delta("compositeRequests").Should().Be(1);
         Delta("queries").Should().Be(2, "the Account and Profile__c queries go in the one read");
-        Delta("writeRequests").Should().Be(1, "the Account and the Profile are created in the one write");
+        Delta("writeRequests").Should().Be(2, "the Account, then the Profile with the Account's key");
+        Delta("upsertRequests").Should().Be(2);
         Delta("recordsSucceeded").Should().Be(2);
         Delta("recordsFailed").Should().Be(0);
         Delta("describes").Should().Be(0, "Describe results are cached");

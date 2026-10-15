@@ -21,8 +21,8 @@ namespace SalesforceSync.Sync;
 /// mapped is dead-lettered on its own.</item>
 /// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
 /// one Composite request reads the current records, then what differs is written with sObject Collections: one
-/// Composite request when a write needs a reference to a record created with it, else one Collections upsert per
-/// object (Account updates and Profile updates: 2 calls).</item>
+/// Composite request when a write needs a reference to a record created with it (a lookup), else one Collections
+/// upsert per level and object, parents first (Accounts, then their Profiles: 2 calls).</item>
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
 /// every claimed event is held (the write's outcome is unknown) or retried.</item>
@@ -127,7 +127,8 @@ public sealed class SalesforceBatchUpsertService(
     /// The Salesforce half of a batch, for any sObjects: one Composite request reads the current records, then what
     /// differs is written with sObject Collections. A write request (more than 5 collections are split over further
     /// requests) whose writes need a reference is one Composite request; any other is sent as one Collections upsert
-    /// per object and 200 records, one call after another. Returns one outcome per unit. Nothing here touches the inbox.
+    /// per level, object and 200 records, one call after another, parents first. Returns one outcome per unit. Nothing
+    /// here touches the inbox.
     /// </summary>
     /// <remarks>
     /// A write call that fails as a whole (the call, not records in it) throws, and the caller fails or holds the
@@ -137,7 +138,7 @@ public sealed class SalesforceBatchUpsertService(
     /// reads Salesforce, finds what they saved and writes only what still differs.
     /// </remarks>
     /// <param name="units">At most <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
-    /// <param name="queries">The strategy's reads: the units' records and the records their lookups point at.</param>
+    /// <param name="queries">The strategy's reads: the units' records and the records their lookups and foreign keys point at.</param>
     /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
     internal async Task<List<UpsertResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
         IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
@@ -174,15 +175,15 @@ public sealed class SalesforceBatchUpsertService(
         var plan = WritePlanner.Plan(normalized, current);
         results.AddRange(plan.NotSent);
 
-        // 5. Send. A request that links a new child to its new parent (@{reference}) is one Composite request, all its
-        // other writes included. Otherwise it is one Collections upsert by external id per object (Accounts, then
-        // their Profiles), each a call of its own through the same rate limiter.
+        // 5. Send. A request that links a new child to its new parent by a lookup (@{reference}) is one Composite
+        // request, all its other writes included. Otherwise it is one Collections upsert by external id per level and
+        // object (Accounts, then their Profiles), each a call of its own through the same rate limiter.
         // 6. Per-record results -> one outcome per unit, the same way for both; a unit with writes in several upserts
         // gets one outcome from all of them, like one from several subrequests.
         foreach (var request in plan.Requests)
         {
             results.AddRange(request.AsUpserts() is { } upserts
-                ? _interpreter.Interpret([.. upserts.Select(u => (u.ReferenceId, u.Writes))], request.Units, await UpsertAsync(upserts, ct))
+                ? await UpsertAsync(upserts, request.Units, ct)
                 : _interpreter.Interpret(request, await SendAsync(request, ct)));
         }
 
@@ -218,7 +219,7 @@ public sealed class SalesforceBatchUpsertService(
         IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
     {
         var sobjects = units.SelectMany(u => u.Unit.Records)
-            .SelectMany(r => (r.Lookups ?? []).Select(l => l.SObject).Append(r.SObject))
+            .SelectMany(r => r.Parents.Select(p => p.SObject).Append(r.SObject))
             .Concat(queries.Select(q => q.SObject))
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
@@ -263,19 +264,26 @@ public sealed class SalesforceBatchUpsertService(
     }
 
     /// <summary>
-    /// The calls one after another, each one's per-record results filed under its reference id like a Composite
-    /// subrequest's. The first call that fails as a whole throws, and the later ones are not sent.
+    /// The calls one after another, each one's per-record results classified like a Composite subrequest's before the
+    /// next call is sent: a child whose new parent (in an earlier call) wasn't saved is not sent at all
+    /// (<see cref="UpsertCall.DropOrphans"/>). The first call that fails as a whole throws, and the later ones are not sent.
     /// </summary>
-    private async Task<List<CollectionResult>> UpsertAsync(IReadOnlyList<UpsertCall> calls, CancellationToken ct)
+    private async Task<List<UpsertResult>> UpsertAsync(IReadOnlyList<UpsertCall> calls, IReadOnlyList<PlannedUnit> units,
+        CancellationToken ct)
     {
-        var answers = new List<CollectionResult>(calls.Count);
         foreach (var call in calls)
         {
+            call.DropOrphans();
+            if (call.Writes.Count == 0)
+            {
+                continue;
+            }
+
             var records = await WriteAsync(() => salesforce.UpsertAsync(call.SObject, call.ExternalIdField, call.Bodies(), ct));
-            answers.Add(new CollectionResult(call.ReferenceId, records, []));
+            _interpreter.Classify(call.ReferenceId, call.Writes, new CollectionResult(call.ReferenceId, records, []));
         }
 
-        return answers;
+        return _interpreter.Results(units);
     }
 
     private static async Task<T> WriteAsync<T>(Func<Task<T>> write)

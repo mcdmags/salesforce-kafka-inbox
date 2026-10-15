@@ -30,7 +30,7 @@ public sealed class SharedDescribeCacheTests(MultiPodFixture app)
         {
             var schema = await newPod.GetAsync(sobject, TimeSpan.FromMinutes(15),
                 (_, _) => throw new InvalidOperationException($"{sobject} was described again"), CancellationToken.None);
-            schema.Fields.Should().ContainKey("External_Id__c");
+            schema.Fields.Should().ContainKey("ExternalId__c");
             schema.RecordTypes.Should().ContainKey(sobject == "Account" ? "Business" : "Standard");
         }
     }

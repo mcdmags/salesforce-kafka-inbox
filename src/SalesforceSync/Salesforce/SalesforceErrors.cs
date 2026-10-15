@@ -7,8 +7,8 @@ namespace SalesforceSync.Salesforce;
 public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 {
     /// <summary>
-    /// Our own code (not Salesforce's): a lookup target, e.g. the Account of a relationship, isn't in Salesforce yet.
-    /// Transient: it is expected to arrive through its own sync.
+    /// Our own code (not Salesforce's): a lookup target or a foreign key's parent, e.g. the Account of a relationship,
+    /// isn't in Salesforce yet. Transient: it is expected to arrive through its own sync.
     /// </summary>
     public const string DependencyNotSynced = "DEPENDENCY_NOT_SYNCED";
 
@@ -53,9 +53,17 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     private readonly HashSet<string> _permanent = new(
         options.Value.PermanentErrorCodes ?? DefaultPermanentCodes, StringComparer.Ordinal);
 
+    private readonly string[] _parentMissing = [.. options.Value.ParentMissingMessages.Where(m => !string.IsNullOrWhiteSpace(m))];
+
     public bool IsPermanent(string code)
     {
         return _permanent.Contains(code);
+    }
+
+    /// <summary>Whether the error is the org saying a record's parent is missing (<see cref="SalesforceOptions.ParentMissingMessages"/>).</summary>
+    public bool IsParentMissing(SalesforceError error)
+    {
+        return error.Message is { } message && _parentMissing.Any(m => message.Contains(m, StringComparison.OrdinalIgnoreCase));
     }
 }
 
