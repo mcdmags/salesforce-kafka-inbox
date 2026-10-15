@@ -88,7 +88,6 @@ public class SyncFixture : IAsyncLifetime
     /// </summary>
     protected Dictionary<string, string?> WorkerSettings { get; } = new()
     {
-        ["Salesforce:UseFake"] = "false", // the real OAuth + REST client, over HTTP to the mock org
         ["Salesforce:ClientId"] = "fake-client",
         ["Salesforce:ClientSecret"] = "fake-secret",
         ["Sync:Workers"] = "4",
@@ -162,7 +161,6 @@ public class SyncFixture : IAsyncLifetime
                 ["ConnectionStrings:inboxdb"] = inbox,
                 ["ConnectionStrings:kafka"] = kafka,
                 ["Salesforce:InstanceUrl"] = instanceUrl,
-                ["Salesforce:TokenUrl"] = $"{instanceUrl}/services/oauth2/token",
                 // Pods share a process here, so name them apart (the mock org counts requests per User-Agent)
                 ["Salesforce:UserAgentInstance"] = name,
                 ["ConnectionStrings:redis"] = _redis?.GetConnectionString()
