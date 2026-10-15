@@ -4,8 +4,8 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// What is sent to Salesforce and what per-record results do to an entity: one Composite request of sObject
-/// Collections creates and updates, or one Collections upsert when only one object is written and nothing links to a
-/// record created in the same request; each record saved or rejected on its own (allOrNone false).
+/// Collections creates and updates when a record links to a record created in the same request, otherwise one
+/// Collections upsert per object; each record saved or rejected on its own (allOrNone false).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class CollectionsWriteTests(SyncFixture app)
@@ -142,6 +142,28 @@ public sealed class CollectionsWriteTests(SyncFixture app)
             ("PATCH", "/services/data/v62.0/composite/sobjects/Account/External_Id__c"));
         Records(writes[1]).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "External_Id__c", "Rating");
         (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().ContainSingle("the Profile is not written");
+    }
+
+    [Fact]
+    public async Task A_change_of_the_Account_and_its_Profile_is_one_upsert_per_object_Account_first()
+    {
+        var acct = SyncFixture.NewAccountId();
+        await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "Acme", ["rating"] = "Hot" }, new JsonObject { ["tier"] = "Gold" });
+        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+
+        await app.PublishAsync(acct, 2, new JsonObject { ["name"] = "Acme", ["rating"] = "Cold" }, new JsonObject { ["tier"] = "Silver" });
+        (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().OnlyContain(r => r.Status == "done");
+
+        var writes = await app.GetWriteRequestsAsync(acct, SyncFixture.ProfileIdFor(acct));
+        writes.Should().HaveCount(3, "the creates in one Composite request, then the change in two upserts");
+        writes.Skip(1).Select(w => ((string?)w["method"], (string?)w["url"])).Should().Equal(
+            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/External_Id__c"),
+            ("PATCH", "/services/data/v62.0/composite/sobjects/Profile__c/External_Id__c"));
+        Records(writes[1]).Single(r => (string?)r["External_Id__c"] == acct).Select(kv => kv.Key).Should()
+            .BeEquivalentTo("attributes", "External_Id__c", "Rating");
+        Records(writes[2]).Single(r => (string?)r["External_Id__c"] == SyncFixture.ProfileIdFor(acct)).Select(kv => kv.Key).Should()
+            .BeEquivalentTo("attributes", "External_Id__c", "Tier__c");
+        ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Tier__c"]).Should().Be("Silver");
     }
 
     private static List<JsonObject> Records(JsonNode collection)

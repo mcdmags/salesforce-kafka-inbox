@@ -21,9 +21,10 @@ namespace SalesforceSync.Sync;
 /// record); the others are superseded, and so is the newest if it is not newer than what was already synced. Arrival
 /// order plays no part, so events may come out of order, over any partitions. An event that can't be read or
 /// mapped is dead-lettered on its own.</item>
-/// <item>Writes the units to Salesforce in 2 API calls (<see cref="WriteToSalesforceAsync"/>), giving up before the
-/// lease runs out: one Composite request reads the current records, one writes what differs with sObject Collections
-/// (a Composite request, or a Collections upsert when every write is of one object and none needs a reference).</item>
+/// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
+/// one Composite request reads the current records, then what differs is written with sObject Collections: one
+/// Composite request when a write needs a reference to a record created with it, else one Collections upsert per
+/// object (Account updates and Profile updates: 2 calls).</item>
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
 /// every claimed event is held (the write's outcome is unknown), deferred (rate limited) or retried.</item>
@@ -122,9 +123,9 @@ public sealed class SalesforceBatchUpsertService(
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // A request failed that Salesforce provably did not apply (describe, the read or a write): every entity is
-            // retried. Records that earlier write requests of the batch saved are safe: the retry reads them and
-            // writes only what still differs. Shutdown (ct) is not caught: the failed request wrote nothing, and the
-            // lease simply expires.
+            // retried. Records that earlier write calls of the batch saved (an earlier request, or another object's
+            // upsert) are safe: the retry reads them and writes only what still differs. Shutdown (ct) is not caught:
+            // the failed request wrote nothing, and the lease simply expires.
             log.LogError(ex, "{Type} batch failed", strategy.EntityType);
             await inbox.FailAllAsync(claim, ex.Message, ex is SalesforceQueryException q ? q.Errors.FirstOrDefault()?.Code : null, ct);
             return claim.Events.Count;
@@ -137,15 +138,17 @@ public sealed class SalesforceBatchUpsertService(
     }
 
     /// <summary>
-    /// The Salesforce half of a batch, for any sObjects, in two API calls: one Composite request reads the current
-    /// records, one writes what differs with sObject Collections (more than 5 collections are split over further
-    /// requests; a request whose writes are all of one object and need no reference is sent as a Collections upsert).
-    /// Returns one outcome per unit. Nothing here touches the inbox.
+    /// The Salesforce half of a batch, for any sObjects: one Composite request reads the current records, then what
+    /// differs is written with sObject Collections. A write request (more than 5 collections are split over further
+    /// requests) whose writes need a reference is one Composite request; any other is sent as one Collections upsert
+    /// per object and 200 records, one call after another. Returns one outcome per unit. Nothing here touches the inbox.
     /// </summary>
     /// <remarks>
-    /// A write request that fails as a whole (the call, not records in it) throws, and the caller fails, holds or
-    /// defers the whole claim, even when earlier requests of the batch were saved: the retry diffs against Salesforce
-    /// again, so what they saved is not written twice.
+    /// A write call that fails as a whole (the call, not records in it) throws, and the caller fails, holds or defers
+    /// the whole claim, even when earlier calls of the batch were saved (another object's upsert, or an earlier
+    /// request): the outcome of the failed call decides, so an unknown one holds every claimed entity. Nothing earlier
+    /// calls learned is recorded, and nothing needs to be: every write is matched by Id or external id, so the retry
+    /// reads Salesforce, finds what they saved and writes only what still differs.
     /// </remarks>
     /// <param name="units">At most <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
     /// <param name="queries">The strategy's reads: the units' records and the records their lookups point at.</param>
@@ -185,14 +188,15 @@ public sealed class SalesforceBatchUpsertService(
         var plan = WritePlanner.Plan(normalized, current);
         results.AddRange(plan.NotSent);
 
-        // 5. Send: normally one call. A request that links a new child to its new parent (@{reference}) is a Composite
-        // request, all its other writes included; so is one that writes several objects. Otherwise (one object, no
-        // reference, e.g. accounts whose Profiles are unchanged) it is a plain Collections upsert by external id.
-        // 6. Per-record results -> one outcome per unit, the same way for both.
+        // 5. Send. A request that links a new child to its new parent (@{reference}) is one Composite request, all its
+        // other writes included. Otherwise it is one Collections upsert by external id per object (Accounts, then
+        // their Profiles), each a call of its own through the same rate limiter.
+        // 6. Per-record results -> one outcome per unit, the same way for both; a unit with writes in several upserts
+        // gets one outcome from all of them, like one from several subrequests.
         foreach (var request in plan.Requests)
         {
-            results.AddRange(request.AsUpsert() is { } upsert
-                ? _interpreter.Interpret([(upsert.ReferenceId, upsert.Writes)], request.Units, [await UpsertAsync(upsert, ct)])
+            results.AddRange(request.AsUpserts() is { } upserts
+                ? _interpreter.Interpret([.. upserts.Select(u => (u.ReferenceId, u.Writes))], request.Units, await UpsertAsync(upserts, ct))
                 : _interpreter.Interpret(request, await SendAsync(request, ct)));
         }
 
@@ -272,11 +276,20 @@ public sealed class SalesforceBatchUpsertService(
         return WriteAsync(() => salesforce.SendCollectionsAsync(request.BuildRequests(), ct));
     }
 
-    /// <summary>The call's per-record results, filed under its reference id like a Composite subrequest's.</summary>
-    private async Task<CollectionResult> UpsertAsync(UpsertCall call, CancellationToken ct)
+    /// <summary>
+    /// The calls one after another, each one's per-record results filed under its reference id like a Composite
+    /// subrequest's. The first call that fails as a whole throws, and the later ones are not sent.
+    /// </summary>
+    private async Task<List<CollectionResult>> UpsertAsync(IReadOnlyList<UpsertCall> calls, CancellationToken ct)
     {
-        var records = await WriteAsync(() => salesforce.UpsertAsync(call.SObject, call.ExternalIdField, call.Bodies(), ct));
-        return new CollectionResult(call.ReferenceId, records, []);
+        var answers = new List<CollectionResult>(calls.Count);
+        foreach (var call in calls)
+        {
+            var records = await WriteAsync(() => salesforce.UpsertAsync(call.SObject, call.ExternalIdField, call.Bodies(), ct));
+            answers.Add(new CollectionResult(call.ReferenceId, records, []));
+        }
+
+        return answers;
     }
 
     private static async Task<T> WriteAsync<T>(Func<Task<T>> write)

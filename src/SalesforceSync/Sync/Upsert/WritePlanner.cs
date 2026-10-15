@@ -4,13 +4,17 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync.Upsert;
 
 /// <summary>What to do with a batch after the read.</summary>
-/// <param name="Requests">The Composite requests to send, each with its units and their writes by collection.</param>
+/// <param name="Requests">
+/// The write requests, each with its units and their writes by collection: sent as one Composite request, or as one
+/// Collections upsert per object when no write needs a reference (<see cref="CompositeWrite.AsUpserts"/>).
+/// </param>
 /// <param name="NotSent">The units that won't be sent, with their outcome: unchanged, rejected, too large, or waiting for a lookup target.</param>
 internal sealed record WritePlan(IReadOnlyList<CompositeWrite> Requests, IReadOnlyList<UpsertResult> NotSent);
 
 /// <summary>
 /// One sObject Collections upsert (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>): up to 200 records
-/// of one object, matched by their external id. Not a Composite request: one call of its own.
+/// of one object, matched by their external id. Not a Composite request: one call of its own, one per object of a
+/// request without references.
 /// </summary>
 internal sealed record UpsertCall(string ReferenceId, string SObject, string ExternalIdField, List<PlannedWrite> Writes)
 {
