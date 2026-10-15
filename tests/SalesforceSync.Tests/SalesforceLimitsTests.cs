@@ -231,6 +231,17 @@ public sealed class SalesforceLimitsTests
         new SyncOptionsValidator().Validate(null, new SyncOptions()).Succeeded.Should().BeTrue();
     }
 
+    [Fact]
+    public void Coalesce_delay_must_be_at_least_zero_and_less_than_the_lease()
+    {
+        var validator = new SyncOptionsValidator();
+        validator.Validate(null, new SyncOptions { CoalesceDelay = TimeSpan.FromMilliseconds(-1) })
+            .FailureMessage.Should().Contain("CoalesceDelay");
+        validator.Validate(null, new SyncOptions { CoalesceDelay = new SyncOptions().Lease })
+            .FailureMessage.Should().Contain("CoalesceDelay");
+        validator.Validate(null, new SyncOptions { CoalesceDelay = TimeSpan.Zero }).Succeeded.Should().BeTrue();
+    }
+
     /// <summary>The worker's default allocation (appsettings.json).</summary>
     private static SalesforceLimitsOptions Limits(int concurrentLongRunningLimit = 25)
     {
