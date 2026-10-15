@@ -23,6 +23,8 @@ public class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(
 
     public DbSet<AccountRelationshipInboxRow> AccountRelationshipInbox => Set<AccountRelationshipInboxRow>();
 
+    public DbSet<ContactInboxRow> ContactInbox => Set<ContactInboxRow>();
+
     public DbSet<SyncStateRow> SyncState => Set<SyncStateRow>();
 
     /// <summary>The tables of all inbox row types, as the model names them.</summary>
@@ -57,6 +59,7 @@ public class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(
         modelBuilder.Ignore<InboxRow>();
         ConfigureInbox(modelBuilder.Entity<AccountInboxRow>(), "sf_account_inbox");
         ConfigureInbox(modelBuilder.Entity<AccountRelationshipInboxRow>(), "sf_account_relationship_inbox");
+        ConfigureInbox(modelBuilder.Entity<ContactInboxRow>(), "sf_contact_inbox");
 
         modelBuilder.Entity<SyncStateRow>(e =>
         {

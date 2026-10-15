@@ -222,6 +222,7 @@ public static class SyncServiceCollectionExtensions
         AddEntitySync<AccountEvent, AccountInboxRow>(services, AccountSync.Strategy, AccountSync.DefaultTopic);
         AddEntitySync<AccountRelationshipEvent, AccountRelationshipInboxRow>(services,
             AccountRelationshipSync.Strategy, AccountRelationshipSync.DefaultTopic);
+        AddEntitySync<ContactEvent, ContactInboxRow>(services, ContactSync.Strategy, ContactSync.DefaultTopic);
         return services;
     }
 

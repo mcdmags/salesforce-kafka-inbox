@@ -8,17 +8,20 @@ namespace SalesforceSync.IntegrationTests;
 [Collection(SyncCollection.Name)]
 public sealed class SchemaTests(SyncFixture app)
 {
-    private static readonly string[] InboxTables = [SyncFixture.InboxTable(), SyncFixture.InboxTable(SyncFixture.Relationships)];
+    private static readonly string[] InboxTables =
+        [SyncFixture.InboxTable(), SyncFixture.InboxTable(SyncFixture.Relationships), SyncFixture.InboxTable(SyncFixture.Contacts)];
 
     [Fact]
     public async Task Startup_created_one_inbox_table_per_object_type_and_reapplying_changes_nothing()
     {
         // The worker already applied the schema at startup; a restart against a persisted volume applies it again
         var before = await TablesAndIndexesAsync();
-        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_sync_state", "sf_rate_limit", "sf_api_usage"]);
+        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_contact_inbox", "sf_sync_state", "sf_rate_limit",
+            "sf_api_usage"]);
         before.Should().Contain([
             "sf_account_inbox_ready", "sf_account_inbox_pending", "sf_account_inbox_leased", "sf_account_inbox_pkey",
-            "sf_account_relationship_inbox_ready", "sf_account_relationship_inbox_pending", "sf_account_relationship_inbox_leased"]);
+            "sf_account_relationship_inbox_ready", "sf_account_relationship_inbox_pending", "sf_account_relationship_inbox_leased",
+            "sf_contact_inbox_ready", "sf_contact_inbox_pending", "sf_contact_inbox_leased"]);
         before.Should().NotContain("sf_inbox", "there is no shared inbox any more");
 
         await InboxSchema.EnsureCreatedAsync(app.Contexts, InboxTables);
@@ -28,7 +31,7 @@ public sealed class SchemaTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Both_inboxes_have_the_same_columns_and_none_for_the_event()
+    public async Task Every_inbox_has_the_same_columns_and_none_for_the_event()
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         async Task<List<string>> Columns(string table)
@@ -43,6 +46,7 @@ public sealed class SchemaTests(SyncFixture app)
             "id", "entity_id", "payload", "status", "retry_count", "last_updated", "last_error", "last_error_code",
             "next_attempt_at", "locked_until", "lock_token", "received_at");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
+        (await Columns(SyncFixture.InboxTable(SyncFixture.Contacts))).Should().Equal(account);
         (await conn.ExecuteScalarAsync<long>("select count(*) from pg_proc where proname like 'sf\\_event\\_%'"))
             .Should().Be(0, "no SQL function reads inside an event");
     }
@@ -78,7 +82,8 @@ public sealed class SchemaTests(SyncFixture app)
         }
 
         mappedByTable[SyncFixture.InboxTable()].Should().Equal(mappedByTable[SyncFixture.InboxTable(SyncFixture.Relationships)],
-            "both inboxes have exactly the same fields");
+            "every inbox has exactly the same fields");
+        mappedByTable[SyncFixture.InboxTable()].Should().Equal(mappedByTable[SyncFixture.InboxTable(SyncFixture.Contacts)]);
         db.InboxTables.Should().BeEquivalentTo(InboxTables);
     }
 

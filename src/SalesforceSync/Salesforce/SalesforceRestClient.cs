@@ -46,7 +46,7 @@ public sealed class SalesforceRestClient(HttpClient http)
         var body = await res.Content.ReadFromJsonAsync<DescribeBody>(Json, ct)
                    ?? throw new InvalidOperationException($"Empty describe response for {sobject}");
         return new DescribeResult(new SObjectSchema(body.Name, body.Fields.Select(f => new SalesforceField(
-            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable, f.Digits)),
+            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable, f.Digits, f.RelationshipName)),
             body.RecordTypeInfos));
     }
 
@@ -143,6 +143,32 @@ public sealed class SalesforceRestClient(HttpClient http)
         })];
     }
 
+    /// <summary>
+    /// sObject Collections upsert: up to 200 records of one object in one call, each created or updated by its
+    /// <paramref name="externalIdField"/> (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>, each record
+    /// <c>{ "attributes": { "type": ... }, externalIdField: ..., field: value, ... }</c>). Not a Composite request: one
+    /// call of its own, so no references to other requests' results. <c>allOrNone: false</c>: every record succeeds or
+    /// fails on its own. A lookup can be set by the parent's external id through the field's relationship,
+    /// <c>"Account": { "External_Id__c": "A1" }</c>.
+    /// </summary>
+    /// <returns>One result per record, in request order, with <c>created</c> set.</returns>
+    public async Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdField,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> records, CancellationToken ct)
+    {
+        if (records.Count is 0 or > MaxCollectionRecords)
+        {
+            throw new ArgumentOutOfRangeException(nameof(records), $"{records.Count} records; an upsert takes 1 to {MaxCollectionRecords}");
+        }
+
+        using var res = await http.PatchAsJsonAsync($"{DataPath}/composite/sobjects/{sobject}/{externalIdField}",
+            new { allOrNone = false, records }, Json, ct);
+        await EnsureSuccessAsync(res, ct);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
+        return body.ValueKind == JsonValueKind.Array
+            ? [.. body.EnumerateArray().Select(ParseRecordResult)]
+            : throw new InvalidOperationException($"Upsert of {sobject} answered without per-record results");
+    }
+
     /// <summary>Posts a Composite request and returns its subresponses, in request order.</summary>
     private async Task<List<SubResponse>> PostCompositeAsync(object payload, CancellationToken ct)
     {
@@ -178,7 +204,10 @@ public sealed class SalesforceRestClient(HttpClient http)
         record.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
         record.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
             ? errors.EnumerateArray().Select(e => ParseError(null, e, "statusCode")).ToList()
-            : []);
+            : [],
+        record.TryGetProperty("created", out var created) && created.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? created.GetBoolean()
+            : null);
     }
 
     /// <param name="codeProperty">"errorCode" in an error response, "statusCode" in a collection's per-record errors.</param>
@@ -213,7 +242,7 @@ public sealed class SalesforceRestClient(HttpClient http)
 
     private sealed record DescribeBody(string Name, List<DescribeField> Fields, List<SalesforceRecordType>? RecordTypeInfos);
     private sealed record DescribeField(string Name, string Type, int Length, int Precision, int Scale,
-        bool Createable, bool Updateable, bool Nillable, int Digits);
+        bool Createable, bool Updateable, bool Nillable, int Digits, string? RelationshipName);
     private sealed record CompositeBody(List<SubResponse> CompositeResponse);
     private sealed record QueryPage(List<JsonElement> Records, string? NextRecordsUrl);
     private sealed record SubResponse(string ReferenceId, int HttpStatusCode, JsonElement Body);
@@ -229,7 +258,8 @@ public sealed record CompositeQuery(string ReferenceId, string Soql);
 public sealed record CollectionRequest(string ReferenceId, bool Create, IReadOnlyList<IReadOnlyDictionary<string, object?>> Records);
 
 /// <summary>One record's result within a collection, in request order.</summary>
-public sealed record RecordResult(bool Success, string? Id, IReadOnlyList<SalesforceError> Errors);
+/// <param name="Created">Upserts only: whether the record was created (true) or updated (false).</param>
+public sealed record RecordResult(bool Success, string? Id, IReadOnlyList<SalesforceError> Errors, bool? Created = null);
 
 /// <param name="Records">Null when the subrequest failed as a whole (see <paramref name="Errors"/>).</param>
 public sealed record CollectionResult(string ReferenceId, IReadOnlyList<RecordResult>? Records, IReadOnlyList<SalesforceError> Errors);

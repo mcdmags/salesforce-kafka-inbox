@@ -14,7 +14,17 @@ public sealed record FakeField(
     bool Updateable = true,
     bool Nillable = true,
     string? ReferenceTo = null,
-    int Digits = 0);
+    int Digits = 0)
+{
+    /// <summary>
+    /// A reference field's relationship name, by Salesforce's convention: <c>AccountId</c> -> <c>Account</c>,
+    /// <c>Account__c</c> -> <c>Account__r</c>. A write can set the field through it by the parent's external id.
+    /// </summary>
+    public string? RelationshipName => Type != "reference" ? null
+        : Name.EndsWith("__c", StringComparison.Ordinal) ? $"{Name[..^3]}__r"
+        : Name.EndsWith("Id", StringComparison.Ordinal) ? Name[..^2]
+        : null;
+}
 
 /// <summary>A record type of the mock org, as Describe's <c>recordTypeInfos</c> lists it.</summary>
 public sealed record FakeRecordType(
@@ -92,6 +102,19 @@ public static class FakeSchema
                 new("Active__c", "boolean", Nillable: false),
                 new("CreatedDate", "datetime", Createable: false, Updateable: false, Nillable: false),
                 new("LastModifiedDate", "datetime", Createable: false, Updateable: false, Nillable: false)
+            ],
+            ["Contact"] =
+            [
+                new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
+                new(RecordTypeIdField, "reference", 18, ReferenceTo: "RecordType"),
+                new("External_Id__c", "string", 255),
+                new("AccountId", "reference", 18, ReferenceTo: "Account"),
+                new("FirstName", "string", 40),
+                new("LastName", "string", 80, Nillable: false),
+                new("Email", "email", 80),
+                new("Phone", "phone", 40),
+                new("CreatedDate", "datetime", Createable: false, Updateable: false, Nillable: false),
+                new("LastModifiedDate", "datetime", Createable: false, Updateable: false, Nillable: false)
             ]
         };
 
@@ -104,13 +127,15 @@ public static class FakeSchema
         {
             ["Account"] = [Master, new("Business", "Business", FakeRecords.Id18("012FAKE00000001"), Default: true)],
             ["Profile__c"] = [Master, new("Standard", "Standard", FakeRecords.Id18("012FAKE00000002"), Default: true)],
-            ["Account_Relationship__c"] = [Master, new("Standard", "Standard", FakeRecords.Id18("012FAKE00000003"), Default: true)]
+            ["Account_Relationship__c"] = [Master, new("Standard", "Standard", FakeRecords.Id18("012FAKE00000003"), Default: true)],
+            ["Contact"] = [Master, new("Standard", "Standard", FakeRecords.Id18("012FAKE00000004"), Default: true)]
         };
 
     /// <summary>The first three characters of an object's record Ids.</summary>
     private static readonly Dictionary<string, string> KeyPrefixes = new(StringComparer.OrdinalIgnoreCase)
     {
         ["Account"] = "001",
+        ["Contact"] = "003",
         ["Profile__c"] = "a00"
     };
 
@@ -143,7 +168,8 @@ public static class FakeSchema
                 ["createable"] = f.Createable,
                 ["updateable"] = f.Updateable,
                 ["nillable"] = f.Nillable,
-                ["referenceTo"] = f.ReferenceTo is null ? [] : new JsonArray(f.ReferenceTo)
+                ["referenceTo"] = f.ReferenceTo is null ? [] : new JsonArray(f.ReferenceTo),
+                ["relationshipName"] = f.RelationshipName
             })]),
             ["recordTypeInfos"] = new JsonArray([.. RecordTypes[sobject].Select(r => (JsonNode)new JsonObject
             {

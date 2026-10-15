@@ -8,9 +8,10 @@ namespace SalesforceSync.LoadGenerator;
 
 /// <summary>
 /// Publishes account change events keyed by account external id (so Kafka keeps per-account order),
-/// including rapid bursts to the same account to exercise the ordering/coalescing logic, and relationship
-/// events between accounts (keyed by relationship id), which can arrive before their accounts are synced.
-/// Events use the real envelope: <c>{ "meta": { "time": ... }, "account" | "accountRelationship": { "externalId": ..., ... } }</c>,
+/// including rapid bursts to the same account to exercise the ordering/coalescing logic, relationship events between
+/// accounts (keyed by relationship id) and contact events of accounts (keyed by contact id), which can arrive before
+/// their accounts are synced. Events use the real envelope:
+/// <c>{ "meta": { "time": ... }, "account" | "accountRelationship" | "contact": { "externalId": ..., ... } }</c>,
 /// with the source system's camelCase field names. Every event carries the full record.
 /// </summary>
 public sealed class AccountEventProducer(
@@ -29,6 +30,7 @@ public sealed class AccountEventProducer(
         var o = options.Value;
         var versions = new long[o.Accounts];
         var relationships = new HashSet<string>(StringComparer.Ordinal);
+        var contacts = new HashSet<string>(StringComparer.Ordinal);
         var random = new Random(42);
         var interval = TimeSpan.FromSeconds(1.0 / Math.Max(1, o.EventsPerSecond));
         var sent = 0L;
@@ -48,13 +50,7 @@ public sealed class AccountEventProducer(
                 var key = $"ACC-{account:D6}";
                 var value = BuildEvent(key, version, random).ToJsonString();
 
-                producer.Produce(o.Topic, new Message<string, string> { Key = key, Value = value }, report =>
-                {
-                    if (report.Error.IsError)
-                    {
-                        log.LogWarning("Produce failed: {Reason}", report.Error.Reason);
-                    }
-                });
+                Produce(o.Topic, key, value);
                 sent++;
 
                 if (o.Accounts > 1 && random.NextDouble() < o.RelationshipProbability)
@@ -74,14 +70,26 @@ public sealed class AccountEventProducer(
                             ["isActive"] = random.NextDouble() < 0.9
                         }
                     };
-                    producer.Produce(o.RelationshipTopic,
-                        new Message<string, string> { Key = relKey, Value = relationship.ToJsonString() }, report =>
+                    Produce(o.RelationshipTopic, relKey, relationship.ToJsonString());
+                }
+
+                if (random.NextDouble() < o.ContactProbability)
+                {
+                    var contactKey = $"CON-{account:D6}-{random.Next(3)}";
+                    var contact = new JsonObject
+                    {
+                        ["meta"] = Meta(inserted: contacts.Add(contactKey)),
+                        ["contact"] = new JsonObject
                         {
-                            if (report.Error.IsError)
-                            {
-                                log.LogWarning("Produce failed: {Reason}", report.Error.Reason);
-                            }
-                        });
+                            ["externalId"] = contactKey,
+                            ["accountExternalId"] = key,
+                            ["firstName"] = "Contact",
+                            ["lastName"] = contactKey,
+                            ["email"] = $"{contactKey.ToLowerInvariant()}@example.com",
+                            ["phone"] = $"+1 555 {random.Next(10_000):D4}"
+                        }
+                    };
+                    Produce(o.ContactTopic, contactKey, contact.ToJsonString());
                 }
             }
 
@@ -100,6 +108,17 @@ public sealed class AccountEventProducer(
 
         producer.Flush(TimeSpan.FromSeconds(10));
         log.LogInformation("Done: produced {Sent} events in {Elapsed}", sent, sw.Elapsed);
+    }
+
+    private void Produce(string topic, string key, string value)
+    {
+        producer.Produce(topic, new Message<string, string> { Key = key, Value = value }, report =>
+        {
+            if (report.Error.IsError)
+            {
+                log.LogWarning("Produce failed: {Reason}", report.Error.Reason);
+            }
+        });
     }
 
     private JsonObject BuildEvent(string accountKey, long version, Random random)

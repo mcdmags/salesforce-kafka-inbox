@@ -29,8 +29,10 @@ public class SyncFixture : IAsyncLifetime
 {
     public const string Topic = "account-changes";
     public const string RelationshipTopic = "account-relationship-changes";
+    public const string ContactTopic = "contact-changes";
     public const string Accounts = "account";
     public const string Relationships = "accountRelationship";
+    public const string Contacts = "contact";
 
     /// <summary>
     /// Tests think in versions (v1, v2, ...); an event's order is its meta.time, so version N is published as this
@@ -261,6 +263,18 @@ public class SyncFixture : IAsyncLifetime
         });
     }
 
+    /// <summary>Publishes a contact event, keyed by contact id.</summary>
+    public async Task PublishContactAsync(string contactKey, long version, string accountExtId, JsonObject fields)
+    {
+        var body = Body(contactKey, fields);
+        body["accountExternalId"] = accountExtId;
+        await _producer!.ProduceAsync(ContactTopic, new Message<string, string>
+        {
+            Key = contactKey,
+            Value = new JsonObject { ["meta"] = Meta(version), ["contact"] = body }.ToJsonString()
+        });
+    }
+
     /// <summary>meta of version N: its time, and by default "inserted" for version 1 and "updated" for every later one.</summary>
     public static JsonObject Meta(long version, string? type = null)
     {
@@ -291,6 +305,11 @@ public class SyncFixture : IAsyncLifetime
     public static string NewRelationshipId()
     {
         return Any.String("REL-");
+    }
+
+    public static string NewContactId()
+    {
+        return Any.String("CON-");
     }
 
     public static string ProfileIdFor(string accountExtId)
@@ -346,7 +365,12 @@ public class SyncFixture : IAsyncLifetime
     {
         // Only the model is read: nothing connects to this address
         using var model = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
-        return entityType == Relationships ? model.TableOf<AccountRelationshipInboxRow>() : model.TableOf<AccountInboxRow>();
+        return entityType switch
+        {
+            Relationships => model.TableOf<AccountRelationshipInboxRow>(),
+            Contacts => model.TableOf<ContactInboxRow>(),
+            _ => model.TableOf<AccountInboxRow>()
+        };
     }
 
     /// <summary>The account inbox through the worker's own repository, to play a worker by hand.</summary>
@@ -412,7 +436,7 @@ public class SyncFixture : IAsyncLifetime
         return Uri.TryCreate(address, UriKind.Absolute, out var uri) ? $"{uri.Host}:{uri.Port}" : address;
     }
 
-    /// <summary>Creates both topics up front (6 partitions, like production), so pods never race to auto-create them.</summary>
+    /// <summary>Creates every topic up front (6 partitions, like production), so pods never race to auto-create them.</summary>
     private static async Task EnsureTopicsAsync(string bootstrap)
     {
         using var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = bootstrap }).Build();
@@ -421,7 +445,8 @@ public class SyncFixture : IAsyncLifetime
             await admin.CreateTopicsAsync(
             [
                 new TopicSpecification { Name = Topic, NumPartitions = 6, ReplicationFactor = 1 },
-                new TopicSpecification { Name = RelationshipTopic, NumPartitions = 6, ReplicationFactor = 1 }
+                new TopicSpecification { Name = RelationshipTopic, NumPartitions = 6, ReplicationFactor = 1 },
+                new TopicSpecification { Name = ContactTopic, NumPartitions = 6, ReplicationFactor = 1 }
             ]);
         }
         catch (CreateTopicsException ex) when (ex.Results.All(r => r.Error.Code is ErrorCode.TopicAlreadyExists or ErrorCode.NoError))

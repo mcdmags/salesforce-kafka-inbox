@@ -61,6 +61,20 @@ public sealed class MapperTests
         });
     }
 
+    [Theory, TypedAutoData]
+    public void Contact_payload_maps_field_by_field(ContactPayload payload)
+    {
+        ContactSync.ToContact(payload).Should().BeEquivalentTo(new ContactSObject
+        {
+            ExternalId = payload.ExternalId,
+            AccountExternalId = payload.AccountExternalId,
+            FirstName = payload.FirstName,
+            LastName = payload.LastName,
+            Email = payload.Email,
+            Phone = payload.Phone
+        });
+    }
+
     [Fact]
     public void Empty_payloads_map_to_empty_sObjects()
     {
@@ -68,6 +82,7 @@ public sealed class MapperTests
         AccountSync.ToAccount(new AccountPayload()).Should().BeEquivalentTo(new AccountSObject());
         AccountSync.ToProfile(new ProfilePayload()).Should().BeEquivalentTo(new ProfileSObject());
         AccountRelationshipSync.ToRelationship(new AccountRelationshipPayload()).Should().BeEquivalentTo(new AccountRelationshipSObject());
+        ContactSync.ToContact(new ContactPayload()).Should().BeEquivalentTo(new ContactSObject());
     }
 
     [Fact]
@@ -79,12 +94,14 @@ public sealed class MapperTests
     }
 
     [Theory, TypedAutoData]
-    public void Every_sObject_property_is_set_by_its_mapper(AccountPayload account, ProfilePayload profile, AccountRelationshipPayload relationship)
+    public void Every_sObject_property_is_set_by_its_mapper(AccountPayload account, ProfilePayload profile, AccountRelationshipPayload relationship,
+        ContactPayload contact)
     {
         // Guards the tests above too: with every payload property filled, nothing mapped may be left empty
         NullProperties(AccountSync.ToAccount(account)).Should().BeEmpty();
         NullProperties(AccountSync.ToProfile(profile)).Should().Equal(nameof(ProfileSObject.AccountExternalId));
         NullProperties(AccountRelationshipSync.ToRelationship(relationship)).Should().BeEmpty();
+        NullProperties(ContactSync.ToContact(contact)).Should().BeEmpty();
     }
 
     private static IEnumerable<string> NullProperties(object sobject)

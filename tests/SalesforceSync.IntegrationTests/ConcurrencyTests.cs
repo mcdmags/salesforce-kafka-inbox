@@ -118,7 +118,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         clients.Should().NotBeNull();
         foreach (var (client, requests) in clients!)
         {
-            output.WriteLine($"{client}: {requests} composite requests");
+            output.WriteLine($"{client}: {requests} composite requests and upserts");
         }
 
         clients.Should().HaveCount(MultiPodFixture.PodCount, "every pod should have written to Salesforce");
