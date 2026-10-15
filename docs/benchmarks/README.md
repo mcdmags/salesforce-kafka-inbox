@@ -8,6 +8,9 @@ These numbers come from the claim and outcome tuning merged in PR #13 and re-mea
 (PR #12). Later changes (PR #14 formatting, PR #15 simplification of the write path) do not touch the inbox SQL;
 they can change the API call counts of the drain benchmarks, so re-run them before comparing call counts.
 
+[Latest run](#latest-run-main-at-7a145b0-after-the-simplification) re-measures everything on `main` at 7a145b0, after
+the record types, the shared Describe cache and the simplification into fewer files (PR #20 to #24).
+
 [Sequential, limiter-only vs full](#sequential-limiter-only-vs-full) compares this version with one that has no parallel
 processing or race-condition handling, measured on `main` at 01b53b3.
 
@@ -290,6 +293,58 @@ median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest sing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. Lower
 `Sync:MaxEventsPerEntity` to make those claims cheaper, at the price of more Salesforce calls per event. A
 claim-wide row budget was not added: it would split deep backlogs into more, smaller writes.
+
+## Latest run: main at 7a145b0, after the simplification
+
+Everything re-run on `main` at 7a145b0 (PR #24): the record types and the Describe cache shared through Redis
+(PR #20), the record type rejection fixes (PR #21, #22) and the simplification into fewer files and types (PR #23,
+no behaviour change). Same machine and Postgres settings as above (Postgres 17 in its own container), load average 4 to 8,
+quieter than the runs below, so the times are lower mainly because of the machine. 37 benchmarks, 11 minutes.
+
+**Correctness**: 196 iterations, 0 failures: 0 overlapping claims, 0 accounts not at their newest version, 0 wrong
+values, 0 write-history regressions, 0 failed records.
+
+**Same work**: with one worker the run is deterministic, and the counts equal the EF Core run below exactly
+(100 accounts: 26 API calls, 1,138 records, 878 entity syncs, 928 claims, 50 retries; 1,000 accounts: 58, 2,592,
+1,618, 2,114, 496). With several workers the counts depend on timing and are in the same ranges.
+
+Preloaded drain, 5,000 events, 0 ms latency (API calls, write requests, claims and retries are the median over
+both latencies of the iterations without a Describe):
+
+| W | P | Accounts | Mean | API calls | Write req | Claims | Retries | EF Core run mean |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 704.5 ms | 26 | 13 | 928 | 50 | 1,590.0 ms |
+| 1 | 1 | 1,000 | 1,668.1 ms | 58 | 29 | 2,114 | 496 | 3,726.7 ms |
+| 1 | 3 | 100 | 490.9 ms | 35 | 17 | 987 | 109 | 458.0 ms |
+| 1 | 3 | 1,000 | 969.0 ms | 56 | 28 | 2,099 | 481 | 1,724.9 ms |
+| 4 | 1 | 100 | 557.2 ms | 37 | 17 | 1,097 | 219 | 1,178.8 ms |
+| 4 | 1 | 1,000 | 782.3 ms | 56 | 27 | 2,150 | 532 | 1,989.7 ms |
+| 4 | 3 | 100 | 847.6 ms | 46 | 18 | 1,524 | 646 | 1,130.5 ms |
+| 4 | 3 | 1,000 | 823.7 ms | 60 | 27 | 2,202 | 584 | 1,502.9 ms |
+| 8 | 1 | 100 | 648.2 ms | 40 | 17 | 1,328 | 450 | 837.2 ms |
+| 8 | 1 | 1,000 | 830.7 ms | 58 | 27 | 2,138 | 520 | 1,934.9 ms |
+| 8 | 3 | 100 | 1,255.3 ms | 62 | 26 | 1,623 | 745 | 1,750.5 ms |
+| 8 | 3 | 1,000 | 1,115.3 ms | 74 | 32 | 2,682 | 1,064 | 2,138.4 ms |
+
+With 25 ms latency the means were 1,407.7 / 3,159.9 ms (1×1), 754.0 / 1,280.8 ms (1×3), 771.3 / 1,131.9 ms (4×1),
+897.1 / 869.8 ms (4×3), 881.2 / 858.2 ms (8×1) and 1,328.4 / 1,116.6 ms (8×3) for 100 / 1,000 accounts.
+
+Streaming (50 accounts, 5 ms latency): 1.249 s (4×1), 1.302 s (4×3), 1.188 s (8×1), 1.808 s (8×3); API calls 201,
+292, 272 and 328.
+
+Micro benchmarks:
+
+| Method | Mean | Allocated |
+|---|--:|--:|
+| ParseLimitHeader | 1,134.14 ns | 2832 B |
+| CoalesceTenEvents | 32.91 ns | - |
+| PrepareTenEvents | 23,753.68 ns | 20368 B |
+| ReadAndValidateEvent | 2,132.39 ns | 1624 B |
+| MapAccountEvent | 2,721.06 ns | 3632 B |
+| MapPayloadToSObject | 41.43 ns | 200 B |
+| MapSObjectToRecord | 423.85 ns | 896 B |
+| DiffNumber | 206.45 ns | 32 B |
+| DiffDateTime | 413.62 ns | 192 B |
 
 ## Drain benchmarks
 
