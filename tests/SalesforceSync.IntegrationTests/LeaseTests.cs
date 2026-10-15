@@ -1,6 +1,5 @@
 using System.Text.Json.Nodes;
 using SalesforceSync.Inbox;
-using SalesforceSync.Sync;
 
 namespace SalesforceSync.IntegrationTests;
 
@@ -63,7 +62,7 @@ public sealed class LeaseTests(SyncFixture app)
         // The first worker comes back and tries everything it could do with its old token
         var farFuture = watermark!.Value + 1_000_000_000;
         var errors = $$"""{ "{{claimed[0]}}": ["late failure", "UNABLE_TO_LOCK_ROW"] }""";
-        (await ExecuteAsync(Sql.MarkSynced, new { entityType = AccountSync.Type, token = stale, entityIds = new[] { acct }, times = new[] { farFuture } }))
+        (await ExecuteAsync(Sql.Done, new { ids = claimed, token = stale, times = TimesJson(claimed[0], farFuture) }))
             .Should().Be(0, "the watermark only moves for the worker that holds the lease");
         (await ExecuteAsync(Sql.Fail, new { ids = claimed, token = stale, errors, maxRetries = 8, baseDelaySecs = 1d, maxDelaySecs = 1d })).Should().Be(0);
         (await ExecuteAsync(Sql.Dead, new { ids = claimed, token = stale, errors })).Should().Be(0);
@@ -80,6 +79,27 @@ public sealed class LeaseTests(SyncFixture app)
         (await app.GetInboxAsync(acct)).Should().Equal((1L, "done"));
         (await app.GetInboxRowsAsync(acct)).Should().Equal(rowsBefore, "the row is exactly as the worker that took over left it");
         (await WatermarkAsync(acct)).Should().Be(watermark, "the worker that took over is unaffected");
+    }
+
+    [Fact]
+    public async Task Done_completes_a_row_and_sets_its_watermark_only_under_its_lease_and_only_once()
+    {
+        var acct = SyncFixture.NewAccountId();
+        var token = Guid.NewGuid();
+        var claimed = await InsertAndClaimAsync(acct, token, TimeSpan.FromMinutes(1),
+            SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []));
+        var times = TimesJson(claimed[0], 1_000_000);
+
+        (await ExecuteAsync(Sql.Done, new { ids = claimed, token = Guid.NewGuid(), times })).Should().Be(0, "a lost lease completes nothing");
+        (await WatermarkAsync(acct)).Should().BeNull();
+
+        (await ExecuteAsync(Sql.Done, new { ids = claimed, token, times })).Should().Be(1);
+        (await ExecuteAsync(Sql.Done, new { ids = claimed, token, times })).Should().Be(0,
+            "repeated after a commit whose outcome was unknown, it finds the lease already released");
+
+        var row = (await app.GetInboxRowsAsync(acct)).Should().ContainSingle().Subject;
+        row.Should().Match<InboxRow>(r => r.Status == "done" && r.LockToken == null && r.LockedUntil == null);
+        (await WatermarkAsync(acct)).Should().Be(1_000_000);
     }
 
     [Fact]
@@ -117,7 +137,7 @@ public sealed class LeaseTests(SyncFixture app)
 
     private static InboxClaim ClaimOf(string acct, Guid token, long[] ids)
     {
-        return new InboxClaim(AccountSync.Type, token, [.. ids.Select(id => new InboxEvent(id, acct, "{}", 1))], new Dictionary<string, long>());
+        return new InboxClaim(token, [.. ids.Select(id => new InboxEvent(id, acct, "{}", 1))], new Dictionary<string, long>());
     }
 
     private static BatchOutcomes Outcomes(long[] released)
@@ -131,10 +151,17 @@ public sealed class LeaseTests(SyncFixture app)
         return await conn.ExecuteAsync(sql, args);
     }
 
+    /// <summary>The account's newest synced_time over its done rows.</summary>
     private async Task<long?> WatermarkAsync(string acct)
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         return await conn.ExecuteScalarAsync<long?>(
-            "select synced_time from sf_sync_state where entity_type = @type and entity_id = @acct", new { type = AccountSync.Type, acct });
+            $"select max(synced_time) from {Sql.Table} where entity_id = @acct and status = 'done'", new { acct });
+    }
+
+    /// <summary>@times of InboxSql.Done for one row.</summary>
+    private static string TimesJson(long id, long time)
+    {
+        return $$"""{ "{{id}}": {{time}} }""";
     }
 }

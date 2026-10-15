@@ -14,7 +14,7 @@ namespace SalesforceSync.Sync;
 /// field: they go through <paramref name="EntityId"/> and <paramref name="Meta"/>.
 /// </summary>
 /// <typeparam name="TEvent">The inbox payload (the whole event envelope).</typeparam>
-/// <param name="EntityType">The strategy's name, e.g. "account": the key of its watermarks and of its topic setting.</param>
+/// <param name="EntityType">The strategy's name, e.g. "account": the key of its topic setting, and how logs name it.</param>
 /// <param name="EntityId">The id of the entity an event is about (e.g. account.externalId), or null if it has none.</param>
 /// <param name="Meta">The event's meta, or null if it has none: when the event happened (meta.time, which must have an
 /// explicit offset) and what the source says happened (meta.type: inserted or updated). The type is only checked at

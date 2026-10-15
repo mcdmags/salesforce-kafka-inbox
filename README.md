@@ -38,7 +38,7 @@ each contact as a **Contact** of its Account, which may not be synced yet either
 | Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to that object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, before storing its offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. A redelivery is simply stored again and ends `superseded`. A message that isn't a valid event of its topic's type (see below) is logged with its offset and skipped, rather than blocking its partition. |
 | Ordering across parallel batches | Workers claim **entities, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each entity's *head* (oldest pending) row plus a per-entity advisory **claim lock** for the claim transaction, only for entities with nothing in flight, then lease the entity's rows (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same entity. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
 | Bursts of updates to one entity | Pending events for an entity are **coalesced**: every event carries the full record, so of the events claimed together only the one with the newest `meta.time` is written (ties: the one stored later) and the others are marked `superseded`. Five updates in five seconds become one Salesforce write with the newest data. At most `Sync:MaxEventsPerEntity` (20) events of an entity are taken per claim, so a deep backlog is never leased or loaded whole. |
-| Late or replayed older events | **Sync watermark in Postgres**: `sf_sync_state` holds the newest `meta.time` synced per entity, advanced in the same transaction that completes the events and only while the worker still holds the lease. A claimed event at or before the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
+| Late or replayed older events | **Sync watermark in the inbox**: the row of the event written to Salesforce ends `done` with that event's `meta.time` in `synced_time`, in the same statement that completes it and only while the worker still holds the lease; an entity's watermark is the newest `synced_time` of its done rows. A claimed event at or before the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this, and no table mixes types of event. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement and the watermark are conditional on its `lock_token`. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
 | Records that belong together | **One Composite request of sObject Collections** creates and updates: Accounts first, then their Profiles (or one plain Collections upsert when only one object is written, see below). Each record is saved or rejected on its own (`allOrNone: false`); the entity is done, and its watermark advanced, only when all of its records are in. A new Profile points at its new Account by reference (`@{Account_create[i].id}`); existing records (e.g. a relationship's Accounts) are linked by the Id read from Salesforce. See [Writing to Salesforce](#writing-to-salesforce). |
@@ -92,8 +92,8 @@ and `SchemaTests` checks the model against the real tables column by column. Eve
 they all live on the abstract `InboxRow`; `AccountInboxRow`, `AccountRelationshipInboxRow` and `ContactInboxRow` only
 name their tables (independent entity types, no shared table), and the one `InboxRepository<TRow>` (`IRepository<TRow>`,
 registered as an open generic) serves them all. The table name comes from the EF model. What EF can express is LINQ (`Add` + `SaveChanges`
-for an event, `ExecuteUpdate` for the lease-conditional outcomes done, superseded, released, held and deferred, a query for
-the watermarks); the claim, `ReleaseLostClaims`, `MarkSynced`, fail and dead-letter, and the rate limiter's statements are
+for an event, `ExecuteUpdate` for the lease-conditional outcomes superseded, released, held and deferred); the claim, the
+watermark read (`SyncedTimes`), `ReleaseLostClaims`, done, fail and dead-letter, and the rate limiter's statements are
 the SQL texts of `InboxSql` and `RateLimitSql` run unchanged through `Database.SqlQueryRaw` / `ExecuteSqlRaw` with named
 `NpgsqlParameter`s, since a recursive CTE with `FOR UPDATE SKIP LOCKED` or `UPDATE ... RETURNING` has no LINQ form.
 
@@ -280,19 +280,23 @@ create table if not exists sf_account_inbox (       -- and sf_account_relationsh
   next_attempt_at timestamptz not null default now(),  -- not claimable before; while leased, the end of the lease
   locked_until    timestamptz,                   -- lease while a worker processes the row
   lock_token      uuid,                          -- which worker holds the lease
-  received_at     timestamptz not null default now()
+  received_at     timestamptz not null default now(),
+  synced_time     bigint                         -- done rows only: the synced event's meta.time, microseconds since the epoch
 );
 create index if not exists sf_account_inbox_ready   on sf_account_inbox (next_attempt_at, id)     where status = 'pending';
 create index if not exists sf_account_inbox_pending on sf_account_inbox (entity_id, id)           where status = 'pending';
 create index if not exists sf_account_inbox_leased  on sf_account_inbox (entity_id, locked_until) where locked_until is not null;
+create index if not exists sf_account_inbox_synced  on sf_account_inbox (entity_id, synced_time)  where status = 'done';
 alter table sf_account_inbox set (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000);
 ```
 
 There is no entity type, version or time column and **no SQL that names a JSON field**: the event's field names are
 yours to change in the payload classes. There is also no uniqueness rule: a Kafka redelivery becomes a second row,
 which ends `superseded` (its time is not newer than what was synced); a rule on the payload would wrongly drop the
-last event of A → B → A. `sf_sync_state (entity_type, entity_id, synced_time)` is the sync's own bookkeeping: the
-newest synced `meta.time` per entity in microseconds, supplied by C#.
+last event of A → B → A. The sync's own bookkeeping is in the same table: `synced_time` is set only on a row that ends
+`done`, to its event's `meta.time` in microseconds (supplied by C#), and an entity's watermark is the newest of those,
+read with one probe of the synced index per entity. Every table holds one type of event; nothing is shared between
+types.
 
 **Claim** (`InboxSql`, the same statements for every table). One statement picks up to `Sync:BatchSize` entities and
 locks them; a second leases them:
@@ -326,8 +330,8 @@ and outcome costs are in [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
 Then, per claimed entity, in C#: deserialize its rows, keep the one with the newest `meta.time` (the rest are
 `superseded`), supersede that one too if it is not newer than the entity's watermark, otherwise map → write → advance
-the watermark. A row that can't be read is dead-lettered on its own (`INVALID_EVENT`). All outcome statements are
-set-based and conditional on the `lock_token`.
+the watermark (the row ends `done` with its `synced_time`, one statement for the batch). A row that can't be read is
+dead-lettered on its own (`INVALID_EVENT`). All outcome statements are set-based and conditional on the `lock_token`.
 
 **Cost.** A claim of 75 entities locks them in about 2 ms (median over 108 measured scenarios: 5,000 or 100,000
 pending rows, 100 to 5,000 entities, fresh, analyzed or stale statistics, up to 90% of entities in flight); the
@@ -338,8 +342,11 @@ more pending events each) is 20 to 40 ms, about 54 ms under load. Lower `Sync:Ma
 Salesforce calls per event.
 
 **Upgrade.** An `sf_inbox` table from an earlier version (any shape) is renamed to `sf_inbox_legacy` at startup, rows
-kept for inspection and not migrated; the `sf_event_*` SQL functions are dropped; `sf_sync_state` keeps its
-watermarks under the new column names.
+kept for inspection and not migrated; the `sf_event_*` SQL functions are dropped. The watermarks of the shared
+`sf_sync_state` table move into their objects' inboxes (`account` → `sf_account_inbox`, `accountRelationship` →
+`sf_account_relationship_inbox`, `contact` → `sf_contact_inbox`) as `done` rows with an empty payload and the
+watermark as `synced_time`, unless the inbox already has a done row at least as new; the table is then dropped. Rows
+of a type without an inbox are left, and the table with them.
 
 ```sql
 -- Dead letters of one type, by cause
@@ -369,8 +376,8 @@ or a transaction all that time.
 2. **While live.** Other workers skip the entity. This worker calls Salesforce outside any transaction and stops
    (cancels the call) at 80% of the lease, measured from the claim, so it gives up before anyone else can claim the
    entity.
-3. **Release.** The outcome transaction records done, superseded, retry, dead or hold. Every statement, the
-   watermark (`MarkSynced`) included, only touches rows `where lock_token = @token`: a worker whose lease expired and
+3. **Release.** The outcome transaction records done, superseded, retry, dead or hold. Every statement, done (which
+   also sets the watermark) included, only touches rows `where lock_token = @token`: a worker whose lease expired and
    was claimed by another changes nothing.
 4. **Crash.** Nothing to clean up. The lease expires, `next_attempt_at` has already passed, and the next claim takes
    the rows. Its read of Salesforce shows what the crashed worker did or didn't save. (A write whose outcome is
@@ -465,7 +472,7 @@ the entity were released and a newer event synced in the meantime, the late writ
 | Two workers or pods never hold the same entity at once | head row `FOR UPDATE SKIP LOCKED`, per-entity claim lock, lease on the entity's rows checked under that lock | `ConcurrencyTests.Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version` (3 pods × 8 loops, claim audit: 0 overlaps); `ClaimRaceTests` (a row committed out of id order; fails without the claim lock and lease check) |
 | An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | the claim requires the head to be due and the entity unleased | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
 | Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | newest-time coalescing + watermark | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
-| A worker whose lease expired can't record outcomes or move the watermark | every statement is conditional on `lock_token` | `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark` |
+| A worker whose lease expired can't record outcomes or move the watermark | every statement is conditional on `lock_token` | `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark`, `LeaseTests.Done_completes_a_row_and_sets_its_watermark_only_under_its_lease_and_only_once` |
 | Dropped Postgres connections cause no overlap, loss or regression | `PostgresRetryStrategy` (EF execution strategy), idempotent statements | `ConcurrencyTests.Pods_survive_their_Postgres_connections_being_dropped` |
 | A write with an unknown outcome can't be overtaken by a newer write | the hold | `UnknownOutcomeTests.Entity_is_held_after_a_write_with_an_unknown_outcome_and_ends_at_the_newest_event` |
 
@@ -909,8 +916,8 @@ tests/
 benchmarks/
   SalesforceSync.Benchmarks/      BenchmarkDotNet: real Postgres inbox, fake Salesforce HTTP
 sql/
-  schema.sql                      Inbox table template (applied once per object type) + indexes, sync watermark,
-                                  rate-limit and API usage tables (embedded, applied at worker startup)
+  schema.sql                      Inbox table template (applied once per object type, sync watermark included) +
+                                  indexes, rate-limit and API usage tables (embedded, applied at worker startup)
   claim-audit.sql                 Test/benchmark-only trigger that records every entity claim
 ```
 
@@ -988,13 +995,15 @@ with the worker's own SQL, so a lease lasts exactly as long as the test wants.
 Covered: create Account + linked Profile, a full record in which one field changed (only that field is sent), a
 field that becomes null or absent being cleared, an event without a profile leaving the Profile alone, the diff
 being taken against the record in Salesforce (a direct edit in Salesforce is corrected by the next event),
-bursts coalesced to the newest full record, stale versions superseded without a write, unchanged events skip the
+bursts coalesced to the newest full record, stale versions superseded without a write (the watermark being the newest
+`synced_time` of the entity's done rows), unchanged events skip the
 write, exactly 2 API calls per batch, a redelivered event stored again and superseded, an older event claimed with a
 newer one superseded in the same claim, A → B → A ending at A, one account's events under different or no Kafka keys
 ending at the newest `meta.time`, invalid events (no time offset, no or an unknown `meta.type`, another type's event,
 not JSON) skipped at ingest, a deep backlog taken 20 events at a time, an event waiting for its entity's lease, an
 expired worker unable to record anything, the unknown-outcome hold, every inbox table created at startup with
-identical columns, the schema being reapplied, and an earlier `sf_inbox` kept aside as `sf_inbox_legacy`. Tests
+identical columns, the schema being reapplied, an earlier `sf_inbox` kept aside as `sf_inbox_legacy`, and the
+watermarks of an earlier `sf_sync_state` moved into the inboxes. Tests
 publish version N as `meta.time` = a fixed base time + N ms, and read it back from the stored payload. Relationships
 (`RelationshipTests`): linked to two synced Accounts with only changed fields sent later; a relationship that
 arrives before its Accounts waits (`DEPENDENCY_NOT_SYNCED`, retried) and syncs once they exist; a malformed

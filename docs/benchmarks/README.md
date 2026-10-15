@@ -78,6 +78,12 @@ What changed, and why:
 - **ReleaseLostClaims** finds the claim's rows by `entity_id = any(@entityIds)` on the leased index instead of
   scanning the ready index.
 - **MarkSynced** probes one lease per entity (`order by l.entity_id, l.locked_until limit 1`).
+- **Watermark in the inbox** (after these measurements). The shared `sf_sync_state` table is gone, so every table
+  holds one type of event. `InboxSql.Done` completes the synced rows and sets their `synced_time` in one statement,
+  found by primary key under the lease token like Fail and Dead (it replaces MarkSynced and the done Complete);
+  `SyncedTimes` reads each claimed entity's watermark, its newest `synced_time`, with one backward probe of the
+  partial index `(entity_id, synced_time) where status = 'done'`. The MarkSynced, Complete and SyncedTimes rows
+  below were measured before this change and have not been re-measured.
 - **Autovacuum** on the inbox tables: `autovacuum_vacuum_scale_factor` 0.02, threshold 1000. On 200,000 rows the
   first claim after 150,000 rows finished took 187 ms before vacuum, 5 to 7 ms once vacuum ran (2 ms fully
   vacuumed).

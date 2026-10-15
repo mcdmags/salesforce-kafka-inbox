@@ -43,14 +43,10 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         await Eventually.ValueAsync(() => app.GetRecordAsync("Account", acct), a => a is not null, "the Account to be created");
         await using (var conn = await app.Db.OpenConnectionAsync())
         {
-            var (status, code, watermarks) = await conn.QuerySingleAsync<(string, string?, long)>(
-                $"""
-                select status, last_error_code,
-                       (select count(*) from sf_sync_state where entity_type = 'account' and entity_id = @acct)
-                from {SyncFixture.InboxTable()} where entity_id = @acct
-                """, new { acct });
+            var (status, code, syncedTime) = await conn.QuerySingleAsync<(string, string?, long?)>(
+                $"select status, last_error_code, synced_time from {SyncFixture.InboxTable()} where entity_id = @acct", new { acct });
             status.Should().Be("pending", "the entity is not synced while one of its records is missing");
-            watermarks.Should().Be(0, "the watermark advances only when the Account and the Profile are both in");
+            syncedTime.Should().BeNull("the watermark advances only when the Account and the Profile are both in");
             code.Should().BeOneOf("UNABLE_TO_LOCK_ROW", null);
         }
         (await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().BeNull();
@@ -61,8 +57,8 @@ public sealed class CollectionsWriteTests(SyncFixture app)
             .Should().Be((string?)(await app.GetRecordAsync("Account", acct))!["Id"]);
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("the retries had nothing left to write on the Account");
         await using var after = await app.Db.OpenConnectionAsync();
-        (await after.ExecuteScalarAsync<long>(
-            "select count(*) from sf_sync_state where entity_type = 'account' and entity_id = @acct", new { acct })).Should().Be(1);
+        (await after.ExecuteScalarAsync<long?>(
+            $"select synced_time from {SyncFixture.InboxTable()} where entity_id = @acct", new { acct })).Should().Be(SyncFixture.SyncedTime(1));
     }
 
     [Fact]

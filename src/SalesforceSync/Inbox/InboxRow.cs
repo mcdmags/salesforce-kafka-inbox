@@ -37,4 +37,10 @@ public abstract class InboxRow
     public Guid? LockToken { get; set; }
 
     public DateTimeOffset ReceivedAt { get; set; }
+
+    /// <summary>
+    /// Done rows only: the time of the event written to Salesforce, microseconds since the epoch. The newest of an
+    /// entity's is its watermark.
+    /// </summary>
+    public long? SyncedTime { get; set; }
 }
