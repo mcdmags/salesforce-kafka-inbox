@@ -66,14 +66,15 @@ internal sealed partial class CompositeWrite
     }
 
     /// <summary>
-    /// The request as sObject Collections upserts by external id, one per object (and per 200 records of it), when
-    /// none of its writes points at a record created in the same request (an upsert has no <c>@{reference}</c>): e.g.
-    /// Account updates and Profile updates are two calls, Accounts first. The calls follow the collections' order
-    /// (parents first), each record keeps its collection's order, and each carries its external id and exactly the
-    /// fields planned for it (all of a new record's, only the changed ones of an existing record; a lookup as the Id
-    /// the read found). Null when the request stays one Composite request: one write needing a reference (a new parent
-    /// and its new child) keeps the whole request Composite, writes that wouldn't need it included. Marks the writes
-    /// <see cref="PlannedWrite.ByUpsert"/>, which is how their results are read.
+    /// The request as sObject Collections upserts by external id, one per level and object (and per 200 records of
+    /// it), when none of its writes points at a record created in the same request by a lookup (an upsert has no
+    /// <c>@{reference}</c>): e.g. new or changed Accounts and their Profiles (whose foreign key holds the Account's
+    /// external id) are two calls, Accounts first. The calls follow the collections' order (parents first, so a new
+    /// parent exists before its child is sent), each record keeps its collection's order, and each carries its external
+    /// id and exactly the fields planned for it (all of a new record's, only the changed ones of an existing record; a
+    /// lookup as the Id the read found). Null when the request stays one Composite request: one write needing a
+    /// reference (a new parent and its new child linked by a lookup) keeps the whole request Composite, writes that
+    /// wouldn't need it included. Marks the writes <see cref="PlannedWrite.ByUpsert"/>, which is how their results are read.
     /// </summary>
     public List<UpsertCall>? AsUpserts()
     {
@@ -89,7 +90,7 @@ internal sealed partial class CompositeWrite
         }
 
         // The call's position makes its reference id unique, which is how its answer finds its writes
-        return [.. writes.GroupBy(w => (w.SObject, w.ExternalIdField))
+        return [.. writes.GroupBy(w => (w.Collection.Depth, w.SObject, w.ExternalIdField))
             .SelectMany(o => o.Chunk(SalesforceRestClient.MaxCollectionRecords).Select(chunk => (Object: o.Key, Writes: chunk)))
             .Select((call, i) => new UpsertCall($"{ReferenceIdFor(call.Object.SObject)}_upsert_{i}", call.Object.SObject,
                 call.Object.ExternalIdField, [.. call.Writes]))];
@@ -167,7 +168,7 @@ internal sealed partial class CompositeWrite
 internal sealed record PlannedUnit(string Key, IReadOnlyList<PlannedWrite> Writes);
 
 /// <summary>The collection a write goes into: one per level, object and verb.</summary>
-/// <param name="Depth">0 for a record that looks up nothing in its unit, 1 for its children, ...</param>
+/// <param name="Depth">0 for a record that points at nothing in its unit (by a lookup or a foreign key), 1 for its children, ...</param>
 /// <param name="ByReference">It points at its parent's create by reference (<c>@{Account_create[3].id}</c>).</param>
 internal sealed record CollectionKey(int Depth, string SObject, bool Create, bool ByReference);
 
@@ -180,7 +181,7 @@ internal enum WriteStatus
     Saved,
     /// <summary>Not saved because of a record of another unit (its subrequest went down on a broken reference).</summary>
     NotAttempted,
-    /// <summary>Not saved because its parent in the same unit wasn't; the parent's result says what to do.</summary>
+    /// <summary>Not saved (or not sent) because its parent in the same unit wasn't; the parent's result says what to do.</summary>
     ParentNotSaved,
     Transient,
     Permanent
@@ -188,9 +189,10 @@ internal enum WriteStatus
 
 /// <summary>One record to create (<paramref name="id"/> null) or update, and what came of it.</summary>
 /// <param name="changes">The fields to send, by API name.</param>
+/// <param name="parents">The new records of its unit it points at (by a lookup or a foreign key): sent before it.</param>
 /// <param name="lookupFields">The lookups this write sets, by field name.</param>
 internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnlyDictionary<string, object?> changes,
-    IReadOnlyList<ParentReference> links, IReadOnlySet<string> lookupFields, int depth)
+    IReadOnlyList<ParentReference> links, IReadOnlyList<PlannedWrite> parents, IReadOnlySet<string> lookupFields, int depth)
 {
     public bool Create => id is null;
     public string ReferenceId => record.ReferenceId;
@@ -202,6 +204,7 @@ internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnl
     /// <summary>Sent in an sObject Collections upsert (matched by external id) rather than a create or an update.</summary>
     public bool ByUpsert { get; set; }
     public IReadOnlyList<ParentReference> Links => links;
+    public IReadOnlyList<PlannedWrite> Parents => parents;
     public IReadOnlySet<string> LookupFields => lookupFields;
 
     public CollectionKey Collection { get; } = new(depth, record.Schema.Name, id is null, links.Count > 0);

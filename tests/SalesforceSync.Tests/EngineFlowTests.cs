@@ -307,26 +307,26 @@ public sealed class EngineFlowTests
     // ---------- Helpers ----------
 
     /// <summary>
-    /// Account, Profile and relationship per entity: a new entity needs three collections (creates), an existing one
-    /// three others (updates), so the two together take two write requests (5 collections each at most): the new one's
-    /// a Composite call (its Profile and relationship refer to its Account), the existing one's three upserts, one per
-    /// object.
+    /// Account, Contact and Profile per entity: a new entity needs three collections (creates), an existing one three
+    /// others (updates), so the two together take two write requests (5 collections each at most): the new one's a
+    /// Composite call (its Contact looks its Account up by reference), the existing one's three upserts, one per object.
     /// </summary>
     private static readonly UpsertStrategy<AccountEvent> ThreeObjects = new("account",
         e => e.Account?.ExternalId, e => e.Meta,
         (key, e) => new UpsertUnit(
         [
-            new SObjectRecord("acct", "Account", "External_Id__c", key, new Dictionary<string, object?> { ["Name"] = e.Account!.Name }),
-            new SObjectRecord("prof", "Profile__c", "External_Id__c", $"P-{key}", new Dictionary<string, object?> { ["Tier__c"] = e.Account.Name },
-                [new SObjectLookup("Account__c", "Account", "External_Id__c", key)]),
-            new SObjectRecord("rel", "Account_Relationship__c", "External_Id__c", $"R-{key}", new Dictionary<string, object?> { ["Type__c"] = e.Account.Name },
-                [new SObjectLookup("Account__c", "Account", "External_Id__c", key), new SObjectLookup("Related_Account__c", "Account", "External_Id__c", key)])
+            new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = e.Account!.Name }),
+            new SObjectRecord("contact", "Contact", "ExternalId__c", $"C-{key}", new Dictionary<string, object?> { ["LastName"] = e.Account.Name },
+                [new SObjectLookup("AccountId", "Account", "ExternalId__c", key)]),
+            new SObjectRecord("prof", "Profile__c", "ExternalId__c", $"P-{key}",
+                new Dictionary<string, object?> { ["Tier__c"] = e.Account.Name, ["AccountId__c"] = key },
+                ForeignKeys: [new SObjectLookup("AccountId__c", "Account", "ExternalId__c", key)])
         ]),
         units =>
         [
-            new SoqlQuery("Account", "External_Id__c", SoqlQuery.ExternalIdsOf(units, "Account")),
-            new SoqlQuery("Profile__c", "External_Id__c", SoqlQuery.ExternalIdsOf(units, "Profile__c")),
-            new SoqlQuery("Account_Relationship__c", "External_Id__c", SoqlQuery.ExternalIdsOf(units, "Account_Relationship__c"))
+            new SoqlQuery("Account", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Account")),
+            new SoqlQuery("Contact", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Contact")),
+            new SoqlQuery("Profile__c", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Profile__c"))
         ]);
 
     /// <summary>Creates the entity OLD, so that changing it takes the second write call.</summary>

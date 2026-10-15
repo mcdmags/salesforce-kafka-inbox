@@ -5,8 +5,8 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Account_Relationship__c between two Accounts, looked up by their external ids. If either Account isn't in
-/// Salesforce yet, the relationship is retried until the account sync has created it. Like <see cref="AccountSync"/>,
+/// Account_Relationship__c between two Accounts, named by their external ids (Text foreign keys). If either Account
+/// isn't in Salesforce yet, nothing is sent and the relationship is retried until the account sync has created it. Like <see cref="AccountSync"/>,
 /// everything particular to relationships is in this file.
 /// </summary>
 public static class AccountRelationshipSync
@@ -26,7 +26,7 @@ public static class AccountRelationshipSync
             : new UpsertUnit([SObjectRecord.From("rel", ToRelationship(payload))]);
     }
 
-    // What to read: the relationships themselves (to diff) and the Accounts they point at (for their Ids)
+    // What to read: the relationships themselves (to diff) and the Accounts they point at (to know they exist)
     public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
     {
         return [
@@ -42,8 +42,8 @@ public static class AccountRelationshipSync
         {
             ExternalId = payload.ExternalId,
             Name = payload.Name,
-            AccountExternalId = payload.AccountExternalId,
-            RelatedAccountExternalId = payload.RelatedAccountExternalId,
+            AccountId = payload.AccountExternalId,
+            RelatedAccountId = payload.RelatedAccountExternalId,
             Type = payload.Type,
             StartDate = payload.StartDate,
             Active = payload.IsActive
@@ -76,17 +76,18 @@ public sealed class AccountRelationshipPayload
 }
 
 /// <summary>Account_Relationship__c between two Accounts (complete desired state, like <see cref="AccountSObject"/>).</summary>
-[SObject("Account_Relationship__c", ExternalIdField = "External_Id__c", RecordType = "Standard")]
+[SObject("Account_Relationship__c", ExternalIdField = "ExternalId__c", RecordType = "Standard")]
 public sealed class AccountRelationshipSObject
 {
-    [JsonPropertyName("External_Id__c")] public string? ExternalId { get; set; }
+    [JsonPropertyName("ExternalId__c")] public string? ExternalId { get; set; }
     [JsonPropertyName("Name")] public string? Name { get; set; }
 
-    [JsonPropertyName("Account__c"), SObjectLookup(typeof(AccountSObject))]
-    public string? AccountExternalId { get; set; }
+    /// <summary>The two Accounts, by their external ids (Text fields).</summary>
+    [JsonPropertyName("AccountId__c"), SObjectForeignKey(typeof(AccountSObject))]
+    public string? AccountId { get; set; }
 
-    [JsonPropertyName("Related_Account__c"), SObjectLookup(typeof(AccountSObject))]
-    public string? RelatedAccountExternalId { get; set; }
+    [JsonPropertyName("RelatedAccountId__c"), SObjectForeignKey(typeof(AccountSObject))]
+    public string? RelatedAccountId { get; set; }
 
     [JsonPropertyName("Type__c")] public string? Type { get; set; }
     [JsonPropertyName("Start_Date__c")] public DateOnly? StartDate { get; set; }

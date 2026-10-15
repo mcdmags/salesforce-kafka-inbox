@@ -36,7 +36,7 @@ public sealed class MapperTests
         {
             ExternalId = payload.ExternalId,
             Name = payload.Name,
-            AccountExternalId = null, // the account's: filled in by AccountSync.Map
+            AccountId = null, // the account's: filled in by AccountSync.Map
             Tier = payload.Tier,
             Score = payload.Score,
             Discount = payload.DiscountPercent,
@@ -53,8 +53,8 @@ public sealed class MapperTests
         {
             ExternalId = payload.ExternalId,
             Name = payload.Name,
-            AccountExternalId = payload.AccountExternalId,
-            RelatedAccountExternalId = payload.RelatedAccountExternalId,
+            AccountId = payload.AccountExternalId,
+            RelatedAccountId = payload.RelatedAccountExternalId,
             Type = payload.Type,
             StartDate = payload.StartDate,
             Active = payload.IsActive
@@ -67,7 +67,7 @@ public sealed class MapperTests
         ContactSync.ToContact(payload).Should().BeEquivalentTo(new ContactSObject
         {
             ExternalId = payload.ExternalId,
-            AccountExternalId = payload.AccountExternalId,
+            AccountId = payload.AccountExternalId,
             FirstName = payload.FirstName,
             LastName = payload.LastName,
             Email = payload.Email,
@@ -99,7 +99,7 @@ public sealed class MapperTests
     {
         // Guards the tests above too: with every payload property filled, nothing mapped may be left empty
         NullProperties(AccountSync.ToAccount(account)).Should().BeEmpty();
-        NullProperties(AccountSync.ToProfile(profile)).Should().Equal(nameof(ProfileSObject.AccountExternalId));
+        NullProperties(AccountSync.ToProfile(profile)).Should().Equal(nameof(ProfileSObject.AccountId));
         NullProperties(AccountRelationshipSync.ToRelationship(relationship)).Should().BeEmpty();
         NullProperties(ContactSync.ToContact(contact)).Should().BeEmpty();
     }

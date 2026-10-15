@@ -4,7 +4,8 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// The records of one entity, written in the same request. Each record is saved or rejected on its own (they are not
-/// atomic); the entity counts as synced only when all of them are. A record must come after the records it looks up.
+/// atomic); the entity counts as synced only when all of them are. A record must come after the records it looks up
+/// (by a lookup or a foreign key).
 /// </summary>
 public sealed record UpsertUnit(IReadOnlyList<SObjectRecord> Records);
 
@@ -16,6 +17,10 @@ public sealed record UpsertUnit(IReadOnlyList<SObjectRecord> Records);
 /// Developer name of the record's record type: RecordTypeId is set to its Id (from Describe) like any other field.
 /// Records of sObject classes always have one; null leaves RecordTypeId alone.
 /// </param>
+/// <param name="ForeignKeys">
+/// Text fields of <paramref name="Fields"/> that hold a parent's external id: written as they are, but the parent goes
+/// first and must exist (<see cref="SObjectForeignKeyAttribute"/>).
+/// </param>
 public sealed record SObjectRecord(
     string ReferenceId,
     string SObject,
@@ -23,10 +28,12 @@ public sealed record SObjectRecord(
     string ExternalId,
     IReadOnlyDictionary<string, object?> Fields,
     IReadOnlyList<SObjectLookup>? Lookups = null,
-    string? RecordType = null)
+    string? RecordType = null,
+    IReadOnlyList<SObjectLookup>? ForeignKeys = null)
 {
     /// <summary>
-    /// The record for an sObject instance: the object, external id field, record type, field names and lookups come
+    /// The record for an sObject instance: the object, external id field, record type, field names, lookups and
+    /// foreign keys come
     /// from the class's attributes (<see cref="SObjectMetadata{TSObject}"/>, cached per class). Every field is
     /// included, nulls too: the instance is the complete desired state, so a null field is cleared if Salesforce has a
     /// value.
@@ -51,16 +58,30 @@ public sealed record SObjectRecord(
 
             (lookups ??= []).Add(new SObjectLookup(lookup.Field, lookup.TargetSObject, lookup.TargetExternalIdField, targetId));
         }
+
+        // An empty foreign key is an empty field like any other: no parent to wait for
+        List<SObjectLookup>? foreignKeys = null;
+        foreach (var (key, parentId) in meta.ForeignKeysOf(sobject))
+        {
+            if (!string.IsNullOrWhiteSpace(parentId))
+            {
+                (foreignKeys ??= []).Add(new SObjectLookup(key.Field, key.TargetSObject, key.TargetExternalIdField, parentId));
+            }
+        }
         return new SObjectRecord(referenceId, meta.SObject, meta.ExternalIdField, externalId, meta.FieldsOf(sobject), lookups,
-            meta.RecordType);
+            meta.RecordType, foreignKeys);
     }
+
+    /// <summary>The records this one points at: by its lookups, then by its foreign keys.</summary>
+    public IEnumerable<SObjectLookup> Parents => (Lookups ?? []).Concat(ForeignKeys ?? []);
 }
 
 /// <summary>
-/// Sets <paramref name="Field"/> to the Id of the record of <paramref name="SObject"/> whose
-/// <paramref name="ExternalIdField"/> is <paramref name="ExternalId"/>: an earlier record of the same unit (created in
-/// the same request if new) or a record already in Salesforce (read by the strategy's queries). If neither exists, the
-/// unit is retried later (<see cref="SalesforceErrors.DependencyNotSynced"/>).
+/// The record of <paramref name="SObject"/> whose <paramref name="ExternalIdField"/> is <paramref name="ExternalId"/>,
+/// which <paramref name="Field"/> points at: an earlier record of the same unit (written before this one) or a record
+/// already in Salesforce (read by the strategy's queries). If neither exists, the unit is retried later
+/// (<see cref="SalesforceErrors.DependencyNotSynced"/>). As a lookup, the field is set to that record's Id (or to a
+/// reference to its create in the same request); as a foreign key, the field holds <paramref name="ExternalId"/> itself.
 /// </summary>
 public sealed record SObjectLookup(string Field, string SObject, string ExternalIdField, string ExternalId);
 

@@ -6,30 +6,30 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// Contacts through the same engine as accounts: Kafka -> inbox -> read and diff -> one sObject Collections upsert by
-/// external id (a Contact's Account already exists, so nothing needs a Composite reference).
+/// external id, the Account named by its external id (a Text foreign key) once the read has found it.
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class ContactTests(SyncFixture app)
 {
     [Fact]
-    public async Task Contact_is_upserted_with_its_Accounts_Id_and_then_written_only_when_it_changes()
+    public async Task Contact_is_upserted_with_its_Accounts_key_and_then_written_only_when_it_changes()
     {
         var (acct, contact) = (SyncFixture.NewAccountId(), SyncFixture.NewContactId());
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, []);
         await app.WaitForInboxSettledAsync(acct, 1);
-        var accountId = (string?)(await app.GetRecordAsync("Account", acct))!["Id"];
 
         await app.PublishContactAsync(contact, 1, acct, new JsonObject { ["lastName"] = "Lovelace", ["phone"] = "+1 555 0101" });
         (await app.WaitForInboxSettledAsync(contact, 1, SyncFixture.Contacts)).Should().Equal((1L, "done"));
 
         var record = await app.GetRecordAsync("Contact", contact);
         record.Should().NotBeNull();
-        ((string?)record!["AccountId"]).Should().Be(accountId);
+        ((string?)record!["AccountId__c"]).Should().Be(acct);
+        record["AccountId"].Should().BeNull("the standard lookup is left alone");
         ((string?)record["RecordTypeId"]).Should().Be(FakeSchema.RecordTypes["Contact"].Single(r => r.DeveloperName == "Standard").Id);
         var write = (await app.GetWriteRequestsAsync(contact)).Should().ContainSingle().Subject;
-        ((string?)write["method"], (string?)write["url"]).Should().Be(("PATCH", "/services/data/v62.0/composite/sobjects/Contact/External_Id__c"));
+        ((string?)write["method"], (string?)write["url"]).Should().Be(("PATCH", "/services/data/v62.0/composite/sobjects/Contact/ExternalId__c"));
         write["body"]!["allOrNone"]!.GetValue<bool>().Should().BeFalse();
-        ((string?)write["body"]!["records"]!.AsArray().Single()!["AccountId"]).Should().Be(accountId, "the Id the read found");
+        ((string?)write["body"]!["records"]!.AsArray().Single()!["AccountId__c"]).Should().Be(acct, "the key as text");
 
         await app.PublishContactAsync(contact, 2, acct, new JsonObject { ["lastName"] = "Lovelace", ["phone"] = "+1 555 0101" });
         (await app.WaitForInboxSettledAsync(contact, 2, SyncFixture.Contacts)).Should().Equal((1L, "done"), (2L, "done"));
@@ -65,8 +65,7 @@ public sealed class ContactTests(SyncFixture app)
             rows => rows.Count == 1 && rows[0].Status != "pending",
             "the contact to sync once its account exists");
         settled[0].Status.Should().Be("done");
-        ((string?)(await app.GetRecordAsync("Contact", contact))!["AccountId"])
-            .Should().Be((string?)(await app.GetRecordAsync("Account", acct))!["Id"]);
+        ((string?)(await app.GetRecordAsync("Contact", contact))!["AccountId__c"]).Should().Be(acct);
     }
 
     [Fact]

@@ -14,21 +14,31 @@ public sealed class UpsertStepsTests
     private static readonly SObjectSchema Account = new("Account",
     [
         new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
-        new SalesforceField("External_Id__c", "string", 255, 0, 0, true, true, true),
+        new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true),
         new SalesforceField("Name", "string", 5, 0, 0, true, true, false)
     ]);
 
+    /// <summary>A foreign key: AccountId__c holds the Account's external id.</summary>
     private static readonly SObjectSchema Profile = new("Profile__c",
     [
         new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
-        new SalesforceField("External_Id__c", "string", 255, 0, 0, true, true, true),
-        new SalesforceField("Account__c", "reference", 18, 0, 0, true, true, true)
+        new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true),
+        new SalesforceField("AccountId__c", "string", 255, 0, 0, true, true, true)
+    ]);
+
+    /// <summary>A lookup: AccountId holds the Account's Salesforce Id.</summary>
+    private static readonly SObjectSchema Contact = new("Contact",
+    [
+        new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
+        new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true),
+        new SalesforceField("AccountId", "reference", 18, 0, 0, true, true, true)
     ]);
 
     private static readonly Dictionary<string, SObjectSchema> Schemas = new(StringComparer.OrdinalIgnoreCase)
     {
         ["Account"] = Account,
-        ["Profile__c"] = Profile
+        ["Profile__c"] = Profile,
+        ["Contact"] = Contact
     };
 
     // ---------- RecordNormalizer ----------
@@ -51,19 +61,36 @@ public sealed class UpsertStepsTests
     {
         var unit = new UpsertUnit(
         [
-            new SObjectRecord("acct", "Account", "External_Id__c", "A1",
+            new SObjectRecord("acct", "Account", "ExternalId__c", "A1",
                 new Dictionary<string, object?> { ["Name"] = "too long", ["Nope__c"] = 1 }),
-            new SObjectRecord("prof", "Profile__c", "External_Id__c", "P1", new Dictionary<string, object?>(),
-                [new SObjectLookup("External_Id__c", "Account", "External_Id__c", "A1")])
+            new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1", new Dictionary<string, object?>(),
+                [new SObjectLookup("ExternalId__c", "Account", "ExternalId__c", "A1")]),
+            new SObjectRecord("contact", "Contact", "ExternalId__c", "C1", new Dictionary<string, object?>(),
+                ForeignKeys: [new SObjectLookup("AccountId", "Account", "ExternalId__c", "A1")])
         ]);
 
         RecordNormalizer.Normalize("A1", unit, Schemas, out var problems);
 
         problems.Select(p => (p.ReferenceId, p.Code)).Should().BeEquivalentTo(
         [
-            ("acct", "STRING_TOO_LONG"), ("acct", "INVALID_FIELD"), ("prof", "INVALID_FIELD")
+            ("acct", "STRING_TOO_LONG"), ("acct", "INVALID_FIELD"), ("prof", "INVALID_FIELD"), ("contact", "INVALID_FIELD")
         ]);
-        problems.Last().Message.Should().Contain("Profile__c.External_Id__c is not a lookup");
+        problems.Should().Contain(p => p.Message!.Contains("Profile__c.ExternalId__c is not a lookup"))
+            .And.Contain(p => p.Message!.Contains("Contact.AccountId is a lookup, not a foreign key"));
+    }
+
+    [Fact]
+    public void A_foreign_key_is_normalized_and_compared_like_any_text_field()
+    {
+        var unit = new UpsertUnit([new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1",
+            new Dictionary<string, object?> { ["AccountId__c"] = "A1" }, ForeignKeys: [new SObjectLookup("AccountId__c", "Account", "ExternalId__c", "A1")])]);
+
+        var normalized = RecordNormalizer.Normalize("P1", unit, Schemas, out var problems);
+
+        problems.Should().BeEmpty();
+        normalized.Records[0].Fields.Should().ContainSingle().Which.Should().Be(
+            new KeyValuePair<SalesforceField, object?>(Profile.Fields["AccountId__c"], "A1"));
+        normalized.Records[0].Lookups.Should().BeEmpty("never resolved to an Id");
     }
 
     // ---------- Record types ----------
@@ -73,7 +100,7 @@ public sealed class UpsertStepsTests
         ["Account"] = new("Account",
         [
             new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
-            new SalesforceField("External_Id__c", "string", 255, 0, 0, true, true, true),
+            new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true),
             new SalesforceField("Name", "string", 5, 0, 0, true, true, false),
             new SalesforceField("RecordTypeId", "reference", 18, 0, 0, true, true, true)
         ],
@@ -147,19 +174,24 @@ public sealed class UpsertStepsTests
         var units = Normalized(new UpsertUnit(
         [
             AccountRecord("A1", "Acme"),
-            new SObjectRecord("prof", "Profile__c", "External_Id__c", "P1", new Dictionary<string, object?>(),
-                [new SObjectLookup("Account__c", "Account", "External_Id__c", "A1")])
+            new SObjectRecord("contact", "Contact", "ExternalId__c", "C1", new Dictionary<string, object?>(),
+                [new SObjectLookup("AccountId", "Account", "ExternalId__c", "A1")]),
+            new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1", new Dictionary<string, object?> { ["AccountId__c"] = "A1" },
+                ForeignKeys: [new SObjectLookup("AccountId__c", "Account", "ExternalId__c", "A1")])
         ]));
         var ids = Enumerable.Range(0, 150).Select(i => $"A{i}").ToList();
 
         var queries = ReadQueryBuilder.Build(units,
-            [new SoqlQuery("account", "External_Id__c", ids), new SoqlQuery("Profile__c", "External_Id__c", ["P1"]), new SoqlQuery("Profile__c", "External_Id__c", [])],
+            [new SoqlQuery("account", "ExternalId__c", ids), new SoqlQuery("Contact", "ExternalId__c", ["C1"]), new SoqlQuery("Profile__c", "ExternalId__c", ["P1"]),
+                new SoqlQuery("Profile__c", "ExternalId__c", [])],
             Schemas);
 
-        queries.Select(q => (q.Query.ReferenceId, q.SObject)).Should().Equal(("q0", "Account"), ("q1", "Account"), ("q2", "Profile__c"));
-        queries[0].Query.Soql.Should().StartWith("SELECT Name,External_Id__c,Id FROM Account WHERE External_Id__c IN ('A0',");
+        queries.Select(q => (q.Query.ReferenceId, q.SObject)).Should().Equal(("q0", "Account"), ("q1", "Account"), ("q2", "Contact"), ("q3", "Profile__c"));
+        queries[0].Query.Soql.Should().StartWith("SELECT Name,ExternalId__c,Id FROM Account WHERE ExternalId__c IN ('A0',");
         queries[1].Query.Soql.Should().Contain("'A149'").And.NotContain("'A99'");
-        queries[2].Query.Soql.Should().Be("SELECT Account__c,External_Id__c,Id FROM Profile__c WHERE External_Id__c IN ('P1')");
+        queries[2].Query.Soql.Should().Be("SELECT AccountId,ExternalId__c,Id FROM Contact WHERE ExternalId__c IN ('C1')");
+        queries[3].Query.Soql.Should().Be("SELECT AccountId__c,ExternalId__c,Id FROM Profile__c WHERE ExternalId__c IN ('P1')",
+            "a foreign key is selected as the field it is");
     }
 
     [Fact]
@@ -168,7 +200,7 @@ public sealed class UpsertStepsTests
         var ids = Enumerable.Range(0, 501).Select(i => $"A{i}").ToList();
 
         var build = () => ReadQueryBuilder.Build(Normalized(new UpsertUnit([AccountRecord("A1", "Acme")])),
-            [new SoqlQuery("Account", "External_Id__c", ids)], Schemas);
+            [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas);
 
         build.Should().Throw<InvalidOperationException>().WithMessage("*6 SOQL queries*Sync:BatchSize*");
     }
@@ -233,7 +265,7 @@ public sealed class UpsertStepsTests
 
     private static SObjectRecord AccountRecord(string key, string name)
     {
-        return new("acct", "Account", "External_Id__c", key, new Dictionary<string, object?> { ["Name"] = name });
+        return new("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = name });
     }
 
     private static List<NormalizedUnit> Normalized(UpsertUnit unit)
@@ -246,9 +278,9 @@ public sealed class UpsertStepsTests
     private static PlannedWrite Write(string sobject, bool create, int depth = 0)
     {
         var record = new NormalizedRecord(
-            new SObjectRecord("r", sobject, "External_Id__c", "X", new Dictionary<string, object?>()),
+            new SObjectRecord("r", sobject, "ExternalId__c", "X", new Dictionary<string, object?>()),
             new SObjectSchema(sobject, []), new Dictionary<SalesforceField, object?>(), []);
-        return new PlannedWrite(record, create ? null : "001000000000001AAA", new Dictionary<string, object?>(), [],
+        return new PlannedWrite(record, create ? null : "001000000000001AAA", new Dictionary<string, object?>(), [], [],
             new HashSet<string>(), depth);
     }
 }

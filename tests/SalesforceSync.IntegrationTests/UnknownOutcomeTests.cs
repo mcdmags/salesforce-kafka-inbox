@@ -56,7 +56,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Held_entity_whose_lost_write_was_the_newest_event_completes_without_another_write()
+    public async Task Held_entity_whose_lost_write_was_the_newest_event_completes_without_writing_anything_twice()
     {
         var acct = SyncFixture.NewAccountId();
         using (var lose = await app.Salesforce.PostAsJsonAsync("/__fake/lost-responses",
@@ -67,7 +67,8 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "only" }, new JsonObject { ["tier"] = "Gold" });
 
-        // Held, then picked up again: Salesforce already has everything, so the diff finds nothing to write
+        // Held, then picked up again: Salesforce already has the Account, so the diff writes only the Profile (whose call
+        // never went out after the Account's answer was lost)
         await Eventually.ValueAsync(() => app.GetInboxRowsAsync(acct),
             rows => rows.Count == 1 && rows[0].ErrorCode == "UNKNOWN_OUTCOME", "the hold");
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));

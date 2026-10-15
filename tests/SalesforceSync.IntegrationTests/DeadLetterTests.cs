@@ -49,7 +49,6 @@ public sealed class DeadLetterTests(FewRetriesFixture app)
             """);
 
         (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Equal((1L, "done"));
-        ((string?)(await app.GetRecordAsync("Account_Relationship__c", rel))!["Related_Account__c"])
-            .Should().Be((string?)(await app.GetRecordAsync("Account", child))!["Id"]);
+        ((string?)(await app.GetRecordAsync("Account_Relationship__c", rel))!["RelatedAccountId__c"]).Should().Be(child);
     }
 }

@@ -19,7 +19,7 @@ namespace SalesforceSync.FakeSalesforce;
 /// </summary>
 public sealed class FakeSalesforceStore
 {
-    public const string ExternalIdField = "External_Id__c";
+    public const string ExternalIdField = "ExternalId__c";
 
     public const int MaxCompositeSubrequests = 25;
     public const int MaxCompositeCollectionsAndQueries = 5;
