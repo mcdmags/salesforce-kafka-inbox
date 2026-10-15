@@ -50,31 +50,33 @@ internal static class ReadQueryBuilder
 
     /// <summary>
     /// The values in order as queries of at most <see cref="MaxValuesPerQuery"/> values: a query takes the next value
-    /// while its URL, built as the client sends it, still fits.
+    /// while its URL, as the client sends it, still fits. Percent-encoding works character by character, so a URL's
+    /// length is the empty query's plus each value's encoded literal and separator: counted per value, not rebuilt.
     /// </summary>
     private static IEnumerable<string> Chunked(string sobject, List<string> fields, string whereField, IEnumerable<string> values)
     {
+        var empty = SalesforceRestClient.QueryUrl(SalesforceRestClient.Soql(sobject, fields, whereField, [])).Length;
+        var separator = Uri.EscapeDataString(",").Length;
         var chunk = new List<string>();
-        string? soql = null; // chunk's query
+        var length = empty;
         foreach (var value in values)
         {
-            if (chunk.Count < MaxValuesPerQuery
-                && SalesforceRestClient.Soql(sobject, fields, whereField, [.. chunk, value]) is var longer
-                && SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(longer)))
+            var literal = Uri.EscapeDataString(SalesforceRestClient.SoqlLiteral(value)).Length;
+            if (chunk.Count > 0 && chunk.Count < MaxValuesPerQuery && length + separator + literal <= SalesforceRestClient.MaxUrlBytes)
             {
                 chunk.Add(value);
-                soql = longer;
+                length += separator + literal;
                 continue;
             }
 
-            if (soql is not null)
+            if (chunk.Count > 0)
             {
-                yield return soql;
+                yield return SalesforceRestClient.Soql(sobject, fields, whereField, chunk);
             }
 
             chunk = [value];
-            soql = SalesforceRestClient.Soql(sobject, fields, whereField, chunk);
-            if (!SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(soql)))
+            length = empty + literal;
+            if (length > SalesforceRestClient.MaxUrlBytes)
             {
                 throw new InvalidOperationException(
                     $"The read of {sobject} by {whereField} does not fit a URL ({SalesforceRestClient.MaxUrlBytes:N0} bytes) " +
@@ -82,9 +84,9 @@ internal static class ReadQueryBuilder
             }
         }
 
-        if (soql is not null)
+        if (chunk.Count > 0)
         {
-            yield return soql;
+            yield return SalesforceRestClient.Soql(sobject, fields, whereField, chunk);
         }
     }
 

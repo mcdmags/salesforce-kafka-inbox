@@ -217,7 +217,13 @@ public sealed class SalesforceRestClient(HttpClient http)
     public static string Soql(string sobject, IEnumerable<string> fields, string whereField, IEnumerable<string> values)
     {
         return $"SELECT {string.Join(",", fields)} FROM {sobject} WHERE {whereField} IN " +
-               $"({string.Join(",", values.Select(v => $"'{EscapeSoql(v)}'"))})";
+               $"({string.Join(",", values.Select(SoqlLiteral))})";
+    }
+
+    /// <summary>A value as a SOQL string literal: quoted, with backslashes and quotes escaped.</summary>
+    public static string SoqlLiteral(string value)
+    {
+        return $"'{EscapeSoql(value)}'";
     }
 
     private static string EscapeSoql(string s)
