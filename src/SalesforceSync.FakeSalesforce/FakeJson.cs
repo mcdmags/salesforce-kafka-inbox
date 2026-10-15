@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace SalesforceSync.FakeSalesforce;
@@ -29,9 +28,13 @@ internal static class FakeJson
         };
     }
 
-    /// <summary>The node's value if it is a JSON string, else null.</summary>
+    /// <summary>
+    /// The node's value if it is a JSON string, else null. TryGetValue, not GetValueKind: on a value the org stored
+    /// (not parsed from JSON), .NET 8's GetValueKind serializes it to find its kind, and record lookups call this for
+    /// every record they scan.
+    /// </summary>
     public static string? Str(JsonNode? node)
     {
-        return node is JsonValue v && v.GetValueKind() == JsonValueKind.String ? v.GetValue<string>() : null;
+        return node is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
     }
 }
