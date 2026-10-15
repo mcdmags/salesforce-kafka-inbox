@@ -20,7 +20,8 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
    written in the same request, each record saved or rejected on its own; an account counts as synced
    only when both are in, and is retried until they are (see [Writing to Salesforce](#writing-to-salesforce)).
 3. **Only send what changed.** Blind updates fire triggers and flows, pollute field history and burn
-   API calls. Each record is read, diffed and only the changed fields are sent; new records are created.
+   API calls. Each record is read, diffed and only the changed fields are sent; new records are created
+   (why, and the alternative: [Why compare with Salesforce before writing](#why-compare-with-salesforce-before-writing)).
    Nothing extra may be stored in Salesforce for the sync's own bookkeeping (no custom version field).
 4. **Batching.** Salesforce limits are per call, so updates have to be grouped efficiently.
 5. **Rate limits shared by every worker.** The org has a daily API allocation (also used by other
@@ -540,6 +541,40 @@ isn't in Salesforce (its insert was lost or dead-lettered, or the record was del
 `inserted` and an `updated` event pending together are coalesced first, so they become one write of the newest
 data. A create that Salesforce answers with `DUPLICATE_VALUE` (someone created the record between the read and the
 write) is retried, and the retry's read turns it into an update.
+
+### Why compare with Salesforce before writing
+
+Salesforce's default integration pattern is a blind **upsert by external id**: one call per batch, no read, no
+comparison, idempotent. This sync reads first and writes only what differs. That is a common, legitimate pattern,
+and it pays off when unnecessary writes cost something:
+
+- **Salesforce doesn't skip no-op updates.** An update with identical values still runs triggers, flows and
+  validation rules, bumps `LastModifiedDate`, can publish Change Data Capture events, and locks the record (and its
+  parent Account, a source of `UNABLE_TO_LOCK_ROW` under concurrency). Comparing first means an unchanged record
+  isn't written at all, and a changed one sends only its changed fields.
+- **Events repeat data.** Every event carries the full record ([An event is the full record](#an-event-is-the-full-record)),
+  so many are no-ops by the time they are synced; those cost no write request and trigger nothing.
+- **Drift is repaired.** The comparison is against what Salesforce has now, so a synced field edited in Salesforce
+  is set back by the next event for that record.
+
+What it costs:
+
+- **Two API calls per batch instead of one**: one Composite request reads, the other writes.
+- **Exact value handling.** `FieldValues` normalizes each value to what Salesforce stores for its field type (scale,
+  checkbox, 15/18-character ids, multi-picklist order, date/time precision, from Describe), or the diff would see a
+  change on every event. It is the logic most likely to be subtly wrong; the sandbox checks under
+  [Tune and check](#6-tune-and-check) cover it.
+- **A small race**: an edit made in Salesforce between the read and the write is overwritten, but only on fields
+  this sync owns, which the write would overwrite anyway.
+- **Read access** for the integration user to every synced field.
+
+The cheaper alternative is to keep a hash of what was last sent per entity in Postgres, skip entities whose event
+hashes the same, and upsert the rest blindly. That removes the read, the diff and `FieldValues`, but repairs no
+drift, and an upsert sends the whole record, so a changed record still fires automation on every mapped field.
+
+Keep the comparison when the org has meaningful automation on the synced objects (triggers, flows, field history,
+Change Data Capture) or edits made in Salesforce must be corrected, which is typical for Account. Choose hash +
+blind upsert when the org is plain and API calls are the scarce resource. The org's admin knows which applies.
 
 ### `allOrNone: false`
 
