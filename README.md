@@ -972,7 +972,8 @@ The dashboard shows:
   to `fake-salesforce` through the real OAuth + REST client
 - **load-generator**: 20k account events (full records) over 500 accounts at 200/s, including bursts to the same
   account, plus relationship events between accounts and contact events of accounts
-- **benchmarks**: explicit start (click ▶), runs the inbox drain benchmark against `benchdb`
+- **benchmarks**: explicit start, against `benchdb`: **Run benchmarks...** asks which run (quick, about 2 minutes;
+  drain, about 20; full, about 30) and starts it; ▶ repeats the last run chosen (quick at first)
 
 To sync to a Salesforce sandbox instead of the mock org, see [Run against the sandbox](#5-run-against-the-sandbox).
 
@@ -1147,10 +1148,15 @@ Only the Salesforce HTTP endpoint is mocked; the Postgres inbox, workers, client
 # use a dedicated database: the benchmark truncates the inbox tables and resets sf_rate_limit
 export ConnectionStrings__benchdb="Host=localhost;Port=5432;Database=benchdb;Username=postgres;Password=postgres"
 
-dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*'             # everything, about 20 minutes
-dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*InboxDrain*'
-dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*Micro*'
+dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks                 # asks which run in the console
+dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --run quick   # 5 drain cases, 3 iterations, about 2 minutes
+dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --run drain   # every drain and streaming case, about 20 minutes
+dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --run full    # drain, streaming and micro, about 30 minutes
+dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*Micro*'   # any BenchmarkDotNet arguments
 ```
+
+The quick run is drain with 1 and 4 workers x 1 and 3 pods at 100 accounts and no latency, plus streaming with 4
+workers in 1 pod; it still checks correctness on every iteration.
 
 Results, the SQL statement measurements and the before/after of this tuning: [docs/benchmarks/README.md](docs/benchmarks/README.md).
 

@@ -45,7 +45,7 @@ public abstract class DrainBenchmarkBase
                 .WithStrategy(RunStrategy.Monitoring)
                 .WithLaunchCount(1)
                 .WithWarmupCount(1)
-                .WithIterationCount(5)
+                .WithIterationCount(BenchmarkRun.IsQuick ? 3 : 5)
                 .WithInvocationCount(1)
                 .WithUnrollFactor(1));
         }
@@ -497,12 +497,16 @@ public abstract class DrainBenchmarkBase
 /// <summary>Whole inbox loaded up front, then drained.</summary>
 public class InboxDrainBenchmarks : DrainBenchmarkBase
 {
-    [Params(1, 4, 8)] public override int Workers { get; set; }
+    [ParamsSource(nameof(WorkerCounts))] public override int Workers { get; set; }
     [Params(1, 3)] public override int Pods { get; set; }
     [Params(5_000)] public override int Events { get; set; }
-    [Params(100, 1_000)] public override int Accounts { get; set; }
-    [Params(0, 25)] public override int LatencyMs { get; set; }
+    [ParamsSource(nameof(AccountCounts))] public override int Accounts { get; set; }
+    [ParamsSource(nameof(Latencies))] public override int LatencyMs { get; set; }
     protected override bool StreamIngest => false;
+
+    public static int[] WorkerCounts => BenchmarkRun.IsQuick ? [1, 4] : [1, 4, 8];
+    public static int[] AccountCounts => BenchmarkRun.IsQuick ? [100] : [100, 1_000];
+    public static int[] Latencies => BenchmarkRun.IsQuick ? [0] : [0, 25];
 
     [Benchmark(Description = "Drain inbox")]
     public Task DrainInbox()
@@ -518,12 +522,15 @@ public class InboxDrainBenchmarks : DrainBenchmarkBase
 /// </summary>
 public class StreamingIngestBenchmarks : DrainBenchmarkBase
 {
-    [Params(4, 8)] public override int Workers { get; set; }
-    [Params(1, 3)] public override int Pods { get; set; }
+    [ParamsSource(nameof(WorkerCounts))] public override int Workers { get; set; }
+    [ParamsSource(nameof(PodCounts))] public override int Pods { get; set; }
     [Params(5_000)] public override int Events { get; set; }
     [Params(50)] public override int Accounts { get; set; }
     [Params(5)] public override int LatencyMs { get; set; }
     protected override bool StreamIngest => true;
+
+    public static int[] WorkerCounts => BenchmarkRun.IsQuick ? [4] : [4, 8];
+    public static int[] PodCounts => BenchmarkRun.IsQuick ? [1] : [1, 3];
 
     [Benchmark(Description = "Drain while ingesting")]
     public Task DrainWhileIngesting()
