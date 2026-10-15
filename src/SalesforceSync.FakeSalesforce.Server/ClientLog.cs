@@ -3,17 +3,18 @@ using System.Collections.Concurrent;
 namespace SalesforceSync.FakeSalesforce.Server;
 
 /// <summary>
-/// What clients sent: composite requests per client (User-Agent), to show which worker pods did the work,
+/// What clients sent: requests that read or wrote records (Composite requests and sObject Collections upserts) per
+/// client (User-Agent), to show which worker pods did the work,
 /// and how many Salesforce API requests arrived gzip-compressed / accepted a compressed response.
 /// </summary>
 public sealed class ClientLog
 {
-    private readonly ConcurrentDictionary<string, long> _compositeRequests = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, long> _dataRequests = new(StringComparer.Ordinal);
     private long _requests, _gzipRequests, _acceptGzip;
 
-    public void RecordCompositeRequest(string? userAgent)
+    public void RecordDataRequest(string? userAgent)
     {
-        _compositeRequests.AddOrUpdate(string.IsNullOrEmpty(userAgent) ? "(none)" : userAgent, 1, (_, n) => n + 1);
+        _dataRequests.AddOrUpdate(string.IsNullOrEmpty(userAgent) ? "(none)" : userAgent, 1, (_, n) => n + 1);
     }
 
     public void RecordRequest(bool gzipBody, bool acceptsGzip)
@@ -30,7 +31,7 @@ public sealed class ClientLog
         }
     }
 
-    public IReadOnlyDictionary<string, long> CompositeRequests => _compositeRequests;
+    public IReadOnlyDictionary<string, long> DataRequests => _dataRequests;
 
     public object Transport => new
     {
@@ -41,7 +42,7 @@ public sealed class ClientLog
 
     public void Reset()
     {
-        _compositeRequests.Clear();
+        _dataRequests.Clear();
         Interlocked.Exchange(ref _requests, 0);
         Interlocked.Exchange(ref _gzipRequests, 0);
         Interlocked.Exchange(ref _acceptGzip, 0);

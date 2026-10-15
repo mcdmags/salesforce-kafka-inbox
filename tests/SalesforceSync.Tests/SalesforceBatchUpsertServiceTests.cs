@@ -10,7 +10,8 @@ namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The generic Salesforce half of the engine (Describe, composite read, diff, lookups, collections write, classification)
-/// driven by the real Account and AccountRelationship strategies and mappings, against the in-memory org. Events are
+/// driven by the real Account, AccountRelationship and Contact (direct upsert) strategies and mappings, against the
+/// in-memory org. Events are
 /// written as the source sends them (camelCase payload names, full records); assertions read Salesforce names.
 /// </summary>
 public sealed class SalesforceBatchUpsertServiceTests
@@ -20,6 +21,9 @@ public sealed class SalesforceBatchUpsertServiceTests
 
     private static readonly UpsertStrategy<AccountRelationshipEvent> RelationshipStrategy =
         AccountRelationshipSync.Strategy;
+
+    private static readonly UpsertStrategy<ContactEvent> ContactStrategy =
+        ContactSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly Fixture _any = new();
@@ -296,23 +300,48 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         (await Account("A1", new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" })).Outcome.Should().Be(SyncOutcome.Saved);
 
-        var write = _org.WriteRequests[^1];
-        var only = write["compositeRequest"]!.AsArray().Should().ContainSingle().Subject!;
-        ((string?)only["method"], (string?)only["referenceId"]).Should().Be(("POST", "Profile__c_create"));
-        ((string?)Records(only).Single()["Account__c"]).Should().Be(IdOf("Account", "A1"), "the Id comes from the read");
+        var record = Upserted(_org.WriteRequests[^1], "Profile__c").Should().ContainSingle(
+            "only the Profile is written, so the request is a plain upsert of it").Subject;
+        ((string?)record["External_Id__c"]).Should().Be("P-A1");
+        ((string?)record["Account__c"]).Should().Be(IdOf("Account", "A1"), "the Id comes from the read");
     }
 
     [Fact]
-    public async Task Update_is_a_PATCH_with_the_record_Id_and_only_the_changed_fields()
+    public async Task Change_of_an_Account_alone_is_one_upsert_by_external_id_with_only_the_changed_fields()
     {
         await Account("A1", new() { ["name"] = "Acme", ["rating"] = "Hot" }, new() { ["tier"] = "Gold" });
+        var before = _org.GetStats();
 
-        await Account("A1", new() { ["name"] = "Acme", ["rating"] = "Cold" }, new() { ["tier"] = "Gold" });
+        (await Account("A1", new() { ["name"] = "Acme", ["rating"] = "Cold" }, new() { ["tier"] = "Gold" })).Outcome
+            .Should().Be(SyncOutcome.Saved);
 
-        var only = _org.WriteRequests[^1]["compositeRequest"]!.AsArray().Should().ContainSingle().Subject!;
-        ((string?)only["method"], (string?)only["referenceId"]).Should().Be(("PATCH", "Account_update"));
-        Records(only).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "id", "Rating");
-        ((string?)Records(only).Single()["id"]).Should().Be(IdOf("Account", "A1"));
+        var record = Upserted(_org.WriteRequests[^1], "Account").Should().ContainSingle().Subject;
+        record.Select(kv => kv.Key).Should().BeEquivalentTo(["attributes", "External_Id__c", "Rating"],
+            "the Profile is unchanged; the Account carries its external id (which finds it) and what differs, no Id");
+        ((string?)record["External_Id__c"], (string?)record["Rating"]).Should().Be(("A1", "Cold"));
+        var after = _org.GetStats();
+        (after.ApiCalls - before.ApiCalls).Should().Be(2, "one read, one write: the same as a Composite write");
+        (after.UpsertRequests - before.UpsertRequests).Should().Be(1);
+        (after.CompositeRequests - before.CompositeRequests).Should().Be(1, "only the read is a Composite request");
+        _org.History("Account", "A1")![^1].Select(kv => kv.Key).Should().Equal("Rating");
+    }
+
+    [Fact]
+    public async Task Accounts_with_and_without_Profile_changes_stay_in_one_Composite_request()
+    {
+        await Accounts(("A1", Event(new() { ["name"] = "One" }, new() { ["tier"] = "Gold" })),
+            ("A2", Event(new() { ["name"] = "Two" }, new() { ["tier"] = "Gold" })));
+        var before = _org.GetStats();
+
+        var results = await Accounts(("A1", Event(new() { ["name"] = "One!" }, new() { ["tier"] = "Gold" })),
+            ("A2", Event(new() { ["name"] = "Two" }, new() { ["tier"] = "Silver" })));
+
+        results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
+        var after = _org.GetStats();
+        (after.WriteRequests - before.WriteRequests).Should().Be(1, "not split into extra calls");
+        (after.UpsertRequests - before.UpsertRequests).Should().Be(0, "two objects need Composite");
+        _org.WriteRequests[^1]["compositeRequest"]!.AsArray().Select(s => (string?)s!["referenceId"])
+            .Should().Equal("Account_update", "Profile__c_update");
     }
 
     [Fact]
@@ -334,7 +363,7 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         // The next claim no longer contains A1 (dead-lettered); A2's Account now exists, so its Profile gets a literal Id
         (await Account("A2", new() { ["name"] = "Two" }, new() { ["tier"] = "Silver" })).Outcome.Should().Be(SyncOutcome.Saved);
-        ((string?)Sub(_org.WriteRequests[^1], 0)["referenceId"]).Should().Be("Profile__c_create");
+        ((string?)Upserted(_org.WriteRequests[^1], "Profile__c").Single()["Account__c"]).Should().Be(IdOf("Account", "A2"));
         ((string?)_org.FindByExternalId("Profile__c", "P-A2")!["Account__c"]).Should().Be(IdOf("Account", "A2"));
     }
 
@@ -514,9 +543,9 @@ public sealed class SalesforceBatchUpsertServiceTests
     // ---------- Create or update: decided by what Salesforce has ----------
 
     [Theory]
-    [InlineData(false, "POST")]
-    [InlineData(true, "PATCH")]
-    public async Task Create_or_update_is_decided_by_what_Salesforce_has(bool exists, string verb)
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Create_or_update_is_decided_by_what_Salesforce_has(bool exists)
     {
         if (exists)
         {
@@ -529,16 +558,22 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         result.Outcome.Should().Be(SyncOutcome.Saved);
         _org.WriteRequests.Should().HaveCount(before + 1);
-        var account = Sub(_org.WriteRequests[^1], 0);
-        ((string?)account["method"]).Should().Be(verb);
+        if (exists)
+        {
+            // Only the Account changed: an upsert carrying what differs
+            Upserted(_org.WriteRequests[^1], "Account").Single().Select(kv => kv.Key)
+                .Should().BeEquivalentTo("attributes", "External_Id__c", "Name", "Rating");
+        }
+        else
+        {
+            // A new Account and its new Profile, linked by reference: Composite, the Account created first
+            var account = Sub(_org.WriteRequests[^1], 0);
+            ((string?)account["method"], (string?)account["referenceId"]).Should().Be(("POST", "Account_create"));
+        }
+
         var stored = _org.FindByExternalId("Account", "A1")!;
         ((string?)stored["Name"]).Should().Be("After");
         stored["Rating"].Should().BeNull("the event is the full record, whichever way it is written");
-        if (exists)
-        {
-            Records(account).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "id", "Name", "Rating");
-        }
-
         _org.All("Account").Should().ContainSingle();
     }
 
@@ -625,7 +660,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         rejected.Outcome.Should().Be(SyncOutcome.TransientFailure, $"{code} on a lookup is not a reason to dead-letter");
         (rejected.PrimaryError?.Code).Should().Be(SalesforceErrors.DependencyNotSynced);
         (rejected.PrimaryError?.Message).Should().StartWith(code);
-        ((string?)Records(Sub(_org.WriteRequests[^1], 0)).Single()["Account__c"]).Should().Be(IdOf("Account", "A1"),
+        ((string?)Upserted(_org.WriteRequests[^1], "Account_Relationship__c").Single()["Account__c"]).Should().Be(IdOf("Account", "A1"),
             "a relationship is its own request, so its Accounts are always literal Ids from the read");
 
         (await Relationship("R1", "A1", "A2", new() { ["type"] = "Parent" })).Outcome.Should().Be(SyncOutcome.Saved);
@@ -647,6 +682,185 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         (await Relationship("R1", "A1", "A3", new() { ["type"] = "Reseller", ["isActive"] = true })).Outcome
             .Should().Be(SyncOutcome.Unchanged);
+    }
+
+    // ---------- Contacts: direct upsert, no read, no diff ----------
+
+    [Fact]
+    public async Task Contact_is_upserted_by_external_id_with_its_Account_by_external_id_and_its_record_type()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        var (first, last) = (_any.Create<string>()[..20], _any.Create<string>()[..20]);
+
+        var result = await Contact("C1", "A1", new() { ["firstName"] = first, ["lastName"] = last, ["email"] = "ada@example.com" });
+
+        result.Outcome.Should().Be(SyncOutcome.Saved);
+        var record = Upserted(_org.WriteRequests[^1], "Contact").Should().ContainSingle().Subject;
+        JsonNode.DeepEquals(record, new JsonObject
+        {
+            ["attributes"] = new JsonObject { ["type"] = "Contact" },
+            ["External_Id__c"] = "C1",
+            ["FirstName"] = first,
+            ["LastName"] = last,
+            ["Email"] = "ada@example.com",
+            ["Phone"] = null,
+            ["RecordTypeId"] = RecordTypeId("Contact", "Standard"),
+            ["Account"] = new JsonObject { ["attributes"] = new JsonObject { ["type"] = "Account" }, ["External_Id__c"] = "A1" }
+        }).Should().BeTrue("every field is sent, the empty one too, and the Account by its relationship: {0}", record.ToJsonString());
+        var stored = _org.FindByExternalId("Contact", "C1")!;
+        ((string?)stored["AccountId"]).Should().Be(IdOf("Account", "A1"), "Salesforce resolved the Account's external id");
+        ((string?)stored["RecordTypeId"]).Should().Be(RecordTypeId("Contact", "Standard"));
+    }
+
+    [Fact]
+    public async Task A_contact_batch_is_one_upsert_call_without_a_read_and_every_event_is_written_whole()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contact("WARM", "A1", new() { ["lastName"] = "Warm" });  // warms the describe cache
+        var before = _org.GetStats();
+
+        var results = await Contacts(("C1", "A1", new() { ["lastName"] = "One" }), ("C2", "A1", new() { ["lastName"] = "Two" }));
+        (await Contact("C1", "A1", new() { ["lastName"] = "One" })).Outcome.Should().Be(SyncOutcome.Saved,
+            "there is no Unchanged without a diff: the same record is upserted again");
+
+        results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
+        var after = _org.GetStats();
+        (after.ApiCalls - before.ApiCalls).Should().Be(2, "one call per batch");
+        (after.UpsertRequests - before.UpsertRequests).Should().Be(2);
+        (after.Queries - before.Queries).Should().Be(0, "nothing is read");
+        (after.CompositeRequests - before.CompositeRequests).Should().Be(0);
+        _org.History("Contact", "C1").Should().HaveCount(2);
+        _org.History("Contact", "C1")![^1].Select(kv => kv.Key).Should().Contain(["LastName", "FirstName", "Email", "Phone", "AccountId"]);
+    }
+
+    [Fact]
+    public async Task Contact_upsert_updates_the_existing_record_and_clears_what_became_empty()
+    {
+        await Account("A1", new() { ["name"] = "One" }, []);
+        await Account("A2", new() { ["name"] = "Two" }, []);
+        await Contact("C1", "A1", new() { ["lastName"] = "Lovelace", ["phone"] = "+1 555 0101" });
+
+        (await Contact("C1", "A2", new() { ["lastName"] = "Lovelace" })).Outcome.Should().Be(SyncOutcome.Saved);
+
+        _org.All("Contact").Should().ContainSingle("matched by its external id");
+        var stored = _org.FindByExternalId("Contact", "C1")!;
+        stored["Phone"].Should().BeNull();
+        ((string?)stored["AccountId"]).Should().Be(IdOf("Account", "A2"));
+    }
+
+    [Fact]
+    public async Task Contact_whose_Account_is_not_in_Salesforce_waits_for_it()
+    {
+        var early = await Contact("C1", "A1", new() { ["lastName"] = "Early" });
+
+        early.Outcome.Should().Be(SyncOutcome.TransientFailure, "Salesforce found no Account with that external id");
+        (early.PrimaryError?.Code).Should().Be(SalesforceErrors.DependencyNotSynced);
+        (early.PrimaryError?.Message).Should().Contain("Foreign key external ID: A1");
+        _org.FindByExternalId("Contact", "C1").Should().BeNull();
+
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        (await Contact("C1", "A1", new() { ["lastName"] = "Early" })).Outcome.Should().Be(SyncOutcome.Saved);
+    }
+
+    [Fact]
+    public async Task A_contact_value_Salesforce_would_reject_fails_only_its_own_entity_before_the_call()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contact("WARM", "A1", new() { ["lastName"] = "Warm" });
+
+        var results = (await Contacts(("NONAME", "A1", new() { ["firstName"] = "No last name" }),
+            ("LONG", "A1", new() { ["lastName"] = "Long", ["phone"] = new string('1', 41) }),
+            ("GOOD", "A1", new() { ["lastName"] = "Good" }))).ToDictionary(r => r.Key);
+
+        (results["NONAME"].Outcome, results["NONAME"].PrimaryError?.Code).Should().Be((SyncOutcome.PermanentFailure, "REQUIRED_FIELD_MISSING"));
+        (results["LONG"].Outcome, results["LONG"].PrimaryError?.Code).Should().Be((SyncOutcome.PermanentFailure, "STRING_TOO_LONG"));
+        results["GOOD"].Outcome.Should().Be(SyncOutcome.Saved);
+        Upserted(_org.WriteRequests[^1], "Contact").Select(r => (string?)r["External_Id__c"]).Should().Equal("GOOD");
+    }
+
+    [Theory]
+    [InlineData("FIELD_CUSTOM_VALIDATION_EXCEPTION", SyncOutcome.PermanentFailure)]
+    [InlineData("UNABLE_TO_LOCK_ROW", SyncOutcome.TransientFailure)]
+    public async Task A_contact_Salesforce_rejects_costs_only_its_own_entity(string code, SyncOutcome outcome)
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        _org.InjectFault("Contact", "C2", code, "rejected", 1);
+
+        var results = (await Contacts(("C1", "A1", new() { ["lastName"] = "One" }), ("C2", "A1", new() { ["lastName"] = "Two" }),
+            ("C3", "A1", new() { ["lastName"] = "Three" }))).ToDictionary(r => r.Key);
+
+        (results["C2"].Outcome, results["C2"].PrimaryError?.Code, results["C2"].PrimaryError?.ReferenceId).Should().Be((outcome, code, "contact"));
+        results["C1"].Outcome.Should().Be(SyncOutcome.Saved);
+        results["C3"].Outcome.Should().Be(SyncOutcome.Saved);
+    }
+
+    [Fact]
+    public async Task More_than_200_contacts_are_split_over_upsert_calls()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        var before = _org.GetStats();
+
+        var results = await Contacts([.. Enumerable.Range(0, 250).Select(i => ($"C{i:D3}", "A1", new Dictionary<string, object?> { ["lastName"] = $"Contact {i}" }))]);
+
+        results.Should().HaveCount(250).And.OnlyContain(r => r.Outcome == SyncOutcome.Saved);
+        (_org.GetStats().UpsertRequests - before.UpsertRequests).Should().Be(2);
+        _org.WriteRequests.TakeLast(2).Select(w => Records(w).Count).Should().Equal(200, 50);
+        _org.All("Contact").Should().HaveCount(250);
+    }
+
+    [Fact]
+    public async Task A_contact_upsert_whose_answer_is_lost_has_an_unknown_outcome()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        _org.LoseResponsesFor("Contact", "C1", 1);
+
+        var upsert = () => Contact("C1", "A1", new() { ["lastName"] = "Lost" });
+
+        await upsert.Should().ThrowAsync<UnknownOutcomeException>("an older upsert landing late could overwrite a newer one");
+        _org.FindByExternalId("Contact", "C1").Should().NotBeNull("the org applied it; only the answer was lost");
+    }
+
+    [Fact]
+    public async Task The_upsert_call_answers_per_record_in_order_with_created_or_updated()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        var client = new SalesforceRestClient(new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") });
+        static IReadOnlyDictionary<string, object?> Record(string key, string account)
+        {
+            return new Dictionary<string, object?>
+            {
+                ["attributes"] = new { type = "Contact" },
+                ["External_Id__c"] = key,
+                ["LastName"] = "Doe",
+                ["Account"] = new Dictionary<string, object?> { ["External_Id__c"] = account }
+            };
+        }
+
+        var first = await client.UpsertAsync("Contact", "External_Id__c", [Record("C1", "A1"), Record("C2", "NOPE")], CancellationToken.None);
+        var second = await client.UpsertAsync("Contact", "External_Id__c", [Record("C1", "A1")], CancellationToken.None);
+
+        first.Select(r => (r.Success, r.Created)).Should().Equal((true, true), (false, false));
+        first[0].Id.Should().Be(IdOf("Contact", "C1"));
+        var error = first[1].Errors.Should().ContainSingle().Subject;
+        (error.Code, error.Message).Should().Be(("INVALID_FIELD", "Foreign key external ID: NOPE not found for field External_Id__c in entity Account"));
+        second.Single().Should().Match<RecordResult>(r => r.Success && r.Created == false && r.Id == IdOf("Contact", "C1"));
+        var unknownField = () => client.UpsertAsync("Contact", "No_Such__c", [Record("C1", "A1")], CancellationToken.None);
+        (await unknownField.Should().ThrowAsync<SalesforceResponseException>()).Which.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task A_contact_record_type_Salesforce_rejects_is_retried_and_describes_again()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contact("WARM", "A1", new() { ["lastName"] = "Warm" });
+        var before = _org.GetStats();
+        _org.InjectFault("Contact", "C1", "INVALID_CROSS_REFERENCE_KEY", "Record Type ID: this ID value isn't valid for the user: 012000000000001AAA", 1);
+
+        var rejected = await Contact("C1", "A1", new() { ["lastName"] = "One" });
+
+        (rejected.Outcome, rejected.PrimaryError?.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.InvalidRecordType));
+        (await Contact("C1", "A1", new() { ["lastName"] = "One" })).Outcome.Should().Be(SyncOutcome.Saved);
+        (_org.GetStats().Describes - before.Describes).Should().BeGreaterThan(0, "the cached describe was invalidated");
     }
 
     // ---------- Helpers ----------
@@ -678,11 +892,29 @@ public sealed class SalesforceBatchUpsertServiceTests
             (key, Read<AccountRelationshipEvent>(new JsonObject { ["accountRelationship"] = rel })))).Single();
     }
 
-    /// <summary>What the engine does with a strategy, minus the inbox: map, query, upsert.</summary>
+    private async Task<UpsertResult> Contact(string key, string account, Dictionary<string, object?> fields)
+    {
+        return (await Contacts((key, account, fields))).Single();
+    }
+
+    private Task<List<UpsertResult>> Contacts(params (string Key, string Account, Dictionary<string, object?> Fields)[] items)
+    {
+        return Upsert(ContactStrategy, [.. items.Select(i =>
+        {
+            var contact = Body(i.Fields);
+            contact["externalId"] = i.Key;
+            contact["accountExternalId"] = i.Account;
+            return (i.Key, Read<ContactEvent>(new JsonObject { ["contact"] = contact }));
+        })]);
+    }
+
+    /// <summary>What the engine does with a strategy, minus the inbox: map, then query and upsert, or upsert directly.</summary>
     private Task<List<UpsertResult>> Upsert<TEvent>(UpsertStrategy<TEvent> strategy, params (string Key, TEvent Event)[] items)
     {
         var units = items.Select(i => (i.Key, strategy.Map(i.Key, i.Event))).ToList();
-        return _upserter.WriteToSalesforceAsync(units, [.. strategy.Queries([.. units.Select(u => u.Item2)])], CancellationToken.None);
+        return strategy.Mode == WriteMode.DirectUpsert
+            ? _upserter.UpsertToSalesforceAsync(units, CancellationToken.None)
+            : _upserter.WriteToSalesforceAsync(units, [.. strategy.Queries([.. units.Select(u => u.Item2)])], CancellationToken.None);
     }
 
     private static JsonObject WithoutProfile(string key, string name)
@@ -691,6 +923,17 @@ public sealed class SalesforceBatchUpsertServiceTests
         e["account"]!.AsObject().Remove("profile");
         e["account"]!["externalId"] = key;
         return e;
+    }
+
+    /// <summary>The records of a recorded write that must be an sObject Collections upsert of <paramref name="sobject"/> by External_Id__c.</summary>
+    private static List<JsonObject> Upserted(JsonObject write, string sobject)
+    {
+        ((string?)write["method"], (string?)write["url"]).Should().Be(
+            ("PATCH", $"/services/data/v62.0/composite/sobjects/{sobject}/External_Id__c"), "the write is an upsert, not a Composite request");
+        write["body"]!["allOrNone"]!.GetValue<bool>().Should().BeFalse("allOrNone is sent explicitly");
+        var records = Records(write);
+        records.Should().OnlyContain(r => (string?)r["attributes"]!["type"] == sobject).And.OnlyContain(r => !r.ContainsKey("id"));
+        return records;
     }
 
     /// <summary>The i-th subrequest of a recorded composite write.</summary>

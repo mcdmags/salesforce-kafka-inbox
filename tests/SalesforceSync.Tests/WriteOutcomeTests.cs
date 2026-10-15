@@ -127,7 +127,10 @@ public sealed class WriteOutcomeTests
         return (SalesforceStep.Service(http, options), org, failing);
     }
 
-    /// <summary>Fails the composite read or the composite write (the one with sObject Collections) before it reaches the org.</summary>
+    /// <summary>
+    /// Fails the composite read or the write (the composite with sObject Collections, or a Collections upsert) before it
+    /// reaches the org.
+    /// </summary>
     private sealed class FailingHandler : DelegatingHandler
     {
         public bool FailReads { get; set; }
@@ -137,12 +140,14 @@ public sealed class WriteOutcomeTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            if (!request.RequestUri!.AbsolutePath.EndsWith("/composite", StringComparison.Ordinal))
+            var path = request.RequestUri!.AbsolutePath;
+            var isUpsert = path.Contains("/composite/sobjects/", StringComparison.Ordinal);
+            if (!isUpsert && !path.EndsWith("/composite", StringComparison.Ordinal))
             {
                 return await base.SendAsync(request, ct);
             }
 
-            var isWrite = (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
+            var isWrite = isUpsert || (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
             return (isWrite ? !FailWrites : !FailReads)
                 ? await base.SendAsync(request, ct)
                 : Cancel

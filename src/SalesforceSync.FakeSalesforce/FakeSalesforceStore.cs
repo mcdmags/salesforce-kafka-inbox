@@ -4,9 +4,9 @@ using static SalesforceSync.FakeSalesforce.FakeJson;
 namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
-/// In-memory Salesforce org: sObject Describe, SOQL "WHERE field IN (...)" queries, and Composite requests with
+/// In-memory Salesforce org: sObject Describe, SOQL "WHERE field IN (...)" queries, Composite requests with
 /// sObject Collections create/update subrequests (per-record results with allOrNone false, references between
-/// subrequests). Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
+/// subrequests), and sObject Collections upserts by external id. Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
 /// values are stored the way Salesforce stores them. Every committed create/update is kept in a per-record write
 /// history (stored values), so tests can check what reached the org and in which order. Errors can be injected per
 /// record. Thread-safe (single lock), which also mimics Salesforce serializing writes to the same rows.
@@ -127,7 +127,11 @@ public sealed class FakeSalesforceStore
         }
     }
 
-    /// <summary>The composite requests that contained writes, oldest first (the last <see cref="MaxRecordedWrites"/>), as received.</summary>
+    /// <summary>
+    /// The write requests, oldest first (the last <see cref="MaxRecordedWrites"/>), as received: Composite requests
+    /// that contained writes (<c>{ "allOrNone", "compositeRequest": [...] }</c>), and upserts as
+    /// <c>{ "method": "PATCH", "url", "body": { "allOrNone", "records" } }</c>.
+    /// </summary>
     public IReadOnlyList<JsonObject> WriteRequests
     {
         get
@@ -302,6 +306,39 @@ public sealed class FakeSalesforceStore
 
         // Everything above is committed; only the answer goes missing
         return lost ? throw new FakeResponseLostException() : new JsonObject { ["compositeResponse"] = responses };
+    }
+
+    // ---------- sObject Collections upsert ----------
+
+    /// <summary>
+    /// sObject Collections upsert (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>): one API call of its own,
+    /// up to 200 records of that object, each updated if a record has its external id and created otherwise. Answers
+    /// <c>[{ "id", "success", "errors", "created" }]</c> in request order.
+    /// </summary>
+    public JsonArray Upsert(string sobject, string externalIdField, string path, JsonObject payload)
+    {
+        if (!FakeSchema.Objects.ContainsKey(sobject))
+        {
+            throw new FakeSalesforceException(404, "NOT_FOUND", $"The requested resource does not exist: {sobject}");
+        }
+
+        if (FakeSchema.Find(sobject, externalIdField) is not { Type: "string" } field)
+        {
+            throw new FakeSalesforceException(404, "NOT_FOUND", $"Provided external ID field does not exist or is not accessible: {externalIdField}");
+        }
+
+        JsonArray results;
+        bool lost;
+        lock (_gate)
+        {
+            _faults.LoseResponse = false;
+            _counters.UpsertRequests++;
+            RecordWriteRequest(new JsonObject { ["method"] = "PATCH", ["url"] = path, ["body"] = payload.DeepClone() });
+            results = _collections.Upsert(sobject, field.Name, payload);
+            lost = _faults.LoseResponse;
+        }
+
+        return lost ? throw new FakeResponseLostException() : results;
     }
 
     private void RecordWriteRequest(JsonObject payload)

@@ -4,7 +4,8 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// What is sent to Salesforce and what per-record results do to an entity: one Composite request of sObject
-/// Collections creates and updates, each record saved or rejected on its own (allOrNone false).
+/// Collections creates and updates, or one Collections upsert when only one object is written and nothing links to a
+/// record created in the same request; each record saved or rejected on its own (allOrNone false).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class CollectionsWriteTests(SyncFixture app)
@@ -119,8 +120,32 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().OnlyContain(r => r.Status == "done");
         var writes = await app.GetWriteRequestsAsync(acct, (string)(await app.GetRecordAsync("Account", acct))!["Id"]!);
         writes.Should().HaveCount(2);
-        ((string?)writes[1]["compositeRequest"]![0]!["method"]).Should().Be("PATCH", "no duplicate is created");
+        ((string?)writes[1]["method"], (string?)writes[1]["url"]).Should().Be(
+            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/External_Id__c"),
+            "only the Account differs (the Profile is unchanged): one upsert by external id, not a Composite request");
+        Records(writes[1]).Single().Select(kv => kv.Key).Should().BeEquivalentTo(["attributes", "External_Id__c", "Rating"],
+            "the existing record is found by its external id and gets only what differs");
         (await app.GetHistoryAsync("Account", acct))[1].Select(kv => kv.Key).Should().Equal("Rating");
+    }
+
+    [Fact]
+    public async Task A_change_of_the_Account_alone_is_one_upsert_and_a_new_Account_with_its_Profile_stays_Composite()
+    {
+        var acct = SyncFixture.NewAccountId();
+        await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "Acme", ["rating"] = "Hot" }, new JsonObject { ["tier"] = "Gold" });
+        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+
+        await app.PublishAsync(acct, 2, new JsonObject { ["name"] = "Acme", ["rating"] = "Cold" }, new JsonObject { ["tier"] = "Gold" });
+        await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
+
+        var writes = await app.GetWriteRequestsAsync(acct);
+        writes.Should().HaveCount(2);
+        writes[0]["compositeRequest"]!.AsArray().Select(s => (string?)s!["referenceId"]).Should().Equal(
+            ["Account_create", "Profile__c_create_ref"], "the new Profile links to its new Account by @{reference}");
+        ((string?)writes[1]["method"], (string?)writes[1]["url"]).Should().Be(
+            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/External_Id__c"));
+        Records(writes[1]).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "External_Id__c", "Rating");
+        (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().ContainSingle("the Profile is not written");
     }
 
     private static List<JsonObject> Records(JsonNode collection)

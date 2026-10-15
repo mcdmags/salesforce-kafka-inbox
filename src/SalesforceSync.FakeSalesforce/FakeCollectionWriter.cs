@@ -4,9 +4,11 @@ using static SalesforceSync.FakeSalesforce.FakeJson;
 namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
-/// sObject Collections create (POST) and update (PATCH): each record is checked the way Salesforce checks it (type,
-/// id, fields, lookups, uniqueness, injected faults) and gets a result of its own (allOrNone false, the only mode the
-/// sync uses). Not thread-safe; <see cref="FakeSalesforceStore"/> holds its lock.
+/// sObject Collections create (POST), update (PATCH) and upsert by external id (PATCH .../{SObject}/{field}): each
+/// record is checked the way Salesforce checks it (type, id, fields, lookups, uniqueness, injected faults) and gets a
+/// result of its own (allOrNone false, the only mode the sync uses). A lookup can also be given by the parent's
+/// external id through its relationship (<c>"Account": { "External_Id__c": "A1" }</c>). Not thread-safe;
+/// <see cref="FakeSalesforceStore"/> holds its lock.
 /// </summary>
 internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults faults, FakeCounters counters)
 {
@@ -17,6 +19,20 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     /// <summary>One result per record, in request order.</summary>
     public JsonArray Execute(bool create, JsonObject body)
     {
+        return Each(body, record => Write(create, record));
+    }
+
+    /// <summary>
+    /// Upsert: each record is matched by <paramref name="externalIdField"/>, updated if it exists and created if not.
+    /// One result per record, in request order, with <c>created</c>.
+    /// </summary>
+    public JsonArray Upsert(string sobject, string externalIdField, JsonObject body)
+    {
+        return Each(body, record => UpsertOne(sobject, externalIdField, record));
+    }
+
+    private JsonArray Each(JsonObject body, Func<JsonObject, JsonObject> write)
+    {
         var sent = body["records"]?.AsArray() ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing 'records'");
         if (sent.Count > MaxRecords)
         {
@@ -26,7 +42,7 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         var results = new JsonArray();
         foreach (var record in sent)
         {
-            results.Add(Write(create, record!.DeepClone().AsObject()));
+            results.Add(write(record!.DeepClone().AsObject()));
         }
 
         var failed = results.Count(r => !r!["success"]!.GetValue<bool>());
@@ -50,8 +66,43 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             ? (400, Errors("MISSING_ARGUMENT", "Id not specified in an update call"))
             : create && id is not null
             ? (400, Errors("INVALID_FIELD_FOR_INSERT_UPDATE", "cannot specify Id in an insert call", "Id"))
+            : ResolveRelationships(sobject, record) is { } unresolved
+            ? (400, unresolved)
             : create ? Create(sobject, record) : Update(sobject, id!, record);
 
+        return Result(outcome, id);
+    }
+
+    private JsonObject UpsertOne(string sobject, string externalIdField, JsonObject record)
+    {
+        var type = record["attributes"]?["type"]?.GetValue<string>();
+        record.Remove("attributes");
+        var extId = Str(record[externalIdField]);
+        var existing = extId is null ? null : records.Find(sobject, externalIdField, extId);
+        var id = Str(existing?["Id"]);
+        if (existing is not null)
+        {
+            record.Remove(externalIdField); // the match, not a change
+        }
+
+        var outcome = type is not null && !type.Equals(sobject, StringComparison.OrdinalIgnoreCase)
+            ? (400, Errors("INVALID_TYPE", $"Record type '{type}' does not match the upsert's sObject {sobject}"))
+            : record.ContainsKey("Id") || record.ContainsKey("id")
+            ? (400, Errors("INVALID_FIELD", "Id can't be set in an upsert by external id", "Id"))
+            : extId is null
+            ? (400, Errors("MISSING_ARGUMENT", $"{externalIdField} not specified", externalIdField))
+            : ResolveRelationships(sobject, record) is { } unresolved
+            ? (400, unresolved)
+            : existing is null ? Create(sobject, record) : Update(sobject, id!, record);
+
+        var result = Result(outcome, id);
+        result["created"] = existing is null && result["success"]!.GetValue<bool>();
+        return result;
+    }
+
+    /// <summary>A record's result: <c>{ "id", "success", "errors" }</c>, errors as Collections lists them.</summary>
+    private static JsonObject Result((int Status, JsonNode? Body) outcome, string? id)
+    {
         var ok = outcome.Status < 400;
         return new JsonObject
         {
@@ -66,6 +117,34 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
                     ["fields"] = e["fields"]?.DeepClone() ?? new JsonArray()
                 })])
         };
+    }
+
+    /// <summary>
+    /// Replaces each <c>"Relationship": { "External_Id__c": "A1" }</c> by the lookup field set to that parent's Id.
+    /// A parent that doesn't exist is Salesforce's INVALID_FIELD "Foreign key external ID: A1 not found ...".
+    /// </summary>
+    private JsonNode? ResolveRelationships(string sobject, JsonObject record)
+    {
+        foreach (var name in record.Where(kv => kv.Value is JsonObject).Select(kv => kv.Key).ToList())
+        {
+            var parent = record[name]!.AsObject();
+            var field = FakeSchema.Objects[sobject].FirstOrDefault(f => string.Equals(f.RelationshipName, name, StringComparison.OrdinalIgnoreCase));
+            var keys = parent.Where(kv => kv.Key != "attributes").ToList();
+            if (field?.ReferenceTo is not { } target || keys.Count != 1 || FakeSchema.Find(target, keys[0].Key) is not { } key)
+            {
+                return Errors("INVALID_FIELD", $"No such relationship '{name}' by an external id field on entity '{sobject}'");
+            }
+
+            var value = Str(keys[0].Value);
+            if (records.Find(target, key.Name, value) is not { } found)
+            {
+                return Errors("INVALID_FIELD", $"Foreign key external ID: {value} not found for field {key.Name} in entity {target}");
+            }
+
+            record.Remove(name);
+            record[field.Name] = found["Id"]!.DeepClone();
+        }
+        return null;
     }
 
     private (int Status, JsonNode? Body) Create(string sobject, JsonObject body)

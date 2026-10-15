@@ -63,6 +63,32 @@ internal sealed partial class CompositeWrite
         return (requests, tooLarge);
     }
 
+    /// <summary>
+    /// The request as one sObject Collections upsert by external id, when it can be one: all its writes are of one
+    /// object, none points at a record created in the same request (an upsert has no <c>@{reference}</c>), and they fit
+    /// one call. Same single API call as the Composite request, with a plainer body: each record carries its external
+    /// id and exactly the fields planned for it (all of a new record's, only the changed ones of an existing record).
+    /// Null when the request needs Composite (several objects, or a new parent and its new children). Marks the writes
+    /// <see cref="PlannedWrite.ByUpsert"/>, which is how their results are read.
+    /// </summary>
+    public UpsertCall? AsUpsert()
+    {
+        var writes = Collections.SelectMany(c => c.Writes).ToList();
+        if (writes.Count is 0 or > SalesforceRestClient.MaxCollectionRecords
+            || writes.Any(w => w.Links.Count > 0)
+            || writes.Select(w => (w.SObject, w.ExternalIdField)).Distinct().Count() != 1)
+        {
+            return null;
+        }
+
+        foreach (var write in writes)
+        {
+            write.ByUpsert = true;
+        }
+
+        return new UpsertCall($"{ReferenceIdFor(writes[0].SObject)}_upsert", writes[0].SObject, writes[0].ExternalIdField, writes);
+    }
+
     /// <summary>The subrequests, in the order and with the reference ids fixed by <see cref="Pack"/>.</summary>
     public List<CollectionRequest> BuildRequests()
     {
@@ -119,8 +145,12 @@ internal sealed partial class CompositeWrite
     /// <summary>E.g. Account_create, Profile__c_create_ref. Reference ids take letters, digits and underscores only.</summary>
     private static string ReferenceIdFor(CollectionKey key)
     {
-        return NotReferenceIdCharacter().Replace(
-                $"{key.SObject}_{(key.Create ? "create" : "update")}{(key.ByReference ? "_ref" : "")}", "_");
+        return ReferenceIdFor($"{key.SObject}_{(key.Create ? "create" : "update")}{(key.ByReference ? "_ref" : "")}");
+    }
+
+    public static string ReferenceIdFor(string name)
+    {
+        return NotReferenceIdCharacter().Replace(name, "_");
     }
 
     [GeneratedRegex("[^A-Za-z0-9_]")]
@@ -158,6 +188,13 @@ internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnl
 {
     public bool Create => id is null;
     public string ReferenceId => record.ReferenceId;
+    public string SObject => record.Schema.Name;
+
+    /// <summary>The external id field as the org names it.</summary>
+    public string ExternalIdField => record.Schema.Find(record.Record.ExternalIdField)!.Name;
+
+    /// <summary>Sent in an sObject Collections upsert (matched by external id) rather than a create or an update.</summary>
+    public bool ByUpsert { get; set; }
     public IReadOnlyList<ParentReference> Links => links;
     public IReadOnlySet<string> LookupFields => lookupFields;
 
@@ -190,6 +227,25 @@ internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnl
             // indexing; indexing into an sObject Collections response is not confirmed: verify in a sandbox.
             body[link.Field.Name] = $"@{{{link.Parent.CollectionReferenceId}[{link.Parent.IndexInCollection}].id}}";
         }
+        return body;
+    }
+
+    /// <summary>
+    /// The record as a Collections upsert takes it: its type, its external id (which decides create or update) and the
+    /// planned fields. No Id: Salesforce finds the record by the external id.
+    /// </summary>
+    public IReadOnlyDictionary<string, object?> UpsertBody()
+    {
+        var body = new Dictionary<string, object?>
+        {
+            ["attributes"] = new Dictionary<string, object?> { ["type"] = SObject },
+            [ExternalIdField] = record.Record.ExternalId
+        };
+        foreach (var (field, value) in changes)
+        {
+            body[field] = value;
+        }
+
         return body;
     }
 }

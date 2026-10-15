@@ -115,6 +115,34 @@ public sealed class InboxEventTests
         map.Should().ThrowExactly<ArgumentException>();
     }
 
+    [Theory, AutoData]
+    public void Contact_event_maps_to_a_Contact_looking_up_its_Account_and_is_written_by_direct_upsert(string key, string account, string lastName)
+    {
+        var unit = ContactSync.Strategy.Map(key, Read<ContactEvent>(new JsonObject
+        {
+            ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z", ["type"] = "inserted" },
+            ["contact"] = new JsonObject { ["externalId"] = key, ["accountExternalId"] = account, ["lastName"] = lastName }
+        }));
+
+        var contact = unit.Records.Should().ContainSingle().Subject;
+        (contact.SObject, contact.ExternalIdField, contact.ExternalId, contact.RecordType).Should()
+            .Be(("Contact", "External_Id__c", key, "Standard"));
+        contact.Fields.Should().Contain("LastName", lastName).And.Contain("Email", null);
+        contact.Lookups.Should().Equal(new SObjectLookup("AccountId", "Account", "External_Id__c", account));
+        ContactSync.Strategy.Mode.Should().Be(WriteMode.DirectUpsert);
+        AccountSync.Strategy.Mode.Should().Be(WriteMode.ReadAndDiff);
+    }
+
+    [Theory]
+    [InlineData(/*lang=json,strict*/ """{ "contact": { "externalId": "CON-1", "lastName": "Doe" } }""")]
+    [InlineData(/*lang=json,strict*/ """{ "contact": { "externalId": "CON-1", "accountExternalId": " ", "lastName": "Doe" } }""")]
+    public void Contact_without_its_account_cannot_be_mapped(string json)
+    {
+        var map = () => ContactSync.Strategy.Map("CON-1", Read<ContactEvent>(json));
+
+        map.Should().ThrowExactly<ArgumentException>();
+    }
+
     [Fact]
     public void CamelCase_is_the_contract_but_a_PascalCase_body_binds_to_the_same_sObject()
     {
