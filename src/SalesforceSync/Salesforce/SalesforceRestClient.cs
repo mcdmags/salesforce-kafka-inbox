@@ -14,8 +14,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     public const string ApiVersion = "v62.0";
     public const string DataPath = $"/services/data/{ApiVersion}";
 
-    /// <summary>Composite: max subrequests, of which at most 5 may be queries or sObject Collections operations.</summary>
-    public const int MaxCompositeSubrequests = 25;
+    /// <summary>Composite: at most 5 of its (25) subrequests may be queries or sObject Collections operations.</summary>
     public const int MaxCompositeQueries = 5;
     public const int MaxCompositeCollections = 5;
 
