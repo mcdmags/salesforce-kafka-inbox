@@ -91,6 +91,7 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         limit.HasKey(r => r.Name).HasName("sf_rate_limit_pkey");
         limit.Property(r => r.UpdatedAt).HasDefaultValueSql("clock_timestamp()");
         limit.HasData(new { Name = "salesforce", Tokens = 5.0, Capacity = 5.0, BaseRefillPerSec = 2.0, RefillPerSec = 2.0 });
+        modelBuilder.HasDbFunction(() => RateLimitSql.ClockTimestamp()).HasName("clock_timestamp").IsBuiltIn();
 
         var usage = modelBuilder.Entity<ApiUsageBucket>();
         usage.ToTable("sf_api_usage");

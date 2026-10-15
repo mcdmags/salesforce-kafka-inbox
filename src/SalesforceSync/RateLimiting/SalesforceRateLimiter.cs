@@ -12,9 +12,11 @@ namespace SalesforceSync.RateLimiting;
 /// allocation is the lower of the configured one (<see cref="SalesforceLimitsOptions.DailyApiAllocation"/>, the
 /// maximum) and the limit Salesforce reports in that header (<c>api-usage=25/5000</c>: 5,000).
 /// <para>
-/// Every change locks the shared <c>sf_rate_limit</c> row (<see cref="RateLimitSql.Lock"/>), reads the database clock,
-/// decides in C# (<see cref="TokenBucket"/>) and writes the row back in the same transaction. Each unit is retried as
-/// a whole on transient errors; a retry after an unknown commit can only over-count usage, the safe direction.
+/// Every change locks the shared <c>sf_rate_limit</c> row and reads the database clock in one statement
+/// (<see cref="RateLimitSql.Lock"/>), decides in C# (<see cref="TokenBucket"/>) and writes the row back in the same
+/// transaction. Every acquire in every process queues for that lock, so it is held for as few round trips as possible.
+/// Each unit is retried as a whole on transient errors; a retry after an unknown commit can only over-count usage, the
+/// safe direction.
 /// </para>
 /// </summary>
 public sealed class SalesforceRateLimiter(
@@ -84,13 +86,21 @@ public sealed class SalesforceRateLimiter(
         {
             var (decision, used, budget) = await contexts.RunInTransactionAsync(async (db, t) =>
             {
+                // Every acquire in every process waits for this row lock, so it is held for four round trips only: the
+                // lock (with the clock), the usage, the write when granted, and the commit
                 var (row, now) = await LockAsync(db, t);
                 // Read after the lock, in a statement of its own: it sees every usage increment committed by
-                // whoever held the lock before
+                // whoever held the lock before. With the calls already counted in the current bucket, null if none.
                 var since = now - _opt.CountedWindow;
+                var bucket = TokenBucket.BucketOf(now, _opt.UsageBucket);
                 var usage = await db.Set<ApiUsageBucket>().Where(b => b.Bucket >= since)
                     .GroupBy(_ => 1)
-                    .Select(g => new { Used = g.Sum(b => b.Calls), Oldest = g.Min(b => b.Bucket) })
+                    .Select(g => new
+                    {
+                        Used = g.Sum(b => b.Calls),
+                        Oldest = g.Min(b => b.Bucket),
+                        Current = g.Max(b => b.Bucket == bucket ? (long?)b.Calls : null),
+                    })
                     .SingleOrDefaultAsync(t);
                 var used = usage?.Used ?? 0;
                 var decision = TokenBucket.Decide(row, now, used, usage?.Oldest, permits, _opt);
@@ -100,16 +110,15 @@ public sealed class SalesforceRateLimiter(
                     row.UpdatedAt = now;
                     used += permits;
                     // The row lock serializes every acquire in every process, so no one can insert this bucket
-                    // between the read and the write: no ON CONFLICT needed
-                    var bucket = TokenBucket.BucketOf(now, _opt.UsageBucket);
-                    var counted = await db.Set<ApiUsageBucket>().FindAsync([bucket], t);
-                    if (counted is null)
+                    // between the read and the write: no ON CONFLICT needed. One SaveChanges, one batch.
+                    var counted = new ApiUsageBucket { Bucket = bucket, Calls = (usage?.Current ?? 0) + permits };
+                    if (usage?.Current is null)
                     {
-                        db.Add(new ApiUsageBucket { Bucket = bucket, Calls = permits });
+                        db.Add(counted);
                     }
                     else
                     {
-                        counted.Calls += permits;
+                        db.Update(counted);
                     }
                     await db.SaveChangesAsync(t);
                 }
@@ -196,27 +205,31 @@ public sealed class SalesforceRateLimiter(
 
     /// <summary>
     /// Locks the row, refills its tokens at the current rate (so a change of rate or capacity applies from now on),
-    /// applies <paramref name="change"/>, deletes the usage buckets that have left the window, and commits.
+    /// applies <paramref name="change"/>, and commits; first deletes the usage buckets that have left the window.
     /// </summary>
     private Task UpdateAsync(Action<RateLimitState, DateTimeOffset> change, CancellationToken ct)
     {
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
+            // Before the lock, so as not to hold it longer: acquires only read and write buckets in the window
+            await db.Set<ApiUsageBucket>()
+                .Where(b => b.Bucket + _opt.CountedWindow < RateLimitSql.ClockTimestamp())
+                .ExecuteDeleteAsync(t);
             var (row, now) = await LockAsync(db, t);
             row.Tokens = TokenBucket.Refill(row, now);
             row.UpdatedAt = now;
             change(row, now);
             await db.SaveChangesAsync(t);
-            var expired = now - _opt.CountedWindow;
-            await db.Set<ApiUsageBucket>().Where(b => b.Bucket < expired).ExecuteDeleteAsync(t);
         }, ct);
     }
 
-    /// <summary>The shared row, locked until the transaction ends, and the database clock once it is locked.</summary>
+    /// <summary>The shared row, locked until the transaction ends, and the database clock once it is locked: one statement.</summary>
     private static async Task<(RateLimitState Row, DateTimeOffset Now)> LockAsync(SyncDbContext db, CancellationToken t)
     {
-        var row = (await db.Set<RateLimitState>().FromSqlRaw(RateLimitSql.Lock).ToListAsync(t)).Single();
-        return (row, await db.Database.QuerySingleAsync<DateTimeOffset>(RateLimitSql.Now, t));
+        var locked = await db.Set<RateLimitState>().FromSqlRaw(RateLimitSql.Lock)
+            .Select(r => new { Row = r, Now = RateLimitSql.ClockTimestamp() })
+            .SingleAsync(t);
+        return (locked.Row, locked.Now);
     }
 
     /// <summary>Pauses until <paramref name="duration"/> from now, unless already paused for longer.</summary>
