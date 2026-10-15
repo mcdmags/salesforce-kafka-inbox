@@ -12,6 +12,12 @@ public sealed class LoadGeneratorOptions
     /// <summary>Chance that an account event is followed by a relationship event between it and another account.</summary>
     public double RelationshipProbability { get; set; } = 0.15;
 
+    /// <summary>Contact events (Contact, written by direct upsert).</summary>
+    public string ContactTopic { get; set; } = "contact-changes";
+
+    /// <summary>Chance that an account event is followed by an event of one of its contacts (up to 3 per account).</summary>
+    public double ContactProbability { get; set; } = 0.15;
+
     /// <summary>Distinct accounts. Fewer accounts = more updates per account = more ordering pressure.</summary>
     public int Accounts { get; set; } = 500;
 

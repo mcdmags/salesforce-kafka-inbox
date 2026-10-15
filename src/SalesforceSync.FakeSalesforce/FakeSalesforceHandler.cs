@@ -16,6 +16,9 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
     [GeneratedRegex(@"/sobjects/(?<obj>\w+)/describe/?$", RegexOptions.IgnoreCase)]
     private static partial Regex DescribeUrl();
 
+    [GeneratedRegex(@"/composite/sobjects/(?<obj>\w+)/(?<field>\w+)/?$", RegexOptions.IgnoreCase)]
+    private static partial Regex UpsertUrl();
+
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
         var options = store.Options;
@@ -81,7 +84,11 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
                 }
                 else
                 {
-                    res = request.Method == HttpMethod.Get && path.EndsWith("/query", StringComparison.OrdinalIgnoreCase)
+                    var upsert = UpsertUrl().Match(path);
+                    res = request.Method == HttpMethod.Patch && upsert.Success
+                        ? Json(request, HttpStatusCode.OK, store.Upsert(upsert.Groups["obj"].Value, upsert.Groups["field"].Value,
+                            path, await ReadJsonAsync(request, ct)))
+                        : request.Method == HttpMethod.Get && path.EndsWith("/query", StringComparison.OrdinalIgnoreCase)
                         ? Json(request, HttpStatusCode.OK, store.Query(QueryOf(uri)))
                         : request.Method == HttpMethod.Post && path.EndsWith("/composite", StringComparison.OrdinalIgnoreCase)
                         ? Json(request, HttpStatusCode.OK, store.ExecuteComposite(await ReadJsonAsync(request, ct)))

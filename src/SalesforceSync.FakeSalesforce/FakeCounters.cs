@@ -9,7 +9,7 @@ internal sealed class FakeCounters
     private long _apiCalls, _concurrencyRejections;
 
     public long Queries, WriteRequests, RecordsSucceeded, RecordsFailed, Creates, Updates, Describes, DescribesNotModified,
-        CompositeRequests;
+        CompositeRequests, UpsertRequests;
 
     public long CountApiCall()
     {
@@ -26,13 +26,13 @@ internal sealed class FakeCounters
         return new(
         Interlocked.Read(ref _apiCalls), Queries, WriteRequests, RecordsSucceeded, RecordsFailed,
         Creates, Updates, Interlocked.Read(ref _concurrencyRejections), Describes, DescribesNotModified,
-        CompositeRequests, records);
+        CompositeRequests, UpsertRequests, records);
     }
 
     public void Reset()
     {
         _apiCalls = Queries = WriteRequests = RecordsSucceeded = RecordsFailed = Creates = Updates = 0;
-        Describes = DescribesNotModified = CompositeRequests = 0;
+        Describes = DescribesNotModified = CompositeRequests = UpsertRequests = 0;
         Interlocked.Exchange(ref _concurrencyRejections, 0);
     }
 }

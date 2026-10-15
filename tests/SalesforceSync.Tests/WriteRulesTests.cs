@@ -282,7 +282,117 @@ public sealed class WriteRulesTests
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced));
     }
 
+    // ---------- Requests sent as an upsert ----------
+
+    [Fact]
+    public void A_request_of_one_object_without_references_is_an_upsert_carrying_the_planned_fields()
+    {
+        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","External_Id__c":"A1","Name":"Old","Active__c":false}"""));
+        var request = WritePlanner.Plan([Normalized(Account("A1", "New")), Normalized(Account("A2", "Created"))], current).Requests.Single();
+
+        var upsert = request.AsUpsert()!;
+
+        (upsert.ReferenceId, upsert.SObject, upsert.ExternalIdField).Should().Be(("Account_upsert", "Account", "External_Id__c"));
+        JsonSerializer.Serialize(upsert.Bodies()).Should().Be(JsonSerializer.Serialize(new object[]
+        {
+            new Dictionary<string, object?> { ["attributes"] = new { type = "Account" }, ["External_Id__c"] = "A2", ["Name"] = "Created", ["Active__c"] = false },
+            new Dictionary<string, object?> { ["attributes"] = new { type = "Account" }, ["External_Id__c"] = "A1", ["Name"] = "New" }
+        }), "a new record whole, an existing one by its external id with what differs, never an Id");
+    }
+
+    [Fact]
+    public void A_request_that_links_a_new_child_to_its_new_parent_or_spans_objects_stays_Composite()
+    {
+        Request(AccountWithProfile("A1")).AsUpsert().Should().BeNull("the Profile points at @{Account_create[0].id}");
+
+        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","External_Id__c":"A1","Name":"Old","Active__c":false}"""));
+        var request = WritePlanner.Plan([Normalized(new UpsertUnit([Account("A1", "New").Records[0], Profile("P1", "Gold", "A1")]))], current)
+            .Requests.Single();
+        request.AsUpsert().Should().BeNull("an Account update and a Profile create are two objects");
+    }
+
+    [Fact]
+    public void An_update_sent_as_an_upsert_that_created_the_record_is_retried_to_write_the_rest()
+    {
+        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","External_Id__c":"A1","Name":"Old","Active__c":false}"""));
+        var request = WritePlanner.Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
+        var upsert = request.AsUpsert()!;
+
+        var result = Interpreter().Interpret([(upsert.ReferenceId, upsert.Writes)], request.Units,
+            [new CollectionResult(upsert.ReferenceId, [new RecordResult(true, AccountId, [], Created: true)], [])]).Single();
+
+        (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, "ENTITY_IS_DELETED"),
+            "the record was deleted after the read, and the upsert created it from the changed fields alone");
+    }
+
+    [Theory]
+    [InlineData(false, SyncOutcome.PermanentFailure)]
+    [InlineData(true, SyncOutcome.TransientFailure)]
+    public void A_required_field_missing_on_an_update_sent_as_an_upsert_means_the_record_is_gone(bool exists, SyncOutcome outcome)
+    {
+        var current = exists ? Rows(("Account", $$"""{"Id":"{{AccountId}}","External_Id__c":"A1","Name":"Old","Active__c":false}""")) : CurrentRecords.None;
+        var request = WritePlanner.Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
+        var upsert = request.AsUpsert()!;
+
+        var result = Interpreter().Interpret([(upsert.ReferenceId, upsert.Writes)], request.Units,
+            [Failed(upsert.ReferenceId, "REQUIRED_FIELD_MISSING")]).Single();
+
+        result.Outcome.Should().Be(outcome);
+    }
+
+    // ---------- Direct upsert (WriteMode.DirectUpsert) ----------
+
+    [Fact]
+    public void A_direct_upsert_sends_every_field_and_sets_the_parent_by_its_external_id()
+    {
+        var plan = WritePlanner.PlanUpserts([Normalized(new UpsertUnit([Profile("P1", null, "A1")]))]);
+
+        var call = plan.Calls.Should().ContainSingle().Subject;
+        (call.ReferenceId, call.SObject, call.ExternalIdField).Should().Be(("Profile__c_upsert", "Profile__c", "External_Id__c"));
+        JsonSerializer.Serialize(call.Bodies().Single()).Should().Be(JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["attributes"] = new { type = "Profile__c" },
+            ["External_Id__c"] = "P1",
+            ["Tier__c"] = null,
+            ["Account__r"] = new Dictionary<string, object?> { ["attributes"] = new { type = "Account" }, ["External_Id__c"] = "A1" }
+        }), "an empty field is sent to clear it, and the Account is named by the relationship, not the Id field");
+        plan.NotSent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_direct_upsert_splits_per_object_and_200_records_and_rejects_a_field_it_cannot_both_create_and_update()
+    {
+        var units = Enumerable.Range(0, 250).Select(i => Normalized(Account($"A{i}", "Acme"))).Append(Normalized(Account("BAD", "Acme", locked: "x")));
+
+        var plan = WritePlanner.PlanUpserts([.. units]);
+
+        plan.Calls.Select(c => (c.ReferenceId, c.Writes.Count)).Should().Equal(("Account_upsert", 200), ("Account_upsert_2", 50));
+        var bad = plan.NotSent.Should().ContainSingle().Subject;
+        (bad.Key, bad.Outcome, bad.PrimaryError!.Code).Should().Be(("BAD", SyncOutcome.PermanentFailure, "INVALID_FIELD_FOR_INSERT_UPDATE"));
+    }
+
+    [Fact]
+    public void A_parent_Salesforce_cannot_find_by_its_external_id_means_wait_for_it()
+    {
+        var plan = WritePlanner.PlanUpserts([Normalized(new UpsertUnit([Profile("P1", "Gold", "A1")]))]);
+        var call = plan.Calls.Single();
+
+        var result = Interpreter().Interpret([(call.ReferenceId, call.Writes)], plan.Units,
+        [
+            new CollectionResult(call.ReferenceId, [new RecordResult(false, null,
+                [new SalesforceError(null, "INVALID_FIELD", "Foreign key external ID: A1 not found for field External_Id__c in entity Account")])], [])
+        ]).Single();
+
+        (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced),
+            "INVALID_FIELD is permanent, except when it says the parent isn't there");
+    }
+
     // ---------- Helpers ----------
+
+    private static WriteResultInterpreter Interpreter()
+    {
+        return new(new SalesforceErrors(Options.Create(new SalesforceOptions())));
+    }
 
     private static SalesforceField Field(string name, string type, bool createable = true, bool updateable = true, bool nillable = true)
     {
@@ -300,7 +410,7 @@ public sealed class WriteRulesTests
         return new UpsertUnit([new SObjectRecord("acct", "Account", "External_Id__c", key, fields)]);
     }
 
-    private static SObjectRecord Profile(string key, string tier, string accountKey)
+    private static SObjectRecord Profile(string key, string? tier, string accountKey)
     {
         return new("prof", "Profile__c", "External_Id__c", key, new Dictionary<string, object?> { ["Tier__c"] = tier },
                 [new SObjectLookup("Account__c", "Account", "External_Id__c", accountKey)]);

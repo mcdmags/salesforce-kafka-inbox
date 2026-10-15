@@ -13,9 +13,11 @@ public static class SalesforceProxy
     public static async Task HandleAsync(HttpContext ctx)
     {
         var invoker = ctx.RequestServices.GetRequiredService<HttpMessageInvoker>();
-        if (ctx.Request.Path.Value?.EndsWith("/composite", StringComparison.OrdinalIgnoreCase) == true)
+        var path = ctx.Request.Path.Value ?? "";
+        if (path.EndsWith("/composite", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("/composite/sobjects/", StringComparison.OrdinalIgnoreCase))
         {
-            ctx.RequestServices.GetRequiredService<ClientLog>().RecordCompositeRequest(ctx.Request.Headers.UserAgent);
+            ctx.RequestServices.GetRequiredService<ClientLog>().RecordDataRequest(ctx.Request.Headers.UserAgent);
         }
 
         using var request = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), ctx.Request.GetEncodedUrl());

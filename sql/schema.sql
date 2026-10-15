@@ -53,7 +53,7 @@ end $$;
 
 -- >>> inbox table template
 -- Applied once per synced object type, with {inbox} replaced by that type's table name (a code constant, e.g.
--- sf_account_inbox, sf_account_relationship_inbox). Every inbox has the same shape: one row per Kafka event plus its
+-- sf_account_inbox, sf_account_relationship_inbox, sf_contact_inbox). Every inbox has the same shape: one row per Kafka event plus its
 -- processing state. Rows of one entity_id are claimed together and never by two workers at once.
 create table if not exists {inbox} (
   id              bigserial   primary key,

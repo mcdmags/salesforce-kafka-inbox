@@ -97,6 +97,52 @@ public sealed class EngineFlowTests
         _inbox.Recorded!.Dead.Should().ContainSingle();
     }
 
+    // ---------- Direct upsert (contacts) ----------
+
+    [Fact]
+    public async Task A_direct_upsert_batch_writes_without_a_read_and_records_every_outcome()
+    {
+        await CreateAccountAsync("ACC-9");
+        _org.InjectFault("Contact", "C-2", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "rejected", 1);
+        _inbox.Rows.AddRange([Contact(1, "C-1", "ACC-9"), Contact(2, "C-2", "ACC-9")]);
+        _http.OnRead = _ => throw new InvalidOperationException("a direct upsert reads nothing");
+
+        (await Engine().UpsertBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
+
+        _inbox.Calls.Should().Equal("claim contact", "record");
+        _inbox.Recorded!.Synced.Should().ContainSingle().Which.EntityId.Should().Be("C-1");
+        _inbox.Recorded.Dead.Should().ContainSingle().Which.Code.Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION");
+        _http.Writes.Should().Be(1, "both contacts in one upsert call");
+    }
+
+    [Fact]
+    public async Task A_direct_upsert_whose_answer_is_lost_holds_every_claimed_row()
+    {
+        await CreateAccountAsync("ACC-9");
+        _inbox.Rows.AddRange([Contact(1, "C-1", "ACC-9"), Contact(2, "C-2", "ACC-9")]);
+        _org.LoseResponsesFor("Contact", "C-1", 1);
+
+        (await Engine().UpsertBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
+
+        _inbox.Calls.Should().Equal("claim contact", "hold");
+    }
+
+    /// <summary>The contacts' Account, synced through the account strategy.</summary>
+    private async Task CreateAccountAsync(string account)
+    {
+        _inbox.Rows.Add(Row(9, account, "2026-10-14T01:00:00Z"));
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
+        _inbox.Rows.Clear();
+        _inbox.Calls.Clear();
+        _http.Writes = 0;
+    }
+
+    private static InboxEvent Contact(long id, string contact, string account)
+    {
+        return new(id, contact,
+        $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""", 1);
+    }
+
     // ---------- A batch written in more than one call ----------
 
     [Fact]
@@ -296,9 +342,11 @@ public sealed class EngineFlowTests
                 throw Throw;
             }
 
-            if (request.RequestUri!.AbsolutePath.EndsWith("/composite", StringComparison.Ordinal))
+            var path = request.RequestUri!.AbsolutePath;
+            var isUpsert = path.Contains("/composite/sobjects/", StringComparison.Ordinal);
+            if (isUpsert || path.EndsWith("/composite", StringComparison.Ordinal))
             {
-                var isWrite = (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
+                var isWrite = isUpsert || (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
                 if (!isWrite && OnRead is not null)
                 {
                     return OnRead(request);

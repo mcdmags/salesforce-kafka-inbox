@@ -9,6 +9,21 @@ namespace SalesforceSync.Sync.Upsert;
 internal sealed record WritePlan(IReadOnlyList<CompositeWrite> Requests, IReadOnlyList<UpsertResult> NotSent);
 
 /// <summary>
+/// One sObject Collections upsert (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>): up to 200 records
+/// of one object, matched by their external id. Not a Composite request: one call of its own.
+/// </summary>
+internal sealed record UpsertCall(string ReferenceId, string SObject, string ExternalIdField, List<PlannedWrite> Writes)
+{
+    public List<IReadOnlyDictionary<string, object?>> Bodies()
+    {
+        return [.. Writes.Select(w => w.UpsertBody())];
+    }
+}
+
+/// <summary>What a <see cref="WriteMode.DirectUpsert"/> batch sends: its calls, the units in them, and the units not sent.</summary>
+internal sealed record UpsertPlan(IReadOnlyList<UpsertCall> Calls, IReadOnlyList<PlannedUnit> Units, IReadOnlyList<UpsertResult> NotSent);
+
+/// <summary>
 /// Turns units and Salesforce's current records into the collection requests to send. Whether a record is created or
 /// updated is decided by what the read found. A lookup becomes a literal Id, or a reference to a create in the same
 /// request (<c>@{Account_create[3].id}</c>). Compares a record's normalized values with what Salesforce has
@@ -48,6 +63,87 @@ internal static class WritePlanner
         var (requests, tooLarge) = CompositeWrite.Pack(planned);
         decided.AddRange(tooLarge);
         return new WritePlan(requests, decided);
+    }
+
+    /// <summary>
+    /// <see cref="WriteMode.DirectUpsert"/>: no read and no diff, so every record is sent whole (nulls included, since
+    /// the record may exist and an empty field must be cleared) and each lookup names its parent by external id through
+    /// the field's relationship (<c>"Account": { "External_Id__c": "A1" }</c>); Salesforce resolves it, or answers that
+    /// the parent isn't there. One call per object (in the order the units list them, parents first) and per 200
+    /// records. A field must be both createable and updateable: whether the upsert creates or updates is only known
+    /// afterwards.
+    /// </summary>
+    public static UpsertPlan PlanUpserts(IReadOnlyList<NormalizedUnit> units)
+    {
+        var planned = new List<PlannedUnit>();
+        var notSent = new List<UpsertResult>();
+        foreach (var unit in units)
+        {
+            var problems = new List<SalesforceError>();
+            var writes = unit.Records.Select(r => UpsertWrite(r, problems)).ToList();
+            if (problems.Count > 0)
+            {
+                notSent.Add(new(unit.Key, SyncOutcome.PermanentFailure, problems));
+            }
+            else
+            {
+                planned.Add(new PlannedUnit(unit.Key, writes));
+            }
+        }
+
+        var calls = planned.SelectMany(u => u.Writes)
+            .GroupBy(w => (w.SObject, w.ExternalIdField))
+            .SelectMany(g => g.Chunk(SalesforceRestClient.MaxCollectionRecords).Select((chunk, i) => new UpsertCall(
+                CompositeWrite.ReferenceIdFor($"{g.Key.SObject}_upsert{(i == 0 ? "" : $"_{i + 1}")}"),
+                g.Key.SObject, g.Key.ExternalIdField, [.. chunk])))
+            .ToList();
+        return new UpsertPlan(calls, planned, notSent);
+    }
+
+    private static PlannedWrite UpsertWrite(NormalizedRecord record, List<SalesforceError> problems)
+    {
+        var fields = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (field, value) in record.Fields)
+        {
+            if (NotUpsertable(record, field) is { } problem)
+            {
+                problems.Add(problem);
+                continue;
+            }
+
+            fields[field.Name] = FieldValues.ToWire(value);
+        }
+
+        var lookupFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var lookup in record.Lookups)
+        {
+            if (NotUpsertable(record, lookup.Field) is { } problem)
+            {
+                problems.Add(problem);
+            }
+            else if (lookup.Field.Relationship is not { } relationship)
+            {
+                problems.Add(new(record.ReferenceId, "INVALID_FIELD", $"{record.Schema.Name}.{lookup.Field.Name} has no relationship name"));
+            }
+            else
+            {
+                fields[relationship] = new Dictionary<string, object?>
+                {
+                    ["attributes"] = new Dictionary<string, object?> { ["type"] = lookup.Target.SObject },
+                    [lookup.Target.ExternalIdField] = lookup.Target.ExternalId
+                };
+                lookupFields.UnionWith([lookup.Field.Name, relationship]);
+            }
+        }
+        return new PlannedWrite(record, null, fields, [], lookupFields, 0) { ByUpsert = true };
+    }
+
+    private static SalesforceError? NotUpsertable(NormalizedRecord record, SalesforceField field)
+    {
+        return field.Createable && field.Updateable
+            ? null
+            : new SalesforceError(record.ReferenceId, "INVALID_FIELD_FOR_INSERT_UPDATE",
+                $"{record.Schema.Name}.{field.Name} is not createable and updateable, and an upsert may do either");
     }
 
     /// <summary>
