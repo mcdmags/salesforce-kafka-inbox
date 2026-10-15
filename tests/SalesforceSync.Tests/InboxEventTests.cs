@@ -249,7 +249,7 @@ public sealed class InboxEventTests
     [Fact]
     public void A_newest_event_that_cannot_be_mapped_is_invalid_and_the_older_ones_stay_superseded()
     {
-        var batch = BatchPreparer.Prepare(Relationships,
+        var batch = PreparedBatch.Prepare(Relationships,
         [
             new InboxEvent(1, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A", "relatedAccountExternalId": "B" } }""", 1),
             new InboxEvent(2, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""", 1)
@@ -378,17 +378,17 @@ public sealed class InboxEventTests
 
     private static PreparedBatch Prepare(params InboxEvent[] rows)
     {
-        return BatchPreparer.Prepare(Accounts, rows, new Dictionary<string, long>());
+        return PreparedBatch.Prepare(Accounts, rows, new Dictionary<string, long>());
     }
 
     private static PreparedBatch Prepare(Dictionary<string, long> synced, params InboxEvent[] rows)
     {
-        return BatchPreparer.Prepare(Accounts, rows, synced);
+        return PreparedBatch.Prepare(Accounts, rows, synced);
     }
 
     private static long Micros(string time)
     {
-        return BatchPreparer.ToMicroseconds(DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
+        return PreparedBatch.ToMicroseconds(DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
     }
 
     /// <summary>A claimed row of the entity its payload names.</summary>

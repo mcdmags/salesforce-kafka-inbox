@@ -91,14 +91,14 @@ public class MicroBenchmarks
     [Benchmark]
     public long CoalesceTenEvents()
     {
-        return BatchPreparer.Coalesce(_tenRead).Row.Id;
+        return PreparedBatch.Coalesce(_tenRead).Row.Id;
     }
 
     /// <summary>What the engine does with a claimed entity: read its ten events, keep the newest, map it.</summary>
     [Benchmark]
     public int PrepareTenEvents()
     {
-        return BatchPreparer.Prepare(Accounts, _tenEvents, NothingSynced).Work.Count;
+        return PreparedBatch.Prepare(Accounts, _tenEvents, NothingSynced).Work.Count;
     }
 
     /// <summary>What the consumer does per message: typed read + validation (entity id, event time).</summary>

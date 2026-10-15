@@ -27,7 +27,7 @@ namespace SalesforceSync.Sync;
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
 /// every claimed event is held (the write's outcome is unknown), deferred (rate limited) or retried.</item>
 /// </list>
-/// This class is the flow. The rules it applies are small classes without I/O (<see cref="BatchPreparer"/> and the
+/// This class is the flow. The rules it applies are small classes without I/O (<see cref="PreparedBatch"/> and the
 /// ones in <c>Sync/Upsert</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
 /// through <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
 /// </summary>
@@ -85,7 +85,7 @@ public sealed class SalesforceBatchUpsertService(
         }
 
         // 2. Per entity: keep the newest event, drop it if it isn't newer than what is synced, map it to records
-        var batch = BatchPreparer.Prepare(strategy, claim.Events, claim.SyncedTimes);
+        var batch = PreparedBatch.Prepare(strategy, claim.Events, claim.SyncedTimes);
 
         // 3. Salesforce (outside any transaction): read, decide, send, interpret. Not inside one on purpose: Salesforce
         // can't take part in a Postgres transaction (a rollback can't undo a saved write), the execution strategy
