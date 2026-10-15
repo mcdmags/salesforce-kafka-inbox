@@ -84,12 +84,25 @@ public abstract class DrainBenchmarkBase
     // The tables as the EF model names them (only the model is read: nothing connects to this address)
     private static readonly string AccountTable = TableOf<AccountInboxRow>();
     private static readonly string RelationshipTable = TableOf<AccountRelationshipInboxRow>();
-    private static readonly string[] InboxTables = [AccountTable, RelationshipTable];
+    // Every inbox of the model, not only the two the events go to: AddInboxSync runs a worker per synced object, and
+    // each one claims from its own table (the others stay empty)
+    private static readonly string[] InboxTables = AllInboxTables();
 
     private static string TableOf<TRow>() where TRow : InboxRow
     {
-        using var model = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
+        using var model = Model();
         return model.TableOf<TRow>();
+    }
+
+    private static string[] AllInboxTables()
+    {
+        using var model = Model();
+        return [.. model.InboxTables];
+    }
+
+    private static SyncDbContext Model()
+    {
+        return new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
     }
 
     /// <summary>An event as the consumer stores it: the inbox table of its type, the entity's id and the raw payload.</summary>
