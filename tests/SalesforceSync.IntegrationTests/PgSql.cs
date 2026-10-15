@@ -40,11 +40,15 @@ public static class PgSql
         return rows.FirstOrDefault();
     }
 
-    /// <summary>Events into an inbox table as the consumer stores them, their entities made due (InboxSql.Store).</summary>
+    /// <summary>
+    /// Events into an inbox table as the consumer stores them, their entities made due (InboxSql.Store) with no
+    /// coalesce delay: an idle entity is claimable at once.
+    /// </summary>
     public static Task<int> StoreAsync(this NpgsqlConnection conn, string table, string entityType, string[] entityIds, string[] payloads,
         NpgsqlTransaction? transaction = null)
     {
-        return conn.ExecuteAsync(Inbox.InboxSql.For(table).Store, new { entityType, entityIds, payloads }, transaction);
+        return conn.ExecuteAsync(Inbox.InboxSql.For(table).Store,
+            new { entityType, entityIds, payloads, coalesceDelay = TimeSpan.Zero }, transaction);
     }
 
     /// <summary>One event, as the consumer stores it.</summary>
