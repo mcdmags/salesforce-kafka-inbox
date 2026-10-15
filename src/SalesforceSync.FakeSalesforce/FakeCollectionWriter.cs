@@ -4,10 +4,10 @@ using static SalesforceSync.FakeSalesforce.FakeJson;
 namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
-/// sObject Collections create (POST), update (PATCH) and upsert by external id (PATCH .../{SObject}/{field}): each
-/// record is checked the way Salesforce checks it (type, id, fields, lookups, foreign keys, uniqueness, injected
-/// faults) and gets a result of its own (allOrNone false, the only mode the sync uses). Not thread-safe;
-/// <see cref="FakeSalesforceStore"/> holds its lock.
+/// sObject Collections upsert by external id (PATCH .../composite/sobjects/{SObject}/{field}): each record is checked
+/// the way Salesforce checks it (type, fields, lookups, foreign keys, uniqueness, injected faults) and gets a result of
+/// its own (allOrNone false, the only mode the sync uses). Not thread-safe; <see cref="FakeSalesforceStore"/> holds its
+/// lock.
 /// </summary>
 internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults faults, FakeCounters counters)
 {
@@ -15,22 +15,11 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
 
     private const string ExternalIdField = FakeSalesforceStore.ExternalIdField;
 
-    /// <summary>One result per record, in request order.</summary>
-    public JsonArray Execute(bool create, JsonObject body)
-    {
-        return Each(body, record => Write(create, record));
-    }
-
     /// <summary>
     /// Upsert: each record is matched by <paramref name="externalIdField"/>, updated if it exists and created if not.
     /// One result per record, in request order, with <c>created</c>.
     /// </summary>
     public JsonArray Upsert(string sobject, string externalIdField, JsonObject body)
-    {
-        return Each(body, record => UpsertOne(sobject, externalIdField, record));
-    }
-
-    private JsonArray Each(JsonObject body, Func<JsonObject, JsonObject> write)
     {
         var sent = body["records"]?.AsArray() ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing 'records'");
         if (sent.Count > MaxRecords)
@@ -41,33 +30,13 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         var results = new JsonArray();
         foreach (var record in sent)
         {
-            results.Add(write(record!.DeepClone().AsObject()));
+            results.Add(UpsertOne(sobject, externalIdField, record!.DeepClone().AsObject()));
         }
 
         var failed = results.Count(r => !r!["success"]!.GetValue<bool>());
         counters.RecordsSucceeded += results.Count - failed;
         counters.RecordsFailed += failed;
         return results;
-    }
-
-    /// <summary>Creates or updates one record and returns its result: <c>{ "id", "success", "errors" }</c>.</summary>
-    private JsonObject Write(bool create, JsonObject record)
-    {
-        var sobject = record["attributes"]?["type"]?.GetValue<string>();
-        var id = Str(record["id"]) ?? Str(record["Id"]);
-        record.Remove("attributes");
-        record.Remove("id");
-        record.Remove("Id");
-
-        var outcome = sobject is null || !FakeSchema.Objects.ContainsKey(sobject)
-            ? (400, Errors("INVALID_TYPE", $"sObject type '{sobject}' is not supported."))
-            : !create && id is null
-            ? (400, Errors("MISSING_ARGUMENT", "Id not specified in an update call"))
-            : create && id is not null
-            ? (400, Errors("INVALID_FIELD_FOR_INSERT_UPDATE", "cannot specify Id in an insert call", "Id"))
-            : create ? Create(sobject, record) : Update(sobject, id!, record);
-
-        return Result(outcome, id);
     }
 
     private JsonObject UpsertOne(string sobject, string externalIdField, JsonObject record)

@@ -4,10 +4,12 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync.Upsert;
 
 /// <summary>
-/// One write request: its units and their writes by collection, sent as one Composite request, or as one Collections
-/// upsert per object when none of its writes needs a reference (<see cref="AsUpserts"/>). The collections' order,
-/// their reference ids and every write's position are fixed when the request is assembled (<see cref="Pack"/>), so
-/// building the request and reading its results never depend on each other.
+/// One write request, one API call: its units and their writes by collection, each collection an sObject Collections
+/// upsert by external id. A request of one collection (one object, e.g. only Accounts changed) is that upsert on its
+/// own; one of several (Accounts and their Profiles, or a new child linked to its new parent by a lookup) is one
+/// Composite request with an upsert subrequest per collection, parents first. The collections' order, their reference
+/// ids and every write's position are fixed when the request is assembled (<see cref="Pack"/>), so building the
+/// request and reading its results never depend on each other.
 /// </summary>
 internal sealed partial class CompositeWrite
 {
@@ -20,15 +22,15 @@ internal sealed partial class CompositeWrite
     public List<PlannedUnit> Units { get; } = [];
 
     /// <summary>The collections in sending order, with their reference ids.</summary>
-    public IReadOnlyList<(string ReferenceId, bool Create, List<PlannedWrite> Writes)> Collections { get; private set; } = [];
+    public IReadOnlyList<(string ReferenceId, CollectionKey Key, List<PlannedWrite> Writes)> Collections { get; private set; } = [];
 
     /// <summary>
-    /// Distributes the units' writes over Composite requests. Records are grouped into one collection per level,
-    /// object and verb; children that point at their parent by reference get a collection of their own, because one
-    /// reference without a value (its parent failed) fails that whole subrequest, and children with a literal Id
-    /// should not go down with it. A request takes 5 collections of 200 records; a unit that fits none of the requests
-    /// so far starts another, so an entity's records (and the references between them) share a request, and its
-    /// outcome is read from that request's answers alone, however many upserts it is sent as.
+    /// Distributes the units' writes over requests. Records are grouped into one collection per level and object;
+    /// children that point at their parent by reference get a collection of their own, because one reference without
+    /// a value (its parent failed) fails that whole subrequest, and children with a literal Id should not go down with
+    /// it. A request takes 5 collections of 200 records; a unit that fits none of the requests so far starts another,
+    /// so an entity's records (and the references between them) share a request, and its outcome is read from that
+    /// request's answers alone.
     /// </summary>
     /// <returns>The requests, and a permanent failure for each unit that can't fit any request.</returns>
     public static (List<CompositeWrite> Requests, List<UpsertResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units)
@@ -66,40 +68,15 @@ internal sealed partial class CompositeWrite
     }
 
     /// <summary>
-    /// The request as sObject Collections upserts by external id, one per level and object (and per 200 records of
-    /// it), when none of its writes points at a record created in the same request by a lookup (an upsert has no
-    /// <c>@{reference}</c>): e.g. new or changed Accounts and their Profiles (whose foreign key holds the Account's
-    /// external id) are two calls, Accounts first. The calls follow the collections' order (parents first, so a new
-    /// parent exists before its child is sent), each record keeps its collection's order, and each carries its external
-    /// id and exactly the fields planned for it (all of a new record's, only the changed ones of an existing record; a
-    /// lookup as the Id the read found). Null when the request stays one Composite request: one write needing a
-    /// reference (a new parent and its new child linked by a lookup) keeps the whole request Composite, writes that
-    /// wouldn't need it included. Marks the writes <see cref="PlannedWrite.ByUpsert"/>, which is how their results are read.
+    /// The upserts, in the order and with the reference ids fixed by <see cref="Pack"/>: parents first, so a new parent
+    /// exists before its child is sent. Each record carries its external id and exactly the fields planned for it (all
+    /// of a new record's, only the changed ones of an existing record; a lookup as the Id the read found, or as a
+    /// reference to its new parent's result).
     /// </summary>
-    public List<UpsertCall>? AsUpserts()
-    {
-        var writes = Collections.SelectMany(c => c.Writes).ToList();
-        if (writes.Any(w => w.Links.Count > 0))
-        {
-            return null;
-        }
-
-        foreach (var write in writes)
-        {
-            write.ByUpsert = true;
-        }
-
-        // The call's position makes its reference id unique, which is how its answer finds its writes
-        return [.. writes.GroupBy(w => (w.Collection.Depth, w.SObject, w.ExternalIdField))
-            .SelectMany(o => o.Chunk(SalesforceRestClient.MaxCollectionRecords).Select(chunk => (Object: o.Key, Writes: chunk)))
-            .Select((call, i) => new UpsertCall($"{ReferenceIdFor(call.Object.SObject)}_upsert_{i}", call.Object.SObject,
-                call.Object.ExternalIdField, [.. call.Writes]))];
-    }
-
-    /// <summary>The subrequests, in the order and with the reference ids fixed by <see cref="Pack"/>.</summary>
     public List<CollectionRequest> BuildRequests()
     {
-        return [.. Collections.Select(c => new CollectionRequest(c.ReferenceId, c.Create, [.. c.Writes.Select(w => w.Body())]))];
+        return [.. Collections.Select(c => new CollectionRequest(c.ReferenceId, c.Key.SObject, c.Key.ExternalIdField,
+            [.. c.Writes.Select(w => w.Body())]))];
     }
 
     /// <summary>Whether a unit needing these collections (key -> records) still fits within Salesforce's limits.</summary>
@@ -124,19 +101,19 @@ internal sealed partial class CompositeWrite
     }
 
     /// <summary>
-    /// Parents before children (a reference can only point back), creates before updates. Each record learns its
-    /// collection and position there, which is how its children refer to it.
+    /// Parents before children (a reference can only point back). Each record learns its collection and position
+    /// there, which is how its children refer to it.
     /// </summary>
     private void Arrange()
     {
-        var collections = new List<(string, bool, List<PlannedWrite>)>();
-        foreach (var (key, writes) in _byKey.OrderBy(c => c.Key.Depth).ThenByDescending(c => c.Key.Create)
-                     .ThenBy(c => c.Key.SObject, StringComparer.Ordinal).ThenBy(c => c.Key.ByReference))
+        var collections = new List<(string, CollectionKey, List<PlannedWrite>)>();
+        foreach (var (key, writes) in _byKey.OrderBy(c => c.Key.Depth).ThenBy(c => c.Key.SObject, StringComparer.Ordinal)
+                     .ThenBy(c => c.Key.ByReference))
         {
             var referenceId = ReferenceIdFor(key);
             if (collections.Any(c => c.Item1 == referenceId))
             {
-                referenceId += $"_{key.Depth}";
+                referenceId += $"_{collections.Count}";
             }
 
             for (var i = 0; i < writes.Count; i++)
@@ -144,20 +121,15 @@ internal sealed partial class CompositeWrite
                 (writes[i].CollectionReferenceId, writes[i].IndexInCollection) = (referenceId, i);
             }
 
-            collections.Add((referenceId, key.Create, writes));
+            collections.Add((referenceId, key, writes));
         }
         Collections = collections;
     }
 
-    /// <summary>E.g. Account_create, Profile__c_create_ref. Reference ids take letters, digits and underscores only.</summary>
+    /// <summary>E.g. Account, Contact_ref. Reference ids take letters, digits and underscores only.</summary>
     private static string ReferenceIdFor(CollectionKey key)
     {
-        return ReferenceIdFor($"{key.SObject}_{(key.Create ? "create" : "update")}{(key.ByReference ? "_ref" : "")}");
-    }
-
-    private static string ReferenceIdFor(string name)
-    {
-        return NotReferenceIdCharacter().Replace(name, "_");
+        return NotReferenceIdCharacter().Replace($"{key.SObject}{(key.ByReference ? "_ref" : "")}", "_");
     }
 
     [GeneratedRegex("[^A-Za-z0-9_]")]
@@ -167,10 +139,11 @@ internal sealed partial class CompositeWrite
 /// <summary>The writes of one unit; the unit is saved only if all of them are.</summary>
 internal sealed record PlannedUnit(string Key, IReadOnlyList<PlannedWrite> Writes);
 
-/// <summary>The collection a write goes into: one per level, object and verb.</summary>
+/// <summary>The collection (one upsert) a write goes into: one per level and object.</summary>
 /// <param name="Depth">0 for a record that points at nothing in its unit (by a lookup or a foreign key), 1 for its children, ...</param>
-/// <param name="ByReference">It points at its parent's create by reference (<c>@{Account_create[3].id}</c>).</param>
-internal sealed record CollectionKey(int Depth, string SObject, bool Create, bool ByReference);
+/// <param name="ExternalIdField">The external id field as the org names it, which the upsert matches records by.</param>
+/// <param name="ByReference">It points at its new parent by reference (<c>@{Account[3].id}</c>).</param>
+internal sealed record CollectionKey(int Depth, string SObject, string ExternalIdField, bool ByReference);
 
 /// <summary>A lookup to set, by reference, to a record that is created in the same request.</summary>
 internal sealed record ParentReference(SalesforceField Field, PlannedWrite Parent);
@@ -181,7 +154,7 @@ internal enum WriteStatus
     Saved,
     /// <summary>Not saved because of a record of another unit (its subrequest went down on a broken reference).</summary>
     NotAttempted,
-    /// <summary>Not saved (or not sent) because its parent in the same unit wasn't; the parent's result says what to do.</summary>
+    /// <summary>Not saved because its parent in the same unit wasn't; the parent's result says what to do.</summary>
     ParentNotSaved,
     Transient,
     Permanent
@@ -196,18 +169,12 @@ internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnl
 {
     public bool Create => id is null;
     public string ReferenceId => record.ReferenceId;
-    public string SObject => record.Schema.Name;
-
-    /// <summary>The external id field as the org names it.</summary>
-    public string ExternalIdField => record.Schema.Find(record.Record.ExternalIdField)!.Name;
-
-    /// <summary>Sent in an sObject Collections upsert (matched by external id) rather than a create or an update.</summary>
-    public bool ByUpsert { get; set; }
     public IReadOnlyList<ParentReference> Links => links;
     public IReadOnlyList<PlannedWrite> Parents => parents;
     public IReadOnlySet<string> LookupFields => lookupFields;
 
-    public CollectionKey Collection { get; } = new(depth, record.Schema.Name, id is null, links.Count > 0);
+    public CollectionKey Collection { get; } =
+        new(depth, record.Schema.Name, record.Schema.Find(record.Record.ExternalIdField)!.Name, links.Count > 0);
 
     /// <summary>Where the record is in the request: its collection's reference id and its position in it.</summary>
     public string? CollectionReferenceId { get; set; }
@@ -216,15 +183,17 @@ internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnl
     public WriteStatus Status { get; set; } = WriteStatus.NotAttempted;
     public List<SalesforceError> Errors { get; set; } = [];
 
-    /// <summary>The record as sObject Collections takes it: its type, its id when updating, and the fields to set.</summary>
+    /// <summary>
+    /// The record as a Collections upsert takes it: its type, its external id (which decides create or update) and the
+    /// planned fields. No Id: Salesforce finds the record by the external id.
+    /// </summary>
     public IReadOnlyDictionary<string, object?> Body()
     {
-        var body = new Dictionary<string, object?> { ["attributes"] = new Dictionary<string, object?> { ["type"] = record.Schema.Name } };
-        if (id is not null)
+        var body = new Dictionary<string, object?>
         {
-            body["id"] = id;
-        }
-
+            ["attributes"] = new Dictionary<string, object?> { ["type"] = Collection.SObject },
+            [Collection.ExternalIdField] = record.Record.ExternalId
+        };
         foreach (var (field, value) in changes)
         {
             body[field] = value;
@@ -232,29 +201,10 @@ internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnl
 
         foreach (var link in links)
         {
-            // The parent's row in its collection's response. Composite documents @{referenceId.field} with []
+            // The parent's row in its upsert's response. Composite documents @{referenceId.field} with []
             // indexing; indexing into an sObject Collections response is not confirmed: verify in a sandbox.
             body[link.Field.Name] = $"@{{{link.Parent.CollectionReferenceId}[{link.Parent.IndexInCollection}].id}}";
         }
-        return body;
-    }
-
-    /// <summary>
-    /// The record as a Collections upsert takes it: its type, its external id (which decides create or update) and the
-    /// planned fields. No Id: Salesforce finds the record by the external id.
-    /// </summary>
-    public IReadOnlyDictionary<string, object?> UpsertBody()
-    {
-        var body = new Dictionary<string, object?>
-        {
-            ["attributes"] = new Dictionary<string, object?> { ["type"] = SObject },
-            [ExternalIdField] = record.Record.ExternalId
-        };
-        foreach (var (field, value) in changes)
-        {
-            body[field] = value;
-        }
-
         return body;
     }
 }

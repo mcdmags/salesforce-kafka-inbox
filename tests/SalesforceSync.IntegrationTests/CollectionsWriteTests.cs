@@ -3,29 +3,33 @@ using System.Text.Json.Nodes;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// What is sent to Salesforce and what per-record results do to an entity: the example objects name their parents by
-/// Text foreign keys, so their records go as one Collections upsert per object, parents first (Composite with
-/// <c>@{reference}</c> is only for lookups, see the unit tests); each record saved or rejected on its own (allOrNone false).
+/// What is sent to Salesforce and what per-record results do to an entity: the records go as Collections upserts by
+/// external id, one per object: the upsert alone when only one object changed, else one Composite request of them,
+/// parents first (the example objects name their parents by Text foreign keys, so without <c>@{reference}</c>); each
+/// record saved or rejected on its own (allOrNone false).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class CollectionsWriteTests(SyncFixture app)
 {
+    private const string AccountUpsert = "/services/data/v62.0/composite/sobjects/Account/ExternalId__c";
+    private const string ProfileUpsert = "/services/data/v62.0/composite/sobjects/Profile__c/ExternalId__c";
+
     [Fact]
-    public async Task New_Account_and_Profile_are_an_Account_upsert_then_a_Profile_upsert_carrying_the_Accounts_key()
+    public async Task New_Account_and_Profile_are_one_Composite_request_the_Account_upsert_then_the_Profile_upsert_carrying_the_Accounts_key()
     {
         var acct = SyncFixture.NewAccountId();
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, new JsonObject { ["tier"] = "Gold" });
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
 
-        var writes = await app.GetWriteRequestsAsync(acct);
-        writes.Select(w => ((string?)w["method"], (string?)w["url"])).Should().Equal(
-            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/ExternalId__c"),
-            ("PATCH", "/services/data/v62.0/composite/sobjects/Profile__c/ExternalId__c"));
-        writes.Should().OnlyContain(w => !w["body"]!["allOrNone"]!.GetValue<bool>());
-        var profile = Records(writes[1]).Single(r => (string?)r["ExternalId__c"] == SyncFixture.ProfileIdFor(acct));
-        ((string?)profile["AccountId__c"]).Should().Be(acct, "the Account's key as text: no Composite request, no reference");
-        writes.Select(w => w.ToJsonString()).Should().NotContain(w => w.Contains("@{"));
+        var write = (await app.GetWriteRequestsAsync(acct)).Should().ContainSingle("one call for both objects").Subject;
+        write["allOrNone"]!.GetValue<bool>().Should().BeFalse();
+        var upserts = Upserts(write);
+        upserts.Select(w => ((string?)w["method"], (string?)w["url"])).Should().Equal(("PATCH", AccountUpsert), ("PATCH", ProfileUpsert));
+        upserts.Should().OnlyContain(w => !w["body"]!["allOrNone"]!.GetValue<bool>());
+        var profile = Records(upserts[1]).Single(r => (string?)r["ExternalId__c"] == SyncFixture.ProfileIdFor(acct));
+        ((string?)profile["AccountId__c"]).Should().Be(acct, "the Account's key as text, no reference");
+        write.ToJsonString().Should().NotContain("@{");
 
         ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["AccountId__c"]).Should().Be(acct);
     }
@@ -60,7 +64,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Failing_Account_is_dead_lettered_alone_and_its_Profile_never_sent_while_others_are_saved()
+    public async Task Failing_Account_is_dead_lettered_alone_and_its_Profile_rejected_with_it_while_others_are_saved()
     {
         var (bad, good) = (SyncFixture.NewAccountId(), SyncFixture.NewAccountId());
         await app.InjectFaultAsync("Account", bad, "FIELD_CUSTOM_VALIDATION_EXCEPTION", times: int.MaxValue);
@@ -73,8 +77,8 @@ public sealed class CollectionsWriteTests(SyncFixture app)
             "the Account's own error, not the Profile's missing parent");
         (await app.GetRecordAsync("Account", bad)).Should().BeNull();
         (await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(bad))).Should().BeNull();
-        (await app.GetWriteRequestsAsync(SyncFixture.ProfileIdFor(bad))).Should().BeEmpty(
-            "the Profile's call comes after its Account's, which failed: the org would reject it");
+        (await app.GetWriteRequestsAsync(SyncFixture.ProfileIdFor(bad))).Should().NotBeEmpty(
+            "the Profile is in the same Composite request as its Account: the org decides, and rejects it without its Account");
 
         (await app.WaitForInboxSettledAsync(good, expectedRows: 1)).Should().Equal((1L, "done"));
         ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(good)))!["AccountId__c"]).Should().Be(good);
@@ -115,9 +119,8 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().OnlyContain(r => r.Status == "done");
         var writes = await AccountWritesAsync(acct);
         writes.Should().HaveCount(2);
-        ((string?)writes[1]["method"], (string?)writes[1]["url"]).Should().Be(
-            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/ExternalId__c"),
-            "only the Account differs (the Profile is unchanged): one upsert by external id, not a Composite request");
+        ((string?)writes[1]["method"], (string?)writes[1]["url"]).Should().Be(("PATCH", AccountUpsert),
+            "only the Account differs (the Profile is unchanged): one upsert by external id");
         Records(writes[1]).Single().Select(kv => kv.Key).Should().BeEquivalentTo(["attributes", "ExternalId__c", "Rating"],
             "the existing record is found by its external id and gets only what differs");
         (await app.GetHistoryAsync("Account", acct))[1].Select(kv => kv.Key).Should().Equal("Rating");
@@ -134,16 +137,14 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
 
         var writes = await app.GetWriteRequestsAsync(acct);
-        writes.Select(w => (string?)w["url"]).Should().Equal(
-            "/services/data/v62.0/composite/sobjects/Account/ExternalId__c",
-            "/services/data/v62.0/composite/sobjects/Profile__c/ExternalId__c",
-            "/services/data/v62.0/composite/sobjects/Account/ExternalId__c");
-        Records(writes[2]).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "ExternalId__c", "Rating");
+        writes.Select(w => (string?)w["url"] ?? "composite").Should().Equal(["composite", AccountUpsert],
+            "the creates in one Composite request, then the Account's change as an upsert of its own, not a Composite request");
+        Records(writes[1]).Single().Select(kv => kv.Key).Should().BeEquivalentTo("attributes", "ExternalId__c", "Rating");
         (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().ContainSingle("the Profile is not written");
     }
 
     [Fact]
-    public async Task A_change_of_the_Account_and_its_Profile_is_one_upsert_per_object_Account_first()
+    public async Task A_change_of_the_Account_and_its_Profile_is_one_Composite_request_Account_first()
     {
         var acct = SyncFixture.NewAccountId();
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "Acme", ["rating"] = "Hot" }, new JsonObject { ["tier"] = "Gold" });
@@ -153,13 +154,12 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().OnlyContain(r => r.Status == "done");
 
         var writes = await app.GetWriteRequestsAsync(acct, SyncFixture.ProfileIdFor(acct));
-        writes.Should().HaveCount(4, "the creates in two upserts, then the change in two more");
-        writes.Skip(2).Select(w => ((string?)w["method"], (string?)w["url"])).Should().Equal(
-            ("PATCH", "/services/data/v62.0/composite/sobjects/Account/ExternalId__c"),
-            ("PATCH", "/services/data/v62.0/composite/sobjects/Profile__c/ExternalId__c"));
-        Records(writes[2]).Single(r => (string?)r["ExternalId__c"] == acct).Select(kv => kv.Key).Should()
+        writes.Should().HaveCount(2, "the creates in one Composite request, then the change in another");
+        var change = Upserts(writes[1]);
+        change.Select(w => ((string?)w["method"], (string?)w["url"])).Should().Equal(("PATCH", AccountUpsert), ("PATCH", ProfileUpsert));
+        Records(change[0]).Single(r => (string?)r["ExternalId__c"] == acct).Select(kv => kv.Key).Should()
             .BeEquivalentTo("attributes", "ExternalId__c", "Rating");
-        Records(writes[3]).Single(r => (string?)r["ExternalId__c"] == SyncFixture.ProfileIdFor(acct)).Select(kv => kv.Key).Should()
+        Records(change[1]).Single(r => (string?)r["ExternalId__c"] == SyncFixture.ProfileIdFor(acct)).Select(kv => kv.Key).Should()
             .BeEquivalentTo("attributes", "ExternalId__c", "Tier__c");
         ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Tier__c"]).Should().Be("Silver");
     }
@@ -167,7 +167,13 @@ public sealed class CollectionsWriteTests(SyncFixture app)
     /// <summary>The upserts of Accounts that wrote <paramref name="acct"/> (its Profile's carry its key too).</summary>
     private async Task<List<JsonObject>> AccountWritesAsync(string acct)
     {
-        return [.. (await app.GetWriteRequestsAsync(acct)).Where(w => (string?)w["url"] == "/services/data/v62.0/composite/sobjects/Account/ExternalId__c")];
+        return [.. (await app.GetWriteRequestsAsync(acct)).SelectMany(Upserts).Where(w => (string?)w["url"] == AccountUpsert)];
+    }
+
+    /// <summary>The upserts of a recorded write: the subrequests of a Composite request, or the upsert itself.</summary>
+    private static List<JsonObject> Upserts(JsonObject write)
+    {
+        return write["compositeRequest"] is JsonArray subrequests ? [.. subrequests.Select(s => s!.AsObject())] : [write];
     }
 
     private static List<JsonObject> Records(JsonNode collection)
