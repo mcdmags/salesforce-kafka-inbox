@@ -49,7 +49,7 @@ each contact as a **Contact** of its Account, which may not be synced yet either
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a parent not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (skipped because of another entity's record) → back to the inbox without spending an attempt. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
 | Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` around a transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new transaction, change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
-| Rate limits | Configured from the org's daily API allocation and Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) and own usage slow everyone down at 80% and pause at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending an attempt. |
+| Rate limits | Configured from the org's daily API allocation and Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling window (`RateLimit:BudgetWindow`, 24 hours); global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) and own usage slow everyone down at 80% and pause at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending an attempt. |
 
 ```
 Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per object type (Postgres: entity_id +
@@ -94,10 +94,11 @@ they all live on the abstract `InboxRow`; `AccountInboxRow`, `AccountRelationshi
 name their tables (independent entity types, no shared table) and their entity type in `sf_sync_state` (`SyncState`), and
 the one `InboxRepository<TRow>` (`IRepository<TRow>`, registered as an open generic) serves them all. The table name and
 the entity type come from the EF model. What EF can express is LINQ (`ExecuteUpdate` for the lease-conditional outcomes
-superseded, released, held and deferred, and for releasing a lost claim attempt's leases); storing an event, the claim,
-done, fail, dead-letter and the end of a lease, and the rate limiter's statements are the SQL texts of `InboxSql` and
-`RateLimitSql` run unchanged through `Database.SqlQueryRaw` / `ExecuteSqlRaw` with named `NpgsqlParameter`s, since
-`FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have no LINQ form.
+superseded, released, held and deferred, and for releasing a lost claim attempt's leases; the rate limiter's usage
+count and writes); storing an event, the claim, done, fail, dead-letter and the end of a lease are the SQL texts of
+`InboxSql` run unchanged through `Database.SqlQueryRaw` / `ExecuteSqlRaw` with named `NpgsqlParameter`s, since
+`FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have no LINQ form. The rate limiter's
+`RateLimitSql` only locks its row (`FOR UPDATE`) and reads the database clock.
 
 ### The Describe cache
 
@@ -490,8 +491,8 @@ content, and a source clock that goes backwards makes a newer change look older 
 `sf_sync_state`, `sf_rate_limit` (with its one `salesforce` row as seed data) and `sf_api_usage`, with the column names
 in snake_case, the partial indexes (`HasFilter`) and the autovacuum settings (`HasStorageParameter`). EF migrations
 in `src/SalesforceSync/Data/Migrations` create them; the `sf_limit_status` view, which has no model counterpart, is
-created by `migrationBuilder.Sql` in `InitialSchema`. Queries stay raw SQL (`InboxSql`, `RateLimitSql`) where LINQ
-can't express them.
+created by `migrationBuilder.Sql` in `InitialSchema` (and recreated without `own_calls_24h` by
+`LimitStatusWithoutOwnCalls`). Queries stay raw SQL (`InboxSql`, `RateLimitSql`) where LINQ can't express them.
 
 At startup `SyncSchemaInitializer` (registered before the workers) runs `SyncSchema.MigrateAsync`: under a
 session-level advisory lock (`0x5346_5348`), so pods that start together migrate one at a time and each finds the work
@@ -1148,8 +1149,9 @@ engine does with a claim (newest `meta.time` wins, ties, watermark, A → B → 
 admits (the typed read: id, time with offset, `meta.type`), the classification of failed writes (unknown outcome or
 not), inbox table names as plain identifiers, every normalization rule (including the documented 15 → 18-character id
 example), error classification, the Postgres execution strategy (retried, not retried, gives up), the daily budget
-(the configured allocation as the maximum, lowered by the one Salesforce reports), startup validation and throttle
-decisions.
+(the configured allocation as the maximum, lowered by the one Salesforce reports), the token bucket's decision
+(`TokenBucketTests`: granted with the refill capped at the capacity, out of tokens, paused, over the budget until the
+oldest bucket leaves a default or configured window, at least a minute), startup validation and throttle decisions.
 
 ### Concurrency: many threads, many pods, same accounts
 
@@ -1245,7 +1247,9 @@ budget on the configuration.
 "RateLimit": {
   "MaxRequestsPerSecond": 2,        // token bucket refill, all pods together
   "BurstCapacity": 5,               // token bucket size
-  "DailyBudgetShare": 0.5,          // this integration's share of the org's daily allocation
+  "DailyBudgetShare": 0.5,          // this integration's share of the org's daily allocation, per BudgetWindow
+  "BudgetWindow": "1.00:00:00",     // the rolling window the share is counted over
+  "UsageBucket": "00:10:00",        // the granularity of that count (sf_api_usage rows)
   "DailySoftRatio": 0.8, "DailySoftSpeed": 0.25,
   "DailyHardRatio": 0.95, "DailyHardPause": "00:15:00",
   "ConcurrentLimitPause": "00:00:30",
@@ -1253,9 +1257,30 @@ budget on the configuration.
 }
 ```
 
+| Setting (`RateLimit:`) | Default | Meaning |
+|---|---|---|
+| `MaxRequestsPerSecond` | 2 | Token bucket refill, all pods together |
+| `BurstCapacity` | 5 | Token bucket size: calls that may be made back to back after an idle period |
+| `DailyBudgetShare` | 0.5 | This integration's share of the org's allocation (the lower of `SalesforceLimits:DailyApiAllocation` and what Salesforce reports), in (0, 1] |
+| `BudgetWindow` | `1.00:00:00` | The rolling window `DailyBudgetShare` is counted over: at most that many calls in any window of this length. 24 hours, as Salesforce counts the allocation; a shorter window doesn't scale the budget down, so it allows more calls per 24 hours |
+| `UsageBucket` | `00:10:00` | The granularity of the usage count: calls are counted in buckets of this length, and every bucket that overlaps the window counts in full (over- rather than under-counted by up to one bucket). Must be > 0 and shorter than `BudgetWindow`, or startup fails |
+| `MaxWait` | `00:00:20` | Longest wait for a token before the batch is handed back as rate limited |
+| `DailySoftRatio` / `DailySoftSpeed`, `DailyHardRatio` / `DailyHardPause`, `ConcurrentLimitPause` | 0.8 / 0.25, 0.95 / 15 min, 30 s | Slow down, pause (see below) |
+
+**How a call acquires a token.** `SalesforceRateLimiter.AcquireAsync`, in one transaction: lock the shared
+`sf_rate_limit` row (`select * ... for update`, the only raw SQL besides `select clock_timestamp()`, the database clock
+every pod shares), read this integration's calls in the buckets since `BudgetWindow + UsageBucket` ago (LINQ), and let
+`TokenBucket.Decide` (pure C#, unit-tested) refill the tokens (`min(capacity, tokens + elapsed x rate)`) and decide:
+wait until a pause ends, wait until the oldest bucket leaves the window when the budget is used up (at least a
+minute), wait until enough tokens have refilled, or grant. A grant writes the tokens back and adds the call to the
+current bucket with EF (a plain read-then-insert-or-update: the row lock serializes every acquire in every process).
+Not granted, it waits (with jitter) and tries again, until `MaxWait`. Applying the configuration, recording
+`Sforce-Limit-Info` and pausing lock the row the same way, refill with the same function, and delete the buckets older
+than the window.
+
 | Salesforce limit | How it's applied |
 |---|---|
-| **Total API requests per 24 hours**: depends on the edition, licenses and add-ons (e.g. 115,000 for an Enterprise org with 15 Salesforce licenses); Setup shows the org's number | `SalesforceLimits:DailyApiAllocation` (required) as the maximum, lowered to the limit in `Sforce-Limit-Info: api-usage` when Salesforce reports less. The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling 24 hours. When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
+| **Total API requests per 24 hours**: depends on the edition, licenses and add-ons (e.g. 115,000 for an Enterprise org with 15 Salesforce licenses); Setup shows the org's number | `SalesforceLimits:DailyApiAllocation` (required) as the maximum, lowered to the limit in `Sforce-Limit-Info: api-usage` when Salesforce reports less. The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (`UsageBucket`, 10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling `BudgetWindow` (24 hours). When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
 | **What a call is**: each HTTP request; a Composite request (and an sObject Collections request) counts as one call however many subrequests it holds | One token per HTTP request: a describe (cached), each query page, each Composite write and each upsert (one per object of a request without references). Every call goes through the same `SalesforceRateLimitHandler`; a batch's calls are sent one after another under its one concurrency slot. |
 | **Org-wide usage** (also other integrations): `Sforce-Limit-Info: api-usage=used/limit` on every REST response | `api-usage` and, when Salesforce sends it, `per-app-api-usage` (the connected app's quota): slow down at `DailySoftRatio`, pause at `DailyHardRatio`. The allocation Salesforce reports, the configured maximum and the resulting budget are logged when first seen and whenever Salesforce's changes. `api-bursts` appears in Salesforce's example of the header but isn't defined, so it is recorded in `sf_limit_status` and not acted on. |
 | **Requests per second**: Salesforce publishes no such limit, and none on concurrent requests shorter than 20 s | `MaxRequestsPerSecond` and `BurstCapacity` are this integration's own pacing, so it spreads its share of the daily allocation instead of spending it in bursts. |
@@ -1268,8 +1293,9 @@ benchmark pods and the test pods all use. Its handler is always the outermost on
 → gzip → auth), so every request takes a token before it is compressed and authenticated.
 
 Every pod applies the bucket size, rate and budget to the shared `sf_rate_limit` row at startup, so roll out
-configuration changes to all pods together. `sf_limit_status` shows the last reported usage, this integration's
-own calls over the last 24 hours and its budget.
+configuration changes to all pods together. `sf_limit_status` shows the last reported usage and this integration's
+budget. A view can't read the configured window, so this integration's own calls are a query on `sf_api_usage`, e.g.
+over the default window: `select sum(calls) from sf_api_usage where bucket >= now() - interval '24 hours 10 minutes'`.
 
 ### Concurrency slots: Postgres advisory locks
 

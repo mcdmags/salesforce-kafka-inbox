@@ -22,6 +22,25 @@ public sealed class RateLimitOptions
     public double DailyBudgetShare { get; set; } = 0.5;
 
     /// <summary>
+    /// The rolling period <see cref="DailyBudgetShare"/> is counted over: this integration makes at most that many
+    /// calls in any window of this length. 24 hours, as Salesforce counts the allocation. A shorter window doesn't
+    /// scale the budget down, so it allows more calls per 24 hours.
+    /// </summary>
+    public TimeSpan BudgetWindow { get; set; } = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// The granularity of the usage count (rows of sf_api_usage). Every bucket that overlaps the window counts in full,
+    /// so usage is over- rather than under-counted by up to one bucket.
+    /// </summary>
+    public TimeSpan UsageBucket { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// How far back calls are counted: the window plus the whole bucket that straddles its start. Older buckets are
+    /// deleted.
+    /// </summary>
+    internal TimeSpan CountedWindow => BudgetWindow + UsageBucket;
+
+    /// <summary>
     /// Pause after REQUEST_LIMIT_EXCEEDED for too many concurrent long-running requests
     /// (clears as soon as one of them finishes).
     /// </summary>

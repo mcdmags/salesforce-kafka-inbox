@@ -76,6 +76,25 @@ public sealed class SalesforceLimitsTests
         Validate(Limits(), rate: new RateLimitOptions { DailyBudgetShare = share }).Failed.Should().BeTrue();
     }
 
+    [Theory]
+    [InlineData("1.00:00:00", "00:10:00", true)]
+    [InlineData("01:00:00", "00:01:00", true)]
+    [InlineData("01:00:00", "01:00:00", false)]
+    [InlineData("01:00:00", "00:00:00", false)]
+    [InlineData("00:00:00", "-00:01:00", false)]
+    public void The_budget_window_must_be_longer_than_a_positive_usage_bucket(string window, string bucket, bool valid)
+    {
+        var rate = new RateLimitOptions { BudgetWindow = TimeSpan.Parse(window), UsageBucket = TimeSpan.Parse(bucket) };
+
+        var result = Validate(Limits(), rate: rate);
+
+        result.Succeeded.Should().Be(valid);
+        if (!valid)
+        {
+            result.FailureMessage.Should().Contain("RateLimit:UsageBucket");
+        }
+    }
+
     // ---------- REQUEST_LIMIT_EXCEEDED ----------
 
     [Fact]

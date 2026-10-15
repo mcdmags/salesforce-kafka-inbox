@@ -97,6 +97,12 @@ public sealed class SalesforceLimitsValidator(IOptions<SyncOptions> sync, IOptio
             errors.Add($"{RateLimitOptions.Section}:DailyBudgetShare ({share}) must be in (0, 1].");
         }
 
+        if (rate.Value.UsageBucket <= TimeSpan.Zero || rate.Value.BudgetWindow <= rate.Value.UsageBucket)
+        {
+            errors.Add($"{RateLimitOptions.Section}:UsageBucket ({rate.Value.UsageBucket}) must be > 0 and shorter than " +
+                       $"{RateLimitOptions.Section}:BudgetWindow ({rate.Value.BudgetWindow}).");
+        }
+
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);
     }
 }
