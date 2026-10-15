@@ -46,7 +46,7 @@ public sealed class SalesforceRestClient(HttpClient http)
         var body = await res.Content.ReadFromJsonAsync<DescribeBody>(Json, ct)
                    ?? throw new InvalidOperationException($"Empty describe response for {sobject}");
         return new DescribeResult(new SObjectSchema(body.Name, body.Fields.Select(f => new SalesforceField(
-            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable, f.Digits, f.RelationshipName)),
+            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable, f.Digits)),
             body.RecordTypeInfos));
     }
 
@@ -242,7 +242,7 @@ public sealed class SalesforceRestClient(HttpClient http)
 
     private sealed record DescribeBody(string Name, List<DescribeField> Fields, List<SalesforceRecordType>? RecordTypeInfos);
     private sealed record DescribeField(string Name, string Type, int Length, int Precision, int Scale,
-        bool Createable, bool Updateable, bool Nillable, int Digits, string? RelationshipName);
+        bool Createable, bool Updateable, bool Nillable, int Digits);
     private sealed record CompositeBody(List<SubResponse> CompositeResponse);
     private sealed record QueryPage(List<JsonElement> Records, string? NextRecordsUrl);
     private sealed record SubResponse(string ReferenceId, int HttpStatusCode, JsonElement Body);

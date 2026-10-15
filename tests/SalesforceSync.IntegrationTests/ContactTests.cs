@@ -5,41 +5,41 @@ using SalesforceSync.FakeSalesforce;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Contacts through the same engine in its other write mode: Kafka -> inbox -> sObject Collections upsert by external
-/// id, without a read or a diff, the Account set by its external id.
+/// Contacts through the same engine as accounts: Kafka -> inbox -> read and diff -> one sObject Collections upsert by
+/// external id (a Contact's Account already exists, so nothing needs a Composite reference).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class ContactTests(SyncFixture app)
 {
     [Fact]
-    public async Task Contact_is_upserted_with_its_Account_by_external_id_and_every_event_is_written_whole()
+    public async Task Contact_is_upserted_with_its_Accounts_Id_and_then_written_only_when_it_changes()
     {
         var (acct, contact) = (SyncFixture.NewAccountId(), SyncFixture.NewContactId());
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, []);
         await app.WaitForInboxSettledAsync(acct, 1);
+        var accountId = (string?)(await app.GetRecordAsync("Account", acct))!["Id"];
 
         await app.PublishContactAsync(contact, 1, acct, new JsonObject { ["lastName"] = "Lovelace", ["phone"] = "+1 555 0101" });
         (await app.WaitForInboxSettledAsync(contact, 1, SyncFixture.Contacts)).Should().Equal((1L, "done"));
 
         var record = await app.GetRecordAsync("Contact", contact);
         record.Should().NotBeNull();
-        ((string?)record!["AccountId"]).Should().Be((string?)(await app.GetRecordAsync("Account", acct))!["Id"]);
+        ((string?)record!["AccountId"]).Should().Be(accountId);
         ((string?)record["RecordTypeId"]).Should().Be(FakeSchema.RecordTypes["Contact"].Single(r => r.DeveloperName == "Standard").Id);
         var write = (await app.GetWriteRequestsAsync(contact)).Should().ContainSingle().Subject;
         ((string?)write["method"], (string?)write["url"]).Should().Be(("PATCH", "/services/data/v62.0/composite/sobjects/Contact/External_Id__c"));
         write["body"]!["allOrNone"]!.GetValue<bool>().Should().BeFalse();
-        var sent = write["body"]!["records"]!.AsArray().Single()!;
-        JsonNode.DeepEquals(sent["Account"], new JsonObject
-        {
-            ["attributes"] = new JsonObject { ["type"] = "Account" },
-            ["External_Id__c"] = acct
-        }).Should().BeTrue("the Account is named by its external id through the relationship: {0}", sent.ToJsonString());
+        ((string?)write["body"]!["records"]!.AsArray().Single()!["AccountId"]).Should().Be(accountId, "the Id the read found");
 
-        await app.PublishContactAsync(contact, 2, acct, new JsonObject { ["lastName"] = "Lovelace" });
+        await app.PublishContactAsync(contact, 2, acct, new JsonObject { ["lastName"] = "Lovelace", ["phone"] = "+1 555 0101" });
         (await app.WaitForInboxSettledAsync(contact, 2, SyncFixture.Contacts)).Should().Equal((1L, "done"), (2L, "done"));
+        (await app.GetHistoryAsync("Contact", contact)).Should().ContainSingle("an unchanged contact is not written");
+
+        await app.PublishContactAsync(contact, 3, acct, new JsonObject { ["lastName"] = "Lovelace" });
+        (await app.WaitForInboxSettledAsync(contact, 3, SyncFixture.Contacts)).Should().Equal((1L, "done"), (2L, "done"), (3L, "done"));
         var writes = await app.GetHistoryAsync("Contact", contact);
         writes.Should().HaveCount(2, "the same contact, updated by its external id");
-        writes[1].Select(kv => kv.Key).Should().Contain(["LastName", "Phone", "AccountId"], "without a diff, the whole record is sent");
+        writes[1].Select(kv => kv.Key).Should().Equal(["Phone"], "only what differs is sent");
         (await app.GetRecordAsync("Contact", contact))!["Phone"].Should().BeNull("an empty field is cleared");
     }
 
@@ -50,7 +50,7 @@ public sealed class ContactTests(SyncFixture app)
 
         await app.PublishContactAsync(contact, 1, acct, new JsonObject { ["lastName"] = "Early" });
 
-        // Salesforce finds no Account with that external id: retried, not dead-lettered
+        // The read finds no Account with that external id: retried, not dead-lettered
         var waiting = await Eventually.ValueAsync(
             () => app.GetInboxRowsAsync(contact, SyncFixture.Contacts),
             rows => rows.Count == 1 && rows[0].ErrorCode == "DEPENDENCY_NOT_SYNCED",

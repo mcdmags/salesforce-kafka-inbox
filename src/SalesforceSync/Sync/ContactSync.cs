@@ -5,22 +5,18 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Contact of an Account, written by direct upsert (<see cref="WriteMode.DirectUpsert"/>): no read and no diff, every
-/// event's full record is upserted by its external id, and the Account is set by its external id. If the Account isn't
-/// in Salesforce yet, Salesforce says so and the contact is retried until the account sync has created it. Like
-/// <see cref="AccountSync"/>, everything particular to contacts is in this file.
+/// Contact of an Account, looked up by the Account's external id. If the Account isn't in Salesforce yet, the contact
+/// is retried until the account sync has created it. Like <see cref="AccountSync"/>, everything particular to contacts
+/// is in this file.
 /// </summary>
 public static class ContactSync
 {
     public const string Type = "contact";
     public const string DefaultTopic = "contact-changes";
 
-    /// <summary>
-    /// The strategy the engine runs: the contact's key is in the event itself, so Map doesn't take it, and a direct
-    /// upsert reads nothing, so there are no queries.
-    /// </summary>
+    /// <summary>The strategy the engine runs (the contact's key is in the event itself, so Map doesn't take it).</summary>
     public static readonly UpsertStrategy<ContactEvent> Strategy =
-        new(Type, e => e.Contact?.ExternalId, e => e.Meta, (_, e) => Map(e), _ => [], WriteMode.DirectUpsert);
+        new(Type, e => e.Contact?.ExternalId, e => e.Meta, (_, e) => Map(e), Queries);
 
     public static UpsertUnit Map(ContactEvent e)
     {
@@ -28,6 +24,15 @@ public static class ContactSync
         return string.IsNullOrWhiteSpace(payload?.AccountExternalId)
             ? throw new ArgumentException("accountExternalId is required")
             : new UpsertUnit([SObjectRecord.From("contact", ToContact(payload))]);
+    }
+
+    // What to read: the contacts themselves (to diff) and the Accounts they point at (for their Ids)
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
+    {
+        return [
+        SoqlQuery.RecordsOf<ContactSObject>(units),
+        SoqlQuery.LookupTargetsOf<AccountSObject>(units)
+    ];
     }
 
     /// <summary>Payload -> sObject, one line per field (see <see cref="AccountSync.ToAccount"/>).</summary>
@@ -71,16 +76,13 @@ public sealed class ContactPayload
     public string? Phone { get; set; }
 }
 
-/// <summary>
-/// The Salesforce Contact as this sync writes it (complete desired state, like <see cref="AccountSObject"/>; with a
-/// direct upsert every field is sent, so a null clears it).
-/// </summary>
+/// <summary>The Salesforce Contact as this sync writes it (complete desired state, like <see cref="AccountSObject"/>).</summary>
 [SObject("Contact", ExternalIdField = "External_Id__c", RecordType = "Standard")]
 public sealed class ContactSObject
 {
     [JsonPropertyName("External_Id__c")] public string? ExternalId { get; set; }
 
-    /// <summary>The Account, by its external id: sent as <c>"Account": { "External_Id__c": ... }</c>, resolved by Salesforce.</summary>
+    /// <summary>The Account, by its external id: the read finds its Id, which the diff compares with AccountId.</summary>
     [JsonPropertyName("AccountId"), SObjectLookup(typeof(AccountSObject))]
     public string? AccountExternalId { get; set; }
 

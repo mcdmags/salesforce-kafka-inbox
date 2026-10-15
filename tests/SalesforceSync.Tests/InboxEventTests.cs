@@ -116,7 +116,7 @@ public sealed class InboxEventTests
     }
 
     [Theory, AutoData]
-    public void Contact_event_maps_to_a_Contact_looking_up_its_Account_and_is_written_by_direct_upsert(string key, string account, string lastName)
+    public void Contact_event_maps_to_a_Contact_looking_up_its_Account_and_reads_both(string key, string account, string lastName)
     {
         var unit = ContactSync.Strategy.Map(key, Read<ContactEvent>(new JsonObject
         {
@@ -129,8 +129,8 @@ public sealed class InboxEventTests
             .Be(("Contact", "External_Id__c", key, "Standard"));
         contact.Fields.Should().Contain("LastName", lastName).And.Contain("Email", null);
         contact.Lookups.Should().Equal(new SObjectLookup("AccountId", "Account", "External_Id__c", account));
-        ContactSync.Strategy.Mode.Should().Be(WriteMode.DirectUpsert);
-        AccountSync.Strategy.Mode.Should().Be(WriteMode.ReadAndDiff);
+        ContactSync.Strategy.Queries([unit]).Select(q => (q.SObject, q.WhereField, q.Values.Single())).Should()
+            .Equal(("Contact", "External_Id__c", key), ("Account", "External_Id__c", account));
     }
 
     [Theory]
