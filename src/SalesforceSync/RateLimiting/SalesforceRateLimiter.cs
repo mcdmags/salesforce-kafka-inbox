@@ -1,17 +1,21 @@
-using System.ComponentModel.DataAnnotations.Schema;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
-using static SalesforceSync.Data.SqlCommands;
 
 namespace SalesforceSync.RateLimiting;
 
 /// <summary>
 /// Token bucket + limit guard stored in Postgres, shared by every worker in every process.
 /// The bucket's speed is adjusted from the Sforce-Limit-Info header Salesforce returns on each call, and every
-/// call is counted against this integration's share of the org's daily allocation over a rolling 24 hours. The
+/// call is counted against this integration's share of the org's daily allocation over a rolling
+/// <see cref="RateLimitOptions.BudgetWindow"/> (24 hours by default). The
 /// allocation is the lower of the configured one (<see cref="SalesforceLimitsOptions.DailyApiAllocation"/>, the
 /// maximum) and the limit Salesforce reports in that header (<c>api-usage=25/5000</c>: 5,000).
+/// <para>
+/// Every change locks the shared <c>sf_rate_limit</c> row (<see cref="RateLimitSql.Lock"/>), reads the database clock,
+/// decides in C# (<see cref="TokenBucket"/>) and writes the row back in the same transaction. Each unit is retried as
+/// a whole on transient errors; a retry after an unknown commit can only over-count usage, the safe direction.
+/// </para>
 /// </summary>
 public sealed class SalesforceRateLimiter(
     IDbContextFactory<SyncDbContext> contexts,
@@ -19,6 +23,9 @@ public sealed class SalesforceRateLimiter(
     IOptions<SalesforceLimitsOptions> limits,
     ILogger<SalesforceRateLimiter> log)
 {
+    /// <summary>The least wait between attempts to acquire.</summary>
+    private static readonly TimeSpan MinWait = TimeSpan.FromMilliseconds(50);
+
     private readonly RateLimitOptions _opt = options.Value;
     private readonly SalesforceLimitsOptions _limits = limits.Value;
     private readonly object _reportLock = new();
@@ -27,11 +34,11 @@ public sealed class SalesforceRateLimiter(
     private double _ownDailyRatio;
     private long _loggedAllocation;
 
-    /// <summary>This integration's calls per rolling 24 hours under the configured allocation alone: the maximum.</summary>
+    /// <summary>This integration's calls per budget window under the configured allocation alone: the maximum.</summary>
     public long DailyBudget => BudgetFor(null);
 
     /// <summary>
-    /// This integration's calls per rolling 24 hours: <see cref="RateLimitOptions.DailyBudgetShare"/> of the lower of
+    /// This integration's calls per budget window: <see cref="RateLimitOptions.DailyBudgetShare"/> of the lower of
     /// the configured allocation and <paramref name="reportedAllocation"/> (Sforce-Limit-Info api-usage's limit).
     /// </summary>
     public long BudgetFor(long? reportedAllocation)
@@ -51,14 +58,22 @@ public sealed class SalesforceRateLimiter(
     /// </summary>
     public async Task ApplyConfigurationAsync(CancellationToken ct)
     {
-        await contexts.RunAsync((db, t) => db.Database.ExecuteAsync(RateLimitSql.ApplyConfiguration, t,
-            Param("rate", _opt.MaxRequestsPerSecond), Param("capacity", _opt.BurstCapacity),
-            Param("budget", DailyBudget), Param("share", _opt.DailyBudgetShare)), ct);
+        await UpdateAsync((row, _) =>
+        {
+            // Keeps the current throttle factor (refill_per_sec / base_refill_per_sec) under the new base rate. The
+            // budget is the configured one, lowered to the share of the allocation Salesforce last reported.
+            var factor = row.BaseRefillPerSec > 0 ? row.RefillPerSec / row.BaseRefillPerSec : 1;
+            row.Capacity = _opt.BurstCapacity;
+            row.Tokens = Math.Min(row.Tokens, row.Capacity);
+            row.RefillPerSec = _opt.MaxRequestsPerSecond * factor;
+            row.BaseRefillPerSec = _opt.MaxRequestsPerSecond;
+            row.DailyBudget = BudgetFor(row.ApiMax);
+        }, ct);
 
         log.LogInformation(
-            "Salesforce limits: at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls/24h " +
-            "for this integration ({Share:P0}), {Rate} calls/s, burst {Burst}, max {Concurrent} concurrent long-running requests",
-            _limits.DailyApiAllocation, DailyBudget, _opt.DailyBudgetShare,
+            "Salesforce limits: at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls " +
+            "per {Window} for this integration ({Share:P0}), {Rate} calls/s, burst {Burst}, max {Concurrent} concurrent long-running requests",
+            _limits.DailyApiAllocation, DailyBudget, _opt.BudgetWindow, _opt.DailyBudgetShare,
             _opt.MaxRequestsPerSecond, _opt.BurstCapacity, _limits.ConcurrentLongRunningLimit);
     }
 
@@ -67,26 +82,50 @@ public sealed class SalesforceRateLimiter(
         var deadline = DateTime.UtcNow + _opt.MaxWait;
         while (true)
         {
-            // Lock first, in its own statement: the acquire statement's snapshot then includes every usage
-            // increment committed by whoever held the lock before (a single statement would read sf_api_usage
-            // from a snapshot taken before it waited for the lock). Retried as a whole on transient errors; a
-            // retry after an unknown commit can only over-count usage, the safe direction.
-            var r = await contexts.RunInTransactionAsync(async (db, t) =>
+            var (decision, used, budget) = await contexts.RunInTransactionAsync(async (db, t) =>
             {
-                await db.Database.ExecuteAsync(RateLimitSql.Lock, t);
-                return await db.Database.QuerySingleAsync<AcquireResult>(RateLimitSql.Acquire, t, Param("n", (double)permits));
+                var (row, now) = await LockAsync(db, t);
+                // Read after the lock, in a statement of its own: it sees every usage increment committed by
+                // whoever held the lock before
+                var since = now - _opt.CountedWindow;
+                var usage = await db.Set<ApiUsageBucket>().Where(b => b.Bucket >= since)
+                    .GroupBy(_ => 1)
+                    .Select(g => new { Used = g.Sum(b => b.Calls), Oldest = g.Min(b => b.Bucket) })
+                    .SingleOrDefaultAsync(t);
+                var used = usage?.Used ?? 0;
+                var decision = TokenBucket.Decide(row, now, used, usage?.Oldest, permits, _opt);
+                if (decision.Granted)
+                {
+                    row.Tokens = decision.Tokens;
+                    row.UpdatedAt = now;
+                    used += permits;
+                    // The row lock serializes every acquire in every process, so no one can insert this bucket
+                    // between the read and the write: no ON CONFLICT needed
+                    var bucket = TokenBucket.BucketOf(now, _opt.UsageBucket);
+                    var counted = await db.Set<ApiUsageBucket>().FindAsync([bucket], t);
+                    if (counted is null)
+                    {
+                        db.Add(new ApiUsageBucket { Bucket = bucket, Calls = permits });
+                    }
+                    else
+                    {
+                        counted.Calls += permits;
+                    }
+                    await db.SaveChangesAsync(t);
+                }
+                return (decision, used, row.DailyBudget);
             }, ct);
-            if (r.DailyBudget > 0)
+            if (budget > 0)
             {
-                Volatile.Write(ref _ownDailyRatio, r.Used24h / r.DailyBudget.Value);
+                Volatile.Write(ref _ownDailyRatio, (double)used / budget.Value);
             }
 
-            if (r.Granted)
+            if (decision.Granted)
             {
                 return;
             }
 
-            var wait = TimeSpan.FromSeconds(Math.Max(r.WaitSeconds, 0.05))
+            var wait = (decision.Wait > MinWait ? decision.Wait : MinWait)
                        + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100)); // jitter
             if (DateTime.UtcNow + wait > deadline)
             {
@@ -104,7 +143,7 @@ public sealed class SalesforceRateLimiter(
 
     public Task PauseAsync(TimeSpan duration, CancellationToken ct)
     {
-        return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(RateLimitSql.Pause, t, Param("duration", duration)), ct);
+        return UpdateAsync((row, now) => Pause(row, now, duration), ct);
     }
 
     /// <summary>
@@ -135,16 +174,62 @@ public sealed class SalesforceRateLimiter(
             _lastReportUtc = now;
         }
 
-        await contexts.RunAsync((db, t) => db.Database.ExecuteAsync(RateLimitSql.ReportLimits, t,
-            Param("apiUsed", info.ApiUsage?.Used), Param("apiMax", info.ApiUsage?.Max),
-            Param("burstUsed", info.ApiBursts?.Used), Param("burstMax", info.ApiBursts?.Max),
-            Param("appUsed", info.PerAppUsage?.Used), Param("appMax", info.PerAppUsage?.Max),
-            Param("appName", info.AppName),
-            Param("budget", info.ApiUsage is { Max: > 0 } usage ? BudgetFor(usage.Max) : (long?)null),
-            Param("speed", decision.Speed), Param("pauseSeconds", decision.Pause.TotalSeconds)), ct);
+        await UpdateAsync((row, now) =>
+        {
+            row.RefillPerSec = Math.Max(row.BaseRefillPerSec * decision.Speed, 0.01);
+            if (decision.Pause > TimeSpan.Zero)
+            {
+                Pause(row, now, decision.Pause);
+            }
+            row.ApiUsed = info.ApiUsage?.Used ?? row.ApiUsed;
+            row.ApiMax = info.ApiUsage?.Max ?? row.ApiMax;
+            row.BurstUsed = info.ApiBursts?.Used ?? row.BurstUsed;
+            row.BurstMax = info.ApiBursts?.Max ?? row.BurstMax;
+            row.AppUsed = info.PerAppUsage?.Used ?? row.AppUsed;
+            row.AppMax = info.PerAppUsage?.Max ?? row.AppMax;
+            row.AppName = info.AppName ?? row.AppName;
+            // The budget under the allocation this response reported, if it reported one
+            row.DailyBudget = info.ApiUsage is { Max: > 0 } usage ? BudgetFor(usage.Max) : row.DailyBudget;
+            row.UsageUpdatedAt = now;
+        }, ct);
     }
 
-    /// <param name="ownDailyRatio">This integration's rolling 24h calls / its daily budget.</param>
+    /// <summary>
+    /// Locks the row, refills its tokens at the current rate (so a change of rate or capacity applies from now on),
+    /// applies <paramref name="change"/>, deletes the usage buckets that have left the window, and commits.
+    /// </summary>
+    private Task UpdateAsync(Action<RateLimitState, DateTimeOffset> change, CancellationToken ct)
+    {
+        return contexts.RunInTransactionAsync(async (db, t) =>
+        {
+            var (row, now) = await LockAsync(db, t);
+            row.Tokens = TokenBucket.Refill(row, now);
+            row.UpdatedAt = now;
+            change(row, now);
+            await db.SaveChangesAsync(t);
+            var expired = now - _opt.CountedWindow;
+            await db.Set<ApiUsageBucket>().Where(b => b.Bucket < expired).ExecuteDeleteAsync(t);
+        }, ct);
+    }
+
+    /// <summary>The shared row, locked until the transaction ends, and the database clock once it is locked.</summary>
+    private static async Task<(RateLimitState Row, DateTimeOffset Now)> LockAsync(SyncDbContext db, CancellationToken t)
+    {
+        var row = (await db.Set<RateLimitState>().FromSqlRaw(RateLimitSql.Lock).ToListAsync(t)).Single();
+        return (row, await db.Database.QuerySingleAsync<DateTimeOffset>(RateLimitSql.Now, t));
+    }
+
+    /// <summary>Pauses until <paramref name="duration"/> from now, unless already paused for longer.</summary>
+    private static void Pause(RateLimitState row, DateTimeOffset now, TimeSpan duration)
+    {
+        var until = now + duration;
+        if (row.PausedUntil is null || row.PausedUntil < until)
+        {
+            row.PausedUntil = until;
+        }
+    }
+
+    /// <param name="ownDailyRatio">This integration's calls in the budget window / its budget.</param>
     internal ThrottleDecision Decide(SalesforceLimitInfo info, double ownDailyRatio = 0)
     {
         var daily = Math.Max(info.DailyRatio, ownDailyRatio);
@@ -169,8 +254,8 @@ public sealed class SalesforceRateLimiter(
         var configured = _limits.DailyApiAllocation;
         log.LogInformation(
             "Salesforce reports a daily API allocation of {Reported} calls, {Section} allows at most {Configured}: " +
-            "the budget is {Budget} calls/24h ({Share:P0} of {Allocation})",
-            usage.Max, SalesforceLimitsOptions.Section, configured, BudgetFor(usage.Max), _opt.DailyBudgetShare,
+            "the budget is {Budget} calls per {Window} ({Share:P0} of {Allocation})",
+            usage.Max, SalesforceLimitsOptions.Section, configured, BudgetFor(usage.Max), _opt.BudgetWindow, _opt.DailyBudgetShare,
             Math.Min(usage.Max, configured));
     }
 
@@ -181,15 +266,6 @@ public sealed class SalesforceRateLimiter(
             "Salesforce throttle {From} -> {To} (speed x{Speed}, pause {Pause}). api-usage={Api} api-bursts={Bursts} per-app={App} ({AppName})",
             from.Level, to.Level, to.Speed, to.Pause,
             info.ApiUsage, info.ApiBursts, info.PerAppUsage, info.AppName);
-    }
-
-    /// <summary>The row <see cref="RateLimitSql.Acquire"/> returns.</summary>
-    private sealed class AcquireResult
-    {
-        [Column("granted")] public bool Granted { get; set; }
-        [Column("wait_seconds")] public double WaitSeconds { get; set; }
-        [Column("used_24h")] public double Used24h { get; set; }
-        [Column("daily_budget")] public double? DailyBudget { get; set; }
     }
 
     internal enum ThrottleLevel { Normal, DailyLow, DailyExhausted }

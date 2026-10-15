@@ -2,7 +2,8 @@ namespace SalesforceSync.RateLimiting;
 
 /// <summary>
 /// A row of sf_rate_limit: the token bucket and daily budget all pods share, and what Salesforce last reported in
-/// Sforce-Limit-Info. Read and written only by <see cref="RateLimitSql"/>; mapped so that the model defines the table.
+/// Sforce-Limit-Info. Read and written by <see cref="SalesforceRateLimiter"/>, always under the row lock
+/// (<see cref="RateLimitSql.Lock"/>).
 /// </summary>
 public sealed class RateLimitState
 {
@@ -43,15 +44,16 @@ public sealed class RateLimitState
     public DateTimeOffset? UsageUpdatedAt { get; set; }
 
     /// <summary>
-    /// This integration's calls per rolling 24h: RateLimit:DailyBudgetShare x the lower of the configured allocation and
-    /// api_max.
+    /// This integration's calls per rolling RateLimit:BudgetWindow: RateLimit:DailyBudgetShare x the lower of the
+    /// configured allocation and api_max.
     /// </summary>
     public long? DailyBudget { get; set; }
 }
 
 /// <summary>
-/// A row of sf_api_usage: this integration's own Salesforce calls in one 10-minute bucket, the rolling 24-hour window
-/// that <see cref="RateLimitState.DailyBudget"/> is enforced against (the org-wide total comes from Sforce-Limit-Info).
+/// A row of sf_api_usage: this integration's own Salesforce calls in one bucket of RateLimit:UsageBucket (10 minutes),
+/// counted over the rolling RateLimit:BudgetWindow that <see cref="RateLimitState.DailyBudget"/> is enforced against
+/// (the org-wide total comes from Sforce-Limit-Info).
 /// </summary>
 public sealed class ApiUsageBucket
 {
