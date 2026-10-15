@@ -36,20 +36,19 @@ var sync = builder.AddProject<Projects.SalesforceSync>("salesforce-sync")
     .WithReference(inboxDb).WaitFor(inboxDb)
     .WithReference(kafka).WaitFor(kafka)
     .WithReference(redis).WaitFor(redis)
-    .WithEnvironment("Salesforce__UseFake", "false")
     .WithEnvironment("Sync__Workers", "4");
 
 // A real org (a sandbox) when the AppHost's user secrets hold Salesforce:InstanceUrl, ClientId and ClientSecret
-// (README: Using a real Salesforce org); otherwise the mock org
+// (README: Using a real Salesforce org); otherwise the mock org, which accepts any credentials. Either way the worker
+// gets the same settings; only Salesforce:InstanceUrl differs.
 var realOrg = builder.Configuration.GetSection("Salesforce");
 var useRealOrg = !string.IsNullOrEmpty(realOrg["ClientSecret"]);
+sync.WithEnvironment("Salesforce__ClientId", realOrg["ClientId"] ?? "fake-client")
+    .WithEnvironment("Salesforce__ClientSecret",
+        builder.AddParameter("salesforce-client-secret", realOrg["ClientSecret"] ?? "fake-secret", secret: true));
 if (useRealOrg)
 {
-    var instanceUrl = realOrg["InstanceUrl"]!.TrimEnd('/');
-    sync.WithEnvironment("Salesforce__InstanceUrl", instanceUrl)
-        .WithEnvironment("Salesforce__TokenUrl", $"{instanceUrl}/services/oauth2/token")
-        .WithEnvironment("Salesforce__ClientId", realOrg["ClientId"])
-        .WithEnvironment("Salesforce__ClientSecret", builder.AddParameter("salesforce-client-secret", realOrg["ClientSecret"]!, secret: true))
+    sync.WithEnvironment("Salesforce__InstanceUrl", realOrg["InstanceUrl"])
         .WithEnvironment("SalesforceLimits__DailyApiAllocation", builder.Configuration["SalesforceLimits:DailyApiAllocation"] ?? "115000");
 }
 else
@@ -60,12 +59,8 @@ else
         // Matches the worker's SalesforceLimits:DailyApiAllocation
         .WithEnvironment("FakeSalesforce__DailyApiLimit", "115000")
         .WithHttpHealthCheck("/health");
-    var salesforceUrl = salesforce.GetEndpoint("http");
     sync.WaitFor(salesforce)
-        .WithEnvironment("Salesforce__InstanceUrl", salesforceUrl)
-        .WithEnvironment("Salesforce__TokenUrl", ReferenceExpression.Create($"{salesforceUrl}/services/oauth2/token"))
-        .WithEnvironment("Salesforce__ClientId", "fake-client")
-        .WithEnvironment("Salesforce__ClientSecret", "fake-secret");
+        .WithEnvironment("Salesforce__InstanceUrl", salesforce.GetEndpoint("http"));
 }
 
 if (!testMode)
