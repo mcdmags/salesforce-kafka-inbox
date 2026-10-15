@@ -18,7 +18,7 @@ each contact as a **Contact** of its Account, which may not be synced yet either
    reach Salesforce first and then be overwritten by the older one, so Salesforce ends up with stale
    data. Events may also simply arrive out of order: the producers' Kafka key can't be relied on.
 2. **Account and Profile belong together, and one bad record must not hold back the batch.** They are
-   written in the same request, each record saved or rejected on its own; an account counts as synced
+   written in the same batch, each record saved or rejected on its own; an account counts as synced
    only when both are in, and is retried until they are (see [Writing to Salesforce](#writing-to-salesforce)).
 3. **Only send what changed.** Blind updates fire triggers and flows, pollute field history and burn
    API calls. Each record is read, diffed and only the changed fields are sent; new records are created
@@ -41,10 +41,10 @@ each contact as a **Contact** of its Account, which may not be synced yet either
 | Late or replayed older events | **Sync watermark in the inbox**: the row of the event written to Salesforce ends `done` with that event's `meta.time` in `synced_time`, in the same statement that completes it and only while the worker still holds the lease; an entity's watermark is the newest `synced_time` of its done rows. A claimed event at or before the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this, and no table mixes types of event. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement and the watermark are conditional on its `lock_token`. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
-| Records that belong together | **One Composite request of sObject Collections** creates and updates: Accounts first, then their Profiles (or one plain Collections upsert when only one object is written, see below). Each record is saved or rejected on its own (`allOrNone: false`); the entity is done, and its watermark advanced, only when all of its records are in. A new Profile points at its new Account by reference (`@{Account_create[i].id}`); existing records (e.g. a relationship's Accounts) are linked by the Id read from Salesforce. See [Writing to Salesforce](#writing-to-salesforce). |
+| Records that belong together | Written in the same batch, Accounts first, then their Profiles: **one Composite request of sObject Collections** creates and updates when a new record refers to a new parent, otherwise **one Collections upsert per object** (see below). Each record is saved or rejected on its own (`allOrNone: false`); the entity is done, and its watermark advanced, only when all of its records are in. A new Profile points at its new Account by reference (`@{Account_create[i].id}`); existing records (e.g. a relationship's Accounts) are linked by the Id read from Salesforce. See [Writing to Salesforce](#writing-to-salesforce). |
 | Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. The event's `meta.type` is not consulted. |
 | Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the second and time to the millisecond, int/long within their `digits`, 18-character ids checked against their case suffix, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event. The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
-| Batching and API calls | **2 calls per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries), then, after the diff, one write: a Composite request with all writes (≤5 collections of ≤200 records; more are split over further requests) when any write links a new child to its new parent (`@{reference}`), every other write of the request included, or when the writes are of several objects; otherwise (**one object, no reference**, ≤200 records: accounts whose Profiles are unchanged, relationships, contacts) a single **sObject Collections upsert** by external id with exactly the planned fields: the same one call, a plainer request. See [One object: a Collections upsert](#one-object-a-collections-upsert). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
+| Batching and API calls | **1 read call per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries). Then, after the diff, the writes, grouped into write requests (≤5 collections of ≤200 records; more are split over further requests): a request in which any write links a new child to its new parent (`@{reference}`) is **one Composite request**, every other write of it included; any other request is **one sObject Collections upsert per object** (and per 200 records), by external id with exactly the planned fields, sent one after another, parents first. So a batch of new Accounts with their Profiles costs 2 calls, Account-only changes (relationships, contacts likewise) 2, and Account-only plus Profile-only changes 3 (one read, one upsert of the Accounts, one of the Profiles). See [Without references: one upsert per object](#without-references-one-upsert-per-object). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
 | Record types | Every synced object has a record type, named by developer name on its sObject class (`[SObject("Account", …, RecordType = "Business")]`). Its Id comes from the `recordTypeInfos` of the object's cached Describe, so it costs no extra call, and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't offer fails the entity before any call (`INVALID_RECORD_TYPE`, retried) and makes the next batch describe again. See [Record types](#record-types). |
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (skipped because of another entity's record) → back to the inbox without spending a retry. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
@@ -66,7 +66,7 @@ Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per 
                               SalesforceBatchUpsertService.UpsertBatchAsync<TEvent, TRow>(strategy, IRepository<TRow>)
                                 claim → newest meta.time per entity (supersede stale) → map
                                 → describe → normalize → 1 composite read → decide (diff + lookups)
-                                → 1 write: composite, or a collections upsert if one object and no references
+                                → write: 1 composite if a reference is needed, else 1 collections upsert per object
                                 → per-record results → outcome per entity → record outcomes
                                                        │  inbox: IRepository<TRow> (EF Core + raw SQL, PostgresRetryStrategy)
                                                        │  token bucket + daily budget + concurrency slots
@@ -82,7 +82,7 @@ The sync is three layers, each with one job:
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`, `UpsertAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
 | **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | `PreparedBatch.Prepare` (coalesce, watermark, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request) and `CompositeWrite.AsUpsert` (a request of one object without references as one Collections upsert), `WriteResultInterpreter` (per-record results → outcome per entity, for Composite subrequests and upserts alike) | Pure and deterministic; unit-tested without a database or HTTP. |
+| **Rules, no I/O** | `PreparedBatch.Prepare` (coalesce, watermark, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request) and `CompositeWrite.AsUpserts` (a request without references as one Collections upsert per object and 200 records), `WriteResultInterpreter` (per-record results → outcome per entity, for Composite subrequests and upserts alike) | Pure and deterministic; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`); the schema
 stays `sql/schema.sql` (partial indexes, the table template, views, autovacuum settings: not expressible as migrations),
@@ -481,10 +481,10 @@ content, and a source clock that goes backwards makes a newer change look older 
 
 ## Writing to Salesforce
 
-A batch is written with **one call**. When it writes more than one object, or links a new child to a parent created in
-the same call, that call is a **Composite request** (`POST /services/data/vXX.X/composite`) whose subrequests are
-sObject Collections operations with explicit verbs; otherwise it is a single sObject Collections upsert
-([below](#one-object-a-collections-upsert)). The Composite form:
+A batch's writes are grouped into write requests (normally one). When a write links a new child to a parent created
+in the same call, the request is one **Composite request** (`POST /services/data/vXX.X/composite`) whose subrequests
+are sObject Collections operations with explicit verbs; otherwise it is sent as one sObject Collections upsert per
+object ([below](#without-references-one-upsert-per-object)). The Composite form:
 
 ```jsonc
 { "allOrNone": false,
@@ -508,22 +508,34 @@ collections (Account create / update, Profile create by reference / create with 
 more are split over further Composite requests, an entity's records always in the same one. The read is unchanged: one
 Composite request with up to 5 queries.
 
-When a batch needs more than one write request and one of them fails as a whole (the call, not records in it), the
-batch stops and the failure applies to every event of the batch, as if the first request had failed: retried with
-backoff, held if the request's outcome is unknown, deferred if it was rate limited. That is safe even though earlier
-requests may have saved their records: the retry reads Salesforce again and writes only what still differs, so those
-entities end `done` without being written twice.
+When a batch needs more than one write call (several requests, or one upsert per object) and one of them fails as a
+whole (the call, not records in it), the batch stops, the later calls are not sent, and the failure applies to every
+event of the batch, as if the first call had failed: retried with backoff, held if the call's outcome is unknown (an
+Account upsert saved, then the Profile upsert's answer lost: the whole batch is held), deferred if it was rate
+limited. What the earlier calls answered is not recorded. That is safe even though they may have saved their records:
+every write is matched by Id or external id, so the retry reads Salesforce again and writes only what still differs,
+and those entities end `done` without being written twice.
 
-### One object: a Collections upsert
+### Without references: one upsert per object
 
 Every batch is read and diffed first; only then is the API chosen, per write request:
 
 - **Any write needs Composite** (a new parent and its new child linked by `@{referenceId}`): the whole request stays
   one Composite request, writes that wouldn't need it included (e.g. a Profile-only update of an existing Account).
   One call.
-- **No write needs Composite and all are of one object** (at most 200): one plain **sObject Collections upsert**
-  (`PATCH /composite/sobjects/{SObject}/{ExternalIdField}`) with exactly the planned fields.
-- **No references but several objects**: stays Composite, one call instead of one upsert per object.
+- **No write needs Composite**: one plain **sObject Collections upsert**
+  (`PATCH /composite/sobjects/{SObject}/{ExternalIdField}`) per object, with exactly the planned fields: one for the
+  Accounts, one for the Profiles, one for the relationships, and a further one per 200 records of an object. Never
+  Composite. The calls go one after another in the order the Composite request would have used (parents first).
+
+| Write request (no `@{reference}` unless said) | Write calls |
+|---|---|
+| new Accounts with their new Profiles (references) | 1 Composite |
+| Account-only changes, ≤200 | 1 upsert |
+| Account-only changes + Profile-only changes | 2 upserts: Accounts, then Profiles |
+| Accounts and Profiles both changed, of existing accounts | 2 upserts: Accounts, then Profiles |
+| 150 new + 150 changed Accounts (one request) | 2 upserts: 200, then 100 |
+| a new Account with its Profile + other accounts' updates | 1 Composite (the reference decides for the request) |
 
 An upsert looks like this:
 
@@ -539,15 +551,17 @@ An upsert looks like this:
 ```
 
 The usual cases are accounts whose Profiles didn't change (the Account alone is written), a Profile alone,
-relationships and contacts (their Accounts are looked up, never created with them). It is still **one call**, and it
-carries exactly what the diff planned: a new record whole, an existing one only its changed fields (an upsert accepts
+relationships and contacts (their Accounts are looked up, never created with them). Each upsert carries exactly what
+the diff planned: a new record whole, an existing one only its changed fields (an upsert accepts
 a different set of fields per record), each identified by its external id rather than its Id; a lookup to an existing
 record carries the Id the read found (`"AccountId": "001…"`). Unchanged entities still write nothing. The request is
 simpler (no envelope, no subrequest errors to tell apart from record errors) and doesn't count toward Composite's
-subrequest limits. A batch that mixes accounts with and without Profile changes stays one Composite request, not split
-into extra calls.
+subrequest limits. The price is one call per object instead of one per request: a batch that changes Accounts and
+Profiles costs 3 calls instead of 2, each counted by the rate limiter like any other.
 
-The per-record answers go through the same classification as a Composite collection's (`WriteResultInterpreter`).
+The per-record answers go through the same classification as a Composite collection's (`WriteResultInterpreter`), all
+upserts of a request together: an entity with an Account in one upsert and a Profile in another is saved only if both
+are, and a Profile rejected in its upsert fails only its own entity, never the Accounts of the other one.
 Two answers are particular to an update sent as an upsert, both meaning the record was deleted after the read: the
 upsert either created it from the changed fields alone (`"created": true`) or failed creating it
 (`REQUIRED_FIELD_MISSING`). Both are retried, not dead-lettered: the retry's read sees what Salesforce now has and
@@ -601,7 +615,7 @@ Which verb a record gets is decided by the read alone; the event's `meta.type` i
 | no | **create** from the full record |
 | yes | **update** with the fields that differ; nothing differs → no write (`done`) |
 
-(When the request is [a Collections upsert](#one-object-a-collections-upsert), "create" and "update" are what the
+(When the request is [a Collections upsert](#without-references-one-upsert-per-object), "create" and "update" are what the
 upsert does by external id, with the same fields.)
 
 A redelivered insert therefore writes nothing and creates no duplicate, and an `updated` event for a record that
@@ -627,7 +641,7 @@ and it pays off when unnecessary writes cost something:
 
 What it costs:
 
-- **Two API calls per batch instead of one**: one Composite request reads, the other writes.
+- **One more API call per batch**: one Composite request reads before the writes.
 - **Exact value handling.** `FieldValues` normalizes each value to what Salesforce stores for its field type (scale,
   checkbox, 15/18-character ids, multi-picklist order, date/time precision, from Describe), or the diff would see a
   change on every event. It is the logic most likely to be subtly wrong; the sandbox checks under
@@ -664,7 +678,7 @@ succeeded**. Until then Salesforce can show the new Account with the old or no P
 | any record with a permanent error (`Salesforce:PermanentErrorCodes`) | dead-lettered at once, alone |
 | any record with another error (row lock, `DUPLICATE_VALUE` on create, lookup target missing, unknown code) | retried with backoff |
 | a child not saved only because its parent in the same entity wasn't | whatever the parent's error says; the child's own "parent missing" error is ignored |
-| an update [sent as an upsert](#one-object-a-collections-upsert) that created the record, or failed creating it with `REQUIRED_FIELD_MISSING` (deleted after the read) | retried with backoff; the retry reads it again |
+| an update [sent as an upsert](#without-references-one-upsert-per-object) that created the record, or failed creating it with `REQUIRED_FIELD_MISSING` (deleted after the read) | retried with backoff; the retry reads it again |
 | its whole subrequest went down because of another entity's record (`PROCESSING_HALTED` on a reference without a value) | released, no retry spent |
 | a subrequest that failed as a whole for any other reason | retried with backoff, never dead-lettered (it says nothing about one record's data) |
 | the call itself failed (any write request of the batch) | every event of the batch: rate-limited → deferred; provably not applied → retried; otherwise [unknown outcome](#unknown-outcomes) → held |
@@ -978,7 +992,8 @@ Profile's reference to its Account; an Account saved while its Profile failed be
 unmoved until both are in; a failing Account dead-lettered alone, without its Profile, while another account is
 saved; `inserted` and `updated` pending together becoming one create; a later `inserted` for an existing record
 updating only what differs, sent as one Collections upsert since only the Account changed; a new Account with its
-Profile going as Composite with the reference, and the next change of the Account alone as an upsert of that field. `DeadLetterTests` (`FewRetriesFixture`, `Sync:MaxRetries=3` from configuration): a
+Profile going as Composite with the reference, and the next change of the Account alone as an upsert of that field;
+a change of both the Account and its Profile as two upserts, the Account's first, each with only its changed field. `DeadLetterTests` (`FewRetriesFixture`, `Sync:MaxRetries=3` from configuration): a
 relationship whose Account never arrives dead-lettered after `MaxRetries` with `DEPENDENCY_NOT_SYNCED`, then synced
 once the Accounts exist and the dead letter is re-queued.
 
@@ -998,14 +1013,19 @@ strategy against the in-memory org: 2 calls per batch, the exact verbs, bodies a
 Salesforce stores differently written once rather than on every event, a bad value failing only its own unit before
 any call, a validation error or a row lock costing only its own entity, an Account saved without its Profile, a
 create losing a race, a failed new Account taking down the reference subrequest without dead-lettering anyone else,
-more than 5 collections split over requests, failures without a cause spending a retry, create or update decided by
+more than 5 collections split over requests (the existing units' as one upsert per object), failures without a
+cause spending a retry, create or update decided by
 what Salesforce has, relinking, relationships and missing dependencies (found by the read, or rejected by
-Salesforce), gzip, clearing fields that became empty, an Account-only change sent as one upsert with only that field
-while mixed batches stay one Composite request. Contacts: a new one as one upsert (its non-empty fields, the Account's
+Salesforce), gzip, clearing fields that became empty, an Account-only change sent as one upsert with only that field,
+Account-only and Profile-only changes as one upsert per object (Accounts first, 3 calls), an entity written in two
+upserts saved only when both are while the other entities keep their outcome, a lost answer of the second upsert after
+the first was saved holding the whole batch (the retry then finds both applied and writes nothing). Contacts: a new one as one upsert (its non-empty fields, the Account's
 Id from the read, the `RecordTypeId`), an unchanged one read and not written, a changed one as one upsert with only
 the changed fields, a missing Account as `DEPENDENCY_NOT_SYNCED` before any write, bad values and Salesforce
 rejections costing only their own entity, a lost answer as an unknown outcome, the upsert call's per-record answer
-(`created`) and, as pure rules, when a request becomes an upsert, an update upserted onto a deleted record, and a
+(`created`) and, as pure rules, when a request becomes upserts (one per object, Accounts first; a reference keeps the
+whole request Composite; 300 records of one object as 200 + 100, each once), one outcome per entity across upserts,
+an update upserted onto a deleted record, and a
 parent Salesforce can't find by its external id meaning wait for it. Also: each mapper (an AutoFixture payload in, the expected
 sObject out, nulls passed through), sObject → record (names from the attributes, nulls included, lookups and external
 id), the guard that every Salesforce name on an sObject class exists in the mock org's schema, the event mapping
@@ -1123,7 +1143,7 @@ budget on the configuration.
 | Salesforce limit | How it's applied |
 |---|---|
 | **Total API requests per 24 hours**: depends on the edition, licenses and add-ons (e.g. 115,000 for an Enterprise org with 15 Salesforce licenses); Setup shows the org's number | `SalesforceLimits:DailyApiAllocation` (required) as the maximum, lowered to the limit in `Sforce-Limit-Info: api-usage` when Salesforce reports less. The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling 24 hours. When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
-| **What a call is**: each HTTP request; a Composite request (and an sObject Collections request) counts as one call however many subrequests it holds | One token per HTTP request: a describe (cached), each query page and each Composite write. |
+| **What a call is**: each HTTP request; a Composite request (and an sObject Collections request) counts as one call however many subrequests it holds | One token per HTTP request: a describe (cached), each query page, each Composite write and each upsert (one per object of a request without references). Every call goes through the same `SalesforceRateLimitHandler`; a batch's calls are sent one after another under its one concurrency slot. |
 | **Org-wide usage** (also other integrations): `Sforce-Limit-Info: api-usage=used/limit` on every REST response | `api-usage` and, when Salesforce sends it, `per-app-api-usage` (the connected app's quota): slow down at `DailySoftRatio`, pause at `DailyHardRatio`. The allocation Salesforce reports, the configured maximum and the resulting budget are logged when first seen and whenever Salesforce's changes. `api-bursts` appears in Salesforce's example of the header but isn't defined, so it is recorded in `sf_limit_status` and not acted on. |
 | **Requests per second**: Salesforce publishes no such limit, and none on concurrent requests shorter than 20 s | `MaxRequestsPerSecond` and `BurstCapacity` are this integration's own pacing, so it spreads its share of the daily allocation instead of spending it in bursts. |
 | **Concurrent long-running requests** (20 s or longer): 25 for production and sandboxes, 5 for Developer Edition and trials | `SalesforceLimits:ConcurrentLongRunningLimit` (default 25). `Sync:MaxConcurrentRequests` (global advisory-lock slots) must not exceed it, or startup fails. Calls that take `LongRunningThreshold` or longer are logged. `REQUEST_LIMIT_EXCEEDED` with `ConcurrentPerOrgLongTxn` pauses all workers for `ConcurrentLimitPause`. |

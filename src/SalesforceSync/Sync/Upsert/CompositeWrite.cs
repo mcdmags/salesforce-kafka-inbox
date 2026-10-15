@@ -4,9 +4,10 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync.Upsert;
 
 /// <summary>
-/// One Composite write request: its units and their writes by collection. The collections' order, their reference
-/// ids and every write's position are fixed when the request is assembled (<see cref="Pack"/>), so building the
-/// request and reading its results never depend on each other.
+/// One write request: its units and their writes by collection, sent as one Composite request, or as one Collections
+/// upsert per object when none of its writes needs a reference (<see cref="AsUpserts"/>). The collections' order,
+/// their reference ids and every write's position are fixed when the request is assembled (<see cref="Pack"/>), so
+/// building the request and reading its results never depend on each other.
 /// </summary>
 internal sealed partial class CompositeWrite
 {
@@ -26,7 +27,8 @@ internal sealed partial class CompositeWrite
     /// object and verb; children that point at their parent by reference get a collection of their own, because one
     /// reference without a value (its parent failed) fails that whole subrequest, and children with a literal Id
     /// should not go down with it. A request takes 5 collections of 200 records; a unit that fits none of the requests
-    /// so far starts another, so an entity's records (and the references between them) share a request.
+    /// so far starts another, so an entity's records (and the references between them) share a request, and its
+    /// outcome is read from that request's answers alone, however many upserts it is sent as.
     /// </summary>
     /// <returns>The requests, and a permanent failure for each unit that can't fit any request.</returns>
     public static (List<CompositeWrite> Requests, List<UpsertResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units)
@@ -64,21 +66,19 @@ internal sealed partial class CompositeWrite
     }
 
     /// <summary>
-    /// The request as one sObject Collections upsert by external id, when it can be one: none of its writes points at
-    /// a record created in the same request (an upsert has no <c>@{reference}</c>), all are of one object, and they fit
-    /// one call (200 records). Same single API call as the Composite request, with a plainer body: each record carries
-    /// its external id and exactly the fields planned for it (all of a new record's, only the changed ones of an
-    /// existing record). Null when the request stays Composite: one write needing a reference (a new parent and its
-    /// new child) keeps the whole request Composite, writes that wouldn't need it included, and writes of several
-    /// objects stay one Composite request rather than one upsert per object. Marks the writes
+    /// The request as sObject Collections upserts by external id, one per object (and per 200 records of it), when
+    /// none of its writes points at a record created in the same request (an upsert has no <c>@{reference}</c>): e.g.
+    /// Account updates and Profile updates are two calls, Accounts first. The calls follow the collections' order
+    /// (parents first), each record keeps its collection's order, and each carries its external id and exactly the
+    /// fields planned for it (all of a new record's, only the changed ones of an existing record; a lookup as the Id
+    /// the read found). Null when the request stays one Composite request: one write needing a reference (a new parent
+    /// and its new child) keeps the whole request Composite, writes that wouldn't need it included. Marks the writes
     /// <see cref="PlannedWrite.ByUpsert"/>, which is how their results are read.
     /// </summary>
-    public UpsertCall? AsUpsert()
+    public List<UpsertCall>? AsUpserts()
     {
         var writes = Collections.SelectMany(c => c.Writes).ToList();
-        if (writes.Count is 0 or > SalesforceRestClient.MaxCollectionRecords
-            || writes.Any(w => w.Links.Count > 0)
-            || writes.Select(w => (w.SObject, w.ExternalIdField)).Distinct().Count() != 1)
+        if (writes.Any(w => w.Links.Count > 0))
         {
             return null;
         }
@@ -88,7 +88,11 @@ internal sealed partial class CompositeWrite
             write.ByUpsert = true;
         }
 
-        return new UpsertCall($"{ReferenceIdFor(writes[0].SObject)}_upsert", writes[0].SObject, writes[0].ExternalIdField, writes);
+        // The call's position makes its reference id unique, which is how its answer finds its writes
+        return [.. writes.GroupBy(w => (w.SObject, w.ExternalIdField))
+            .SelectMany(o => o.Chunk(SalesforceRestClient.MaxCollectionRecords).Select(chunk => (Object: o.Key, Writes: chunk)))
+            .Select((call, i) => new UpsertCall($"{ReferenceIdFor(call.Object.SObject)}_upsert_{i}", call.Object.SObject,
+                call.Object.ExternalIdField, [.. call.Writes]))];
     }
 
     /// <summary>The subrequests, in the order and with the reference ids fixed by <see cref="Pack"/>.</summary>
