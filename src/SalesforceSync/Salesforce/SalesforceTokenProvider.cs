@@ -20,6 +20,7 @@ public sealed class SalesforceTokenProvider(IHttpClientFactory httpFactory, IOpt
     /// A token Salesforce just answered 401 to. It is replaced only if it is still the cached one, so when many
     /// requests fail at once, one of them fetches a new token and the rest reuse it.
     /// </param>
+    /// <param name="ct">Cancels the wait and the token request.</param>
     public async Task<string> GetTokenAsync(string? rejected, CancellationToken ct)
     {
         if (Usable(_token, rejected) is { } cached)

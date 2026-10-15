@@ -3,7 +3,7 @@ namespace SalesforceSync.Inbox;
 /// <summary>
 /// One row of an inbox table: a Kafka event and what became of it. Every inbox table has exactly these columns (the
 /// inbox configuration in SyncDbContext), so they all live here; a synced object only adds a subclass that names its table
-/// (<see cref="SyncDbContext"/> maps each subclass to its own table; the base is not an entity, there is no shared table).
+/// (<see cref="Data.SyncDbContext"/> maps each subclass to its own table; the base is not an entity, there is no shared table).
 /// </summary>
 public abstract class InboxRow
 {

@@ -243,6 +243,7 @@ public sealed class SalesforceRateLimiter(
     }
 
     /// <param name="ownDailyRatio">This integration's calls in the budget window / its budget.</param>
+    /// <param name="info">What Salesforce last reported in Sforce-Limit-Info.</param>
     internal ThrottleDecision Decide(SalesforceLimitInfo info, double ownDailyRatio = 0)
     {
         var daily = Math.Max(info.DailyRatio, ownDailyRatio);

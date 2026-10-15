@@ -21,6 +21,9 @@ public sealed record UpsertUnit(IReadOnlyList<SObjectRecord> Records);
 /// Text fields of <paramref name="Fields"/> that hold a parent's external id: written as they are, but the parent goes
 /// first and must exist (<see cref="SObjectForeignKeyAttribute"/>).
 /// </param>
+/// <param name="SObject">The object's API name, e.g. Account.</param>
+/// <param name="ExternalIdField">The external id field the record is matched by.</param>
+/// <param name="ExternalId">Its value: the record's identity in this sync.</param>
 public sealed record SObjectRecord(
     string ReferenceId,
     string SObject,
