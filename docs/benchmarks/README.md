@@ -521,6 +521,61 @@ What it means:
   of duplicate writes or create collisions and up to 2.9x the API calls. The sequential version must run as exactly
   one worker.
 
+## CoalesceDelay sweep
+
+2026-10-16, `main` at 4036d77 (PR #41), the environment above; load average 8.6 to 15 during the streaming runs (one
+spike to 23 in a drain run). `StreamingIngestBenchmarks` (50 accounts, 5,000 events, 5 ms latency) with
+`CoalesceDelayMs` swept, 3 measured iterations per run, each setting run twice in alternating order (ascending, then
+descending) on a fresh Postgres. Cells are run 1 / run 2: the median `api=` (calls to the org) and `coalescing=`
+(events per entity sync) of the measured iterations, the BenchmarkDotNet mean and allocated. Every iteration of every
+run: 0 overlapping claims, 0 not done, 0 wrong, 0 regressions.
+
+| Delay | 4 workers x 1 pod: api | coalescing | mean | allocated |
+|---|---|---|---|---|
+| 0 | 230 / 233 | 4.50 / 4.51 | 2.04 s / 1.44 s | 105.6 / 107.4 MB |
+| 25 ms | 231 / 223 | 4.44 / 4.60 | 3.15 s / 1.23 s | 105.5 / 106.4 MB |
+| **50 ms** | **203 / 206** | **5.02 / 5.02** | 1.07 s / 0.99 s | 99.9 / 104.7 MB |
+| 100 ms | 201 / 201 | 5.04 / 5.12 | 1.21 s / 1.10 s | 100.5 / 101.9 MB |
+| 250 ms | 181 / 214 | 5.81 / 5.09 | 1.14 s / 1.52 s | 96.6 / 109.4 MB |
+| 500 ms | 171 / 173 | 6.31 / 6.22 | 1.62 s / 1.62 s | 103.0 / 100.0 MB |
+
+| Delay | 4 workers x 3 pods: api | coalescing | 8 workers x 3 pods: api | coalescing |
+|---|---|---|---|---|
+| 0 | 303 / 294 | 4.01 / 4.14 | 310 / 314 | 4.99 / 5.02 |
+| 25 ms | 312 / 305 | 4.08 / 4.05 | 313 / 319 | 5.00 / 4.97 |
+| **50 ms** | 311 / 308 | 4.10 / 4.13 | 307 / 313 | 5.14 / 4.95 |
+| 100 ms | 290 / 300 | 4.30 / 4.25 | 314 / 310 | 5.10 / 5.18 |
+| 250 ms | 294 / 303 | 4.64 / 4.45 | 307 / 295 | 5.34 / 5.45 |
+| 500 ms | 276 / 311 | 5.48 / 5.14 | 332 / 328 | 5.51 / 5.73 |
+
+Means for 3 pods: 1.2 to 2.8 s at every delay, with no trend (noise); allocated 139 to 160 MB (4 x 3) and 170 to
+188 MB (8 x 3) up to 250 ms, 167 to 194 MB and 238 MB at 500 ms.
+
+- **4 x 1**: 50 ms takes the calls from about 231 to 205 (11% fewer) and the coalescing from 4.5 to 5.0; 100 ms is
+  the same, 250 ms is noisy (181 and 214), and only 500 ms goes further (172, 26% fewer).
+- **3 pods**: no delay changes the calls beyond the run-to-run spread (about 3%), though entity syncs fall (coalescing
+  rises) from 250 ms. A call is per batch, not per entity: with 12 or 24 loops on 50 accounts the batches are small,
+  and a delay makes them smaller rather than fewer. At 500 ms the 8 x 3 case made 6% more calls and allocated a third
+  more.
+- The benchmark streams 5,000 events in one to two seconds (50 to 100 events per account per second), so 500 ms is a
+  large share of a run; real bursts are slower, and a delay costs every entity up to that much sync latency.
+
+**Chosen default: 50 ms** (`Sync:CoalesceDelay` `00:00:00.050`): the smallest delay with the 4 x 1 reduction, as
+good as 100 ms, no worse with 3 pods, and 50 ms of added latency at most. 500 ms would save more calls in one case
+but costs ten times the latency and more calls and memory with 8 x 3.
+
+Preloaded drains (the quick `InboxDrainBenchmarks`, 100 accounts, no latency), 0 vs 50 ms, twice each, alternating:
+the same work, as expected (the whole inbox is due 50 ms later, then drains as before). Medians (pods x workers):
+
+| Delay | 1 x 1: api | 1 x 4 | 3 x 1 | 3 x 4 | coalescing | mean 1 x 1 / 1 x 4 / 3 x 1 / 3 x 4 |
+|---|---|---|---|---|---|---|
+| 0, run 1 | 30 | 35 | 33 | 41 | 5.69 | 546 / 377 / 323 / 474 ms |
+| 50 ms, run 1 | 30 | 34 | 33 | 43 | 5.69 | 1,385 / 740 / 902 / 3,957 ms (load spike to 23) |
+| 0, run 2 | 30 | 34 | 33 | 42 | 5.69 | 613 / 354 / 356 / 470 ms |
+| 50 ms, run 2 | 30 | 34 | 33 | 44 | 5.69 | 731 / 347 / 288 / 457 ms |
+
+Allocated 48 to 84 MB in all four runs; 0 overlapping claims, not done, wrong or regressions.
+
 ## Micro benchmarks
 
 | Method               | Mean         | Error        | StdDev       | Gen0   | Gen1   | Allocated |
