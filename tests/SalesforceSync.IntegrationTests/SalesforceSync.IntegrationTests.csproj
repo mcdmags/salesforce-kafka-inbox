@@ -38,7 +38,6 @@
   <ItemGroup>
     <!-- The worker's own defaults (Kafka topics and consumer group, Postgres retries, ...), loaded by every pod -->
     <None Include="..\..\src\SalesforceSync\appsettings.json" Link="worker.appsettings.json" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\..\sql\schema.sql" Link="schema.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\sql\claim-audit.sql" Link="claim-audit.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

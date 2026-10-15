@@ -5,8 +5,8 @@ using SalesforceSync.Inbox;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Claims, stores and outcomes interleaved by hand on separate connections, in an inbox table no pod works on and
-/// under an entity type of the test's own, so every step happens exactly when the test says. The races the claim used
+/// Claims, stores and outcomes interleaved by hand on separate connections, in the account inbox but under an entity
+/// type of the test's own, which no pod claims, so every step happens exactly when the test says. The races the claim used
 /// to have to defend against (two consumers committing events of one entity out of id order, so that its oldest
 /// pending event was a different row for two workers) can't arise any more: storing an event and claiming an entity
 /// both lock the entity's one sf_sync_state row.
@@ -14,7 +14,7 @@ namespace SalesforceSync.IntegrationTests;
 [Collection(SyncCollection.Name)]
 public sealed class ClaimRaceTests(SyncFixture app)
 {
-    private const string Table = "sf_claim_race_inbox";
+    private static readonly string Table = SyncFixture.InboxTable();
     private static readonly InboxSql Sql = InboxSql.For(Table);
 
     [Fact]
@@ -177,10 +177,6 @@ public sealed class ClaimRaceTests(SyncFixture app)
 
         public static async Task<Race> StartAsync(SyncFixture app)
         {
-            await using (var setup = await app.Db.OpenConnectionAsync())
-            {
-                await PgSql.ApplySchemaAsync(setup, null, [Table]);
-            }
             return new Race(await app.Db.OpenConnectionAsync(), await app.Db.OpenConnectionAsync(), await app.Db.OpenConnectionAsync(),
                 await app.Db.OpenConnectionAsync(), await app.Db.OpenConnectionAsync());
         }

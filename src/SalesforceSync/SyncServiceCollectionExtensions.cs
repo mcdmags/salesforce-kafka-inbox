@@ -20,7 +20,7 @@ public static class SyncServiceCollectionExtensions
 {
     /// <summary>
     /// The worker: options (validated at startup), the Postgres data source (<c>ConnectionStrings:inboxdb</c>), the
-    /// inbox schema, the Salesforce client (real OAuth endpoint, or the in-memory org with
+    /// database schema (migrated at startup), the Salesforce client (real OAuth endpoint, or the in-memory org with
     /// <c>Salesforce:UseFake</c>) with its Describe cache shared through Redis (when <c>ConnectionStrings:redis</c> is
     /// set), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the worker loops.
     /// </summary>
@@ -33,7 +33,7 @@ public static class SyncServiceCollectionExtensions
 
         // Postgres (ConnectionStrings:inboxdb, injected by Aspire, appsettings or the tests)
         builder.AddNpgsqlDataSource("inboxdb");
-        services.AddHostedService<InboxSchemaInitializer>(); // must be registered before the workers
+        services.AddHostedService<SyncSchemaInitializer>(); // migrates the database; must be registered before the workers
 
         // Describe results shared by all pods (ConnectionStrings:redis, injected by Aspire); without it each process
         // keeps its own (AddSalesforceClient falls back to an in-memory IDistributedCache)
@@ -171,8 +171,8 @@ public static class SyncServiceCollectionExtensions
 
     /// <summary>
     /// Inbox -> Salesforce: the database context, one engine, and per synced object its sync (its strategy, topic and
-    /// inbox). Register a new object's sync here (its <see cref="InboxRow"/> type is mapped in <see cref="SyncDbContext"/>):
-    /// its inbox table is created at startup, the consumer subscribes to its topic and the worker loops pick it up.
+    /// inbox). Register a new object's sync here (its <see cref="InboxRow"/> type is mapped in <see cref="SyncDbContext"/>
+    /// and a migration creates its table): the consumer subscribes to its topic and the worker loops pick it up.
     /// </summary>
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {

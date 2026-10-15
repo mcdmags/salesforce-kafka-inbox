@@ -435,6 +435,20 @@ public class SyncFixture : IAsyncLifetime
         await conn.ExecuteAsync(sql);
     }
 
+    /// <summary>
+    /// A data source whose connections work in <paramref name="schema"/>, created empty (dropped first, if a run left it
+    /// behind), so the test's tables are apart from the ones the pods work. The test drops it at the end.
+    /// </summary>
+    public async Task<NpgsqlDataSource> CreateSchemaAsync(string schema)
+    {
+        await ExecuteSqlAsync($"drop schema if exists {schema} cascade; create schema {schema}");
+        return NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(ConnectionString)
+        {
+            SearchPath = schema,
+            ApplicationName = TestsApplicationName
+        }.ConnectionString);
+    }
+
     /// <summary>Polls until every expected inbox row exists and none is pending, then returns them (by version, then arrival).</summary>
     public Task<IReadOnlyList<(long Version, string Status)>> WaitForInboxSettledAsync(string key, int expectedRows,
         string entityType = Accounts)

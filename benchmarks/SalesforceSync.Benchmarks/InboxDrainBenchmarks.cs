@@ -130,7 +130,7 @@ public abstract class DrainBenchmarkBase
     {
         _db = NpgsqlDataSource.Create(BenchmarkDb.ConnectionString);
         _contexts = SyncDbContext.CreateFactory(_db);
-        InboxSchema.EnsureCreatedAsync(_contexts, InboxTables).GetAwaiter().GetResult();
+        SyncSchema.MigrateAsync(_contexts).GetAwaiter().GetResult();
         // A plain command: EF's raw SQL formats {...} as parameter placeholders, and the script has JSON literals
         using (var audit = _db.CreateCommand(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "claim-audit.sql"))))
         {

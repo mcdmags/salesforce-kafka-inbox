@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// The statements for one inbox table (one per synced object type, all the same shape; see sql/schema.sql) and its
+/// The statements for one inbox table (one per synced object type, all the same shape; see SyncDbContext) and its
 /// entities' rows in sf_sync_state. No statement reads inside the payload: an event's entity is its entity_id column,
 /// and which event of an entity is the newest is decided in C#. An entity is claimed by locking and leasing its state
 /// row (lock_token, locked_until), so two workers can never hold one entity: they would lock the same row. Every
