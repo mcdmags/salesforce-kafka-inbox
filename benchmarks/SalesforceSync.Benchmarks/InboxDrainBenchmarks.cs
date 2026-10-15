@@ -104,8 +104,11 @@ public abstract class DrainBenchmarkBase
         return new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
     }
 
-    /// <summary>An event as the consumer stores it: the inbox table of its type, the entity's id and the raw payload.</summary>
-    private sealed record IngestRow(string Table, string EntityId, string Payload);
+    /// <summary>
+    /// An event as the consumer stores it: the inbox table and entity type (in sf_sync_state) of its type, the entity's
+    /// id and the raw payload.
+    /// </summary>
+    private sealed record IngestRow(string Table, string Type, string EntityId, string Payload);
 
     /// <summary>
     /// meta of version N of an entity: time = base time + N ms, so per-entity time order = version order; the first
@@ -181,11 +184,10 @@ public abstract class DrainBenchmarkBase
         await using var db = await _contexts.CreateDbContextAsync(ct);
         foreach (var chunk in _events.Chunk(IngestChunk))
         {
-            foreach (var table in chunk.GroupBy(e => e.Table))
+            foreach (var inbox in chunk.GroupBy(e => (e.Table, e.Type)))
             {
-                await db.Database.ExecuteAsync(
-                    $"insert into {table.Key} (entity_id, payload) select e, p::jsonb from unnest(@e::text[], @p::text[]) as u(e, p)", ct,
-                    Param("e", table.Select(r => r.EntityId).ToArray()), Param("p", table.Select(r => r.Payload).ToArray()));
+                await db.Database.ExecuteAsync(InboxSql.For(inbox.Key.Table).Store, ct, Param("entityType", inbox.Key.Type),
+                    Param("entityIds", inbox.Select(r => r.EntityId).ToArray()), Param("payloads", inbox.Select(r => r.Payload).ToArray()));
             }
         }
     }
@@ -268,7 +270,7 @@ public abstract class DrainBenchmarkBase
         {
             await db.Database.ExecuteAsync($"truncate {table} restart identity", default);
         }
-        await db.Database.ExecuteAsync("truncate sf_claim_audit", default);
+        await db.Database.ExecuteAsync("truncate sf_sync_state; truncate sf_claim_audit", default);
 
         (_events, _expected) = Generate();
         if (!StreamIngest)
@@ -318,7 +320,7 @@ public abstract class DrainBenchmarkBase
                         ["isActive"] = true
                     }
                 };
-                events.Add(new IngestRow(RelationshipTable, relKey, relPayload.ToJsonString()));
+                events.Add(new IngestRow(RelationshipTable, AccountRelationshipSync.Type, relKey, relPayload.ToJsonString()));
                 continue;
             }
 
@@ -344,7 +346,7 @@ public abstract class DrainBenchmarkBase
                         ["profile"] = new JsonObject { ["score"] = version }
                     }
                 };
-                events.Add(new IngestRow(AccountTable, key, payload.ToJsonString()));
+                events.Add(new IngestRow(AccountTable, AccountSync.Type, key, payload.ToJsonString()));
             }
         }
 
@@ -353,17 +355,25 @@ public abstract class DrainBenchmarkBase
 
     private async Task PreloadAsync(NpgsqlConnection conn)
     {
-        foreach (var table in _events.GroupBy(e => e.Table))
+        foreach (var inbox in _events.GroupBy(e => (e.Table, e.Type)))
         {
-            await using var importer = await conn.BeginBinaryImportAsync(
-                $"copy {table.Key} (entity_id, payload) from stdin (format binary)");
-            foreach (var e in table)
+            await using (var importer = await conn.BeginBinaryImportAsync(
+                             $"copy {inbox.Key.Table} (entity_id, payload) from stdin (format binary)"))
             {
-                await importer.StartRowAsync();
-                await importer.WriteAsync(e.EntityId, NpgsqlDbType.Text);
-                await importer.WriteAsync(e.Payload, NpgsqlDbType.Jsonb);
+                foreach (var e in inbox)
+                {
+                    await importer.StartRowAsync();
+                    await importer.WriteAsync(e.EntityId, NpgsqlDbType.Text);
+                    await importer.WriteAsync(e.Payload, NpgsqlDbType.Jsonb);
+                }
+                await importer.CompleteAsync();
             }
-            await importer.CompleteAsync();
+            // What storing does for each event: its entity is due
+            await using var due = new NpgsqlCommand(
+                $"insert into sf_sync_state (entity_type, entity_id, next_attempt_at) select distinct @type, entity_id, now() from {inbox.Key.Table}",
+                conn);
+            due.Parameters.AddWithValue("type", inbox.Key.Type);
+            await due.ExecuteNonQueryAsync();
         }
     }
 
@@ -410,7 +420,7 @@ public abstract class DrainBenchmarkBase
             return await db.Database.QuerySingleAsync<long>(sql, default);
         }
         // One query over both inbox tables; "superseded" is a normal end for an older event claimed with a newer one
-        var inbox = string.Join(" union all ", InboxTables.Select(t => $"select status, retry_count from {t}"));
+        var inbox = string.Join(" union all ", InboxTables.Select(t => $"select status, attempt_count from {t}"));
         var rows = await Count($"select count(*) from ({inbox}) i");
         var notDone = await Count($"select count(*) from ({inbox}) i where status not in ('done', 'superseded')");
         var superseded = await Count($"select count(*) from ({inbox}) i where status = 'superseded'");
@@ -420,9 +430,9 @@ public abstract class DrainBenchmarkBase
         var done = await Count($"select count(*) from ({inbox}) i where status = 'done'");
         var claims = await Count("select count(*) from sf_claim_audit");
         var overlaps = await Count("select count(*) from sf_claim_overlaps");
-        // retry_count counts attempts (bumped at claim), so retries = attempts beyond the first. Mostly relationships
+        // attempt_count counts claims of the event, so retries = attempts beyond the first. Mostly relationships
         // claimed before their Accounts were in the org (DEPENDENCY_NOT_SYNCED).
-        var retries = await Count($"select coalesce(sum(greatest(retry_count - 1, 0)), 0) from ({inbox}) i");
+        var retries = await Count($"select coalesce(sum(greatest(attempt_count - 1, 0)), 0) from ({inbox}) i");
         var relationshipEvents = _events.Count(e => e.Table == RelationshipTable);
 
         var stats = _store.GetStats();

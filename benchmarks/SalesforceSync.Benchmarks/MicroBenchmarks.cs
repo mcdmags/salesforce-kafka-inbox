@@ -65,7 +65,7 @@ public class MicroBenchmarks
                     }
                 }
             }.ToJsonString(),
-            RetryCount: 1))];
+            AttemptCount: 1))];
 
         _tenRead = [.. _tenEvents.Select(row => (row, Accounts.TryRead(row.Payload, out var read, out _) ? read : null!))];
         _payload = JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchUpsertService.EventJson)!.Account!;

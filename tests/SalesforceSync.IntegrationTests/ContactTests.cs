@@ -104,7 +104,7 @@ public sealed class ContactTests(SyncFixture app)
         var held = (await Eventually.ValueAsync(() => app.GetInboxRowsAsync(contact, SyncFixture.Contacts),
             rows => rows.Count == 1 && rows[0].ErrorCode == "UNKNOWN_OUTCOME", "the upsert's outcome to be recorded as unknown"))[0];
         held.Status.Should().Be("pending");
-        held.RetryCount.Should().Be(0, "an unknown outcome doesn't spend a retry");
+        held.AttemptCount.Should().Be(0, "an unknown outcome doesn't spend an attempt");
 
         await app.PublishContactAsync(contact, 2, acct, new JsonObject { ["lastName"] = "v2" });
 

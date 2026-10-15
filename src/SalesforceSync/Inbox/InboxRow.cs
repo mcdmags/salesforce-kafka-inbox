@@ -1,8 +1,8 @@
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// One row of an inbox table: a Kafka event plus its processing state. Every inbox table has exactly these columns
-/// (the template in sql/schema.sql), so they all live here; a synced object only adds a subclass that names its table
+/// One row of an inbox table: a Kafka event and what became of it. Every inbox table has exactly these columns (the
+/// template in sql/schema.sql), so they all live here; a synced object only adds a subclass that names its table
 /// (<see cref="SyncDbContext"/> maps each subclass to its own table; the base is not an entity, there is no shared table).
 /// </summary>
 public abstract class InboxRow
@@ -18,29 +18,15 @@ public abstract class InboxRow
     /// <summary>pending | done | superseded | dead. Null on a new row: the database default ('pending') applies.</summary>
     public string Status { get; set; } = null!;
 
-    public int RetryCount { get; set; }
-
-    public DateTimeOffset LastUpdated { get; set; }
+    /// <summary>Times this event was claimed; it is dead-lettered after <see cref="SyncOptions.MaxRetries"/>.</summary>
+    public int AttemptCount { get; set; }
 
     public string? LastError { get; set; }
 
     /// <summary>E.g. FIELD_CUSTOM_VALIDATION_EXCEPTION, to query dead letters by cause.</summary>
     public string? LastErrorCode { get; set; }
 
-    /// <summary>Not claimable before; while leased, the end of the lease.</summary>
-    public DateTimeOffset NextAttemptAt { get; set; }
-
-    /// <summary>Lease while a worker processes the row.</summary>
-    public DateTimeOffset? LockedUntil { get; set; }
-
-    /// <summary>Which worker holds the lease.</summary>
-    public Guid? LockToken { get; set; }
-
     public DateTimeOffset ReceivedAt { get; set; }
 
-    /// <summary>
-    /// Done rows only: the time of the event written to Salesforce, microseconds since the epoch. The newest of an
-    /// entity's is its watermark.
-    /// </summary>
-    public long? SyncedTime { get; set; }
+    public DateTimeOffset LastUpdated { get; set; }
 }
