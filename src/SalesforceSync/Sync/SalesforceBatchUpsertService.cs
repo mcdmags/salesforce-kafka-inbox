@@ -141,6 +141,7 @@ public sealed class SalesforceBatchUpsertService(
     /// <param name="units">At most <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
     /// <param name="queries">The strategy's reads: the units' records and the records their lookups and foreign keys point at.</param>
     /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
+    /// <param name="ct">Cancels the calls; shutdown, not a failure.</param>
     internal async Task<List<UpsertResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
         IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
     {

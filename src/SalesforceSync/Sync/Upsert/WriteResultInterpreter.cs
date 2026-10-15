@@ -87,6 +87,8 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     }
 
     /// <param name="hasOwnResult">False when the record's subrequest failed as a whole.</param>
+    /// <param name="write">The record that wasn't saved.</param>
+    /// <param name="brokenReference">Its subrequest failed because a reference had no value.</param>
     private WriteStatus FailureStatus(PlannedWrite write, bool hasOwnResult, bool brokenReference)
     {
         // E.g. the org rejecting a child whose new parent, an earlier upsert of the same Composite request, wasn't

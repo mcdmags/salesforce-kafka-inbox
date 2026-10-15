@@ -17,6 +17,7 @@ internal static partial class CompositeReferences
 
     /// <summary>Replaces every "@{ref.path}" string in the body; returns the first reference that has no value, or null.</summary>
     /// <param name="results">Reference id -> the response body of that earlier subrequest.</param>
+    /// <param name="node">The subrequest body (or part of it), changed in place.</param>
     public static string? Resolve(JsonNode node, IReadOnlyDictionary<string, JsonNode?> results)
     {
         switch (node)
