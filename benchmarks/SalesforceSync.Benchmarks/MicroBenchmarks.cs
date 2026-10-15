@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using BenchmarkDotNet.Attributes;
+using SalesforceSync.Inbox;
 using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;

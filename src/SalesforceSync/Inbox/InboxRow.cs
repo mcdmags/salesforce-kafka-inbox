@@ -38,3 +38,9 @@ public abstract class InboxRow
 
     public DateTimeOffset ReceivedAt { get; set; }
 }
+
+/// <summary>A row of <c>sf_account_inbox</c>: events of the account type.</summary>
+public sealed class AccountInboxRow : InboxRow;
+
+/// <summary>A row of <c>sf_account_relationship_inbox</c>: events of the account relationship type.</summary>
+public sealed class AccountRelationshipInboxRow : InboxRow;

@@ -1,3 +1,5 @@
+using SalesforceSync.Inbox;
+
 namespace SalesforceSync.Sync;
 
 /// <summary>Decides what to do with the rows of a claim, before Salesforce is involved. No I/O.</summary>
