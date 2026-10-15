@@ -112,15 +112,15 @@ public sealed class EngineFlowTests
         _inbox.Recorded!.Dead.Should().ContainSingle();
     }
 
-    // ---------- Direct upsert (contacts) ----------
+    // ---------- Contacts: read and diff, then one upsert ----------
 
     [Fact]
-    public async Task A_direct_upsert_batch_writes_without_a_read_and_records_every_outcome()
+    public async Task A_contact_batch_is_read_then_written_in_one_upsert_and_every_outcome_is_recorded()
     {
         await CreateAccountAsync("ACC-9");
         _org.InjectFault("Contact", "C-2", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "rejected", 1);
         _inbox.Rows.AddRange([Contact(1, "C-1", "ACC-9"), Contact(2, "C-2", "ACC-9")]);
-        _http.OnRead = _ => throw new InvalidOperationException("a direct upsert reads nothing");
+        var before = _org.GetStats();
 
         (await Engine().UpsertBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
 
@@ -128,10 +128,11 @@ public sealed class EngineFlowTests
         _inbox.Recorded!.Synced.Should().ContainSingle().Which.EntityId.Should().Be("C-1");
         _inbox.Recorded.Dead.Should().ContainSingle().Which.Code.Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION");
         _http.Writes.Should().Be(1, "both contacts in one upsert call");
+        (_org.GetStats().UpsertRequests - before.UpsertRequests).Should().Be(1, "a new Contact on an existing Account needs no reference");
     }
 
     [Fact]
-    public async Task A_direct_upsert_whose_answer_is_lost_holds_every_claimed_row()
+    public async Task A_contact_upsert_whose_answer_is_lost_holds_every_claimed_row()
     {
         await CreateAccountAsync("ACC-9");
         _inbox.Rows.AddRange([Contact(1, "C-1", "ACC-9"), Contact(2, "C-2", "ACC-9")]);

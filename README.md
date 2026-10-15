@@ -44,9 +44,8 @@ each contact as a **Contact** of its Account, which may not be synced yet either
 | Records that belong together | **One Composite request of sObject Collections** creates and updates: Accounts first, then their Profiles (or one plain Collections upsert when only one object is written, see below). Each record is saved or rejected on its own (`allOrNone: false`); the entity is done, and its watermark advanced, only when all of its records are in. A new Profile points at its new Account by reference (`@{Account_create[i].id}`); existing records (e.g. a relationship's Accounts) are linked by the Id read from Salesforce. See [Writing to Salesforce](#writing-to-salesforce). |
 | Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. The event's `meta.type` is not consulted. |
 | Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the second and time to the millisecond, int/long within their `digits`, 18-character ids checked against their case suffix, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event. The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
-| Batching and API calls | **2 calls per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries), one write: a Composite request with all writes (≤5 collections of ≤200 records; more are split over further requests), or, when the writes are of **one object and none links to a record created in the same request** (accounts whose Profiles are unchanged, relationships), a single **sObject Collections upsert** by external id with the same fields: the same one call, a plainer request. See [One object: a Collections upsert](#one-object-a-collections-upsert). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
+| Batching and API calls | **2 calls per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries), then, after the diff, one write: a Composite request with all writes (≤5 collections of ≤200 records; more are split over further requests) when any write links a new child to its new parent (`@{reference}`), every other write of the request included, or when the writes are of several objects; otherwise (**one object, no reference**, ≤200 records: accounts whose Profiles are unchanged, relationships, contacts) a single **sObject Collections upsert** by external id with exactly the planned fields: the same one call, a plainer request. See [One object: a Collections upsert](#one-object-a-collections-upsert). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
 | Record types | Every synced object has a record type, named by developer name on its sObject class (`[SObject("Account", …, RecordType = "Business")]`). Its Id comes from the `recordTypeInfos` of the object's cached Describe, so it costs no extra call, and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't offer fails the entity before any call (`INVALID_RECORD_TYPE`, retried) and makes the next batch describe again. See [Record types](#record-types). |
-| Objects that don't need the comparison | A strategy can opt into **direct upsert** (`WriteMode.DirectUpsert`, used by contacts): Describe and normalization as above, then sObject Collections upserts by external id, no read and no diff, **1 call per batch**, a parent set by its external id (and waited for if Salesforce doesn't have it). See [Direct upsert](#direct-upsert-no-read-no-diff). |
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (skipped because of another entity's record) → back to the inbox without spending a retry. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
 | Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` around a transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new transaction, change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
@@ -62,13 +61,12 @@ Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per 
                               InboxWorkerService ×N loops (any number of pods), round-robin over:
                                 AccountSync ─┐                   (strategy: typed event → mapping →
                                 AccountRelationshipSync ─┤                 sObject → records, + queries)
-                                ContactSync ─┤                   (WriteMode.DirectUpsert: no queries)
+                                ContactSync ─┤
                                                                 ▼
                               SalesforceBatchUpsertService.UpsertBatchAsync<TEvent, TRow>(strategy, IRepository<TRow>)
                                 claim → newest meta.time per entity (supersede stale) → map
                                 → describe → normalize → 1 composite read → decide (diff + lookups)
                                 → 1 write: composite, or a collections upsert if one object and no references
-                                  (direct upsert: describe → normalize → collections upsert per object, no read)
                                 → per-record results → outcome per entity → record outcomes
                                                        │  inbox: IRepository<TRow> (EF Core + raw SQL, PostgresRetryStrategy)
                                                        │  token bucket + daily budget + concurrency slots
@@ -83,8 +81,8 @@ The sync is three layers, each with one job:
 | Layer | Classes | Does |
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`, `UpsertAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
-| **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) or, for a direct-upsert strategy, `UpsertToSalesforceAsync` (describe → normalize → upsert → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | `PreparedBatch.Prepare` (coalesce, watermark, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`; `PlanUpserts` for direct upsert) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request) and `CompositeWrite.AsUpsert` (a request of one object without references as one Collections upsert), `WriteResultInterpreter` (per-record results → outcome per entity, for Composite subrequests and upserts alike) | Pure and deterministic; unit-tested without a database or HTTP. |
+| **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
+| **Rules, no I/O** | `PreparedBatch.Prepare` (coalesce, watermark, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request) and `CompositeWrite.AsUpsert` (a request of one object without references as one Collections upsert), `WriteResultInterpreter` (per-record results → outcome per entity, for Composite subrequests and upserts alike) | Pure and deterministic; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`); the schema
 stays `sql/schema.sql` (partial indexes, the table template, views, autovacuum settings: not expressible as migrations),
@@ -144,8 +142,6 @@ stores it, and only Describe says what that is:
 - **The read query**: which fields to select.
 - **The diff**: whether a field is createable or updateable.
 - **Record types**: the developer name → `RecordTypeId` (`recordTypeInfos`).
-- **Direct upsert** (contacts): no read and no diff, but the same normalization and checks before the call, the
-  record type Id, and each lookup's relationship name (`relationshipName`: `Account` for `AccountId`).
 
 **Is it best practice?** Caching Describe and revalidating it with `If-Modified-Since` is what Salesforce's REST API
 documentation recommends, and what generic integration tools do. The cost is about one call per object per refresh
@@ -154,7 +150,7 @@ shared Redis layer it is for the whole deployment.
 
 | Alternative | Gains | Loses |
 |---|---|---|
-| Upsert everything by external id (no Describe, no read, no diff) | Two fewer steps | Every event writes every field: triggers, flows, field history and `LastModifiedDate` fire on every event, and bursts multiply writes. A bad value costs a call and comes back as a per-record error. (Direct upsert keeps Describe and drops only the read and the diff.) |
+| Upsert everything by external id (no Describe, no read, no diff) | Two fewer steps | Every event writes every field: triggers, flows, field history and `LastModifiedDate` fire on every event, and bursts multiply writes. A bad value costs a call and comes back as a per-record error. |
 | Hard-coded field metadata | No calls | Drifts silently when an admin changes a field (scale, length, read-only). |
 | Describe once at startup, refresh only on `INVALID_FIELD` | Fewer calls | Misses scale or read-only changes until the next restart. |
 
@@ -206,7 +202,6 @@ Every event carries the entity's complete current state. There is no "field not 
   cleared. (A checkbox is never null in Salesforce, so an empty one becomes `false`.)
 - The diff still writes **only the fields that differ** from Salesforce, so a full record in which one field changed
   is a one-field update, and an unchanged record writes nothing. A new record is created with its non-empty fields.
-  (A direct-upsert object, such as Contact, has no diff: every event is sent whole, empty fields as `null`.)
 - **Coalescing takes the newest event**, it doesn't merge: several pending events of an entity become one write of
   the newest full record (by `meta.time`; ties by row id). Merging would keep a field the newest event no longer has.
 - A required field must therefore be in every event: an account event without a `name` is dead-lettered
@@ -418,11 +413,11 @@ account sync has created the Account; no manual step is needed. If Salesforce it
 (`INVALID_CROSS_REFERENCE_KEY` or `ENTITY_IS_DELETED` on the lookup field), that is recorded as the same `DEPENDENCY_NOT_SYNCED` and retried the same way, not dead-lettered. Only an
 Account that never arrives within `MaxRetries` ends as a dead letter, with `DEPENDENCY_NOT_SYNCED` kept as the cause.
 
-**A contact that arrives before its Account** waits the same way, except that nothing reads first: the upsert names
-the Account by its external id, Salesforce answers that record with `INVALID_FIELD` "Foreign key external ID: ACC-1 not
-found for field External_Id__c in entity Account", and that answer (recognized by its message, since Salesforce has no
-code of its own for it) is recorded as `DEPENDENCY_NOT_SYNCED`. Any other `INVALID_FIELD` stays permanent. Each
-attempt costs a call, which the read+diff path saves.
+**A contact that arrives before its Account** waits the same way: the read doesn't find the Account, and nothing is
+sent for the contact until it does. A lookup set by the parent's external id that Salesforce can't resolve
+(`INVALID_FIELD` "Foreign key external ID: ACC-1 not found for field External_Id__c in entity Account", recognized by
+its message, since Salesforce has no code of its own for it) is recorded as `DEPENDENCY_NOT_SYNCED` too. Any other
+`INVALID_FIELD` stays permanent.
 
 To re-queue dead letters once the cause is fixed (e.g. the missing Account now exists):
 
@@ -521,9 +516,16 @@ entities end `done` without being written twice.
 
 ### One object: a Collections upsert
 
-After the diff, a write request whose records are all of **one object**, none of them linked to a record created in
-the same request (no `@{reference}`), and at most 200 of them, is sent as one **sObject Collections upsert** by the
-object's external id field instead of a Composite request:
+Every batch is read and diffed first; only then is the API chosen, per write request:
+
+- **Any write needs Composite** (a new parent and its new child linked by `@{referenceId}`): the whole request stays
+  one Composite request, writes that wouldn't need it included (e.g. a Profile-only update of an existing Account).
+  One call.
+- **No write needs Composite and all are of one object** (at most 200): one plain **sObject Collections upsert**
+  (`PATCH /composite/sobjects/{SObject}/{ExternalIdField}`) with exactly the planned fields.
+- **No references but several objects**: stays Composite, one call instead of one upsert per object.
+
+An upsert looks like this:
 
 ```jsonc
 // PATCH /services/data/v62.0/composite/sobjects/Account/External_Id__c
@@ -536,13 +538,14 @@ object's external id field instead of a Composite request:
   { "id": "001…", "success": true, "errors": [], "created": true } ]
 ```
 
-The usual cases are accounts whose Profiles didn't change (the Account alone is written), a Profile alone, and
-relationships. It is still **one call**, and it carries exactly what the diff planned: a new record whole, an existing
-one only its changed fields (an upsert accepts a different set of fields per record), each identified by its external
-id rather than its Id. Unchanged entities still write nothing. The request is simpler (no envelope, no subrequest
-errors to tell apart from record errors) and doesn't count toward Composite's subrequest limits. Requests that need
-several objects, or a new Profile pointing at its new Account (`@{Account_create[0].id}`), stay Composite; a batch that
-mixes accounts with and without Profile changes stays one Composite request, not split into extra calls.
+The usual cases are accounts whose Profiles didn't change (the Account alone is written), a Profile alone,
+relationships and contacts (their Accounts are looked up, never created with them). It is still **one call**, and it
+carries exactly what the diff planned: a new record whole, an existing one only its changed fields (an upsert accepts
+a different set of fields per record), each identified by its external id rather than its Id; a lookup to an existing
+record carries the Id the read found (`"AccountId": "001…"`). Unchanged entities still write nothing. The request is
+simpler (no envelope, no subrequest errors to tell apart from record errors) and doesn't count toward Composite's
+subrequest limits. A batch that mixes accounts with and without Profile changes stays one Composite request, not split
+into extra calls.
 
 The per-record answers go through the same classification as a Composite collection's (`WriteResultInterpreter`).
 Two answers are particular to an update sent as an upsert, both meaning the record was deleted after the read: the
@@ -640,57 +643,6 @@ drift, and an upsert sends the whole record, so a changed record still fires aut
 Keep the comparison when the org has meaningful automation on the synced objects (triggers, flows, field history,
 Change Data Capture) or edits made in Salesforce must be corrected, which is typical for Account. Choose hash +
 blind upsert when the org is plain and API calls are the scarce resource. The org's admin knows which applies.
-The choice is per object: [direct upsert](#direct-upsert-no-read-no-diff) is the blind upsert, built in.
-
-### Direct upsert: no read, no diff
-
-A strategy can skip the comparison: `WriteMode.DirectUpsert` (the last argument of its `UpsertStrategy`; the default
-is `ReadAndDiff`). The Contact example uses it:
-
-```csharp
-public static readonly UpsertStrategy<ContactEvent> Strategy =
-    new(Type, e => e.Contact?.ExternalId, e => e.Meta, (_, e) => Map(e), _ => [], WriteMode.DirectUpsert);
-```
-
-What stays the same: claiming, ordering, coalescing, the watermark, Describe (cached) and `FieldValues`, so a value
-Salesforce would reject (a required field empty, too long, wrong type) fails only its own entity, permanently, before
-any call; the record type's `RecordTypeId`; the classification of per-record results, retries and dead letters; the
-unknown-outcome hold; rate limiting (every call goes through the same `HttpClient` pipeline).
-
-What changes: there is no read, no diff and no `WritePlanner` decision. Every record of the batch is sent, whole
-(empty fields as `null`, so they are cleared), in one **sObject Collections upsert** per object
-(`PATCH /services/data/vXX.X/composite/sobjects/Contact/External_Id__c`, `allOrNone: false`). This is not the
-Composite resource: each upsert is a call of its own, one object per call, up to 200 records, so a batch costs **one
-call** per object and 200 records (two or more only past 200, which `Sync:BatchSize` ≤ 100 never reaches with one
-record per entity). A parent is named by its external id through the lookup's relationship name, which comes from
-Describe (`relationshipName`), and Salesforce resolves it:
-
-```jsonc
-{ "allOrNone": false,
-  "records": [
-    { "attributes": { "type": "Contact" }, "External_Id__c": "CON-1", "FirstName": "Ada", "LastName": "Lovelace",
-      "Email": null, "Phone": "+1 555 0101", "RecordTypeId": "012…",
-      "Account": { "attributes": { "type": "Account" }, "External_Id__c": "ACC-1" } } ] }   // AccountId, by external id
-// 200 OK: [ { "id": "003…", "success": true, "errors": [], "created": true } ]   (in request order)
-```
-
-| Result of a record | Entity |
-|---|---|
-| `success` (created or updated) | `done` (`Saved`; there is no "unchanged" in this mode, since nothing is compared) |
-| `INVALID_FIELD` "Foreign key external ID: … not found …" (the Account isn't in Salesforce) | `DEPENDENCY_NOT_SYNCED`, retried until the account sync has created it |
-| any other error | as in [Per-record results](#per-record-results--what-happens-to-the-entity): permanent codes dead-lettered at once, others retried |
-
-Every field sent must be both createable and updateable (the upsert may do either); one that isn't fails its entity
-before the call (`INVALID_FIELD_FOR_INSERT_UPDATE`). An upsert is idempotent, so a lost answer can't create a
-duplicate, but the entity is still [held](#unknown-outcomes): a lost older write that lands late could overwrite a
-newer one.
-
-**When to use it.** For objects where a write costs little: no meaningful triggers, flows, field history or Change
-Data Capture, and no edits in Salesforce to correct. It saves the read (one call per batch instead of two) and the
-diff, at the price of writing every field of every event, including events that change nothing. Keep read+diff (the
-default) for objects like Account; see [Why compare with Salesforce before writing](#why-compare-with-salesforce-before-writing).
-A direct-upsert entity's records of several objects go in one call per object, parents first; a child whose parent's
-call failed is reported as waiting for it.
 
 ### `allOrNone: false`
 
@@ -839,12 +791,12 @@ events there, and the worker loops sync it. A lookup whose target isn't in Sales
 related objects can arrive in any order. A strategy may build `SObjectRecord`s by hand; the typed layers are how the built-in objects do it, not something the
 engine requires.
 
-**An object written by direct upsert** has the same shape, minus the queries. `Sync/ContactSync.cs` is the complete
-example: `ContactEvent` / `ContactPayload` (the `contact` object of the event), `ContactSObject`, `ContactInboxRow`
-(`sf_contact_inbox`), and the strategy with `WriteMode.DirectUpsert`:
+**Contact** has the same shape. `Sync/ContactSync.cs` is the complete example: `ContactEvent` / `ContactPayload` (the
+`contact` object of the event), `ContactSObject`, `ContactInboxRow` (`sf_contact_inbox`), and the strategy, which reads
+the contacts and the Accounts they point at, like relationships:
 
 ```csharp
-// The lookup is declared like any other; in this mode it is sent as "Account": { "External_Id__c": ... }
+// The Account by its external id; the read finds its Id, which the diff compares with AccountId
 [SObject("Contact", ExternalIdField = "External_Id__c", RecordType = "Standard")]
 public sealed class ContactSObject
 {
@@ -862,9 +814,15 @@ public static class ContactSync
     public const string Type = "contact";
     public const string DefaultTopic = "contact-changes";
 
-    // Nothing to read: no queries
     public static readonly UpsertStrategy<ContactEvent> Strategy =
-        new(Type, e => e.Contact?.ExternalId, e => e.Meta, (_, e) => Map(e), _ => [], WriteMode.DirectUpsert);
+        new(Type, e => e.Contact?.ExternalId, e => e.Meta, (_, e) => Map(e), Queries);
+
+    // The contacts themselves (to diff) and the Accounts they point at (for their Ids)
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units) =>
+    [
+        SoqlQuery.RecordsOf<ContactSObject>(units),
+        SoqlQuery.LookupTargetsOf<AccountSObject>(units)
+    ];
     // Map and ToContact as for relationships
 }
 ```
@@ -895,7 +853,7 @@ src/
                                   (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy,
                                   inbox row)
     Sync/Upsert/                  The write path's rules, no I/O: normalize, read queries, diff, plan, pack (Composite or
-                                  Collections upsert), direct-upsert plan, interpret
+                                  Collections upsert), interpret
     Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors,
                                   SObjectMetadata and the attributes the sObject classes are read by
     RateLimiting/                 Token bucket, daily budget, pause, concurrency slots, the batch gate
@@ -1007,9 +965,9 @@ watermarks of an earlier `sf_sync_state` moved into the inboxes. Tests
 publish version N as `meta.time` = a fixed base time + N ms, and read it back from the stored payload. Relationships
 (`RelationshipTests`): linked to two synced Accounts with only changed fields sent later; a relationship that
 arrives before its Accounts waits (`DEPENDENCY_NOT_SYNCED`, retried) and syncs once they exist; a malformed
-relationship event is dead-lettered alone. Contacts (`ContactTests`, direct upsert): upserted with the Account named by
-its external id and every event written whole; a contact that arrives before its Account waits
-(`DEPENDENCY_NOT_SYNCED`, from Salesforce's answer) and syncs once it exists; a contact without `lastName` or its
+relationship event is dead-lettered alone. Contacts (`ContactTests`): upserted with the Id of their Account found by
+the read, an unchanged contact not written and a changed one sent with only what differs; a contact that arrives
+before its Account waits (`DEPENDENCY_NOT_SYNCED`, found by the read) and syncs once it exists; a contact without `lastName` or its
 Account dead-lettered alone before any call; a lost upsert answer held, then ending at the newest event. Every record
 ends with its class's `RecordTypeId`. Pods share their
 Describes through Redis, so a pod that has described nothing finds them there (`SharedDescribeCacheTests`). Writes are checked with the mock's per-record write history
@@ -1043,11 +1001,12 @@ create losing a race, a failed new Account taking down the reference subrequest 
 more than 5 collections split over requests, failures without a cause spending a retry, create or update decided by
 what Salesforce has, relinking, relationships and missing dependencies (found by the read, or rejected by
 Salesforce), gzip, clearing fields that became empty, an Account-only change sent as one upsert with only that field
-while mixed batches stay one Composite request. Direct upsert (contacts): the exact request (every field, the Account
-by its relationship and external id, the `RecordTypeId`), one call and no read, no "unchanged", a missing Account as
-`DEPENDENCY_NOT_SYNCED`, bad values and Salesforce rejections costing only their own entity, more than 200 records
-split over calls, a lost answer as an unknown outcome, the upsert call's per-record answer (`created`) and, as pure
-rules, when a request becomes an upsert, an update upserted onto a deleted record, and the per-object split. Also: each mapper (an AutoFixture payload in, the expected
+while mixed batches stay one Composite request. Contacts: a new one as one upsert (its non-empty fields, the Account's
+Id from the read, the `RecordTypeId`), an unchanged one read and not written, a changed one as one upsert with only
+the changed fields, a missing Account as `DEPENDENCY_NOT_SYNCED` before any write, bad values and Salesforce
+rejections costing only their own entity, a lost answer as an unknown outcome, the upsert call's per-record answer
+(`created`) and, as pure rules, when a request becomes an upsert, an update upserted onto a deleted record, and a
+parent Salesforce can't find by its external id meaning wait for it. Also: each mapper (an AutoFixture payload in, the expected
 sObject out, nulls passed through), sObject → record (names from the attributes, nulls included, lookups and external
 id), the guard that every Salesforce name on an sObject class exists in the mock org's schema, the event mapping
 (account with and without a profile, relationships, contacts, missing Account ids, camelCase and PascalCase bodies), what the
@@ -1350,10 +1309,8 @@ nothing. Add:
 |---|---|
 | `External_Id__c` | Text(255), Unique, External ID |
 
-Contacts are written by [direct upsert](#direct-upsert-no-read-no-diff), which matches them by `External_Id__c` and
-names their Account by the Account's `External_Id__c`; both must be marked **External ID**. The user needs **Edit**
-on every Contact field the sync sends (an upsert may create or update, so a field must be both createable and
-updateable).
+Contacts are read and matched by `External_Id__c`, and their Account is found by the Account's `External_Id__c`;
+both must be marked **External ID**. The user needs **Read** and **Edit** on every Contact field the sync sends.
 
 **`Profile__c`** (custom object). Label `Profile`, Object Name `Profile`, Record Name `Profile Name` of type Text.
 If Salesforce refuses the name, pick another and change it on `ProfileSObject` (see [field mappings](#field-mappings)).
@@ -1436,7 +1393,7 @@ The mappings as they are:
 | `accountRelationship.accountExternalId` | `Account_Relationship__c.Account__c` (the Account with that external id) |
 | `accountRelationship.relatedAccountExternalId` | `Account_Relationship__c.Related_Account__c` |
 | `contact.externalId`, `firstName`, `lastName`, `email`, `phone` | `Contact.External_Id__c`, `FirstName`, `LastName`, `Email`, `Phone` |
-| `contact.accountExternalId` | `Contact.AccountId` (the Account with that external id; sent as `"Account": { "External_Id__c": ... }`) |
+| `contact.accountExternalId` | `Contact.AccountId` (the Id of the Account with that external id, found by the read) |
 | (none: the sObject class's `RecordType`) | `RecordTypeId` of every object: the Id of `Business` (Account) or `Standard` (`Profile__c`, `Account_Relationship__c`, Contact), from the cached Describe |
 
 To change a mapping:
@@ -1513,11 +1470,8 @@ passes the connection string.
   - a required field that has a default value can be left out on create;
   - concurrent workers on the same account, and a worker killed mid-batch, still end with every account at its newest
     version;
-  - the sObject Collections upsert (`PATCH /composite/sobjects/{SObject}/External_Id__c`): a parent given as
-    `"Account": { "attributes": { "type": "Account" }, "External_Id__c": ... }` is accepted, a missing one is answered
-    with `INVALID_FIELD` "Foreign key external ID: … not found …" (the sync matches that text to wait for the parent),
-    each result has `created`, and records in one call may carry different fields;
-  - Describe gives `relationshipName` for `Contact.AccountId` (`Account`) and the custom lookups (`Account__r`).
+  - the sObject Collections upsert (`PATCH /composite/sobjects/{SObject}/External_Id__c`): each result has `created`,
+    and records in one call may carry different fields.
 
 ## Status
 

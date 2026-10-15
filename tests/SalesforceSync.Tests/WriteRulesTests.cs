@@ -340,46 +340,16 @@ public sealed class WriteRulesTests
         result.Outcome.Should().Be(outcome);
     }
 
-    // ---------- Direct upsert (WriteMode.DirectUpsert) ----------
-
-    [Fact]
-    public void A_direct_upsert_sends_every_field_and_sets_the_parent_by_its_external_id()
-    {
-        var plan = WritePlanner.PlanUpserts([Normalized(new UpsertUnit([Profile("P1", null, "A1")]))]);
-
-        var call = plan.Calls.Should().ContainSingle().Subject;
-        (call.ReferenceId, call.SObject, call.ExternalIdField).Should().Be(("Profile__c_upsert", "Profile__c", "External_Id__c"));
-        JsonSerializer.Serialize(call.Bodies().Single()).Should().Be(JsonSerializer.Serialize(new Dictionary<string, object?>
-        {
-            ["attributes"] = new { type = "Profile__c" },
-            ["External_Id__c"] = "P1",
-            ["Tier__c"] = null,
-            ["Account__r"] = new Dictionary<string, object?> { ["attributes"] = new { type = "Account" }, ["External_Id__c"] = "A1" }
-        }), "an empty field is sent to clear it, and the Account is named by the relationship, not the Id field");
-        plan.NotSent.Should().BeEmpty();
-    }
-
-    [Fact]
-    public void A_direct_upsert_splits_per_object_and_200_records_and_rejects_a_field_it_cannot_both_create_and_update()
-    {
-        var units = Enumerable.Range(0, 250).Select(i => Normalized(Account($"A{i}", "Acme"))).Append(Normalized(Account("BAD", "Acme", locked: "x")));
-
-        var plan = WritePlanner.PlanUpserts([.. units]);
-
-        plan.Calls.Select(c => (c.ReferenceId, c.Writes.Count)).Should().Equal(("Account_upsert", 200), ("Account_upsert_2", 50));
-        var bad = plan.NotSent.Should().ContainSingle().Subject;
-        (bad.Key, bad.Outcome, bad.PrimaryError!.Code).Should().Be(("BAD", SyncOutcome.PermanentFailure, "INVALID_FIELD_FOR_INSERT_UPDATE"));
-    }
-
     [Fact]
     public void A_parent_Salesforce_cannot_find_by_its_external_id_means_wait_for_it()
     {
-        var plan = WritePlanner.PlanUpserts([Normalized(new UpsertUnit([Profile("P1", "Gold", "A1")]))]);
-        var call = plan.Calls.Single();
+        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","External_Id__c":"A1","Name":"Acme","Active__c":false}"""));
+        var request = WritePlanner.Plan([Normalized(new UpsertUnit([Profile("P1", "Gold", "A1")]))], current).Requests.Single();
+        var upsert = request.AsUpsert()!;
 
-        var result = Interpreter().Interpret([(call.ReferenceId, call.Writes)], plan.Units,
+        var result = Interpreter().Interpret([(upsert.ReferenceId, upsert.Writes)], request.Units,
         [
-            new CollectionResult(call.ReferenceId, [new RecordResult(false, null,
+            new CollectionResult(upsert.ReferenceId, [new RecordResult(false, null,
                 [new SalesforceError(null, "INVALID_FIELD", "Foreign key external ID: A1 not found for field External_Id__c in entity Account")])], [])
         ]).Single();
 

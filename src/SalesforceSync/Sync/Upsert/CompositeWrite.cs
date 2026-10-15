@@ -64,11 +64,13 @@ internal sealed partial class CompositeWrite
     }
 
     /// <summary>
-    /// The request as one sObject Collections upsert by external id, when it can be one: all its writes are of one
-    /// object, none points at a record created in the same request (an upsert has no <c>@{reference}</c>), and they fit
-    /// one call. Same single API call as the Composite request, with a plainer body: each record carries its external
-    /// id and exactly the fields planned for it (all of a new record's, only the changed ones of an existing record).
-    /// Null when the request needs Composite (several objects, or a new parent and its new children). Marks the writes
+    /// The request as one sObject Collections upsert by external id, when it can be one: none of its writes points at
+    /// a record created in the same request (an upsert has no <c>@{reference}</c>), all are of one object, and they fit
+    /// one call (200 records). Same single API call as the Composite request, with a plainer body: each record carries
+    /// its external id and exactly the fields planned for it (all of a new record's, only the changed ones of an
+    /// existing record). Null when the request stays Composite: one write needing a reference (a new parent and its
+    /// new child) keeps the whole request Composite, writes that wouldn't need it included, and writes of several
+    /// objects stay one Composite request rather than one upsert per object. Marks the writes
     /// <see cref="PlannedWrite.ByUpsert"/>, which is how their results are read.
     /// </summary>
     public UpsertCall? AsUpsert()
@@ -148,7 +150,7 @@ internal sealed partial class CompositeWrite
         return ReferenceIdFor($"{key.SObject}_{(key.Create ? "create" : "update")}{(key.ByReference ? "_ref" : "")}");
     }
 
-    public static string ReferenceIdFor(string name)
+    private static string ReferenceIdFor(string name)
     {
         return NotReferenceIdCharacter().Replace(name, "_");
     }
