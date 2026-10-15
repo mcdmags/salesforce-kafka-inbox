@@ -1,5 +1,4 @@
 using SalesforceSync.Salesforce;
-using SalesforceSync.Salesforce.SObjects;
 
 namespace SalesforceSync.Sync;
 

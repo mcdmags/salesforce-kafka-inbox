@@ -2,11 +2,9 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
-using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
-using SalesforceSync.Sync.Mapping;
 
 namespace SalesforceSync.Tests;
 
@@ -17,7 +15,7 @@ namespace SalesforceSync.Tests;
 public sealed class EngineFlowTests
 {
     private static readonly UpsertStrategy<AccountEvent> Accounts =
-        AccountSyncService.CreateStrategy(new AccountMapper(), new ProfileMapper());
+        AccountSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly RecordingInbox _inbox = new();

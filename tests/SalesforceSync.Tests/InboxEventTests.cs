@@ -1,9 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SalesforceSync.Inbox;
-using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.Sync;
-using SalesforceSync.Sync.Mapping;
 
 namespace SalesforceSync.Tests;
 
@@ -14,10 +12,10 @@ namespace SalesforceSync.Tests;
 public sealed class InboxEventTests
 {
     private static readonly UpsertStrategy<AccountEvent> Accounts =
-        AccountSyncService.CreateStrategy(new AccountMapper(), new ProfileMapper());
+        AccountSync.Strategy;
 
     private static readonly UpsertStrategy<AccountRelationshipEvent> Relationships =
-        AccountRelationshipSyncService.CreateStrategy(new AccountRelationshipMapper());
+        AccountRelationshipSync.Strategy;
 
     // ---------- Mapping ----------
 

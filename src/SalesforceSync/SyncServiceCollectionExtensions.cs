@@ -5,12 +5,9 @@ using Npgsql;
 using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
-using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Salesforce.SObjects;
 using SalesforceSync.Sync;
-using SalesforceSync.Sync.Mapping;
 
 namespace SalesforceSync;
 
@@ -209,9 +206,9 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Inbox -> Salesforce: the database context, one engine, and per synced object its mappers (payload ->
-    /// sObject) and its strategy. Register a new object's mapper and <see cref="ISalesforceEntitySync"/> here (its
-    /// <see cref="InboxRow"/> type is mapped in <see cref="SyncDbContext"/>): its inbox table is created at startup, the consumer subscribes to its topic and the worker loops pick it up.
+    /// Inbox -> Salesforce: the database context, one engine, and per synced object its sync (its strategy, topic and
+    /// inbox). Register a new object's sync here (its <see cref="InboxRow"/> type is mapped in <see cref="SyncDbContext"/>):
+    /// its inbox table is created at startup, the consumer subscribes to its topic and the worker loops pick it up.
     /// </summary>
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {
@@ -221,13 +218,17 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton(typeof(IRepository<>), typeof(InboxRepository<>)); // one per inbox row type
         services.AddTransient<SalesforceBatchUpsertService>();
 
-        // The synced objects. Mappers are stateless.
-        services.AddSingleton<ISObjectMapper<AccountPayload, AccountSObject>, AccountMapper>();
-        services.AddSingleton<ISObjectMapper<ProfilePayload, ProfileSObject>, ProfileMapper>();
-        services.AddTransient<ISalesforceEntitySync, AccountSyncService>();
-
-        services.AddSingleton<ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject>, AccountRelationshipMapper>();
-        services.AddTransient<ISalesforceEntitySync, AccountRelationshipSyncService>();
+        // The synced objects
+        AddEntitySync<AccountEvent, AccountInboxRow>(services, AccountSync.Strategy, AccountSync.DefaultTopic);
+        AddEntitySync<AccountRelationshipEvent, AccountRelationshipInboxRow>(services,
+            AccountRelationshipSync.Strategy, AccountRelationshipSync.DefaultTopic);
         return services;
+    }
+
+    private static void AddEntitySync<TEvent, TRow>(IServiceCollection services, UpsertStrategy<TEvent> strategy, string defaultTopic)
+        where TRow : InboxRow, new()
+    {
+        services.AddTransient<ISalesforceEntitySync>(sp => new EntitySyncService<TEvent, TRow>(
+            sp.GetRequiredService<SalesforceBatchUpsertService>(), sp.GetRequiredService<IRepository<TRow>>(), strategy, defaultTopic));
     }
 }

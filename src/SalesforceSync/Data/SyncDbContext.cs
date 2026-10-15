@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Npgsql;
 using SalesforceSync.Inbox;
+using SalesforceSync.Sync;
 
 namespace SalesforceSync.Data;
 

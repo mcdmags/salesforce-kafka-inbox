@@ -63,7 +63,7 @@ public sealed class LeaseTests(SyncFixture app)
         // The first worker comes back and tries everything it could do with its old token
         var farFuture = watermark!.Value + 1_000_000_000;
         var errors = $$"""{ "{{claimed[0]}}": ["late failure", "UNABLE_TO_LOCK_ROW"] }""";
-        (await ExecuteAsync(Sql.MarkSynced, new { entityType = AccountSyncService.Type, token = stale, entityIds = new[] { acct }, times = new[] { farFuture } }))
+        (await ExecuteAsync(Sql.MarkSynced, new { entityType = AccountSync.Type, token = stale, entityIds = new[] { acct }, times = new[] { farFuture } }))
             .Should().Be(0, "the watermark only moves for the worker that holds the lease");
         (await ExecuteAsync(Sql.Fail, new { ids = claimed, token = stale, errors, maxRetries = 8, baseDelaySecs = 1d, maxDelaySecs = 1d })).Should().Be(0);
         (await ExecuteAsync(Sql.Dead, new { ids = claimed, token = stale, errors })).Should().Be(0);
@@ -117,7 +117,7 @@ public sealed class LeaseTests(SyncFixture app)
 
     private static InboxClaim ClaimOf(string acct, Guid token, long[] ids)
     {
-        return new InboxClaim(AccountSyncService.Type, token, [.. ids.Select(id => new InboxEvent(id, acct, "{}", 1))], new Dictionary<string, long>());
+        return new InboxClaim(AccountSync.Type, token, [.. ids.Select(id => new InboxEvent(id, acct, "{}", 1))], new Dictionary<string, long>());
     }
 
     private static BatchOutcomes Outcomes(long[] released)
@@ -135,6 +135,6 @@ public sealed class LeaseTests(SyncFixture app)
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         return await conn.ExecuteScalarAsync<long?>(
-            "select synced_time from sf_sync_state where entity_type = @type and entity_id = @acct", new { type = AccountSyncService.Type, acct });
+            "select synced_time from sf_sync_state where entity_type = @type and entity_id = @acct", new { type = AccountSync.Type, acct });
     }
 }
