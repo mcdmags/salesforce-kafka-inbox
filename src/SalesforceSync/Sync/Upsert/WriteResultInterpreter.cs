@@ -142,7 +142,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     private static bool RejectsRecordType(SalesforceError e)
     {
         return e.Fields?.Contains(SObjectSchema.RecordTypeIdField, StringComparer.OrdinalIgnoreCase) == true
-               || e.Message.Contains("Record Type", StringComparison.OrdinalIgnoreCase);
+               || e.Message?.Contains("Record Type", StringComparison.OrdinalIgnoreCase) == true;
     }
 
     /// <summary>The record was deleted between the read and the update: the next read finds it gone and creates it.</summary>
