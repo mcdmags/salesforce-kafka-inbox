@@ -31,17 +31,17 @@ as an **Account_Relationship__c** linking two Accounts, which may not be synced 
 
 | Problem | Solution |
 |---|---|
-| Durable, replayable intake | Kafka consumer writes each event to a Postgres **inbox** (`sf_inbox`) before committing the offset. Each topic is one entity type (`Kafka:Topics`); `unique (entity_type, entity_key, version)` makes redelivery harmless. |
+| Durable, replayable intake | Kafka consumer writes each event to a Postgres **inbox** (`sf_inbox`) before storing its offset (committed in the background, so there is no broker round trip per message). Each topic is one entity type (`Kafka:Topics`); `unique (entity_type, entity_key, version)` makes redelivery harmless. A message that isn't a JSON object with a key is logged with its offset and skipped, rather than blocking its partition. |
 | Ordering across parallel batches | Workers claim **entities, not events**: `SELECT … FOR UPDATE SKIP LOCKED` on each entity's *oldest pending* row, only for entities with nothing in flight. All pending events for a claimed entity are then leased (`locked_until`, `lock_token`, `retry_count`, `last_updated`). Two workers can never hold the same entity. |
 | Bursts of updates to one entity | Pending events for an entity are **coalesced** (merged in version order; absent field = unchanged, `null` = clear), so five updates in five seconds become one Salesforce write with the newest data. |
 | Late or replayed older events | **Sync watermark in Postgres**: `sf_sync_state` holds the newest version synced per entity, advanced in the same transaction that completes the events and only while the worker still holds the lease. A claimed event at or below the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
-| Expired leases | The Salesforce call is cancelled at 80% of the lease, so a slow worker gives up before another worker can claim the entity. |
+| Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. |
 | Records that must change together | **Composite Graph API**: one graph per unit (Account + Profile, or a relationship). A graph is all-or-nothing; other graphs in the same request are unaffected. New records are referenced with `@{ref.id}`; existing ones (e.g. a relationship's Accounts) by the Id read from Salesforce. |
 | Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field the coalesced inbox state sets. Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the millisecond, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event (a warning flags any field that still keeps differing). The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
 | Batching and API calls | **2 calls per batch** of up to 75 units: one Composite request with all reads (≤5 queries), one Composite Graph with all writes (≤75 graphs / 500 nodes). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each graph's result decides per entity: **not attempted** (`PROCESSING_HALTED` after 14 failures, `ALL_OR_NONE_OPERATION_ROLLED_BACK`) → back to the inbox without spending a retry; **transient** (`UNABLE_TO_LOCK_ROW`, a lookup target not synced yet, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately. The code is stored in `sf_inbox.last_error_code`. |
-| Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through **`PostgresExecutionStrategy`**: a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new connection, new transaction) with backoff. Every unit is safe to run twice. |
+| Postgres failures | Every unit of work (claim, outcomes, ingest, rate limiter, slots, schema) runs through **`PostgresExecutionStrategy`**: a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new connection, new transaction) with backoff. After a lost connection the pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
 | Rate limits | Configured from Salesforce's published limits (see [Salesforce API limits](#salesforce-api-limits)): Postgres-backed **token bucket** shared by all processes; this integration's **share of the org's daily allocation** enforced as a hard cap over a rolling 24 hours; global **concurrency cap** (advisory locks) validated against the org's concurrent long-running limit; the `Sforce-Limit-Info` header (`api-usage`, `api-bursts`, `per-app-api-usage`) and own usage slow everyone down at 80% and pause at 95%; 429/503 and both kinds of `REQUEST_LIMIT_EXCEEDED` pause all workers. Rate-limited batches are handed back without spending a retry. |
 
 ```
@@ -75,15 +75,21 @@ public sealed class AccountRelationshipSyncService(SalesforceBatchUpsertService 
     public string EntityType => "account-relationship";
     public Task<int> SyncBatchAsync(CancellationToken ct) => upsert.UpsertBatchAsync(Strategy, ct);
 
-    // Inbox event -> the records to write together (one graph)
-    public static UpsertUnit Map(string key, AccountRelationshipChangedEvent e) => new(
-    [
-        new SObjectRecord("rel", "Account_Relationship__c", "External_Id__c", key, SObjectFields.From(e.Fields),
+    // Inbox event -> the records to write together (one graph). Throwing dead-letters the event (INVALID_EVENT).
+    public static UpsertUnit Map(string key, AccountRelationshipChangedEvent e)
+    {
+        if (string.IsNullOrWhiteSpace(e.AccountExternalId) || string.IsNullOrWhiteSpace(e.RelatedAccountExternalId))
+            throw new ArgumentException("accountExternalId and relatedAccountExternalId are required");
+
+        return new UpsertUnit(
         [
-            new SObjectLookup("Account__c", "Account", "External_Id__c", e.AccountExternalId!),
-            new SObjectLookup("Related_Account__c", "Account", "External_Id__c", e.RelatedAccountExternalId!)
-        ])
-    ]);
+            new SObjectRecord("rel", "Account_Relationship__c", "External_Id__c", key, SObjectFields.From(e.Fields),
+            [
+                new SObjectLookup("Account__c", "Account", "External_Id__c", e.AccountExternalId),
+                new SObjectLookup("Related_Account__c", "Account", "External_Id__c", e.RelatedAccountExternalId)
+            ])
+        ]);
+    }
 
     // What to read: the relationships themselves (to diff) and the Accounts they point at (for their Ids)
     public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units) =>
@@ -329,9 +335,9 @@ outlive a connection.
 To see the slots held right now:
 
 ```sql
-select pid, objid::bigint - 1397112832 as slot, application_name, client_addr, state
+select pid, objid::bigint - 1397096448 as slot, application_name, client_addr, state
 from pg_locks join pg_stat_activity using (pid)
-where locktype = 'advisory' and classid = 0 and objid::bigint between 1397112832 and 1397112832 + 100;
+where locktype = 'advisory' and classid = 0 and objid::bigint between 1397096448 and 1397096448 + 100;
 ```
 
 ## Using a real Salesforce org
@@ -345,7 +351,8 @@ where locktype = 'advisory' and classid = 0 and objid::bigint between 1397112832
    (see [Salesforce API limits](#salesforce-api-limits)).
 4. Adjust object and field names in the strategies (`AccountSyncService`, `AccountRelationshipSyncService`),
    and tune `Salesforce:PermanentErrorCodes`, `Sync:RetryBaseDelay` / `MaxRetryDelay` / `MaxRetries` and
-   `Postgres:Retry` if needed.
+   `Postgres:Retry` if needed. `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-75, ...)
+   and a missing `Salesforce:InstanceUrl` fail startup.
 
 ## Status
 

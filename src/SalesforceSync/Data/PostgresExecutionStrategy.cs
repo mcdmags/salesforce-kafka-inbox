@@ -78,6 +78,11 @@ public sealed class PostgresExecutionStrategy(
             }
             catch (Exception ex) when (retry < _opt.MaxRetryCount && IsTransient(ex) && !ct.IsCancellationRequested)
             {
+                // When the server restarts, fails over or terminates sessions, the idle connections in the pool are
+                // dead too, and Npgsql only finds out when one is used. Without clearing, every retry could draw
+                // another dead connection and the retries would run out before reaching the server.
+                if (IsConnectionLost(ex)) db.Clear();
+
                 var delay = Delay(retry);
                 log.LogWarning("Transient Postgres error ({Error}); retry {Retry}/{Max} in {Delay}",
                     ex.Message, retry + 1, _opt.MaxRetryCount, delay);
@@ -98,6 +103,18 @@ public sealed class PostgresExecutionStrategy(
                                 || pg.SqlState is "40001" or "40P01",                       // serialization failure, deadlock
         NpgsqlException npgsql => npgsql.IsTransient,
         TimeoutException => true,
+        _ => false
+    };
+
+    /// <summary>
+    /// The session itself is gone (not just the statement or transaction failing): a connection-class SQLSTATE,
+    /// a server shutdown, or an I/O error or timeout on the client side.
+    /// </summary>
+    public static bool IsConnectionLost(Exception ex) => ex switch
+    {
+        PostgresException pg => pg.SqlState.StartsWith("08", StringComparison.Ordinal)
+                                || pg.SqlState is "57P01" or "57P02" or "57P03",
+        NpgsqlException => true, // raised by the client, not reported by the server
         _ => false
     };
 

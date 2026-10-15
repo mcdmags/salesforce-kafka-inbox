@@ -122,16 +122,22 @@ public sealed class SalesforceRestClient(HttpClient http)
         var body = await res.Content.ReadFromJsonAsync<GraphEnvelope>(Json, ct)
                    ?? throw new InvalidOperationException("Empty composite graph response");
 
-        return body.Graphs.Select(g => new GraphResult(
-                g.GraphId,
-                g.IsSuccessful,
-                g.IsSuccessful
-                    ? []
-                    : g.GraphResponse.CompositeResponse
-                        .Where(s => s.HttpStatusCode >= 400)
-                        .SelectMany(s => ParseErrors(s.ReferenceId, s.Body))
-                        .ToList()))
+        return body.Graphs.Select(g => new GraphResult(g.GraphId, g.IsSuccessful, g.IsSuccessful ? [] : GraphErrors(g)))
             .ToList();
+    }
+
+    /// <summary>
+    /// Errors of a failed graph. A failure without any error detail is reported as UNKNOWN_ERROR (transient), never
+    /// as an empty list, which would read as "not attempted" and be retried forever without spending a retry.
+    /// </summary>
+    private static List<SalesforceError> GraphErrors(GraphBodyResult graph)
+    {
+        var errors = graph.GraphResponse.CompositeResponse
+            .Where(s => s.HttpStatusCode >= 400)
+            .SelectMany(s => ParseErrors(s.ReferenceId, s.Body))
+            .ToList();
+        if (errors.Count == 0) errors.Add(new SalesforceError(null, "UNKNOWN_ERROR", $"Graph {graph.GraphId} failed without error details"));
+        return errors;
     }
 
     public static string Soql(string sobject, IEnumerable<string> fields, string whereField, IEnumerable<string> values)

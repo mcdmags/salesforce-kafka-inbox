@@ -9,8 +9,15 @@ using SalesforceSync.Sync;
 
 var builder = Host.CreateApplicationBuilder(args);
 
-builder.Services.Configure<SalesforceOptions>(builder.Configuration.GetSection(SalesforceOptions.Section));
-builder.Services.Configure<SyncOptions>(builder.Configuration.GetSection(SyncOptions.Section));
+builder.Services.AddOptions<SalesforceOptions>()
+    .Bind(builder.Configuration.GetSection(SalesforceOptions.Section))
+    .Validate(o => Uri.IsWellFormedUriString(o.InstanceUrl, UriKind.Absolute),
+        $"{SalesforceOptions.Section}:InstanceUrl must be an absolute URL")
+    .ValidateOnStart();
+builder.Services.AddOptions<SyncOptions>()
+    .Bind(builder.Configuration.GetSection(SyncOptions.Section))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<SyncOptions>, SyncOptionsValidator>();
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection(RateLimitOptions.Section));
 builder.Services.AddOptions<SalesforceLimitsOptions>()
     .Bind(builder.Configuration.GetSection(SalesforceLimitsOptions.Section))
@@ -79,7 +86,13 @@ else
 // Kafka -> inbox (only when a Kafka connection string is configured)
 if (!string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString("kafka")))
 {
-    builder.AddKafkaConsumer<string, string>("kafka");
+    builder.AddKafkaConsumer<string, string>("kafka", settings =>
+    {
+        // At-least-once without a broker round trip per message: KafkaInboxConsumer stores an offset only after
+        // its row is in the inbox, and the client commits stored offsets in the background (and on close).
+        settings.Config.EnableAutoCommit = true;
+        settings.Config.EnableAutoOffsetStore = false;
+    });
     builder.Services.AddHostedService<KafkaInboxConsumer>();
 }
 

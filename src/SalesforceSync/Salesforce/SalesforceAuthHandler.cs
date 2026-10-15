@@ -8,12 +8,13 @@ public sealed class SalesforceAuthHandler(SalesforceTokenProvider tokens) : Dele
 {
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await tokens.GetTokenAsync(false, ct));
+        var token = await tokens.GetTokenAsync(null, ct);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var res = await base.SendAsync(request, ct);
         if (res.StatusCode != HttpStatusCode.Unauthorized) return res;
 
         res.Dispose();
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await tokens.GetTokenAsync(true, ct));
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await tokens.GetTokenAsync(token, ct));
         return await base.SendAsync(request, ct);
     }
 }

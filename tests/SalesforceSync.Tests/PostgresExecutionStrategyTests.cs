@@ -58,6 +58,21 @@ public sealed class PostgresExecutionStrategyTests
     }
 
     [Fact]
+    public void Lost_connections_are_told_apart_from_failed_transactions()
+    {
+        // Lost: the pool is cleared before retrying, since its idle connections are likely dead too
+        Assert.True(PostgresExecutionStrategy.IsConnectionLost(new NpgsqlException("connection reset", new IOException("broken pipe"))));
+        Assert.True(PostgresExecutionStrategy.IsConnectionLost(
+            new PostgresException("terminating connection due to administrator command", "FATAL", "FATAL", "57P01")));
+        Assert.True(PostgresExecutionStrategy.IsConnectionLost(new PostgresException("connection failure", "FATAL", "FATAL", "08006")));
+
+        // The session is fine: retry on the same pool
+        Assert.False(PostgresExecutionStrategy.IsConnectionLost(new PostgresException("could not serialize access", "ERROR", "ERROR", "40001")));
+        Assert.False(PostgresExecutionStrategy.IsConnectionLost(new PostgresException("deadlock detected", "ERROR", "ERROR", "40P01")));
+        Assert.False(PostgresExecutionStrategy.IsConnectionLost(new TimeoutException()));
+    }
+
+    [Fact]
     public async Task Cancellation_stops_retrying()
     {
         using var cts = new CancellationTokenSource();
