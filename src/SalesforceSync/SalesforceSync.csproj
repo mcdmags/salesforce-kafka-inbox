@@ -14,17 +14,16 @@
     <PackageReference Include="Aspire.Npgsql" Version="9.5.0" />
     <PackageReference Include="Aspire.StackExchange.Redis.DistributedCaching" Version="9.5.0" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.4" />
+    <!-- dotnet ef migrations add (design time only) -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.1" PrivateAssets="all" />
+    <!-- The version the design package compiles this project against, passed on to the projects that reference it -->
+    <PackageReference Include="System.Text.Json" Version="9.0.1" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\SalesforceSync.FakeSalesforce\SalesforceSync.FakeSalesforce.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- Single source of truth for the inbox schema; applied at startup by InboxSchemaInitializer -->
-    <EmbeddedResource Include="..\..\sql\schema.sql" LogicalName="SalesforceSync.schema.sql" Link="Inbox\schema.sql" />
   </ItemGroup>
 
   <ItemGroup>

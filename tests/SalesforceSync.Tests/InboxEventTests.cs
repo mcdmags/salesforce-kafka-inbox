@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.EntityFrameworkCore;
+using SalesforceSync.Data;
 using SalesforceSync.Inbox;
 using SalesforceSync.Sync;
 
@@ -374,17 +376,13 @@ public sealed class InboxEventTests
     }
 
     [Fact]
-    public void Schema_script_has_one_inbox_per_table_and_no_placeholder_left()
+    public void Every_change_to_the_model_has_its_migration()
     {
-        var script = InboxSchema.Script(["sf_account_inbox", "sf_account_relationship_inbox"]);
+        // Only the model and the migrations' snapshot are compared: nothing connects to this address
+        using var db = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
 
-        script.Should().Contain("create table if not exists sf_account_inbox (")
-            .And.Contain("create table if not exists sf_account_relationship_inbox (")
-            .And.Contain("create index if not exists sf_account_inbox_pending on sf_account_inbox")
-            .And.NotContain("{inbox}");
-        script.Should().NotContain("->", "no statement reads inside the payload");
-        var bad = () => InboxSchema.Script(["sf_inbox; drop table sf_rate_limit"]);
-        bad.Should().Throw<ArgumentException>();
+        db.Database.HasPendingModelChanges().Should().BeFalse(
+            "a change to SyncDbContext's model needs a migration: dotnet ef migrations add <Name> --project src/SalesforceSync --output-dir Data/Migrations");
     }
 
     [Fact]

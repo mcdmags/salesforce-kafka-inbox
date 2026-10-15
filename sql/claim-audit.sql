@@ -1,6 +1,6 @@
 -- TEST / BENCHMARK ONLY: records the lifetime of every entity claim so concurrent processing of the
--- same entity (e.g. the same account) can be detected after the fact. Not part of schema.sql; do not install in production.
--- Run it after schema.sql: it attaches to sf_sync_state, where every entity of every type is leased.
+-- same entity (e.g. the same account) can be detected after the fact. Not part of the migrations; do not install in production.
+-- Run it after the migrations: it attaches to sf_sync_state, where every entity of every type is leased.
 --
 -- A claim starts when a worker sets lock_token (InboxSql.ClaimEntities) and ends when that worker clears
 -- the token (EndLease after any outcome, or Hold). Ordering uses a sequence, not the clock: wall-clock

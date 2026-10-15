@@ -22,18 +22,8 @@ public sealed class ClaimRetryTests(SyncFixture app)
     [Fact]
     public async Task A_claim_retried_after_an_unknown_commit_releases_what_the_lost_attempt_leased()
     {
-        await using (var admin = await app.Db.OpenConnectionAsync())
-        {
-            await admin.ExecuteAsync($"drop schema if exists {Schema} cascade; create schema {Schema}");
-        }
-        var connectionString = new NpgsqlConnectionStringBuilder(app.ConnectionString)
-        {
-            SearchPath = Schema,
-            ApplicationName = SyncFixture.TestsApplicationName
-        }.ConnectionString;
-        await using var db = NpgsqlDataSource.Create(connectionString);
-
-        await InboxSchema.EnsureCreatedAsync(SyncDbContext.CreateFactory(db), [SyncFixture.InboxTable()]);
+        await using var db = await app.CreateSchemaAsync(Schema);
+        await SyncSchema.MigrateAsync(SyncDbContext.CreateFactory(db));
         var entity = SyncFixture.NewAccountId();
         await using (var conn = await db.OpenConnectionAsync())
         {

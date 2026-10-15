@@ -1,6 +1,4 @@
-using Microsoft.EntityFrameworkCore;
 using Npgsql;
-using SalesforceSync.Data;
 
 namespace SalesforceSync.IntegrationTests;
 
@@ -54,18 +52,6 @@ public static class PgSql
         NpgsqlTransaction? transaction = null)
     {
         return conn.StoreAsync(table, entityType, [entityId], [payload], transaction);
-    }
-
-    /// <summary>The sync's schema on a connection the test owns (inside a transaction, in a schema of its own).</summary>
-    public static async Task ApplySchemaAsync(NpgsqlConnection conn, NpgsqlTransaction? tx, IEnumerable<string> inboxTables)
-    {
-        var options = new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql(conn).Options;
-        await using var db = new SyncDbContext(options);
-        if (tx is not null)
-        {
-            await db.Database.UseTransactionAsync(tx);
-        }
-        await Inbox.InboxSchema.ApplyAsync(db, inboxTables);
     }
 
     private static NpgsqlCommand Command(NpgsqlConnection conn, string sql, object? args, NpgsqlTransaction? transaction)
