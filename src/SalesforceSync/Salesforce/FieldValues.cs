@@ -364,3 +364,12 @@ public static class FieldValues
         return false;
     }
 }
+
+/// <summary>A value Salesforce would reject; the code is Salesforce's own error code for it.</summary>
+public readonly record struct FieldError(string Field, string Code, string Message)
+{
+    public override string ToString()
+    {
+        return $"{Field}: {Code} {Message}";
+    }
+}

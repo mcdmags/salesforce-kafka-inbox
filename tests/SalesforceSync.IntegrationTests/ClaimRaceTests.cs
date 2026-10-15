@@ -1,7 +1,6 @@
 using System.Text.Json.Nodes;
 using Npgsql;
 using SalesforceSync.Inbox;
-using SalesforceSync.Sync;
 
 namespace SalesforceSync.IntegrationTests;
 

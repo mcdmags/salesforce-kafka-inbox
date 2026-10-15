@@ -53,8 +53,8 @@ Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per 
                                                        │  claim entities: head row + per-entity claim lock
                                                        ▼
                               InboxWorkerService ×N loops (any number of pods), round-robin over:
-                                AccountSyncService ─┐            (strategy: typed event → mapper →
-                                AccountRelationshipSyncService ─┤          sObject → records, + queries)
+                                AccountSync ─┐                   (strategy: typed event → mapping →
+                                AccountRelationshipSync ─┤                 sObject → records, + queries)
                                                                 ▼
                               SalesforceBatchUpsertService.UpsertBatchAsync<TEvent, TRow>(strategy, IRepository<TRow>)
                                 claim → newest meta.time per entity (supersede stale) → map
@@ -73,7 +73,7 @@ The sync is three layers, each with one job:
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `SendCollectionsAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryStrategy`) | Sends requests and returns raw results. Decides nothing. |
 | **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the two ways a batch can fail (unknown outcome → hold, anything else → retry all). |
-| **Rules, no I/O** | `BatchPreparer` (coalesce, watermark, map), `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `RecordDiffer` (changed fields), `WritePlanner` (create / update / unchanged, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
+| **Rules, no I/O** | `PreparedBatch.Prepare` (coalesce, watermark, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (200 records per collection, 5 collections per request), `WriteResultInterpreter` (per-record results → outcome per entity) | Pure and deterministic; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`); the schema
 stays `sql/schema.sql` (partial indexes, the table template, views, autovacuum settings: not expressible as migrations),
@@ -197,7 +197,7 @@ Every event carries the entity's complete current state. There is no "field not 
 - The one thing that isn't cleared by absence is a whole object: an account event **without a `profile`** writes
   only the Account and leaves the Profile in Salesforce as it is.
 
-Other rules (in the strategies, `AccountSyncService` and `AccountRelationshipSyncService`):
+Other rules (in the strategies, `AccountSync` and `AccountRelationshipSync`):
 
 - **account**: `profile.externalId` defaults to the account's `externalId`, and the Profile always looks up the
   event's account.
@@ -207,17 +207,18 @@ Other rules (in the strategies, `AccountSyncService` and `AccountRelationshipSyn
 
 ## The three typed layers
 
-An event passes through three kinds of classes on its way to the generic engine. Each knows one thing:
+An event passes through three kinds of types on its way to the generic engine. Each knows one thing; all three of an
+object live in its one file (`Sync/AccountSync.cs`, `Sync/AccountRelationshipSync.cs`):
 
 | Layer | Where | Knows |
 |---|---|---|
-| **Inbox payload** (`AccountPayload`, `ProfilePayload`, `AccountRelationshipPayload`, in the `AccountEvent` / `AccountRelationshipEvent` envelopes) | `src/SalesforceSync/Inbox/Payloads/` | The event as the source system sends it. PascalCase CLR properties, bound from camelCase JSON; no attributes, no Salesforce names. |
-| **Salesforce sObject** (`AccountSObject`, `ProfileSObject`, `AccountRelationshipSObject`) | `src/SalesforceSync/Salesforce/SObjects/` | The org. One flat class per object; `[SObject]` names the object, its external id field and its record type (developer name), `[JsonPropertyName]` names each field, `[SObjectLookup]` marks a lookup. |
-| **Mapper** (`AccountMapper`, `ProfileMapper`, `AccountRelationshipMapper` : `ISObjectMapper<TPayload, TSObject>`) | `src/SalesforceSync/Sync/Mapping/` | How one becomes the other: hand-written, one line per field, converting only where the types differ (the `tags` list becomes a `;`-separated multi-select value). Registered in `AddInboxSync`. |
+| **Inbox payload** (`AccountPayload`, `ProfilePayload`, `AccountRelationshipPayload`, in the `AccountEvent` / `AccountRelationshipEvent` envelopes) | `Sync/<Object>Sync.cs` | The event as the source system sends it. PascalCase CLR properties, bound from camelCase JSON; no attributes, no Salesforce names. |
+| **Salesforce sObject** (`AccountSObject`, `ProfileSObject`, `AccountRelationshipSObject`) | `Sync/<Object>Sync.cs` | The org. One flat class per object; `[SObject]` names the object, its external id field and its record type (developer name), `[JsonPropertyName]` names each field, `[SObjectLookup]` marks a lookup. |
+| **Mapping** (`AccountSync.ToAccount`, `AccountSync.ToProfile`, `AccountRelationshipSync.ToRelationship`) | `Sync/<Object>Sync.cs` | How one becomes the other: hand-written static methods, one line per field, converting only where the types differ (the `tags` list becomes a `;`-separated multi-select value). |
 
 ```
 raw event JSON ─► AccountEvent { AccountPayload { …, ProfilePayload } }     System.Text.Json (Web defaults)
-               ─► AccountMapper / ProfileMapper ─► AccountSObject, ProfileSObject
+               ─► AccountSync.ToAccount / ToProfile ─► AccountSObject, ProfileSObject
                ─► SObjectRecord.From(referenceId, sobject) ─► SObjectRecord ─► engine (normalize, diff, write)
 ```
 
@@ -589,10 +590,10 @@ always literal Ids from the read.
 
 The engine (`SalesforceBatchUpsertService.UpsertBatchAsync<TEvent, TRow>`) owns claiming, ordering, coalescing,
 batching, normalization, diffing, lookups, retries and dead-lettering. Nothing in the engine, the consumer or
-the worker loops names an object. An object supplies four small things: a payload class, an sObject class, a mapper,
-an inbox row class (which selects the object's inbox table) and a strategy class that names the object's topic and says
-how an event becomes records. The strategy class derives from `EntitySyncService<TEvent, TRow>`, which does the rest of
-`ISalesforceEntitySync` through the shared `IRepository<TRow>`.
+the worker loops names an object. An object supplies, in one file: a payload class, an sObject class, an inbox row
+class (which selects the object's inbox table) and a static class with the mapping and the strategy, which says how an
+event becomes records. `AddInboxSync` registers it as an `EntitySyncService<TEvent, TRow>` with its topic, which does
+the rest of `ISalesforceEntitySync` through the shared `IRepository<TRow>`.
 
 ```csharp
 // 1. Payload: the event as the source sends it  { "meta": {...}, "accountRelationship": { "externalId": ..., ... } }
@@ -625,52 +626,32 @@ public sealed class AccountRelationshipSObject
     [JsonPropertyName("Active__c")] public bool? Active { get; set; }
 }
 
-// 3. Mapper: explicit, one line per field
-public sealed class AccountRelationshipMapper : ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject>
-{
-    public AccountRelationshipSObject Map(AccountRelationshipPayload payload) => new()
-    {
-        ExternalId = payload.ExternalId,
-        AccountExternalId = payload.AccountExternalId,
-        RelatedAccountExternalId = payload.RelatedAccountExternalId,
-        Type = payload.Type,
-        Active = payload.IsActive
-    };
-}
-
-// 4. Inbox row: the object's inbox table. Every column is on InboxRow, so every object's inbox has the same fields
+// 3. Inbox row: the object's inbox table. Every column is on InboxRow, so every object's inbox has the same fields
 public sealed class AccountRelationshipInboxRow : InboxRow;
 //    ... and in SyncDbContext: a DbSet<AccountRelationshipInboxRow>, and in OnModelCreating
 //    ConfigureInbox(modelBuilder.Entity<AccountRelationshipInboxRow>(), "sf_account_relationship_inbox");
 //    The table is created at startup from the schema template (sql/schema.sql); SchemaTests checks the model against it.
 
-// 5. Strategy: how to read an event (id, time, type), event -> records, and what to read
-public sealed class AccountRelationshipSyncService(
-    SalesforceBatchUpsertService engine,
-    IRepository<AccountRelationshipInboxRow> inbox,   // the open generic InboxRepository<TRow>, registered once
-    ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
-    : EntitySyncService<AccountRelationshipEvent, AccountRelationshipInboxRow>(engine, inbox, CreateStrategy(relationships), DefaultTopic)
+// 4. Mapping and strategy: how to read an event (id, time, type), event -> records, and what to read
+public static class AccountRelationshipSync
 {
     public const string Type = "accountRelationship";
     public const string DefaultTopic = "account-relationship-changes";  // Kafka:Topics:accountRelationship overrides
 
-    public static UpsertStrategy<AccountRelationshipEvent> CreateStrategy(
-        ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
-        => new(Type,
-            EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id
-            Meta: e => e.Meta,                                  // and the meta (time and type) are in the event
-            Map: (key, e) => Map(key, e, relationships),
-            Queries: Queries);
+    public static readonly UpsertStrategy<AccountRelationshipEvent> Strategy = new(Type,
+        EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id
+        Meta: e => e.Meta,                                  // and the meta (time and type) are in the event
+        Map: (_, e) => Map(e),
+        Queries: Queries);
 
     // Throwing dead-letters the event (INVALID_EVENT)
-    public static UpsertUnit Map(string key, AccountRelationshipEvent e,
-        ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject> relationships)
+    public static UpsertUnit Map(AccountRelationshipEvent e)
     {
         var payload = e.AccountRelationship;
         if (string.IsNullOrWhiteSpace(payload?.AccountExternalId) || string.IsNullOrWhiteSpace(payload.RelatedAccountExternalId))
             throw new ArgumentException("accountExternalId and relatedAccountExternalId are required");
 
-        return new UpsertUnit([SObjectRecord.From("rel", relationships.Map(payload))]);
+        return new UpsertUnit([SObjectRecord.From("rel", ToRelationship(payload))]);
     }
 
     // The relationships themselves (to diff) and the Accounts they point at (for their Ids)
@@ -679,14 +660,24 @@ public sealed class AccountRelationshipSyncService(
         SoqlQuery.RecordsOf<AccountRelationshipSObject>(units),
         SoqlQuery.LookupTargetsOf<AccountSObject>(units)
     ];
+
+    // The mapping: explicit, one line per field
+    public static AccountRelationshipSObject ToRelationship(AccountRelationshipPayload payload) => new()
+    {
+        ExternalId = payload.ExternalId,
+        AccountExternalId = payload.AccountExternalId,
+        RelatedAccountExternalId = payload.RelatedAccountExternalId,
+        Type = payload.Type,
+        Active = payload.IsActive
+    };
 }
 ```
 
-Register the mapper and the strategy in `AddInboxSync`:
+Register it in `AddInboxSync` (the open generic `InboxRepository<TRow>` is registered once and serves every row type):
 
 ```csharp
-services.AddSingleton<ISObjectMapper<AccountRelationshipPayload, AccountRelationshipSObject>, AccountRelationshipMapper>();
-services.AddTransient<ISalesforceEntitySync, AccountRelationshipSyncService>();
+AddEntitySync<AccountRelationshipEvent, AccountRelationshipInboxRow>(services,
+    AccountRelationshipSync.Strategy, AccountRelationshipSync.DefaultTopic);
 ```
 
 From then on the object's inbox table is created at startup, the consumer subscribes to its topic and stores its
@@ -703,14 +694,14 @@ an in-process single-flight so concurrent workers don't all describe at once.)
 ```
 src/
   SalesforceSync/                 Worker:
-    Inbox/                        Kafka consumer, worker loops, inbox schema, InboxSql, InboxRow and its subclasses, InboxRepository
-    Inbox/Payloads/               The typed events (payload classes) and their meta
-    Sync/                         The engine (SalesforceBatchUpsertService), BatchPreparer, the strategies
-                                  (EntitySyncService and one class per object) and the engine's model types
+    Inbox/                        Kafka consumer, worker loops, inbox schema, InboxSql, InboxRow, IRepository (and the
+                                  claim and outcome types), InboxRepository
+    Sync/                         The engine (SalesforceBatchUpsertService), PreparedBatch, EntitySyncService, the
+                                  strategy and event meta, the engine's model types, and one file per synced object
+                                  (AccountSync, AccountRelationshipSync: payload, sObjects, mapping, strategy, inbox row)
     Sync/Upsert/                  The write path's rules, no I/O: normalize, read queries, diff, plan, pack, interpret
-    Sync/Mapping/                 Mappers: payload -> sObject
-    Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors
-    Salesforce/SObjects/          sObject classes and the attributes they are read by
+    Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors,
+                                  SObjectMetadata and the attributes the sObject classes are read by
     Data/                         SyncDbContext (the EF model of the tables), PostgresRetryStrategy, raw-SQL helpers
   SalesforceSync.FakeSalesforce/  In-memory Salesforce (describe, query, composite, sObject collections, Salesforce-like
                                   value storage, error injection, write history, Sforce-Limit-Info): FakeSalesforceStore
@@ -1090,12 +1081,12 @@ leave the picklist unrestricted.
 
 ### Field mappings
 
-A mapping is code, in three places:
+A mapping is code, in three parts of the object's file (`Sync/AccountSync.cs`, `Sync/AccountRelationshipSync.cs`):
 
-1. **Payload** (`Inbox/Payloads/`): the event's JSON fields.
-2. **sObject** (`Salesforce/SObjects/`): the Salesforce object and field API names and the record type, in the
+1. **Payload**: the event's JSON fields.
+2. **sObject**: the Salesforce object and field API names and the record type, in the
    `[SObject]` and `[JsonPropertyName]` attributes. This is the only place Salesforce names appear.
-3. **Mapper** (`Sync/Mapping/`): one line per field, from the payload to the sObject.
+3. **Mapping** (`ToAccount`, `ToProfile`, `ToRelationship`): one line per field, from the payload to the sObject.
 
 The mappings as they are:
 

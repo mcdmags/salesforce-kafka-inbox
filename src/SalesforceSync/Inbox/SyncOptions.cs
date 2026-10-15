@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Options;
 using SalesforceSync.Sync.Upsert;
 
 namespace SalesforceSync.Inbox;
@@ -46,4 +47,48 @@ public sealed class SyncOptions
 
     public TimeSpan MaxRetryDelay { get; set; } = TimeSpan.FromHours(1);
     public TimeSpan IdleDelay { get; set; } = TimeSpan.FromSeconds(1);
+}
+
+/// <summary>
+/// Fails startup on values that would make the workers silently do nothing (no loops) or exceed what
+/// one batch can carry.
+/// </summary>
+public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
+{
+    public ValidateOptionsResult Validate(string? name, SyncOptions o)
+    {
+        var errors = new List<string>();
+        void AtLeastOne(string setting, int value)
+        {
+            if (value < 1)
+            {
+                errors.Add($"{SyncOptions.Section}:{setting} must be at least 1.");
+            }
+        }
+        void Positive(string setting, TimeSpan value)
+        {
+            if (value <= TimeSpan.Zero)
+            {
+                errors.Add($"{SyncOptions.Section}:{setting} must be positive.");
+            }
+        }
+
+        AtLeastOne(nameof(o.Workers), o.Workers);
+        if (o.BatchSize is < 1 or > ReadQueryBuilder.MaxEntitiesPerBatch)
+        {
+            errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {ReadQueryBuilder.MaxEntitiesPerBatch} " +
+                       "(a batch is read with one Composite request: 5 queries of 100 external ids).");
+        }
+
+        AtLeastOne(nameof(o.MaxEventsPerEntity), o.MaxEventsPerEntity);
+        Positive(nameof(o.Lease), o.Lease);
+        Positive(nameof(o.UnknownOutcomeHold), o.UnknownOutcomeHold);
+        AtLeastOne(nameof(o.MaxRetries), o.MaxRetries);
+        if (o.RetryBaseDelay < TimeSpan.Zero || o.MaxRetryDelay < o.RetryBaseDelay)
+        {
+            errors.Add($"{SyncOptions.Section}:RetryBaseDelay must be >= 0 and at most MaxRetryDelay.");
+        }
+
+        return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);
+    }
 }

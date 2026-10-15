@@ -4,7 +4,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Sync;
 using SalesforceSync.Sync.Upsert;
 using static SalesforceSync.Data.SqlCommands;
 

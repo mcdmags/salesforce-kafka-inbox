@@ -2,10 +2,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
-using SalesforceSync.Inbox.Payloads;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
-using SalesforceSync.Sync.Mapping;
 
 namespace SalesforceSync.Tests;
 
@@ -16,7 +14,7 @@ namespace SalesforceSync.Tests;
 public sealed class EngineFlowTests
 {
     private static readonly UpsertStrategy<AccountEvent> Accounts =
-        AccountSyncService.CreateStrategy(new AccountMapper(), new ProfileMapper());
+        AccountSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly RecordingInbox _inbox = new();
@@ -40,7 +38,7 @@ public sealed class EngineFlowTests
             new InboxEvent(3, "ACC-2", "not json", 1),
             Row(4, "ACC-3", "2026-10-14T01:00:00Z"),
         ]);
-        _inbox.Synced["ACC-3"] = BatchPreparer.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
+        _inbox.Synced["ACC-3"] = PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
 
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(4);
 
@@ -48,7 +46,7 @@ public sealed class EngineFlowTests
         _inbox.Calls.Should().Equal("claim account", "record");
         var outcomes = _inbox.Recorded!;
         outcomes.Synced.Should().ContainSingle().Which.Should().Be(
-            new SyncedEntity("ACC-1", BatchPreparer.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T02:00:00Z")), 2));
+            new SyncedEntity("ACC-1", PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T02:00:00Z")), 2));
         outcomes.Superseded.Should().BeEquivalentTo([1L, 4L], "an older event, and one that is not newer than the watermark");
         outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.EventId == 3 && f.Code == SalesforceErrors.InvalidEvent);
         outcomes.Released.Should().BeEmpty();

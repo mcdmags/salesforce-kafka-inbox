@@ -15,6 +15,7 @@ public sealed class GzipRequestHandler(IOptions<SalesforceOptions> options) : De
         var threshold = options.Value.CompressRequestsLargerThan;
         if (threshold > 0 && request.Content is { } content && content.Headers.ContentEncoding.Count == 0)
         {
+            // Buffers the content, so below the threshold the original is sent as it is
             var bytes = await content.ReadAsByteArrayAsync(ct);
             if (bytes.Length >= threshold)
             {
@@ -32,19 +33,8 @@ public sealed class GzipRequestHandler(IOptions<SalesforceOptions> options) : De
 
                 compressed.Headers.ContentEncoding.Add("gzip");
                 request.Content = compressed;
+                content.Dispose();
             }
-            else
-            {
-                // Already buffered; resend the same bytes
-                var plain = new ByteArrayContent(bytes);
-                foreach (var header in content.Headers.Where(h => h.Key != "Content-Length"))
-                {
-                    plain.Headers.TryAddWithoutValidation(header.Key, header.Value);
-                }
-
-                request.Content = plain;
-            }
-            content.Dispose();
         }
         return await base.SendAsync(request, ct);
     }
