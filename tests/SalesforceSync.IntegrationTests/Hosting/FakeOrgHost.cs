@@ -24,6 +24,7 @@ public sealed class FakeOrgHost : IAsyncDisposable
     public Uri Url { get; }
 
     /// <param name="settings">Configuration overrides (<c>FakeSalesforce:Latency</c>, ...), applied last.</param>
+    /// <param name="ct">Cancels the start.</param>
     public static async Task<FakeOrgHost> StartAsync(IReadOnlyDictionary<string, string?> settings, CancellationToken ct)
     {
         var app = FakeSalesforceServer.Build([], builder =>

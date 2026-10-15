@@ -61,6 +61,8 @@ internal static class WritePlanner
     /// </summary>
     /// <param name="problems">Receives what Salesforce would reject (a field that can't be written).</param>
     /// <param name="missing">Receives the lookups and foreign keys whose target is neither in Salesforce nor in the unit.</param>
+    /// <param name="unit">The unit, normalized.</param>
+    /// <param name="current">What the read found in Salesforce.</param>
     private static List<PlannedWrite> PlanUnit(NormalizedUnit unit, CurrentRecords current, List<SalesforceError> problems,
         List<SalesforceError> missing)
     {
@@ -187,6 +189,8 @@ internal static class WritePlanner
     /// actually be written.
     /// </summary>
     /// <param name="existing">The record in Salesforce, or null if it is new.</param>
+    /// <param name="record">The desired record, normalized.</param>
+    /// <param name="problems">Receives the fields that must be written but can't be.</param>
     public static Dictionary<string, object?> Changes(NormalizedRecord record, CurrentRecord? existing, List<SalesforceError> problems)
     {
         var changes = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);

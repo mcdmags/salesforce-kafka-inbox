@@ -20,6 +20,8 @@ internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, 
     /// the unit to write; if it can't be mapped, it is invalid.
     /// </summary>
     /// <param name="synced">Entity id -> the time (microseconds since the epoch) of its newest synced event.</param>
+    /// <param name="strategy">Reads, keys and maps the object's events.</param>
+    /// <param name="rows">The claimed events, any number per entity.</param>
     public static PreparedBatch Prepare<TEvent>(UpsertStrategy<TEvent> strategy, IReadOnlyList<InboxEvent> rows,
         IReadOnlyDictionary<string, long> synced)
     {

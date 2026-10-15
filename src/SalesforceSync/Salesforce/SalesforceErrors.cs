@@ -69,6 +69,9 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 
 /// <summary>An error Salesforce reported for one record (or for a whole subrequest), or one found before sending.</summary>
 /// <param name="Fields">The fields Salesforce blames, when it says.</param>
+/// <param name="ReferenceId">The subrequest the error belongs to, null for a call of its own.</param>
+/// <param name="Code">Salesforce's error code, e.g. FIELD_CUSTOM_VALIDATION_EXCEPTION.</param>
+/// <param name="Message">Salesforce's message, if any.</param>
 public sealed record SalesforceError(string? ReferenceId, string Code, string? Message, IReadOnlyList<string>? Fields = null)
 {
     public override string ToString()

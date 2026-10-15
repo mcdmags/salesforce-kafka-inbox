@@ -2,7 +2,7 @@ namespace SalesforceSync.Inbox;
 
 /// <summary>
 /// An inbox table as the sync engine uses it: store an event, claim a batch of entities, then record what became of
-/// them. The row type selects the table (see <see cref="SyncDbContext"/>), so one implementation serves every object.
+/// them. The row type selects the table (see <see cref="Data.SyncDbContext"/>), so one implementation serves every object.
 /// Every recording is conditional on the claim's lease token (on the entities' sf_sync_state rows), so a worker whose
 /// lease expired records nothing.
 /// </summary>
@@ -41,6 +41,7 @@ public interface IRepository<TEntity> where TEntity : InboxRow, new()
 /// <param name="SyncedTimes">
 /// Entity id -> the time (microseconds since the epoch) of its newest synced event: its sf_sync_state.synced_time.
 /// </param>
+/// <param name="Events">The claimed events of every leased entity.</param>
 public sealed record InboxClaim(
     Guid Token,
     IReadOnlyList<InboxEvent> Events,
@@ -53,6 +54,9 @@ public sealed record InboxClaim(
 
 /// <summary>A pending inbox row as claimed: the entity it belongs to and the raw event.</summary>
 /// <param name="AttemptCount">Times the event was claimed, this claim included.</param>
+/// <param name="Id">The inbox row's primary key (one row per event).</param>
+/// <param name="EntityId">The entity the event is about: the Kafka message key.</param>
+/// <param name="Payload">The event as received, JSON.</param>
 public sealed record InboxEvent(long Id, string EntityId, string Payload, int AttemptCount);
 
 /// <summary>
