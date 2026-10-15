@@ -59,9 +59,11 @@ public sealed class SyncOptions
     /// <summary>
     /// How long an idle entity waits after a new event before it is due (one already due or backing off keeps its
     /// time), so the rest of a burst of its events is claimed with it and merged into one write: fewer Salesforce
-    /// calls, for an entity synced up to this much later. Zero: due at once. Less than <see cref="Lease"/>.
+    /// calls, for an entity synced up to this much later. Zero: due at once. Less than <see cref="Lease"/>. 50 ms: the
+    /// streaming benchmark's 4 workers x 1 pod made about 11% fewer calls than with none, as many as with 100 ms
+    /// (docs/benchmarks/README.md).
     /// </summary>
-    public TimeSpan CoalesceDelay { get; set; } = TimeSpan.Zero;
+    public TimeSpan CoalesceDelay { get; set; } = TimeSpan.FromMilliseconds(50);
 
     public TimeSpan IdleDelay { get; set; } = TimeSpan.FromSeconds(1);
 }
