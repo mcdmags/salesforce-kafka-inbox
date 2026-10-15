@@ -11,6 +11,12 @@ they can change the API call counts of the drain benchmarks, so re-run them befo
 [Latest run](#latest-run-main-at-7a145b0-after-the-simplification) re-measures everything on `main` at 7a145b0, after
 the record types, the shared Describe cache and the simplification into fewer files (PR #20 to #24).
 
+**Since then the claim has changed.** Entities are now claimed by locking and leasing their row in one
+`sf_sync_state` table (`FOR UPDATE SKIP LOCKED`), and the inboxes hold only events (see the
+[main README](../../README.md#the-inbox)). The claim statements measured below (LockHeads, the claim lock, the
+inbox's lease, due-time and `synced_time` columns and their indexes, `InboxSql.PinPlans`) no longer exist; their
+numbers are kept as the record of that design, not as a description of the current one.
+
 [Sequential, limiter-only vs full](#sequential-limiter-only-vs-full) compares this version with one that has no parallel
 processing or race-condition handling, measured on `main` at 01b53b3.
 
@@ -531,17 +537,15 @@ What it means:
 
 ## Remaining risks
 
-- **Deep backlogs**: a claim that leases 1,500 rows costs 20 to 40 ms (more under load); the ≤ 10 ms target
-  holds up to about 375 rows. `Sync:MaxEventsPerEntity` is the knob.
-- **Statistics**: the pins remove the plan choice for the measured statements; a new inbox statement must be
-  measured with stale statistics too, or it can reintroduce a seconds-long plan.
-- **Isolation**: the claim lock relies on READ COMMITTED. Running the claim under REPEATABLE READ would take the
-  snapshot before the lock and reopen the race.
-- **Advisory lock keys** are `hashtext` of the inbox and entity id: two entities that hash alike are claimed one
-  after the other, never together. Harmless, but not zero.
-- **Round trips**: with EF Core the pins are a separate statement, one extra round trip per claim and per outcome
-  transaction.
-- **Lock table**: each claimed entity holds an advisory lock until commit; very large batch sizes need
-  `max_locks_per_transaction` headroom.
+(As of the `sf_sync_state` claim.)
+
+- **Deep backlogs**: a claim reads (and bumps `attempt_count` on) up to `Sync:MaxEventsPerEntity` events per entity,
+  so its cost grows with that setting. `Sync:MaxEventsPerEntity` is the knob.
+- **Statistics**: no planner settings are pinned; every statement is written so that its only sensible plan is an
+  index lookup by key. A new statement must be checked with stale statistics too (idle-then-backlog and
+  backlog-then-drained), or it can reintroduce a plan that scans a whole table or index.
+- **Isolation**: the claim relies on READ COMMITTED: a state row leased by another worker after the claim's snapshot
+  is re-checked on its new version when it is locked. Under REPEATABLE READ that would be a serialization error
+  instead.
 - **Noise**: the drain numbers above were measured on a busy machine; compare work counts first and times only
   across alternating runs.

@@ -29,7 +29,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
             rows => rows.Count == 1 && rows[0].ErrorCode == "UNKNOWN_OUTCOME", "the write's outcome to be recorded as unknown"))[0];
         var heldAt = DateTime.UtcNow;
         held.Status.Should().Be("pending");
-        held.RetryCount.Should().Be(0, "an unknown outcome doesn't spend a retry");
+        held.AttemptCount.Should().Be(0, "an unknown outcome doesn't spend an attempt");
         held.LockToken.Should().BeNull("the old worker can't record anything on it any more");
         held.LockedUntil.Should().BeAfter(heldAt.AddSeconds(1)).And.BeBefore(heldAt + Hold + TimeSpan.FromSeconds(1));
         ((string?)(await app.GetRecordAsync("Account", acct))?["Description"]).Should().Be("v1", "Salesforce did apply the write");
@@ -40,7 +40,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         await Task.Delay(TimeSpan.FromSeconds(1.5));
         var during = await app.GetInboxRowsAsync(acct);
         DateTime.UtcNow.Should().BeBefore(held.LockedUntil!.Value, "the check must fall inside the hold");
-        during.Should().OnlyContain(r => r.Status == "pending" && r.RetryCount == 0, "nothing of a held entity may be claimed");
+        during.Should().OnlyContain(r => r.Status == "pending" && r.AttemptCount == 0, "nothing of a held entity may be claimed");
         during[1].LockToken.Should().BeNull();
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v1");
 

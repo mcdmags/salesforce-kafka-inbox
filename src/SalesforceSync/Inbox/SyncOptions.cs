@@ -21,16 +21,16 @@ public sealed class SyncOptions
 
     /// <summary>
     /// Pending events of one entity taken per claim (the oldest first). An event is the full record, so only the
-    /// newest of them is written; the bound keeps a deep backlog for one entity from being leased and loaded whole.
+    /// newest of them is written; the bound keeps a deep backlog for one entity from being claimed and loaded whole.
     /// What is left is taken by the following claims.
     /// </summary>
     public int MaxEventsPerEntity { get; set; } = 20;
 
     /// <summary>
-    /// How long a claim owns its entities' rows (locked_until; lock_token says who). Between the claim transaction and
-    /// the outcome transaction nothing else holds them: no transaction or row lock spans the Salesforce calls. The
-    /// worker stops calling Salesforce at 80% of it, and a worker that crashes needs no cleanup: the lease expires
-    /// and the rows are claimable again. Must be longer than <c>SalesforceLimits:RequestTimeout</c>.
+    /// How long a claim owns its entities (sf_sync_state.locked_until; lock_token says who). Between the claim
+    /// transaction and the outcome transaction nothing else holds them: no transaction or row lock spans the Salesforce
+    /// calls. The worker stops calling Salesforce at 80% of it, and a worker that crashes needs no cleanup: the lease
+    /// expires and the entities are claimable again. Must be longer than <c>SalesforceLimits:RequestTimeout</c>.
     /// </summary>
     public TimeSpan Lease { get; set; } = TimeSpan.FromMinutes(5);
 
@@ -42,10 +42,16 @@ public sealed class SyncOptions
     /// </summary>
     public TimeSpan UnknownOutcomeHold { get; set; } = TimeSpan.FromMinutes(10);
 
-    /// <summary>Attempts before a transiently failing entity is dead-lettered (permanent errors: immediately).</summary>
+    /// <summary>
+    /// Claims of an event (its attempt_count) before it is dead-lettered on a transient failure (permanent errors:
+    /// immediately).
+    /// </summary>
     public int MaxRetries { get; set; } = 8;
 
-    /// <summary>Backoff after the first transient failure; doubles per attempt up to <see cref="MaxRetryDelay"/>.</summary>
+    /// <summary>
+    /// The entity's backoff after the first transient failure; doubles per attempt (of its most-attempted failed event)
+    /// up to <see cref="MaxRetryDelay"/>.
+    /// </summary>
     public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromSeconds(30);
 
     public TimeSpan MaxRetryDelay { get; set; } = TimeSpan.FromHours(1);

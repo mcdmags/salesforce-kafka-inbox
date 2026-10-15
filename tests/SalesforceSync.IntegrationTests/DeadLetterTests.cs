@@ -34,7 +34,7 @@ public sealed class DeadLetterTests(FewRetriesFixture app)
         (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Equal((1L, "dead"));
         var dead = (await app.GetInboxRowsAsync(rel, SyncFixture.Relationships))[0];
         dead.ErrorCode.Should().Be("DEPENDENCY_NOT_SYNCED", "the cause stays on the dead letter");
-        dead.RetryCount.Should().Be(FewRetriesFixture.MaxRetries);
+        dead.AttemptCount.Should().Be(FewRetriesFixture.MaxRetries);
         (await app.GetRecordAsync("Account_Relationship__c", rel)).Should().BeNull();
 
         // The Accounts arrive after all; the dead letter is re-queued by hand (the statement from the README)
@@ -43,9 +43,14 @@ public sealed class DeadLetterTests(FewRetriesFixture app)
         await app.WaitForInboxSettledAsync(parent, 1);
         await app.WaitForInboxSettledAsync(child, 1);
         await app.ExecuteSqlAsync("""
-            update sf_account_relationship_inbox
-            set status = 'pending', retry_count = 0, next_attempt_at = now(), locked_until = null, lock_token = null
-            where status = 'dead' and last_error_code = 'DEPENDENCY_NOT_SYNCED'
+            with requeued as (
+              update sf_account_relationship_inbox set status = 'pending', attempt_count = 0
+              where status = 'dead' and last_error_code = 'DEPENDENCY_NOT_SYNCED'
+              returning entity_id
+            )
+            insert into sf_sync_state as s (entity_type, entity_id, next_attempt_at)
+            select distinct 'accountRelationship', entity_id, now() from requeued
+            on conflict (entity_type, entity_id) do update set next_attempt_at = coalesce(s.next_attempt_at, now())
             """);
 
         (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Equal((1L, "done"));

@@ -14,9 +14,9 @@ namespace SalesforceSync.Sync;
 /// strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
 /// <item>Takes a global concurrency slot and respects a shared pause (rate limits, all pods).</item>
-/// <item>Claims up to <see cref="SyncOptions.BatchSize"/> entities from the inbox table: per entity, the head
-/// row is locked with FOR UPDATE SKIP LOCKED and its oldest pending rows are leased, so no two workers in any pod
-/// ever process the same entity at once.</item>
+/// <item>Claims up to <see cref="SyncOptions.BatchSize"/> due entities: each one's sf_sync_state row is locked with
+/// FOR UPDATE SKIP LOCKED and leased, so no two workers in any pod ever process the same entity at once, and its
+/// oldest pending events are read from the inbox table.</item>
 /// <item>Per entity, reads the claimed events and keeps the one with the newest event time (events carry the full
 /// record); the others are superseded, and so is the newest if it is not newer than what was already synced. Arrival
 /// order plays no part, so events may come out of order, over any partitions. An event that can't be read or
