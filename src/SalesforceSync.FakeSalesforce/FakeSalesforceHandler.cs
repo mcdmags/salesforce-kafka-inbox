@@ -59,6 +59,15 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
             });
         }
 
+        // Refused before it reaches the API (so not an API call), as Salesforce answers a request line and headers too long
+        if (UriAndHeadersBytes(request) is var size && size > FakeSalesforceStore.MaxUriAndHeadersBytes)
+        {
+            return Encoding.UTF8.GetByteCount(uri.PathAndQuery) > FakeSalesforceStore.MaxUriAndHeadersBytes
+                ? Json(request, HttpStatusCode.RequestUriTooLong, FakeJson.Errors("URI_TOO_LONG", "The URI is too long"))
+                : Json(request, HttpStatusCode.RequestHeaderFieldsTooLarge,
+                    FakeJson.Errors("REQUEST_HEADER_FIELDS_TOO_LARGE", $"URI and headers are {size:N0} bytes"));
+        }
+
         var calls = store.CountApiCall();
         HttpResponseMessage res;
 
@@ -99,6 +108,14 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
 
         res.Headers.TryAddWithoutValidation("Sforce-Limit-Info", $"api-usage={calls}/{options.DailyApiLimit}");
         return res;
+    }
+
+    /// <summary>The request's URI (path and query) and its headers as sent: "Name: value" and a line break each.</summary>
+    private static int UriAndHeadersBytes(HttpRequestMessage request)
+    {
+        var headers = request.Headers.Concat(request.Content?.Headers ?? Enumerable.Empty<KeyValuePair<string, IEnumerable<string>>>())
+            .Sum(h => Encoding.UTF8.GetByteCount($"{h.Key}: {string.Join(", ", h.Value)}\r\n"));
+        return Encoding.UTF8.GetByteCount(request.RequestUri!.PathAndQuery) + headers;
     }
 
     private static string QueryOf(Uri uri)

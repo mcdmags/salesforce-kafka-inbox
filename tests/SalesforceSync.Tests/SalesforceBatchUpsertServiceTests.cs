@@ -421,6 +421,71 @@ public sealed class SalesforceBatchUpsertServiceTests
         ((string?)_org.FindByExternalId("Profile__c", "P-OLD2")!["Tier__c"]).Should().Be("Silver");
     }
 
+    // ---------- Query URL length ----------
+
+    [Fact]
+    public async Task Ids_too_long_for_five_queries_are_read_with_more_Composite_requests()
+    {
+        // 100 Accounts and 100 Profiles with 250-character ids: about 45 ids fit a query's URL, so 3 queries each
+        var units = Enumerable.Range(0, 100).Select(i => ($"{i:D3}{new string('a', 247)}", Event(new() { ["name"] = $"N{i}" }, []))).ToArray();
+        await Account("WARM", new() { ["name"] = "Warm" }, []); // warms the describe cache
+        var before = _org.GetStats();
+
+        (await Accounts(units)).Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
+        var afterCreate = _org.GetStats();
+        (await Accounts(units)).Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Unchanged,
+            "the rows of both reads are found by their reference ids");
+
+        var after = _org.GetStats();
+        (afterCreate.CompositeRequests - before.CompositeRequests).Should().Be(3, "6 queries: two reads; then one write");
+        (after.ApiCalls - afterCreate.ApiCalls).Should().Be(2, "the two reads; nothing to write");
+        (after.Queries - afterCreate.Queries).Should().Be(6);
+    }
+
+    [Fact]
+    public async Task A_query_URL_over_the_budget_is_refused_before_any_call_and_one_at_it_is_sent()
+    {
+        var client = new SalesforceRestClient(new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") });
+        static string Soql(int urlBytes)
+        {
+            var empty = SalesforceRestClient.Soql("Account", ["Id"], "ExternalId__c", [""]);
+            return SalesforceRestClient.Soql("Account", ["Id"], "ExternalId__c",
+                [new string('a', urlBytes - SalesforceRestClient.QueryUrl(empty).Length)]);
+        }
+
+        var before = _org.GetStats();
+        var tooLong = () => client.QueryAsync([new CompositeQuery("q0", Soql(SalesforceRestClient.MaxUrlBytes + 1))], CancellationToken.None);
+        await tooLong.Should().ThrowAsync<ArgumentException>().WithMessage("The URL is * bytes; a call allows *");
+        _org.GetStats().ApiCalls.Should().Be(before.ApiCalls);
+
+        var atBudget = Soql(SalesforceRestClient.MaxUrlBytes);
+        SalesforceRestClient.QueryUrl(atBudget).Length.Should().Be(SalesforceRestClient.MaxUrlBytes);
+        (await client.QueryAsync([new CompositeQuery("q0", atBudget)], CancellationToken.None))["q0"].Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task The_mock_org_refuses_a_URI_over_16384_bytes_as_Salesforce_does()
+    {
+        var http = new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
+        var subrequest = new JsonObject
+        {
+            ["compositeRequest"] = new JsonArray(new JsonObject
+            {
+                ["method"] = "GET",
+                ["url"] = $"/services/data/v62.0/query?q={new string('a', FakeSalesforceStore.MaxUriAndHeadersBytes)}",
+                ["referenceId"] = "q0"
+            })
+        };
+
+        using var direct = await http.GetAsync($"/services/data/v62.0/query?q={new string('a', FakeSalesforceStore.MaxUriAndHeadersBytes)}");
+        using var composite = await http.PostAsync("/services/data/v62.0/composite",
+            new StringContent(subrequest.ToJsonString(), System.Text.Encoding.UTF8, "application/json"));
+
+        direct.StatusCode.Should().Be(System.Net.HttpStatusCode.RequestUriTooLong);
+        var answer = JsonNode.Parse(await composite.Content.ReadAsStringAsync())!["compositeResponse"]![0]!;
+        ((int)answer["httpStatusCode"]!, (string?)answer["body"]![0]!["errorCode"]).Should().Be((414, "URI_TOO_LONG"));
+    }
+
     // ---------- Real lookups (test-only objects): Id resolution and @{reference} ----------
 
     [Fact]

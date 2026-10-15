@@ -8,22 +8,26 @@ internal sealed record ReadQuery(CompositeQuery Query, string SObject);
 
 /// <summary>
 /// Builds the batch's read: the strategy's queries as SOQL, each selecting every field the diff compares and the Ids
-/// the lookups need (or the external ids that show a parent exists), split into chunks of 100 values.
+/// the lookups need (or the external ids that show a parent exists), split into chunks of at most 100 values whose
+/// URL fits a call (<see cref="SalesforceRestClient.MaxUrlBytes"/>).
 /// </summary>
 internal static class ReadQueryBuilder
 {
-    /// <summary>External ids per query; with 5 queries per Composite request this is what bounds Sync:BatchSize.</summary>
+    /// <summary>External ids per query, at most; fewer when long ids would make its URL too long.</summary>
     internal const int MaxValuesPerQuery = 100;
 
     /// <summary>
-    /// Entities per batch. Not a Salesforce limit of its own: the batch's read must fit one Composite request, i.e. 5
-    /// queries of <see cref="MaxValuesPerQuery"/> external ids each, and an entity can need up to 3 ids per 100 (a
-    /// relationship: itself and two Accounts). The write side would allow more (5 collections of 200 records).
+    /// Entities per batch. Not a Salesforce limit of its own: it keeps a batch's read to one Composite request while
+    /// the ids are short, i.e. 5 queries of <see cref="MaxValuesPerQuery"/> external ids each, where an entity can need
+    /// up to 3 ids per 100 (a relationship: itself and two Accounts). Ids long enough to split the queries further
+    /// cost more read calls, not a failure. The write side would allow more (5 collections of 200 records).
     /// </summary>
     internal const int MaxEntitiesPerBatch = MaxValuesPerQuery;
 
-    /// <summary>One query per chunk of values, named q0, q1, ...</summary>
-    /// <exception cref="InvalidOperationException">More queries than a Composite request takes.</exception>
+    /// <summary>
+    /// One query per chunk of values, named q0, q1, ...; more than one Composite request takes (5) are sent as several.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A query's URL is too long even with a single value.</exception>
     public static List<ReadQuery> Build(IReadOnlyList<NormalizedUnit> units, IReadOnlyList<SoqlQuery> queries,
         IReadOnlyDictionary<string, SObjectSchema> schemas)
     {
@@ -35,17 +39,53 @@ internal static class ReadQueryBuilder
             var target = schemas[query.SObject];
             var fields = FieldsToSelect(target, query, records);
 
-            foreach (var chunk in query.Values.Distinct(StringComparer.Ordinal).Chunk(MaxValuesPerQuery))
+            foreach (var soql in Chunked(target.Name, fields, query.WhereField, query.Values.Distinct(StringComparer.Ordinal)))
             {
-                var soql = SalesforceRestClient.Soql(target.Name, fields, query.WhereField, chunk);
                 composite.Add(new ReadQuery(new CompositeQuery($"q{composite.Count}", soql), target.Name));
             }
         }
 
-        return composite.Count > SalesforceRestClient.MaxCompositeQueries
-            ? throw new InvalidOperationException(
-                $"The strategy's queries need {composite.Count} SOQL queries; a Composite request allows {SalesforceRestClient.MaxCompositeQueries}. Use a smaller Sync:BatchSize.")
-            : composite;
+        return composite;
+    }
+
+    /// <summary>
+    /// The values in order as queries of at most <see cref="MaxValuesPerQuery"/> values: a query takes the next value
+    /// while its URL, built as the client sends it, still fits.
+    /// </summary>
+    private static IEnumerable<string> Chunked(string sobject, List<string> fields, string whereField, IEnumerable<string> values)
+    {
+        var chunk = new List<string>();
+        string? soql = null; // chunk's query
+        foreach (var value in values)
+        {
+            if (chunk.Count < MaxValuesPerQuery
+                && SalesforceRestClient.Soql(sobject, fields, whereField, [.. chunk, value]) is var longer
+                && SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(longer)))
+            {
+                chunk.Add(value);
+                soql = longer;
+                continue;
+            }
+
+            if (soql is not null)
+            {
+                yield return soql;
+            }
+
+            chunk = [value];
+            soql = SalesforceRestClient.Soql(sobject, fields, whereField, chunk);
+            if (!SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(soql)))
+            {
+                throw new InvalidOperationException(
+                    $"The read of {sobject} by {whereField} does not fit a URL ({SalesforceRestClient.MaxUrlBytes:N0} bytes) " +
+                    $"even for one value ({value.Length:N0} characters) and its {fields.Count} fields");
+            }
+        }
+
+        if (soql is not null)
+        {
+            yield return soql;
+        }
     }
 
     /// <summary>
