@@ -25,8 +25,6 @@ public class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(
 
     public DbSet<ContactInboxRow> ContactInbox => Set<ContactInboxRow>();
 
-    public DbSet<SyncStateRow> SyncState => Set<SyncStateRow>();
-
     /// <summary>The tables of all inbox row types, as the model names them.</summary>
     public IReadOnlyList<string> InboxTables => [.. Model.GetEntityTypes()
         .Where(e => e.ClrType.IsAssignableTo(typeof(InboxRow)))
@@ -60,16 +58,6 @@ public class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(
         ConfigureInbox(modelBuilder.Entity<AccountInboxRow>(), "sf_account_inbox");
         ConfigureInbox(modelBuilder.Entity<AccountRelationshipInboxRow>(), "sf_account_relationship_inbox");
         ConfigureInbox(modelBuilder.Entity<ContactInboxRow>(), "sf_contact_inbox");
-
-        modelBuilder.Entity<SyncStateRow>(e =>
-        {
-            e.ToTable("sf_sync_state");
-            e.HasKey(s => new { s.EntityType, s.EntityId });
-            e.Property(s => s.EntityType).HasColumnName("entity_type");
-            e.Property(s => s.EntityId).HasColumnName("entity_id");
-            e.Property(s => s.SyncedTime).HasColumnName("synced_time");
-            e.Property(s => s.SyncedAt).HasColumnName("synced_at").HasDefaultValueSql("now()");
-        });
     }
 
     /// <summary>
@@ -92,19 +80,6 @@ public class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(
         e.Property(r => r.LockedUntil).HasColumnName("locked_until");
         e.Property(r => r.LockToken).HasColumnName("lock_token");
         e.Property(r => r.ReceivedAt).HasColumnName("received_at").HasDefaultValueSql("now()");
+        e.Property(r => r.SyncedTime).HasColumnName("synced_time");
     }
-}
-
-/// <summary>A row of <c>sf_sync_state</c>: the newest event time synced to Salesforce for an entity.</summary>
-public sealed class SyncStateRow
-{
-    /// <summary>The strategy's entity type, e.g. 'account'.</summary>
-    public string EntityType { get; set; } = "";
-
-    public string EntityId { get; set; } = "";
-
-    /// <summary>The newest synced event's time, microseconds since the epoch.</summary>
-    public long SyncedTime { get; set; }
-
-    public DateTimeOffset SyncedAt { get; set; }
 }

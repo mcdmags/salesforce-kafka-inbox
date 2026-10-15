@@ -285,6 +285,12 @@ public class SyncFixture : IAsyncLifetime
         };
     }
 
+    /// <summary>The synced_time of version N: its meta.time in microseconds since the epoch, as the worker stores it.</summary>
+    public static long SyncedTime(long version)
+    {
+        return (BaseTime.AddMilliseconds(version) - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
+    }
+
     private static JsonObject Body(string externalId, JsonObject fields)
     {
         var body = new JsonObject { ["externalId"] = externalId };

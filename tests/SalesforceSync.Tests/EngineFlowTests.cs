@@ -25,7 +25,7 @@ public sealed class EngineFlowTests
     {
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
 
-        _inbox.Calls.Should().Equal("claim account");
+        _inbox.Calls.Should().Equal("claim");
     }
 
     [Fact]
@@ -43,7 +43,7 @@ public sealed class EngineFlowTests
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(4);
 
         ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("new");
-        _inbox.Calls.Should().Equal("claim account", "record");
+        _inbox.Calls.Should().Equal("claim", "record");
         var outcomes = _inbox.Recorded!;
         outcomes.Synced.Should().ContainSingle().Which.Should().Be(
             new SyncedEntity("ACC-1", PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T02:00:00Z")), 2));
@@ -97,26 +97,27 @@ public sealed class EngineFlowTests
         _inbox.Recorded!.Dead.Should().ContainSingle();
     }
 
-    // ---------- Direct upsert (contacts) ----------
+    // ---------- Contacts: read and diff, then one upsert ----------
 
     [Fact]
-    public async Task A_direct_upsert_batch_writes_without_a_read_and_records_every_outcome()
+    public async Task A_contact_batch_is_read_then_written_in_one_upsert_and_every_outcome_is_recorded()
     {
         await CreateAccountAsync("ACC-9");
         _org.InjectFault("Contact", "C-2", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "rejected", 1);
         _inbox.Rows.AddRange([Contact(1, "C-1", "ACC-9"), Contact(2, "C-2", "ACC-9")]);
-        _http.OnRead = _ => throw new InvalidOperationException("a direct upsert reads nothing");
+        var before = _org.GetStats();
 
         (await Engine().UpsertBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
 
-        _inbox.Calls.Should().Equal("claim contact", "record");
+        _inbox.Calls.Should().Equal("claim", "record");
         _inbox.Recorded!.Synced.Should().ContainSingle().Which.EntityId.Should().Be("C-1");
         _inbox.Recorded.Dead.Should().ContainSingle().Which.Code.Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION");
         _http.Writes.Should().Be(1, "both contacts in one upsert call");
+        (_org.GetStats().UpsertRequests - before.UpsertRequests).Should().Be(1, "a new Contact on an existing Account needs no reference");
     }
 
     [Fact]
-    public async Task A_direct_upsert_whose_answer_is_lost_holds_every_claimed_row()
+    public async Task A_contact_upsert_whose_answer_is_lost_holds_every_claimed_row()
     {
         await CreateAccountAsync("ACC-9");
         _inbox.Rows.AddRange([Contact(1, "C-1", "ACC-9"), Contact(2, "C-2", "ACC-9")]);
@@ -124,7 +125,7 @@ public sealed class EngineFlowTests
 
         (await Engine().UpsertBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
 
-        _inbox.Calls.Should().Equal("claim contact", "hold");
+        _inbox.Calls.Should().Equal("claim", "hold");
     }
 
     /// <summary>The contacts' Account, synced through the account strategy.</summary>
@@ -153,7 +154,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal(["claim account", "fail all: refused ()"],
+        _inbox.Calls.Should().Equal(["claim", "fail all: refused ()"],
             "every event is retried and none is marked done, not even NEW's, whose call succeeded");
     }
 
@@ -182,7 +183,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim account", "hold");
+        _inbox.Calls.Should().Equal("claim", "hold");
     }
 
     [Fact]
@@ -194,7 +195,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim account", $"fail all: Salesforce 403: {body} ()");
+        _inbox.Calls.Should().Equal("claim", $"fail all: Salesforce 403: {body} ()");
     }
 
     // ---------- Failures of the read ----------
@@ -373,10 +374,10 @@ public sealed class EngineFlowTests
             return Call($"add {entityId}");
         }
 
-        public Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct)
+        public Task<InboxClaim> ClaimAsync(CancellationToken ct)
         {
-            Calls.Add($"claim {entityType}");
-            return Task.FromResult(new InboxClaim(entityType, Guid.NewGuid(), Rows, Synced));
+            Calls.Add("claim");
+            return Task.FromResult(new InboxClaim(Guid.NewGuid(), Rows, Synced));
         }
 
         public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)

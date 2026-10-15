@@ -214,8 +214,13 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishAsync(acct, 3, new JsonObject { ["name"] = name, ["rating"] = "Cold" }, new JsonObject { ["tier"] = "Bronze" });
         var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
         inbox.Should().Equal((3L, "superseded"), (5L, "done"));
+        await using (var conn = await app.Db.OpenConnectionAsync())
+        {
+            (await conn.QueryAsync<long?>($"select synced_time from {SyncFixture.InboxTable()} where entity_id = @acct order by id", new { acct }))
+                .Should().Equal([SyncFixture.SyncedTime(5), null], "only the row written to Salesforce has a synced time");
+        }
 
-        // sf_sync_state already holds v5 for the account, so v3 never reached Salesforce
+        // v5's done row already holds the account's watermark, so v3 never reached Salesforce
         var account = await app.GetRecordAsync("Account", acct);
         account.Should().NotBeNull();
         ((string?)account!["Rating"]).Should().Be("Hot");
@@ -225,6 +230,30 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         profile.Should().NotBeNull();
         ((string?)profile!["Tier__c"]).Should().Be("Platinum");
         (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().ContainSingle("the stale event must not be written");
+    }
+
+    [Fact]
+    public async Task Watermark_is_the_newest_synced_time_of_the_entitys_done_rows()
+    {
+        var acct = SyncFixture.NewAccountId();
+        // Done rows as earlier syncs (or the move out of sf_sync_state) leave them; one from before synced_time existed has none
+        long[] versions = [3, 5, 6];
+        await using (var conn = await app.Db.OpenConnectionAsync())
+        {
+            await conn.ExecuteAsync(
+                $"insert into {SyncFixture.InboxTable()} (entity_id, payload, status, synced_time) select @acct, p::jsonb, 'done', t from unnest(@payloads, @times) as u(p, t)",
+                new
+                {
+                    acct,
+                    payloads = versions.Select(v => SyncFixture.AccountEvent(acct, v, new JsonObject { ["name"] = $"v{v}" }, []).ToJsonString()).ToArray(),
+                    times = new long?[] { SyncFixture.SyncedTime(3), SyncFixture.SyncedTime(5), null }
+                });
+        }
+
+        await app.PublishAsync(acct, 4, new JsonObject { ["name"] = "v4" }, []);
+
+        (await app.WaitForInboxSettledAsync(acct, expectedRows: 4)).Should().Equal((3L, "done"), (4L, "superseded"), (5L, "done"), (6L, "done"));
+        (await app.GetRecordAsync("Account", acct)).Should().BeNull("v4 is not newer than v5, the newest synced time, so it is not written");
     }
 
     [Fact]

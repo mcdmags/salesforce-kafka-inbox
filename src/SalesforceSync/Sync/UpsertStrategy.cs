@@ -14,23 +14,19 @@ namespace SalesforceSync.Sync;
 /// field: they go through <paramref name="EntityId"/> and <paramref name="Meta"/>.
 /// </summary>
 /// <typeparam name="TEvent">The inbox payload (the whole event envelope).</typeparam>
-/// <param name="EntityType">The strategy's name, e.g. "account": the key of its watermarks and of its topic setting.</param>
+/// <param name="EntityType">The strategy's name, e.g. "account": the key of its topic setting, and how logs name it.</param>
 /// <param name="EntityId">The id of the entity an event is about (e.g. account.externalId), or null if it has none.</param>
 /// <param name="Meta">The event's meta, or null if it has none: when the event happened (meta.time, which must have an
 /// explicit offset) and what the source says happened (meta.type: inserted or updated). The type is only checked at
 /// ingest, so a delete is never synced; whether a record is created or updated is decided by what Salesforce has.</param>
 /// <param name="Map">Inbox event (with its entity id) -> the records to upsert together.</param>
-/// <param name="Queries">The batch's units -> the reads (at most 5 after chunking) the diff and lookups need. Not called
-/// with <see cref="WriteMode.DirectUpsert"/>, which reads nothing.</param>
-/// <param name="Mode">How the records reach Salesforce: compared with what it has first (the default), or upserted
-/// by external id without a read (<see cref="WriteMode"/>).</param>
+/// <param name="Queries">The batch's units -> the reads (at most 5 after chunking) the diff and lookups need.</param>
 public sealed record UpsertStrategy<TEvent>(
     string EntityType,
     Func<TEvent, string?> EntityId,
     Func<TEvent, EventMeta?> Meta,
     Func<string, TEvent, UpsertUnit> Map,
-    Func<IReadOnlyCollection<UpsertUnit>, IEnumerable<SoqlQuery>> Queries,
-    WriteMode Mode = WriteMode.ReadAndDiff)
+    Func<IReadOnlyCollection<UpsertUnit>, IEnumerable<SoqlQuery>> Queries)
 {
     /// <summary>
     /// Reads and validates a raw event: valid JSON for <typeparamref name="TEvent"/>, an entity with a non-empty id,
@@ -76,26 +72,6 @@ public sealed record UpsertStrategy<TEvent>(
         }
         return false;
     }
-}
-
-/// <summary>How a strategy's records are written. Everything before (describe, normalize, record type) and after
-/// (per-record results -> outcome per entity, holds, retries) is the same in both modes.</summary>
-public enum WriteMode
-{
-    /// <summary>
-    /// Read the records from Salesforce, write only what differs (create or update by what the read found), link
-    /// children to parents created in the same request by Composite reference. Two calls per batch; an unchanged
-    /// record isn't written at all.
-    /// </summary>
-    ReadAndDiff,
-
-    /// <summary>
-    /// sObject Collections upsert by external id (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>): no
-    /// read, no diff, every record of the batch sent whole, lookups set by the parent's external id. One call per
-    /// object and 200 records. For objects where a write costs little (no meaningful automation, field history or
-    /// drift to repair) and API calls matter more.
-    /// </summary>
-    DirectUpsert
 }
 
 /// <summary>An inbox event that passed <see cref="UpsertStrategy{TEvent}.TryRead"/>: the typed event, whose it is and when.</summary>

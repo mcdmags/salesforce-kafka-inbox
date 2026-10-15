@@ -10,9 +10,9 @@ using static SalesforceSync.Data.SqlCommands;
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// <see cref="IRepository{TEntity}"/> on Postgres, for any inbox row type: the claim and the failure statements are the
-/// <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL; the outcomes that are a plain
-/// conditional UPDATE are LINQ (<c>ExecuteUpdate</c>), one statement with the same WHERE as the SQL it replaced.
+/// <see cref="IRepository{TEntity}"/> on Postgres, for any inbox row type: the claim, done and the failure statements
+/// are the <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL; the outcomes that are a
+/// plain conditional UPDATE are LINQ (<c>ExecuteUpdate</c>), one statement with the same WHERE as the SQL it replaced.
 /// Each unit of work runs through EF's execution strategy (<see cref="PostgresRetryStrategy"/>).
 /// </summary>
 public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TEntity>
@@ -35,13 +35,13 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     }
 
     /// <summary>
-    /// Locks and leases a batch, and reads the claimed entities' watermarks in the same transaction. A fresh token per
-    /// attempt: if a commit's outcome is unknown and the claim is retried, rows leased by the lost attempt are not
-    /// mistaken for this one's. The retry releases them first, so they don't wait for their lease to expire (and a
-    /// lease nobody works on is never taken over). The transaction ends before Salesforce is called: from then on the
-    /// lease (lock_token, locked_until) protects the rows, not a lock.
+    /// Locks and leases a batch, and reads the claimed entities' watermarks (their done rows' newest synced_time) in
+    /// the same transaction. A fresh token per attempt: if a commit's outcome is unknown and the claim is retried, rows
+    /// leased by the lost attempt are not mistaken for this one's. The retry releases them first, so they don't wait
+    /// for their lease to expire (and a lease nobody works on is never taken over). The transaction ends before
+    /// Salesforce is called: from then on the lease (lock_token, locked_until) protects the rows, not a lock.
     /// </summary>
-    public Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct)
+    public Task<InboxClaim> ClaimAsync(CancellationToken ct)
     {
         var attempted = new List<Guid>();
         var attemptedEntityIds = new HashSet<string>(StringComparer.Ordinal);
@@ -63,17 +63,16 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
                 Param("batchSize", Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)))).ToArray();
             if (entityIds.Length == 0)
             {
-                return new InboxClaim(entityType, token, [], new Dictionary<string, long>());
+                return new InboxClaim(token, [], new Dictionary<string, long>());
             }
             attemptedEntityIds.UnionWith(entityIds);
 
             var events = await db.Database.QueryAsync<InboxEvent>(sql.ClaimEntities, t,
                 Param("entityIds", entityIds), Param("token", token), Param("lease", _opt.Lease),
                 Param("maxPerEntity", _opt.MaxEventsPerEntity));
-            var synced = await db.SyncState.AsNoTracking()
-                .Where(s => s.EntityType == entityType && entityIds.Contains(s.EntityId))
-                .ToDictionaryAsync(s => s.EntityId, s => s.SyncedTime, StringComparer.Ordinal, t);
-            return new InboxClaim(entityType, token, events, synced);
+            var synced = (await db.Database.QueryAsync<Watermark>(sql.SyncedTimes, t, Param("entityIds", entityIds)))
+                .ToDictionary(w => w.EntityId, w => w.SyncedTime, StringComparer.Ordinal);
+            return new InboxClaim(token, events, synced);
         }, ct);
     }
 
@@ -92,16 +91,12 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             await db.Database.ExecuteAsync(InboxSql.PinPlans, t);
             if (outcomes.Synced.Count > 0)
             {
-                // Watermarks first: Complete releases the lease that MarkSynced checks
-                await db.Database.ExecuteAsync(sql.MarkSynced, t,
-                    Param("entityType", claim.EntityType), Param("token", token),
-                    Param("entityIds", outcomes.Synced.Select(s => s.EntityId).ToArray()),
-                    Param("times", outcomes.Synced.Select(s => s.EventTime).ToArray()));
-                await CompleteAsync(db, [.. outcomes.Synced.Select(s => s.EventId)], token, "done", t);
+                await db.Database.ExecuteAsync(sql.Done, t, Param("ids", outcomes.Synced.Select(s => s.EventId).ToArray()),
+                    Param("times", TimesJson(outcomes.Synced)), Param("token", token));
             }
             if (outcomes.Superseded.Count > 0)
             {
-                await CompleteAsync(db, [.. outcomes.Superseded], token, "superseded", t);
+                await SupersedeAsync(db, [.. outcomes.Superseded], token, t);
             }
             if (outcomes.Released.Count > 0)
             {
@@ -136,11 +131,11 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         return db.Set<TEntity>().Where(r => ids.Contains(r.Id) && r.LockToken == token);
     }
 
-    /// <summary>Done or superseded (<paramref name="status"/>): the row leaves the queue.</summary>
-    private static Task<int> CompleteAsync(SyncDbContext db, long[] ids, Guid token, string status, CancellationToken ct)
+    /// <summary>Not written (an event of the same entity is newer, or as new was already synced): the row leaves the queue.</summary>
+    private static Task<int> SupersedeAsync(SyncDbContext db, long[] ids, Guid token, CancellationToken ct)
     {
         return Leased(db, ids, token).ExecuteUpdateAsync(u => u
-                .SetProperty(r => r.Status, status)
+                .SetProperty(r => r.Status, "superseded")
                 .SetProperty(r => r.LockedUntil, (DateTimeOffset?)null)
                 .SetProperty(r => r.LockToken, (Guid?)null)
                 .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
@@ -192,6 +187,12 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         return [.. rows.Select(r => r.EventId)];
     }
 
+    /// <summary>{ "row id": event time }, as InboxSql.Done takes the times.</summary>
+    private static string TimesJson(IReadOnlyList<SyncedEntity> synced)
+    {
+        return JsonSerializer.Serialize(synced.ToDictionary(s => s.EventId.ToString(CultureInfo.InvariantCulture), s => s.EventTime));
+    }
+
     /// <summary>{ "row id": [error, code] }, as InboxSql.Fail / Dead take the errors.</summary>
     private static string ErrorsJson(IReadOnlyList<FailedEvent> rows)
     {
@@ -202,4 +203,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         }
         return JsonSerializer.Serialize(errors);
     }
+
+    /// <summary>A row of InboxSql.SyncedTimes.</summary>
+    private sealed record Watermark(string EntityId, long SyncedTime);
 }

@@ -255,7 +255,7 @@ public abstract class DrainBenchmarkBase
         {
             await db.Database.ExecuteAsync($"truncate {table} restart identity", default);
         }
-        await db.Database.ExecuteAsync("truncate sf_sync_state; truncate sf_claim_audit", default);
+        await db.Database.ExecuteAsync("truncate sf_claim_audit", default);
 
         (_events, _expected) = Generate();
         if (!StreamIngest)

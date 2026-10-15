@@ -42,7 +42,7 @@ internal static class SalesforceStep
             throw NotUsed();
         }
 
-        public Task<InboxClaim> ClaimAsync(string entityType, CancellationToken ct)
+        public Task<InboxClaim> ClaimAsync(CancellationToken ct)
         {
             throw NotUsed();
         }
