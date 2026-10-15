@@ -24,6 +24,10 @@ internal static class TokenBucket
     /// <summary>Whether <paramref name="permits"/> calls may be made now, and if not, how long until they may.</summary>
     /// <param name="used">This integration's calls in the buckets since <see cref="RateLimitOptions.CountedWindow"/> ago.</param>
     /// <param name="oldestBucket">The oldest of those buckets, null if there are none.</param>
+    /// <param name="s">The shared bucket row, locked by the caller.</param>
+    /// <param name="now">The database clock, read with the lock.</param>
+    /// <param name="permits">Calls to make.</param>
+    /// <param name="options">The budget window and usage bucket size.</param>
     public static AcquireDecision Decide(RateLimitState s, DateTimeOffset now, long used, DateTimeOffset? oldestBucket,
         int permits, RateLimitOptions options)
     {

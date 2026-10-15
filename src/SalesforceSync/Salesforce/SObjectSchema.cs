@@ -3,6 +3,13 @@ namespace SalesforceSync.Salesforce;
 /// <summary>Salesforce field metadata from sObject Describe (only what the diff and validation need).</summary>
 /// <param name="Precision">Numbers with decimals: total digits; digits left of the point = Precision - Scale.</param>
 /// <param name="Digits">int and long fields: the maximum number of digits (they have no precision).</param>
+/// <param name="Name">The field's API name.</param>
+/// <param name="Type">Describe's type, e.g. string, double, date, reference.</param>
+/// <param name="Length">Text fields: the maximum length.</param>
+/// <param name="Scale">Numbers with decimals: digits right of the point.</param>
+/// <param name="Createable">Can be set when creating a record.</param>
+/// <param name="Updateable">Can be changed on an existing record.</param>
+/// <param name="Nillable">Can be empty.</param>
 public sealed record SalesforceField(
     string Name,
     string Type,
@@ -16,6 +23,9 @@ public sealed record SalesforceField(
 
 /// <summary>A record type from sObject Describe's <c>recordTypeInfos</c> (names as in the API).</summary>
 /// <param name="Available">Assigned to the running user (profile or permission set), so records can be given it.</param>
+/// <param name="DeveloperName">The record type's API name.</param>
+/// <param name="RecordTypeId">Its Id, the value of a record's RecordTypeId.</param>
+/// <param name="Active">Active in the org.</param>
 public sealed record SalesforceRecordType(string DeveloperName, string RecordTypeId, bool Active, bool Available);
 
 /// <summary>

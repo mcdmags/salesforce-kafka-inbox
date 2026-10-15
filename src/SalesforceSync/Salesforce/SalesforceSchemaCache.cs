@@ -59,6 +59,9 @@ public sealed class SalesforceSchemaCache(
     private long _lastWarningTicks;
 
     /// <param name="fetch">Calls Describe; the argument is the If-Modified-Since value (null = unconditional).</param>
+    /// <param name="sobject">The object's API name, e.g. Account.</param>
+    /// <param name="refreshInterval">How old a cached Describe may be before it is checked again.</param>
+    /// <param name="ct">Cancels the wait and the call.</param>
     public async Task<SObjectSchema> GetAsync(string sobject, TimeSpan refreshInterval,
         Func<DateTimeOffset?, CancellationToken, Task<DescribeResult>> fetch, CancellationToken ct)
     {

@@ -143,6 +143,7 @@ internal sealed record PlannedUnit(string Key, IReadOnlyList<PlannedWrite> Write
 /// <param name="Depth">0 for a record that points at nothing in its unit (by a lookup or a foreign key), 1 for its children, ...</param>
 /// <param name="ExternalIdField">The external id field as the org names it, which the upsert matches records by.</param>
 /// <param name="ByReference">It points at its new parent by reference (<c>@{Account[3].id}</c>).</param>
+/// <param name="SObject">The object's API name.</param>
 internal sealed record CollectionKey(int Depth, string SObject, string ExternalIdField, bool ByReference);
 
 /// <summary>A lookup to set, by reference, to a record that is created in the same request.</summary>
@@ -164,6 +165,10 @@ internal enum WriteStatus
 /// <param name="changes">The fields to send, by API name.</param>
 /// <param name="parents">The new records of its unit it points at (by a lookup or a foreign key): sent before it.</param>
 /// <param name="lookupFields">The lookups this write sets, by field name.</param>
+/// <param name="record">The record as normalized against Describe.</param>
+/// <param name="id">Its Id in Salesforce, null when it is new.</param>
+/// <param name="links">The lookups set by reference to a new parent's result.</param>
+/// <param name="depth">Its level in the unit: after every record it points at.</param>
 internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnlyDictionary<string, object?> changes,
     IReadOnlyList<ParentReference> links, IReadOnlyList<PlannedWrite> parents, IReadOnlySet<string> lookupFields, int depth)
 {

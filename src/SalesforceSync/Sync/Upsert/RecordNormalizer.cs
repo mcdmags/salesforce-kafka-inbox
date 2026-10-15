@@ -38,6 +38,9 @@ internal static class RecordNormalizer
     }
 
     /// <param name="problems">Why Salesforce would reject the unit; empty when it can be written.</param>
+    /// <param name="key">The entity's key, for the errors.</param>
+    /// <param name="unit">The records the strategy mapped.</param>
+    /// <param name="schemas">Describe of every object in the unit, by API name.</param>
     public static NormalizedUnit Normalize(string key, UpsertUnit unit, IReadOnlyDictionary<string, SObjectSchema> schemas,
         out List<SalesforceError> problems)
     {
