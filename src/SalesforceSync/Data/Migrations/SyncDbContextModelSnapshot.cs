@@ -180,10 +180,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("status")
                         .HasDefaultValueSql("'pending'");
 
-                    b.Property<long?>("SyncedTime")
-                        .HasColumnType("bigint")
-                        .HasColumnName("synced_time");
-
                     b.HasKey("Id")
                         .HasName("sf_account_inbox_pkey");
 
@@ -260,10 +256,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("status")
                         .HasDefaultValueSql("'pending'");
 
-                    b.Property<long?>("SyncedTime")
-                        .HasColumnType("bigint")
-                        .HasColumnName("synced_time");
-
                     b.HasKey("Id")
                         .HasName("sf_account_relationship_inbox_pkey");
 
@@ -339,10 +331,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("status")
                         .HasDefaultValueSql("'pending'");
-
-                    b.Property<long?>("SyncedTime")
-                        .HasColumnType("bigint")
-                        .HasColumnName("synced_time");
 
                     b.HasKey("Id")
                         .HasName("sf_contact_inbox_pkey");

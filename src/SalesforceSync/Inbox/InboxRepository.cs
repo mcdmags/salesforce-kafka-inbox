@@ -4,7 +4,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Sync;
 using SalesforceSync.Sync.Upsert;
 
 namespace SalesforceSync.Inbox;
@@ -21,21 +20,20 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 
     /// <summary>
     /// One event into its entity's row unless that holds a newer one, and the entity made due
-    /// (<see cref="InboxSql.Template.Store"/>, one statement). A Kafka redelivery overwrites the row with the same event
-    /// and ends superseded (its time is not newer than what was synced), which is harmless; the last event of A -> B ->
-    /// A is newer than B and is written. Safe to retry for the same reason. The time is stored cut to the microsecond as
-    /// the engine cuts it (<see cref="PreparedBatch.ToWholeMicroseconds"/>), so the watermark InboxSql.Done takes from it
-    /// is the time the engine compares the entity's later events with.
+    /// (<see cref="InboxSql.Template.Store"/>, one statement). A Kafka redelivery of a synced event changes nothing, and
+    /// one of an event not yet synced overwrites the row with itself, which is harmless; the last event of A -> B -> A
+    /// is newer than B and is written. Safe to retry for the same reason. The time is stored cut to the microsecond
+    /// (<see cref="InboxRow.ToWholeMicroseconds"/>).
     /// </summary>
     public Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct)
     {
-        var time = PreparedBatch.ToWholeMicroseconds(eventTime);
+        var time = InboxRow.ToWholeMicroseconds(eventTime);
         return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).Store, t,
                 new { entityId, eventTime = time, payload, coalesceDelay = _opt.CoalesceDelay }), ct);
     }
 
     /// <summary>
-    /// Locks and leases a batch of due rows and reads them with their watermarks (<see cref="InboxSql.Template.Claim"/>),
+    /// Locks and leases a batch of due rows and reads them (<see cref="InboxSql.Template.Claim"/>),
     /// in a transaction of its own, so the rows are read before the commit is sent. A fresh token per attempt: if a
     /// commit's outcome is unknown and the claim is retried, rows leased by the lost attempt are not mistaken for this
     /// one's. The retry ends their leases first (<see cref="InboxSql.Template.EndLease"/>), so they don't wait for the
@@ -82,11 +80,6 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             {
                 recorded += await db.Database.ExecuteAsync(sql.Done, t,
                     new { ids = outcomes.Synced.ToArray(), times = claim.TimesOf(outcomes.Synced), token });
-            }
-            if (outcomes.Superseded.Count > 0)
-            {
-                recorded += await db.Database.ExecuteAsync(sql.Supersede, t,
-                    new { ids = outcomes.Superseded.ToArray(), times = claim.TimesOf(outcomes.Superseded), token });
             }
             if (outcomes.Released.Count > 0)
             {

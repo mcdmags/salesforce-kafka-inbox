@@ -27,7 +27,10 @@ claim takes at most one row per entity, and `Sync:MaxEventsPerEntity` is gone (s
 [main README](../../README.md#the-inbox)). So the counts of `done` and `superseded` rows, the coalescing as events per
 done row, the [leasing cost by rows leased](#leasing-cost-by-rows-leased) and the preloaded drains of 5,000 rows
 describe that design. The drain benchmarks now preload each entity's newest event only (100 or 1,000 account rows,
-plus relationships) and print `entities` (inbox rows) and the coalescing as events per entity claim.
+plus relationships) and print `entities` (inbox rows) and the coalescing as events per entity claim. Since then the
+lease is the row's `next_attempt_at` (migration `LeaseInNextAttemptAt`, no `locked_until`), and there is no
+watermark and no `superseded` status (migration `DropSyncedTime`): an event not newer than a synced one is never
+stored, so every row of a drained inbox ends `done`.
 
 [Sequential, limiter-only vs full](#sequential-limiter-only-vs-full) compares this version with one that has no parallel
 processing or race-condition handling, measured on `main` at 01b53b3.

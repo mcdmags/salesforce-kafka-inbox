@@ -29,7 +29,7 @@ namespace SalesforceSync.Benchmarks;
 /// land: every account must end at its newest version, the org's write history must show each account's
 /// versions only moving forward, every relationship must end at its newest version linked to the right two
 /// Accounts, the claim audit (sql/claim-audit.sql) must show no two overlapping claims on the same entity, and
-/// every entity's one inbox row must hold its newest event and end done (or superseded: as new as the watermark).
+/// every entity's one inbox row must hold its newest event and end done.
 /// </para>
 /// </summary>
 [Config(typeof(DrainConfig))]
@@ -457,11 +457,10 @@ public abstract class DrainBenchmarkBase
         {
             return await db.Database.QuerySingleAsync<long>(sql, default);
         }
-        // One query over both inbox tables, one row per entity; "superseded" ends an event as new as the watermark
+        // One query over both inbox tables, one row per entity
         var inbox = string.Join(" union all ", InboxTables.Select(t => $"select entity_id, event_time, status, attempt_count from {t}"));
         var rows = await Count($"select count(*) from ({inbox}) i");
-        var notDone = await Count($"select count(*) from ({inbox}) i where status not in ('done', 'superseded')");
-        var superseded = await Count($"select count(*) from ({inbox}) i where status = 'superseded'");
+        var notDone = await Count($"select count(*) from ({inbox}) i where status <> 'done'");
         // Every entity's row holds its newest event (the entity ids of the two types never collide: ACC- and REL-)
         var newest = _expected.ToDictionary(e => e.Key.Key, e => Time(e.Value), StringComparer.Ordinal);
         var stale = (await db.Database.QueryAsync<StoredEvent>($"select entity_id as EntityId, event_time as EventTime from ({inbox}) i", default))
@@ -480,7 +479,7 @@ public abstract class DrainBenchmarkBase
         var stats = _store.GetStats();
         Console.WriteLine(
             $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms coalesceDelay={CoalesceDelayMs}ms] " +
-            $"events={Events} relationshipEvents={relationshipEvents} {stats} entities={rows} superseded={superseded} " +
+            $"events={Events} relationshipEvents={relationshipEvents} {stats} entities={rows} " +
             $"coalescing={(double)Events / Math.Max(1, claims):F2} events/entity claim " +
             $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} stale={stale} wrong={wrong.Count} regressions={regressions}");
 

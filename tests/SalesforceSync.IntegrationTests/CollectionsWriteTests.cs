@@ -35,7 +35,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Account_saved_but_Profile_failed_is_retried_and_the_watermark_waits_for_both()
+    public async Task Account_saved_but_Profile_failed_is_retried_and_the_entity_is_done_only_with_both()
     {
         var acct = SyncFixture.NewAccountId();
         // Retried after about 1 s, 2 s and 4 s: long enough to look at the state in between
@@ -48,9 +48,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         {
             var (status, code) = await conn.QuerySingleAsync<(string, string?)>(
                 $"select status, last_error_code from {SyncFixture.InboxTable()} where entity_id = @acct", new { acct });
-            var syncedTime = (await app.GetSyncStateAsync(acct))?.SyncedTime;
             status.Should().Be("pending", "the entity is not synced while one of its records is missing");
-            syncedTime.Should().BeNull("the watermark advances only when the Account and the Profile are both in");
             code.Should().BeOneOf("UNABLE_TO_LOCK_ROW", null);
         }
         (await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().BeNull();
@@ -59,7 +57,6 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         (await app.GetInboxRowAsync(acct))!.AttemptCount.Should().BePositive();
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("the retries had nothing left to write on the Account");
         ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["AccountId__c"]).Should().Be(acct);
-        (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(SyncFixture.SyncedTime(1));
     }
 
     [Fact]

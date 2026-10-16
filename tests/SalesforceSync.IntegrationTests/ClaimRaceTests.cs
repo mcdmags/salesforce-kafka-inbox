@@ -106,7 +106,6 @@ public sealed class ClaimRaceTests(SyncFixture app)
     [InlineData("done")]
     [InlineData("failed")]
     [InlineData("dead")]
-    [InlineData("superseded")]
     [InlineData("released")]
     [InlineData("failed all")]
     [InlineData("deferred")]
@@ -134,7 +133,6 @@ public sealed class ClaimRaceTests(SyncFixture app)
         state.NextAttemptAt.Should().NotBeNull("v2 is pending, so it must be due, or it would never be claimed");
         (await race.DueAsync()).Should().Be(outcome != "held",
             "v2 is due when the outcome transaction ends (held: when the hold ends), not when v1's lease would have");
-        state.SyncedTime.Should().BeNull("the watermark doesn't move to v2, which was never written");
     }
 
     /// <summary>
@@ -180,7 +178,6 @@ public sealed class ClaimRaceTests(SyncFixture app)
         state.LockToken.Should().BeNull();
         state.NextAttemptAt.Should().NotBeNull("v3 is pending, so it must be due, or it would never be claimed");
         (await race.DueAsync()).Should().BeTrue("v3 is due now, not when v1's lease would have ended");
-        state.SyncedTime.Should().Be(overwrittenDuringTheLease ? null : SyncFixture.SyncedTime(1), "the watermark is v1's, if v1 was recorded done");
     }
 
     private static Task Record(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
@@ -190,11 +187,10 @@ public sealed class ClaimRaceTests(SyncFixture app)
         var none = CancellationToken.None;
         return outcome switch
         {
-            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], [], [], []), none),
-            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [], [failure]), none),
-            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [failure], []), none),
-            "superseded" => inbox.RecordAsync(claim, new BatchOutcomes([], [row], [], [], []), none),
-            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [row], [], []), none),
+            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], [], []), none),
+            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [failure]), none),
+            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure], []), none),
+            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [row], [], []), none),
             "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
             "deferred" => inbox.DeferAsync(claim, TimeSpan.Zero, none),
             "held" => inbox.HoldAsync(claim, "lost", none),
@@ -259,7 +255,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         public Task<SyncStateRow> StateAsync()
         {
             return observer.QuerySingleAsync<SyncStateRow>(
-                $"select next_attempt_at, lock_token, synced_time from {Table} where entity_id = @Entity", new { Entity });
+                $"select next_attempt_at, lock_token from {Table} where entity_id = @Entity", new { Entity });
         }
 
         /// <summary>Whether the entity is due now (null: idle).</summary>

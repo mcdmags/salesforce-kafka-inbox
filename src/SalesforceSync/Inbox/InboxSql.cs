@@ -7,9 +7,9 @@ namespace SalesforceSync.Inbox;
 /// The statements for one inbox table (one per synced object type, all the same shape; see SyncDbContext). An inbox has
 /// one row per entity (entity_id is unique) that holds the entity's newest event, a newer event overwriting it
 /// (<see cref="Template.Store"/>), and the entity's sync state: when it is due (next_attempt_at), the lease of the worker
-/// processing it (lock_token; the lease ends at next_attempt_at, after which the row is simply due again) and its
-/// watermark (synced_time). No statement reads inside the payload: an event's entity is its entity_id column, its time
-/// its event_time column (both set by the consumer). An entity is claimed by locking and leasing its row, so two
+/// processing it (lock_token; the lease ends at next_attempt_at, after which the row is simply due again) and what
+/// became of its event (status). No statement reads inside the payload: an event's entity is its entity_id column, its
+/// time its event_time column (both set by the consumer). An entity is claimed by locking and leasing its row, so two
 /// workers can never hold one entity: they would lock the same row.
 /// <para>
 /// Every outcome statement updates only the claimed rows that its claim's token still holds and that still hold the
@@ -58,7 +58,6 @@ public sealed partial class InboxSql
         Store = Template.Store.Replace("{inbox}", table);
         Claim = Template.Claim.Replace("{inbox}", table);
         Done = Template.Done.Replace("{inbox}", table);
-        Supersede = Template.Supersede.Replace("{inbox}", table);
         Release = Template.Release.Replace("{inbox}", table);
         Fail = Template.Fail.Replace("{inbox}", table);
         Dead = Template.Dead.Replace("{inbox}", table);
@@ -76,9 +75,6 @@ public sealed partial class InboxSql
 
     /// <inheritdoc cref="Template.Done"/>
     public string Done { get; }
-
-    /// <inheritdoc cref="Template.Supersede"/>
-    public string Supersede { get; }
 
     /// <inheritdoc cref="Template.Release"/>
     public string Release { get; }
@@ -100,15 +96,15 @@ public sealed partial class InboxSql
     {
         /// <summary>
         /// Stores one event (@entityId, @eventTime, @payload) in one statement. The entity's row is created, or
-        /// overwritten unless it holds a newer event: an event is the full record, so the newest is all the sync needs.
-        /// Overwritten, the row is pending again with no attempts and no error, whatever it was (done, superseded, dead,
-        /// or claimed: see <see cref="StillClaimed"/>). An event as new as the row's (a Kafka redelivery) overwrites it too; its
-        /// claim then finds it not newer than the watermark and ends it superseded without a Salesforce call. An older
-        /// event changes nothing. A new or idle entity (next_attempt_at null) is due after @coalesceDelay
+        /// overwritten if it holds an older event: an event is the full record, so the newest is all the sync needs.
+        /// Overwritten, the row is pending again with no attempts and no error, whatever it was (done, dead, or claimed:
+        /// see <see cref="StillClaimed"/>). An event as new as the row's (a Kafka redelivery) overwrites it too, unless
+        /// the row is done: then that time is in Salesforce already, and the redelivery changes nothing, without a
+        /// claim or a Salesforce call. An older event changes nothing. A new or idle entity (next_attempt_at null) is due after @coalesceDelay
         /// (<see cref="SyncOptions.CoalesceDelay"/>), so the rest of a burst of its events overwrites the row before it
         /// is claimed and only the newest is written. An entity that is already due, backing off, deferred or held
         /// keeps its time, and so does a leased one: its next_attempt_at is the lease's end, so a worker that holds the
-        /// entity keeps it, and the outcome transaction makes it due (<see cref="EndLease"/>). The watermark is left as it is.
+        /// entity keeps it, and the outcome transaction makes it due (<see cref="EndLease"/>).
         /// <para>
         /// Under READ COMMITTED the conflicting row is locked, and if another transaction is updating it (a claim or an
         /// outcome), the store waits for that transaction and then applies to the row as it left it, its WHERE checked
@@ -122,12 +118,12 @@ public sealed partial class InboxSql
             set payload = excluded.payload, event_time = excluded.event_time, status = 'pending', attempt_count = 0,
                 last_error = null, last_error_code = null, last_updated = now(),
                 next_attempt_at = coalesce(i.next_attempt_at, excluded.next_attempt_at)
-            where i.event_time <= excluded.event_time
+            where i.event_time < excluded.event_time or (i.event_time = excluded.event_time and i.status <> 'done')
             """;
 
         /// <summary>
         /// Picks and leases up to @batchSize due rows, the longest-waiting first, bumps each one's attempt_count and
-        /// returns them with their payloads, event times and watermarks. The lease is lock_token and next_attempt_at
+        /// returns them with their payloads and event times. The lease is lock_token and next_attempt_at
         /// moved to the lease's end (now + @lease): a leased row is not due until then, and an expired lease (its worker
         /// died) is simply due again and taken over without anyone resetting it. FOR UPDATE SKIP LOCKED: a row another
         /// transaction is claiming, recording or storing an event in is skipped, not waited for. Under READ COMMITTED
@@ -146,15 +142,14 @@ public sealed partial class InboxSql
               order by d.next_attempt_at
               limit @batchSize
               for update skip locked))
-            returning i.id as RowId, i.entity_id as EntityId, i.payload::text as Payload, i.event_time as EventTime,
-                      i.synced_time as SyncedTime
+            returning i.id as RowId, i.entity_id as EntityId, i.payload::text as Payload, i.event_time as EventTime
             """;
 
         /// <summary>
         /// The WHERE of every outcome statement: of the claimed rows (@ids, with the event_time @times the claim read
         /// for each), those that @token still holds and that still hold that event. A worker whose lease expired
         /// records nothing; a row the consumer overwrote with a newer event after the claim gets no outcome: it stays
-        /// pending with the newer event, Done doesn't move the watermark to it, and <see cref="EndLease"/> ends its
+        /// pending with the newer event, Done doesn't mark it done, and <see cref="EndLease"/> ends its
         /// lease, leaving it due. Each row is looked up by primary key; the times are compared as timestamptz, exactly:
         /// @times are the values the claim read back from the column.
         /// <para>
@@ -172,22 +167,12 @@ public sealed partial class InboxSql
             """;
 
         /// <summary>
-        /// The rows' events are in Salesforce: done, and each one's watermark moves to the event's time (its event_time
-        /// in microseconds since the epoch; extract returns numeric, so exactly), never back. The lease ends and the
-        /// entity is idle until a consumer stores its next event.
+        /// The rows' events are in Salesforce: done, so a redelivery of the same event changes nothing (<see cref="Store"/>).
+        /// The lease ends and the entity is idle until a consumer stores its next event.
         /// </summary>
         public const string Done = $$"""
             update {inbox} i
             set status = 'done', last_updated = now(), last_error = null, last_error_code = null,
-                synced_time = greatest(i.synced_time, (extract(epoch from i.event_time) * 1000000)::bigint),
-                next_attempt_at = null, lock_token = null
-            where {{StillClaimed}}
-            """;
-
-        /// <summary>Not written (an event as new was already synced): the row leaves the queue, and the lease ends.</summary>
-        public const string Supersede = $$"""
-            update {inbox} i
-            set status = 'superseded', last_updated = now(), last_error = null, last_error_code = null,
                 next_attempt_at = null, lock_token = null
             where {{StillClaimed}}
             """;

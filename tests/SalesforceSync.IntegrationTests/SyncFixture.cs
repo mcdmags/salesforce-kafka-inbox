@@ -315,8 +315,8 @@ public class SyncFixture : IAsyncLifetime
         return DateTimeOffset.Parse((string)e["meta"]!["time"]!, CultureInfo.InvariantCulture);
     }
 
-    /// <summary>The synced_time of version N: its meta.time in microseconds since the epoch, as the worker stores it.</summary>
-    public static long SyncedTime(long version)
+    /// <summary>Version N's meta.time in microseconds since the epoch, as its event_time holds it.</summary>
+    public static long Micros(long version)
     {
         return (BaseTime.AddMilliseconds(version) - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
     }
@@ -442,7 +442,7 @@ public class SyncFixture : IAsyncLifetime
     {
         await using var conn = await Db.OpenConnectionAsync();
         return (await conn.QueryAsync<SyncStateRow>(
-            $"select next_attempt_at, lock_token, synced_time from {InboxTable(entityType)} where entity_id = @key",
+            $"select next_attempt_at, lock_token from {InboxTable(entityType)} where entity_id = @key",
             new { key })).SingleOrDefault();
     }
 
@@ -528,7 +528,7 @@ public sealed record InboxRow(long Id, long Version, string Status, int AttemptC
     Guid? LockToken);
 
 /// <summary>The sync state of an entity's inbox row as the tests see it.</summary>
-public sealed record SyncStateRow(DateTime? NextAttemptAt, Guid? LockToken, long? SyncedTime);
+public sealed record SyncStateRow(DateTime? NextAttemptAt, Guid? LockToken);
 
 [CollectionDefinition(Name)]
 public sealed class SyncCollection : ICollectionFixture<SyncFixture>

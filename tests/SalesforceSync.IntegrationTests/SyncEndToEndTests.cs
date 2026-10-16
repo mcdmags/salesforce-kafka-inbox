@@ -209,7 +209,6 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishAsync(acct, 3, new JsonObject { ["name"] = name, ["rating"] = "Cold" }, new JsonObject { ["tier"] = "Bronze" });
         await WaitUntilConsumedAsync(acct);
         (await app.GetInboxAsync(acct)).Should().Be((5L, "done"), "an older event doesn't overwrite the row");
-        (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(SyncFixture.SyncedTime(5), "the watermark is the event written to Salesforce");
 
         // v3 never reached Salesforce
         var account = await app.GetRecordAsync("Account", acct);
@@ -224,30 +223,11 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Watermark_is_the_synced_time_of_the_entitys_row()
+    public async Task Event_time_is_stored_from_meta_time_cut_to_the_microsecond_and_an_event_a_microsecond_newer_is_written()
     {
         var acct = SyncFixture.NewAccountId();
-        // Set up by hand: a pending v4 whose entity has v5 synced. The claim reads the row's watermark with its event.
-        var v4 = SyncFixture.AccountEvent(acct, 4, new JsonObject { ["name"] = "v4" }, []);
-        await using (var conn = await app.Db.OpenConnectionAsync())
-        {
-            await conn.ExecuteAsync(
-                $"insert into {SyncFixture.InboxTable()} (entity_id, payload, event_time, next_attempt_at, synced_time) values (@acct, @payload::jsonb, @time, now(), @synced)",
-                new { acct, payload = v4.ToJsonString(), time = SyncFixture.TimeOf(v4).UtcDateTime, synced = SyncFixture.SyncedTime(5) });
-        }
-
-        (await app.WaitForInboxSettledAsync(acct, version: 4)).Should().Be((4L, "superseded"));
-        (await app.GetRecordAsync("Account", acct)).Should().BeNull("v4 is not newer than v5, the watermark, so it is not written");
-        (await app.GetSyncStateAsync(acct)).Should().Be(new SyncStateRow(null, null, SyncFixture.SyncedTime(5)),
-            "the entity is idle again, its watermark unchanged");
-    }
-
-    [Fact]
-    public async Task Event_time_is_stored_from_meta_time_and_becomes_the_watermark_to_the_microsecond_the_engine_reads()
-    {
-        var acct = SyncFixture.NewAccountId();
-        // 1 ms after BaseTime plus 700 ns, written in another zone: Postgres would round it up to 1,001 µs, the engine cuts
-        // it to 1,000 µs. Then an event that the engine reads as 1,001 µs: newer, so it must not be taken for v1 again.
+        // 1 ms after BaseTime plus 700 ns, written in another zone: Postgres would round it up to 1,001 µs, the consumer
+        // cuts it to 1,000 µs. Then an event at 1,001.1 µs: newer, so it must be written, not taken for a redelivery of v1.
         var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []);
         v1["meta"]!["time"] = "2026-01-01T02:00:00.0010007+02:00";
         var v2 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v2" }, []);
@@ -256,34 +236,31 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         await app.PublishRawAsync(acct, v1.ToJsonString());
         await app.WaitForInboxSettledAsync(acct, version: 1);
-        (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(micros + 1_000, "Done moves the watermark to the row's event_time");
         await using var conn = await app.Db.OpenConnectionAsync();
         var storedTime = $"select (extract(epoch from event_time) * 1000000)::bigint from {SyncFixture.InboxTable()} where entity_id = @acct";
         (await conn.QuerySingleAsync<long>(storedTime, new { acct }))
-            .Should().Be(micros + 1_000, "the consumer stores meta.time, cut to the microsecond as the engine cuts it");
+            .Should().Be(micros + 1_000, "the consumer stores meta.time, cut to the microsecond");
 
         await app.PublishRawAsync(acct, v2.ToJsonString());
-        await Eventually.ValueAsync(() => app.GetSyncStateAsync(acct), s => s?.SyncedTime == micros + 1_001, "v2 to be synced");
-        (await app.GetInboxAsync(acct)).Should().Be((1L, "done"));
-        ((string?)(await app.GetRecordAsync("Account", acct))!["Name"]).Should().Be("v2");
+        await Eventually.ValueAsync(() => app.GetRecordAsync("Account", acct), a => (string?)a?["Name"] == "v2", "v2 to be synced");
+        (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
         (await conn.QuerySingleAsync<long>(storedTime, new { acct })).Should().Be(micros + 1_001);
     }
 
     [Fact]
-    public async Task Redelivered_event_makes_its_row_pending_again_and_ends_superseded_without_a_write()
+    public async Task Redelivered_event_of_a_synced_entity_changes_nothing_and_is_not_written()
     {
         var acct = SyncFixture.NewAccountId();
         var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme "), ["rating"] = "Hot" }, []);
 
         await app.PublishRawAsync(acct, v1.ToJsonString());
         await app.WaitForInboxSettledAsync(acct, version: 1);
+        var before = await app.GetInboxRowAsync(acct);
         await app.PublishRawAsync(acct, v1.ToJsonString());            // Kafka redelivery, after the first was synced
+        await WaitUntilConsumedAsync(acct);
 
-        // As new as the row: it overwrites it (pending again), and its claim finds it not newer than the watermark
-        await Eventually.ValueAsync(() => app.GetInboxAsync(acct), row => row == (1L, "superseded"),
-            "the redelivery to be superseded");
+        (await app.GetInboxRowAsync(acct)).Should().Be(before, "as new as a done row: the store leaves it as it is");
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("a redelivery must not write to Salesforce");
-        (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(SyncFixture.SyncedTime(1));
     }
 
     [Fact]

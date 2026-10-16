@@ -59,18 +59,16 @@ public sealed class EngineFlowTests
     {
         _inbox.Rows.AddRange(
         [
-            Row(2, "ACC-1", "2026-10-14T02:00:00Z", "new") with { SyncedTime = PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z")) },
+            Row(2, "ACC-1", "2026-10-14T02:00:00Z", "new"),
             Invalid(3, "ACC-2"),
-            Row(4, "ACC-3", "2026-10-14T01:00:00Z") with { SyncedTime = PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z")) },
         ]);
 
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(3);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
 
         ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("new");
         _inbox.Calls.Should().Equal("claim", "record");
         var outcomes = _inbox.Recorded!;
-        outcomes.Synced.Should().Equal([2L], "ACC-1's row's event_time becomes the watermark");
-        outcomes.Superseded.Should().Equal([4L], "its event is not newer than the watermark");
+        outcomes.Synced.Should().Equal([2L]);
         outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.RowId == 3 && f.Code == SalesforceErrors.InvalidEvent);
         outcomes.Released.Should().BeEmpty();
         outcomes.Failed.Should().BeEmpty();
@@ -166,7 +164,7 @@ public sealed class EngineFlowTests
     {
         return new(id, contact,
         $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""",
-            DateTimeOffset.Parse("2026-10-14T01:00:00Z"), null);
+            DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
     }
 
     // ---------- A batch written in more than one call ----------
@@ -294,7 +292,7 @@ public sealed class EngineFlowTests
             return new(id, new UpsertUnit([]), eventId);
         }
 
-        var batch = new PreparedBatch([9], [Entity("A", 1), Entity("B", 2), Entity("C", 3), Entity("D", 4), Entity("E", 5)], [(8, "bad")]);
+        var batch = new PreparedBatch([Entity("A", 1), Entity("B", 2), Entity("C", 3), Entity("D", 4), Entity("E", 5)], [(8, "bad")]);
         SalesforceError[] error = [new(null, "PROCESSING_HALTED", "x"), new("acct", "SOME_CODE", "why")];
 
         var outcomes = batch.Outcomes(new Dictionary<string, UpsertResult>
@@ -307,7 +305,6 @@ public sealed class EngineFlowTests
         });
 
         outcomes.Synced.Should().Equal(1L, 2L);
-        outcomes.Superseded.Should().Equal(9L);
         outcomes.Released.Should().Equal(3L);
         outcomes.Dead.Should().Equal(new FailedEvent(8, "bad", SalesforceErrors.InvalidEvent),
             new FailedEvent(4, "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));
@@ -382,20 +379,20 @@ public sealed class EngineFlowTests
     {
         return new(id, account,
         $$"""{ "meta": { "time": "{{time}}", "type": "updated" }, "account": { "externalId": "{{account}}", "name": "{{name}}", "profile": { "tier": "{{tier}}" } } }""",
-            DateTimeOffset.Parse(time), null);
+            DateTimeOffset.Parse(time));
     }
 
     private static InboxEvent Row(long id, string account, string time, string name = "Acme")
     {
         return new(id, account,
         $$"""{ "meta": { "time": "{{time}}", "type": "inserted" }, "account": { "externalId": "{{account}}", "name": "{{name}}" } }""",
-            DateTimeOffset.Parse(time), null);
+            DateTimeOffset.Parse(time));
     }
 
     /// <summary>A row whose payload can't be read.</summary>
     private static InboxEvent Invalid(long id, string account)
     {
-        return new(id, account, "not json", DateTimeOffset.UnixEpoch, null);
+        return new(id, account, "not json", DateTimeOffset.UnixEpoch);
     }
 
     /// <summary>Lets requests through to the org, or fails all of them, the read, or the Nth write.</summary>

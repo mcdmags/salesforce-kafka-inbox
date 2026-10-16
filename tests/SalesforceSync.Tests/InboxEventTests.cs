@@ -9,7 +9,7 @@ namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The raw event format: how an envelope (camelCase JSON, full record) maps to Salesforce records, how a claimed
-/// row is written, superseded or found invalid, and what the Kafka consumer admits into the inbox.
+/// row is written or found invalid, and what the Kafka consumer admits into the inbox.
 /// </summary>
 public sealed class InboxEventTests
 {
@@ -177,7 +177,7 @@ public sealed class InboxEventTests
         read.Should().Throw<JsonException>("the engine dead-letters an event it can't deserialize (INVALID_EVENT)");
     }
 
-    // ---------- A claimed row: written, superseded by the watermark, or invalid ----------
+    // ---------- A claimed row: written or invalid ----------
 
     [Fact]
     public void The_claimed_event_is_the_full_record_and_clears_what_it_does_not_have()
@@ -189,27 +189,7 @@ public sealed class InboxEventTests
         work.RowId.Should().Be(2);
         work.Unit.Records[0].Fields.Should().Contain("Name", "Acme Ltd").And.Contain("Rating", null, "the record has no rating");
         work.Unit.Records[1].Fields.Should().Contain("Score__c", 9m).And.Contain("Tier__c", null, "nor a tier");
-        batch.SupersededRowIds.Should().BeEmpty();
         batch.Invalid.Should().BeEmpty();
-    }
-
-    [Theory]
-    [InlineData("2026-10-14T01:00:00Z", "the same time: a redelivery")]
-    [InlineData("2026-10-14T00:59:59.999999Z", "an older event that arrived late")]
-    public void An_event_not_newer_than_what_is_synced_is_superseded_without_a_write(string time, string because)
-    {
-        var batch = Prepare(Row(5, Account("ACC-1", "late", time)) with { SyncedTime = Micros("2026-10-14T01:00:00Z") },
-            Row(6, Account("ACC-2", "other entity", time)));
-
-        batch.SupersededRowIds.Should().Equal([5L], because);
-        batch.Work.Should().ContainSingle().Which.EntityId.Should().Be("ACC-2", "watermarks are per entity");
-    }
-
-    [Fact]
-    public void An_event_newer_than_what_is_synced_is_written_even_by_a_microsecond()
-    {
-        Prepare(Row(5, Account("ACC-1", "newer", "2026-10-14T01:00:00.000001Z")) with { SyncedTime = Micros("2026-10-14T01:00:00Z") })
-            .Work.Should().ContainSingle();
     }
 
     [Fact]
@@ -223,7 +203,6 @@ public sealed class InboxEventTests
 
         batch.Invalid.Select(i => i.RowId).Should().Equal(2L, 3L, 4L);
         batch.Work.Should().ContainSingle().Which.RowId.Should().Be(1);
-        batch.SupersededRowIds.Should().BeEmpty();
     }
 
     [Fact]
@@ -242,11 +221,10 @@ public sealed class InboxEventTests
         var batch = PreparedBatch.Prepare(Relationships,
         [
             new InboxEvent(2, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""",
-                DateTimeOffset.Parse("2026-10-14T02:00:00Z", System.Globalization.CultureInfo.InvariantCulture), null)
+                DateTimeOffset.Parse("2026-10-14T02:00:00Z", System.Globalization.CultureInfo.InvariantCulture))
         ]);
 
         batch.Invalid.Should().ContainSingle().Which.RowId.Should().Be(2);
-        batch.SupersededRowIds.Should().BeEmpty();
         batch.Work.Should().BeEmpty();
     }
 
@@ -267,15 +245,14 @@ public sealed class InboxEventTests
     [InlineData("2026-10-14T01:02:03.1234567Z", "2026-10-14T01:02:03.123456Z")]
     [InlineData("2026-10-14T03:02:03.4569999+02:00", "2026-10-14T01:02:03.456999Z")]
     [InlineData("2026-10-14T01:02:03.123456951Z", "2026-10-14T01:02:03.123457Z")]
-    public void An_event_time_is_stored_cut_to_the_microsecond_in_UTC_as_the_watermark_counts_it(string time, string stored)
+    public void An_event_time_is_stored_cut_to_the_microsecond_in_UTC(string time, string stored)
     {
         var read = DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture);
 
-        var cut = PreparedBatch.ToWholeMicroseconds(read);
+        var cut = InboxRow.ToWholeMicroseconds(read);
 
         cut.Should().Be(DateTimeOffset.Parse(stored, System.Globalization.CultureInfo.InvariantCulture), "not rounded up as Postgres would");
         cut.Offset.Should().Be(TimeSpan.Zero, "Npgsql writes only UTC times to timestamptz");
-        PreparedBatch.ToMicroseconds(cut).Should().Be(PreparedBatch.ToMicroseconds(read));
     }
 
     [Theory]
@@ -364,7 +341,7 @@ public sealed class InboxEventTests
     {
         var sql = InboxSql.For("sf_account_inbox");
         // Fail and Dead read their @errors object with ->, not the payload
-        string[] claimAndOutcomes = [sql.Store, sql.Claim, sql.Done, sql.Supersede, sql.Release, sql.Hold, sql.EndLease];
+        string[] claimAndOutcomes = [sql.Store, sql.Claim, sql.Done, sql.Release, sql.Hold, sql.EndLease];
 
         claimAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
     }
@@ -383,11 +360,6 @@ public sealed class InboxEventTests
         return PreparedBatch.Prepare(Accounts, rows);
     }
 
-    private static long Micros(string time)
-    {
-        return PreparedBatch.ToMicroseconds(DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
-    }
-
     /// <summary>A claimed row of the entity its payload names.</summary>
     private static InboxEvent Row(long id, string payload)
     {
@@ -397,7 +369,7 @@ public sealed class InboxEventTests
     /// <summary>A claimed row of <paramref name="entityId"/>, with the time its payload has (or none, if it can't be read).</summary>
     private static InboxEvent Row(long id, string entityId, string payload)
     {
-        return new(id, entityId, payload, Accounts.TryRead(payload, out var read, out _) ? read.Time : DateTimeOffset.UnixEpoch, null);
+        return new(id, entityId, payload, Accounts.TryRead(payload, out var read, out _) ? read.Time : DateTimeOffset.UnixEpoch);
     }
 
     private static TEvent Read<TEvent>(string json)

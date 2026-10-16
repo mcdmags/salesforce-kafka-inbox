@@ -10,8 +10,8 @@ namespace SalesforceSync.Inbox;
 /// unchanged in the type's inbox table together with the entity's id taken from the event, in the entity's one row
 /// unless that holds a newer event. The Kafka message key and the order of arrival are not used: an entity's events
 /// are ordered by their own time, so they may come over any partition, in any order. The offset is stored for commit
-/// only after the event is in the inbox; a redelivery (or a retried store) just stores the event over itself again,
-/// which ends superseded. A message that can never be synced (not a valid event of its topic's type) is logged with
+/// only after the event is in the inbox; a redelivery (or a retried store) changes nothing once the event is synced,
+/// and before that just stores the event over itself again. A message that can never be synced (not a valid event of its topic's type) is logged with
 /// its offset and skipped.
 /// </summary>
 public sealed class KafkaInboxConsumer(
@@ -130,7 +130,7 @@ public sealed class KafkaInboxConsumer(
     /// <summary>
     /// Marks the message as handled; the client commits stored offsets in the background (EnableAutoOffsetStore=false
     /// + auto commit, see Program.cs). If a rebalance revoked the partition since the message was consumed, the store
-    /// fails: harmless, its new owner re-reads from the last commit and the event stored twice ends superseded.
+    /// fails: harmless, its new owner re-reads from the last commit, and the event stored again changes nothing once synced.
     /// </summary>
     private void StoreOffset(ConsumeResult<string, string> result)
     {

@@ -17,7 +17,7 @@ namespace SalesforceSync.Sync;
 /// <item>Claims up to <see cref="SyncOptions.BatchSize"/> due entities: each one's inbox row is locked with FOR UPDATE
 /// SKIP LOCKED, leased and read, so no two workers in any pod ever process the same entity at once.</item>
 /// <item>Per entity, reads the claimed event: the newest one stored (events carry the full record, and a newer event
-/// overwrites the entity's row), superseded if it is not newer than what was already synced. Arrival order plays no
+/// overwrites the entity's row; one not newer than a synced event is never stored). Arrival order plays no
 /// part, so events may come out of order, over any partitions. An event that can't be read or mapped is
 /// dead-lettered on its own.</item>
 /// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
@@ -25,7 +25,7 @@ namespace SalesforceSync.Sync;
 /// what differs is written with sObject Collections upserts, one per level and object: one upsert call when the
 /// writes are of one object, else one Composite request of them, parents first (Accounts, then their Profiles: 1
 /// call), whatever the objects.</item>
-/// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
+/// <item>Records each entity's outcome in one transaction: done, released for the
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
 /// every claimed entity is held (the write's outcome is unknown), deferred (rate limited) or retried. An entity whose
 /// row a newer event overwrote meanwhile gets no outcome: its row stays pending and due.</item>
@@ -86,7 +86,7 @@ public sealed class SalesforceBatchUpsertService(
             return 0;
         }
 
-        // 2. Per entity: drop its event if it isn't newer than what is synced, else map it to records
+        // 2. Per entity: map its event to records
         var batch = PreparedBatch.Prepare(strategy, claim.Events);
 
         // 3. Salesforce (outside any transaction): read, decide, send, interpret. Not inside one on purpose: Salesforce
