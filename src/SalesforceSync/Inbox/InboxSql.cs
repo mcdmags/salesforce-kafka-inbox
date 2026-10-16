@@ -118,7 +118,7 @@ public sealed partial class InboxSql
             values (@entityId, @eventTime, @payload::jsonb, now() + @coalesceDelay)
             on conflict (entity_id) do update
             set payload = excluded.payload, event_time = excluded.event_time, status = 'pending', attempt_count = 0,
-                last_error = null, last_error_code = null, received_at = now(), last_updated = now(),
+                last_error = null, last_error_code = null, last_updated = now(),
                 next_attempt_at = coalesce(i.next_attempt_at, excluded.next_attempt_at)
             where i.event_time <= excluded.event_time
             """;
