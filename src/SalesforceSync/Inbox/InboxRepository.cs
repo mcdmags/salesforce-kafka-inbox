@@ -146,7 +146,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// <summary>
     /// Records outcomes in one transaction: <paramref name="record"/> runs the outcome statements, each of which updates
     /// only the claimed rows this lease still holds that still hold the event the claim read
-    /// (<see cref="InboxSql.Template.Held"/>), and returns how many rows they updated. If that is fewer than the claim's,
+    /// (<see cref="InboxSql.Template.StillClaimed"/>), and returns how many rows they updated. If that is fewer than the claim's,
     /// <see cref="InboxSql.Template.EndLease"/> ends the lease on the rest (rows a newer event overwrote meanwhile),
     /// due after <paramref name="delay"/>. Safe to repeat: an attempt whose commit outcome was unknown, or a lease lost
     /// meanwhile, leaves no row under this token, and nothing is written.

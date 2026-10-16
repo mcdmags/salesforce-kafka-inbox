@@ -12,8 +12,8 @@ namespace SalesforceSync.Inbox;
 /// claimed by locking and leasing its row, so two workers can never hold one entity: they would lock the same row.
 /// <para>
 /// Every outcome statement updates only the claimed rows that its claim's token still holds and that still hold the
-/// event the claim read (<see cref="Template.Held"/>), and ends their lease. The consumer writes the same row, so
-/// Postgres's row lock orders the two (see <see cref="Template.Held"/>). Every statement is safe to run again after an
+/// event the claim read (<see cref="Template.StillClaimed"/>), and ends their lease. The consumer writes the same row, so
+/// Postgres's row lock orders the two (see <see cref="Template.StillClaimed"/>). Every statement is safe to run again after an
 /// unknown commit (see PostgresRetryStrategy): storing the same event again is harmless (see
 /// InboxRepository.AddAsync), a retried claim first releases what the lost attempt leased (InboxRepository.ClaimAsync),
 /// and an outcome's first run ended the lease, so a second finds no row it holds. Outcome statements take arrays, so
@@ -101,7 +101,7 @@ public sealed partial class InboxSql
         /// Stores one event (@entityId, @eventTime, @payload) in one statement. The entity's row is created, or
         /// overwritten unless it holds a newer event: an event is the full record, so the newest is all the sync needs.
         /// Overwritten, the row is pending again with no attempts and no error, whatever it was (done, superseded, dead,
-        /// or claimed: see <see cref="Held"/>). An event as new as the row's (a Kafka redelivery) overwrites it too; its
+        /// or claimed: see <see cref="StillClaimed"/>). An event as new as the row's (a Kafka redelivery) overwrites it too; its
         /// claim then finds it not newer than the watermark and ends it superseded without a Salesforce call. An older
         /// event changes nothing. A new or idle entity (next_attempt_at null) is due after @coalesceDelay
         /// (<see cref="SyncOptions.CoalesceDelay"/>), so the rest of a burst of its events overwrites the row before it
@@ -163,7 +163,7 @@ public sealed partial class InboxSql
         /// and due (next_attempt_at, null once finished, becomes now + @coalesceDelay).
         /// </para>
         /// </summary>
-        public const string Held = """
+        public const string StillClaimed = """
             i.id = any(@ids) and i.lock_token = @token
               and exists (select 1 from unnest(@ids, @times) as c(id, event_time) where c.id = i.id and c.event_time = i.event_time)
             """;
@@ -178,7 +178,7 @@ public sealed partial class InboxSql
             set status = 'done', last_updated = now(), last_error = null, last_error_code = null,
                 synced_time = greatest(i.synced_time, (extract(epoch from i.event_time) * 1000000)::bigint),
                 next_attempt_at = null, locked_until = null, lock_token = null
-            where {{Held}}
+            where {{StillClaimed}}
             """;
 
         /// <summary>Not written (an event as new was already synced): the row leaves the queue, and the lease ends.</summary>
@@ -186,7 +186,7 @@ public sealed partial class InboxSql
             update {inbox} i
             set status = 'superseded', last_updated = now(), last_error = null, last_error_code = null,
                 next_attempt_at = null, locked_until = null, lock_token = null
-            where {{Held}}
+            where {{StillClaimed}}
             """;
 
         /// <summary>
@@ -197,7 +197,7 @@ public sealed partial class InboxSql
             update {inbox} i
             set attempt_count = greatest(i.attempt_count - 1, 0), last_updated = now(),
                 next_attempt_at = greatest(i.next_attempt_at, now() + @delay), locked_until = null, lock_token = null
-            where {{Held}}
+            where {{StillClaimed}}
             """;
 
         /// <summary>
@@ -216,7 +216,7 @@ public sealed partial class InboxSql
                 next_attempt_at = case when i.attempt_count < @maxRetries
                                        then now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count - 1))) end,
                 locked_until = null, lock_token = null
-            where {{Held}}
+            where {{StillClaimed}}
             """;
 
         /// <summary>
@@ -229,7 +229,7 @@ public sealed partial class InboxSql
                 last_error = (select @errors::jsonb) -> i.id::text ->> 0,
                 last_error_code = (select @errors::jsonb) -> i.id::text ->> 1,
                 status = 'dead', next_attempt_at = null, locked_until = null, lock_token = null
-            where {{Held}}
+            where {{StillClaimed}}
             """;
 
         /// <summary>
@@ -240,12 +240,12 @@ public sealed partial class InboxSql
             update {inbox} i
             set attempt_count = greatest(i.attempt_count - 1, 0), last_updated = now(), last_error = @error, last_error_code = @code,
                 next_attempt_at = now() + @hold, locked_until = null, lock_token = null
-            where {{Held}}
+            where {{StillClaimed}}
             """;
 
         /// <summary>
         /// Last in an outcome transaction: ends the lease on the claimed rows (@ids) that @token still holds after the
-        /// outcomes, which are the rows a newer event overwrote during the lease (see <see cref="Held"/>). They are
+        /// outcomes, which are the rows a newer event overwrote during the lease (see <see cref="StillClaimed"/>). They are
         /// pending and stay due (the store kept next_attempt_at, which the claim left set), now or after @delay,
         /// whichever is later. Such a row gets no coalesce delay (<see cref="Store"/>): its event has already waited as
         /// long as the batch's Salesforce calls took, and newer events that arrive before the next claim overwrite it

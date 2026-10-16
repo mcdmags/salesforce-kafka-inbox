@@ -61,7 +61,7 @@ public sealed record InboxClaim(Guid Token, IReadOnlyList<InboxEvent> Events)
 /// <param name="Payload">The event as received, JSON.</param>
 /// <param name="EventTime">
 /// The row's event_time as the claim read it: every outcome is recorded only while the row still has it (a newer event
-/// stored meanwhile has overwritten the row; see <see cref="InboxSql.Template.Held"/>).
+/// stored meanwhile has overwritten the row; see <see cref="InboxSql.Template.StillClaimed"/>).
 /// </param>
 /// <param name="SyncedTime">
 /// The entity's watermark: the time (microseconds since the epoch) of its newest synced event, if any (synced_time).
