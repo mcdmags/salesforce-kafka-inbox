@@ -15,6 +15,12 @@ public abstract class InboxRow
     /// <summary>The Kafka message value, unchanged (jsonb); never read by SQL.</summary>
     public string Payload { get; set; } = "";
 
+    /// <summary>
+    /// The event's time (its meta.time), to the microsecond as the watermark keeps it; set by the consumer. What
+    /// InboxSql.Done moves the entity's synced_time to.
+    /// </summary>
+    public DateTimeOffset EventTime { get; set; }
+
     /// <summary>pending | done | superseded | dead. Null on a new row: the database default ('pending') applies.</summary>
     public string Status { get; set; } = null!;
 

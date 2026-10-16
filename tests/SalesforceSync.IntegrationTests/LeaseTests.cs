@@ -57,13 +57,14 @@ public sealed class LeaseTests(SyncFixture app)
         (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
         var watermark = (await app.GetSyncStateAsync(acct))!.SyncedTime;
         watermark.Should().NotBeNull();
+        // Were the stale worker's Done applied, it would move the watermark far ahead
+        await ExecuteAsync($"update {Sql.Table} set event_time = event_time + interval '1000 seconds' where id = @id", new { id = claimed[0] });
         var rowsBefore = await app.GetInboxRowsAsync(acct);
         var stateBefore = await app.GetSyncStateAsync(acct);
 
         // The first worker comes back and tries everything it could do with its old token
-        var farFuture = watermark!.Value + 1_000_000_000;
         var errors = $$"""{ "{{claimed[0]}}": ["late failure", "UNABLE_TO_LOCK_ROW"] }""";
-        (await ExecuteAsync(Sql.Done, new { entityType = SyncFixture.Accounts, ids = claimed, token = stale, times = TimesJson(claimed[0], farFuture) }))
+        (await ExecuteAsync(Sql.Done, new { entityType = SyncFixture.Accounts, ids = claimed, token = stale }))
             .Should().Be(0, "the watermark only moves for the worker that holds the lease");
         (await ExecuteAsync(Sql.Fail, new
         {
@@ -81,7 +82,7 @@ public sealed class LeaseTests(SyncFixture app)
         var inbox = app.AccountInbox;
         var claim = ClaimOf(acct, stale, claimed);
         var failed = new FailedEvent(claimed[0], "x", "UNKNOWN_OUTCOME");
-        await inbox.RecordAsync(claim, new BatchOutcomes([new SyncedEntity(acct, farFuture, claimed[0])], claimed, claimed, [failed], [failed]), CancellationToken.None);
+        await inbox.RecordAsync(claim, new BatchOutcomes([new SyncedEntity(acct, claimed[0])], claimed, claimed, [failed], [failed]), CancellationToken.None);
         await inbox.HoldAsync(claim, "x", CancellationToken.None);
         await inbox.FailAllAsync(claim, "x", "UNKNOWN_OUTCOME", CancellationToken.None);
 
@@ -91,25 +92,26 @@ public sealed class LeaseTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Done_completes_an_event_and_sets_the_watermark_only_under_its_lease_and_only_once()
+    public async Task Done_completes_an_event_and_sets_the_watermark_to_its_time_only_under_its_lease_and_only_once()
     {
         var acct = SyncFixture.NewAccountId();
         var token = Guid.NewGuid();
         var claimed = await InsertAndClaimAsync(acct, token, TimeSpan.FromMinutes(1),
             SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []));
 
-        (await ExecuteAsync(Sql.Done, new { entityType = SyncFixture.Accounts, ids = claimed, token = Guid.NewGuid(), times = TimesJson(claimed[0], 1_000_000) }))
+        (await ExecuteAsync(Sql.Done, new { entityType = SyncFixture.Accounts, ids = claimed, token = Guid.NewGuid() }))
             .Should().Be(0, "a lost lease completes nothing");
         (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().BeNull();
 
         var claim = ClaimOf(acct, token, claimed);
-        await app.AccountInbox.RecordAsync(claim, Synced(acct, claimed[0], 1_000_000), CancellationToken.None);
-        await app.AccountInbox.RecordAsync(claim, Synced(acct, claimed[0], 2_000_000), CancellationToken.None);
+        await app.AccountInbox.RecordAsync(claim, Synced(acct, claimed[0]), CancellationToken.None);
+        await app.AccountInbox.RecordAsync(claim, Synced(acct, claimed[0]), CancellationToken.None);
 
         var row = (await app.GetInboxRowsAsync(acct)).Should().ContainSingle().Subject;
         row.Should().Match<InboxRow>(r => r.Status == "done" && r.LockToken == null && r.LockedUntil == null);
-        (await app.GetSyncStateAsync(acct)).Should().Be(new SyncStateRow(null, null, null, 1_000_000),
-            "recorded again (after a commit whose outcome was unknown), it finds the lease already ended; nothing is left to do");
+        (await app.GetSyncStateAsync(acct)).Should().Be(new SyncStateRow(null, null, null, SyncFixture.SyncedTime(1)),
+            "the watermark is the event's time (its event_time); recorded again (after a commit whose outcome was unknown), it " +
+            "finds the lease already ended and nothing is left to do");
     }
 
     [Fact]
@@ -140,7 +142,7 @@ public sealed class LeaseTests(SyncFixture app)
         await using var tx = await conn.BeginTransactionAsync();
         foreach (var e in events)
         {
-            await conn.StoreAsync(Sql.Table, SyncFixture.Accounts, acct, e.ToJsonString(), tx);
+            await conn.StoreAsync(Sql.Table, SyncFixture.Accounts, acct, SyncFixture.TimeOf(e), e.ToJsonString(), tx);
         }
         await conn.ExecuteAsync(
             "update sf_sync_state set lock_token = @token, locked_until = now() + @lease where entity_type = @entityType and entity_id = @acct",
@@ -160,20 +162,14 @@ public sealed class LeaseTests(SyncFixture app)
         return new BatchOutcomes([], [], released, [], []);
     }
 
-    private static BatchOutcomes Synced(string acct, long id, long time)
+    private static BatchOutcomes Synced(string acct, long id)
     {
-        return new BatchOutcomes([new SyncedEntity(acct, time, id)], [], [], [], []);
+        return new BatchOutcomes([new SyncedEntity(acct, id)], [], [], [], []);
     }
 
     private async Task<int> ExecuteAsync(string sql, object args)
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         return await conn.ExecuteAsync(sql, args);
-    }
-
-    /// <summary>@times of InboxSql.Done for one row.</summary>
-    private static string TimesJson(long id, long time)
-    {
-        return $$"""{ "{{id}}": {{time}} }""";
     }
 }

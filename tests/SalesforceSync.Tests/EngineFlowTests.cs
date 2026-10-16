@@ -21,6 +21,18 @@ public sealed class EngineFlowTests
     private readonly Interceptor _http = new();
 
     [Fact]
+    public async Task The_consumer_stores_an_event_with_the_time_it_read_from_meta_time()
+    {
+        var sync = new EntitySyncService<AccountEvent, AccountInboxRow>(Engine(), _inbox, Accounts, "topic");
+        var json = Row(1, "ACC-1", "2026-10-14T03:02:03.1234567+02:00").Payload;
+
+        sync.TryReadEvent(json, out var entityId, out var eventTime, out var problem).Should().BeTrue("the event is valid, but: {0}", problem);
+        await sync.StoreEventAsync(entityId!, eventTime, json, CancellationToken.None);
+
+        _inbox.Calls.Should().Equal("add ACC-1 at 2026-10-14T03:02:03.1234567+02:00");
+    }
+
+    [Fact]
     public async Task An_empty_claim_is_nothing_to_do()
     {
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
@@ -46,7 +58,7 @@ public sealed class EngineFlowTests
         _inbox.Calls.Should().Equal("claim", "record");
         var outcomes = _inbox.Recorded!;
         outcomes.Synced.Should().ContainSingle().Which.Should().Be(
-            new SyncedEntity("ACC-1", PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T02:00:00Z")), 2));
+            new SyncedEntity("ACC-1", 2), "its row's event_time becomes the watermark");
         outcomes.Superseded.Should().BeEquivalentTo([1L, 4L], "an older event, and one that is not newer than the watermark");
         outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.RowId == 3 && f.Code == SalesforceErrors.InvalidEvent);
         outcomes.Released.Should().BeEmpty();
@@ -267,7 +279,7 @@ public sealed class EngineFlowTests
     {
         static Work Entity(string id, long eventId)
         {
-            return new(id, new UpsertUnit([]), eventId * 10, eventId);
+            return new(id, new UpsertUnit([]), eventId);
         }
 
         var batch = new PreparedBatch([9], [Entity("A", 1), Entity("B", 2), Entity("C", 3), Entity("D", 4), Entity("E", 5)], [(8, "bad")]);
@@ -282,7 +294,7 @@ public sealed class EngineFlowTests
             ["E"] = new("E", SyncOutcome.TransientFailure, error)
         });
 
-        outcomes.Synced.Should().Equal(new SyncedEntity("A", 10, 1), new SyncedEntity("B", 20, 2));
+        outcomes.Synced.Should().Equal(new SyncedEntity("A", 1), new SyncedEntity("B", 2));
         outcomes.Superseded.Should().Equal(9L);
         outcomes.Released.Should().Equal(3L);
         outcomes.Dead.Should().Equal(new FailedEvent(8, "bad", SalesforceErrors.InvalidEvent),
@@ -406,9 +418,9 @@ public sealed class EngineFlowTests
         public List<string> Calls { get; } = [];
         public BatchOutcomes? Recorded { get; private set; }
 
-        public Task AddAsync(string entityId, string payload, CancellationToken ct)
+        public Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct)
         {
-            return Call($"add {entityId}");
+            return Call($"add {entityId} at {eventTime:O}");
         }
 
         public Task<InboxClaim> ClaimAsync(CancellationToken ct)

@@ -82,6 +82,10 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("entity_id");
 
+                    b.Property<DateTimeOffset>("EventTime")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("event_time");
+
                     b.Property<string>("LastError")
                         .HasColumnType("text")
                         .HasColumnName("last_error");
@@ -149,6 +153,10 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("entity_id");
 
+                    b.Property<DateTimeOffset>("EventTime")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("event_time");
+
                     b.Property<string>("LastError")
                         .HasColumnType("text")
                         .HasColumnName("last_error");
@@ -215,6 +223,10 @@ namespace SalesforceSync.Data.Migrations
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("entity_id");
+
+                    b.Property<DateTimeOffset>("EventTime")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("event_time");
 
                     b.Property<string>("LastError")
                         .HasColumnType("text")

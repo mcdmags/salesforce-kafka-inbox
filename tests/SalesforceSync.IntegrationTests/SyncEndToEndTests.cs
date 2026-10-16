@@ -248,6 +248,34 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
+    public async Task Event_time_is_stored_from_meta_time_and_becomes_the_watermark_to_the_microsecond_the_engine_reads()
+    {
+        var acct = SyncFixture.NewAccountId();
+        // 1 ms after BaseTime plus 700 ns, written in another zone: Postgres would round it up to 1,001 µs, the engine cuts
+        // it to 1,000 µs. Then an event that the engine reads as 1,001 µs: newer, so it must not be taken for v1 again.
+        var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []);
+        v1["meta"]!["time"] = "2026-01-01T02:00:00.0010007+02:00";
+        var v2 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v2" }, []);
+        v2["meta"]!["time"] = "2026-01-01T00:00:00.0010011Z";
+        var micros = (SyncFixture.BaseTime - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
+
+        await app.PublishRawAsync(acct, v1.ToJsonString());
+        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(micros + 1_000, "Done moves the watermark to the row's event_time");
+
+        await app.PublishRawAsync(acct, v2.ToJsonString());
+        (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().Equal((1L, "done"), (1L, "done"));
+        (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(micros + 1_001);
+        ((string?)(await app.GetRecordAsync("Account", acct))!["Name"]).Should().Be("v2");
+
+        await using var conn = await app.Db.OpenConnectionAsync();
+        (await conn.QueryAsync<long>(
+                $"select (extract(epoch from event_time) * 1000000)::bigint from {SyncFixture.InboxTable()} where entity_id = @acct order by id",
+                new { acct }))
+            .Should().Equal([micros + 1_000, micros + 1_001], "the consumer stores meta.time, cut to the microsecond as the engine cuts it");
+    }
+
+    [Fact]
     public async Task Redelivered_event_is_stored_again_and_changes_nothing()
     {
         var acct = SyncFixture.NewAccountId();

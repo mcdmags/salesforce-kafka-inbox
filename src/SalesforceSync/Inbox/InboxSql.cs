@@ -6,11 +6,11 @@ namespace SalesforceSync.Inbox;
 /// <summary>
 /// The statements for one inbox table (one per synced object type, all the same shape; see SyncDbContext) and its
 /// entities' rows in sf_sync_state. No statement reads inside the payload: an event's entity is its entity_id column,
-/// and which event of an entity is the newest is decided in C#. An entity is claimed by locking and leasing its state
-/// row (lock_token, locked_until), so two workers can never hold one entity: they would lock the same row. Every
-/// statement is safe to run again after an unknown commit (see PostgresRetryStrategy): outcomes apply only while the
-/// claim's token holds the entity's state row. Outcome statements take arrays, so recording a batch costs a fixed
-/// number of round trips, not two per entity.
+/// its time its event_time column (both set by the consumer), and which event of an entity is the newest is decided in
+/// C#. An entity is claimed by locking and leasing its state row (lock_token, locked_until), so two workers can never
+/// hold one entity: they would lock the same row. Every statement is safe to run again after an unknown commit (see
+/// PostgresRetryStrategy): outcomes apply only while the claim's token holds the entity's state row. Outcome statements
+/// take arrays, so recording a batch costs a fixed number of round trips, not two per entity.
 /// <para>
 /// Every lookup is by key: a primary key (= ANY of an array, never a join the planner could turn into a scan), the
 /// pending index per entity (LATERAL ... LIMIT), or the front of the ready index. With statistics as wrong as a queue's
@@ -117,8 +117,8 @@ public sealed partial class InboxSql
     public static class Template
     {
         /// <summary>
-        /// Stores one event (@entityId, @payload) and makes its entity due, in one statement: a new entity's state row
-        /// is created, and a new or idle one (next_attempt_at null) is due after @coalesceDelay
+        /// Stores one event (@entityId, @eventTime, @payload) and makes its entity due, in one statement: a new entity's
+        /// state row is created, and a new or idle one (next_attempt_at null) is due after @coalesceDelay
         /// (<see cref="SyncOptions.CoalesceDelay"/>), so the rest of a burst of its events is claimed with it and merged
         /// into one write. An entity that is already due, backing off or held keeps its time. Upserting the
         /// state row takes its row lock, which is what makes storing safe against an outcome transaction ending the
@@ -126,7 +126,7 @@ public sealed partial class InboxSql
         /// </summary>
         public const string Store = """
             with stored as (
-              insert into {inbox} (entity_id, payload) values (@entityId, @payload::jsonb)
+              insert into {inbox} (entity_id, event_time, payload) values (@entityId, @eventTime, @payload::jsonb)
             )
             insert into sf_sync_state as s (entity_type, entity_id, next_attempt_at)
             values (@entityType, @entityId, now() + @coalesceDelay)
@@ -156,9 +156,9 @@ public sealed partial class InboxSql
 
         /// <summary>
         /// The entities' newest events are in Salesforce: those events are done, and each entity's watermark moves to
-        /// the event's time (@times, a JSON object event id -> time, bound once as in <see cref="Fail"/>), never back.
-        /// Like every outcome, only while @token holds the entity's state row, so a worker whose lease expired neither
-        /// completes events nor moves the watermark.
+        /// the event's time (its event_time in microseconds since the epoch; extract returns numeric, so exactly), never
+        /// back. Like every outcome, only while @token holds the entity's state row, so a worker whose lease expired
+        /// neither completes events nor moves the watermark.
         /// </summary>
         public const string Done = """
             with done as (
@@ -167,7 +167,7 @@ public sealed partial class InboxSql
               where i.id = any(@ids)
                 and exists (select 1 from sf_sync_state h
                             where h.entity_type = @entityType and h.entity_id = i.entity_id and h.lock_token = @token)
-              returning i.entity_id, ((select @times::jsonb) ->> i.id::text)::bigint as synced_time
+              returning i.entity_id, (extract(epoch from i.event_time) * 1000000)::bigint as synced_time
             )
             update sf_sync_state s
             set synced_time = greatest(s.synced_time, done.synced_time)

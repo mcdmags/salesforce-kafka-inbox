@@ -37,7 +37,7 @@ internal static class SalesforceStep
             return new("The Salesforce step does not use the inbox");
         }
 
-        public Task AddAsync(string entityId, string payload, CancellationToken ct)
+        public Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct)
         {
             throw NotUsed();
         }

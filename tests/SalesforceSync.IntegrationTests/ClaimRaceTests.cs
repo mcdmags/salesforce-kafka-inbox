@@ -183,8 +183,8 @@ public sealed class ClaimRaceTests(SyncFixture app)
 
         public Task StoreAsync(NpgsqlConnection consumer, int version, NpgsqlTransaction? tx = null)
         {
-            var payload = SyncFixture.AccountEvent(Entity, version, new JsonObject { ["name"] = $"v{version}" }, []).ToJsonString();
-            return consumer.StoreAsync(Table, EntityType, Entity, payload, tx);
+            var e = SyncFixture.AccountEvent(Entity, version, new JsonObject { ["name"] = $"v{version}" }, []);
+            return consumer.StoreAsync(Table, EntityType, Entity, SyncFixture.TimeOf(e), e.ToJsonString(), tx);
         }
 
         public async Task<List<string>> ClaimAsync(NpgsqlConnection worker, NpgsqlTransaction tx, Guid token)
