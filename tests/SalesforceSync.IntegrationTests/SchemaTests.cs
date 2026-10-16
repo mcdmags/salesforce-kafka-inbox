@@ -21,13 +21,14 @@ public sealed class SchemaTests(SyncFixture app)
     {
         // The worker already migrated at startup; a restart against a persisted volume migrates again
         var before = await TablesAndIndexesAsync();
-        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_contact_inbox", "sf_sync_state", "sf_rate_limit",
-            "sf_api_usage", "__EFMigrationsHistory"]);
+        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_contact_inbox", "sf_rate_limit", "sf_api_usage",
+            "__EFMigrationsHistory"]);
         before.Should().Contain([
             "sf_account_inbox_entity_id", "sf_account_inbox_pkey", "sf_account_relationship_inbox_entity_id", "sf_contact_inbox_entity_id",
-            "sf_sync_state_pkey", "sf_sync_state_ready"]);
+            "sf_account_relationship_inbox_ready", "sf_contact_inbox_ready"]);
+        before.Should().NotContain("sf_sync_state", "every entity's state is in its inbox row");
         before.Where(r => r.StartsWith("sf_account_inbox", StringComparison.Ordinal)).Should().BeEquivalentTo(
-            ["sf_account_inbox", "sf_account_inbox_pkey", "sf_account_inbox_entity_id"], "the claim's state is in sf_sync_state, not indexed here");
+            ["sf_account_inbox", "sf_account_inbox_pkey", "sf_account_inbox_entity_id", "sf_account_inbox_ready"]);
 
         await SyncSchema.MigrateAsync(app.Contexts);
 
@@ -47,10 +48,10 @@ public sealed class SchemaTests(SyncFixture app)
         foreach (var table in InboxTables)
         {
             indexes[$"{table}_entity_id"].Should().StartWith("CREATE UNIQUE INDEX").And.EndWith($"{table} USING btree (entity_id)");
+            indexes[$"{table}_ready"].Should().EndWith($"{table} USING btree (next_attempt_at) WHERE (next_attempt_at IS NOT NULL)");
         }
-        indexes["sf_sync_state_ready"].Should().EndWith("sf_sync_state USING btree (entity_type, next_attempt_at) WHERE (next_attempt_at IS NOT NULL)");
 
-        foreach (var table in InboxTables.Append("sf_sync_state"))
+        foreach (var table in InboxTables)
         {
             (await conn.QuerySingleAsync<string>("select array_to_string(reloptions, ', ') from pg_class where oid = @table::regclass", new { table }))
                 .Should().Be("autovacuum_vacuum_scale_factor=0.02, autovacuum_vacuum_threshold=1000", table);
@@ -75,7 +76,7 @@ public sealed class SchemaTests(SyncFixture app)
         var account = await Columns(SyncFixture.InboxTable());
         account.Select(c => c.Split(' ')[0]).Should().Equal(
             "id", "entity_id", "payload", "status", "attempt_count", "last_error", "last_error_code", "received_at", "last_updated",
-            "event_time");
+            "event_time", "next_attempt_at", "locked_until", "lock_token", "synced_time");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await Columns(SyncFixture.InboxTable(SyncFixture.Contacts))).Should().Equal(account);
         (await conn.ExecuteScalarAsync<long>("select count(*) from pg_proc where proname like 'sf\\_event\\_%'"))
@@ -138,9 +139,14 @@ public sealed class SchemaTests(SyncFixture app)
 
         await using var context = await contexts.CreateDbContextAsync();
         (await context.Database.GetAppliedMigrationsAsync()).Should().Equal(context.Database.GetMigrations());
-        // InboxOneRowPerRecord replaced each inbox's pending index with its unique entity_id index
+        // InboxOneRowPerRecord replaced each inbox's pending index with its unique entity_id index; StateInInboxRow
+        // dropped sf_sync_state and gave each inbox its ready index
+        string[] state = ["sf_sync_state", "sf_sync_state_pkey", "sf_sync_state_ready"];
         (await TablesAndIndexesAsync(conn)).Should().BeEquivalentTo(
-            [.. before.Select(r => r.Replace("_pending", "_entity_id", StringComparison.Ordinal)), "__EFMigrationsHistory", "PK___EFMigrationsHistory"]);
+        [
+            .. before.Except(state).Select(r => r.Replace("_pending", "_entity_id", StringComparison.Ordinal)),
+            .. InboxTables.Select(t => $"{t}_ready"), "__EFMigrationsHistory", "PK___EFMigrationsHistory"
+        ]);
         (await conn.QuerySingleAsync<long>($"select (extract(epoch from event_time) * 1000000)::bigint from {SyncFixture.InboxTable()}"))
             .Should().Be(SyncFixture.SyncedTime(1), "the row is kept, and InboxEventTime filled its event_time");
         await conn.ExecuteAsync($"drop schema {schema} cascade");
@@ -229,6 +235,69 @@ public sealed class SchemaTests(SyncFixture app)
             var duplicate = () => conn.ExecuteAsync($"insert into {table} (entity_id, payload, event_time) values ('ACC-4', '{{}}', now())");
             (await duplicate.Should().ThrowAsync<PostgresException>()).Which.SqlState.Should().Be(PostgresErrorCodes.UniqueViolation);
         }
+        await conn.ExecuteAsync($"drop schema {schema} cascade");
+    }
+
+    [Fact]
+    public async Task StateInInboxRow_moves_each_entitys_state_into_its_row_and_Down_moves_it_back()
+    {
+        const string schema = "state_in_inbox_row_test";
+        await using var db = await app.CreateSchemaAsync(schema);
+        var contexts = SyncDbContext.CreateFactory(db);
+        await MigrateToAsync(contexts, typeof(InboxOneRowPerRecord));
+
+        // Every inbox with its type's state rows, each with values of its own (n), so state copied into another type's
+        // inbox would show. ACC-1 due and synced, ACC-2 idle and synced, ACC-3 leased, ACC-4 pending without state, ACC-5
+        // dead but due, ACC-9 a state row without an inbox row.
+        (string Type, string Table)[] inboxes =
+            [(SyncFixture.Accounts, InboxTables[0]), (SyncFixture.Relationships, InboxTables[1]), (SyncFixture.Contacts, InboxTables[2])];
+        var lease = Guid.NewGuid();
+        var at = SyncFixture.BaseTime.UtcDateTime;
+        await using var conn = await db.OpenConnectionAsync();
+        for (var n = 0; n < inboxes.Length; n++)
+        {
+            var (type, table) = inboxes[n];
+            foreach (var (entity, status) in new[] { ("ACC-1", "pending"), ("ACC-2", "done"), ("ACC-3", "pending"), ("ACC-4", "pending"), ("ACC-5", "dead") })
+            {
+                var e = SyncFixture.AccountEvent(entity, 1, [], []);
+                await conn.ExecuteAsync($"insert into {table} (entity_id, payload, event_time, status) values (@entity, @payload::jsonb, @time, @status)",
+                    new { entity, payload = e.ToJsonString(), time = SyncFixture.TimeOf(e).UtcDateTime, status });
+            }
+            await conn.ExecuteAsync("""
+                insert into sf_sync_state (entity_type, entity_id, next_attempt_at, locked_until, lock_token, synced_time) values
+                  (@type, 'ACC-1', @at + make_interval(secs => @n), null, null, @n + 100),
+                  (@type, 'ACC-2', null, null, null, @n + 200),
+                  (@type, 'ACC-3', @at, @at + make_interval(secs => @n + 300), @lease, null),
+                  (@type, 'ACC-5', @at, null, null, null),
+                  (@type, 'ACC-9', @at, null, null, @n + 900)
+                """, new { type, at, n, lease });
+        }
+
+        await SyncSchema.MigrateAsync(contexts);
+
+        for (var n = 0; n < inboxes.Length; n++)
+        {
+            var table = inboxes[n].Table;
+            var rows = await conn.QueryAsync<(string Entity, DateTime? Next, DateTime? LockedUntil, Guid? Token, long? Synced)>(
+                $"select entity_id, next_attempt_at, locked_until, lock_token, synced_time from {table} order by entity_id");
+            rows.Select(r => r.Entity).Should().Equal(["ACC-1", "ACC-2", "ACC-3", "ACC-4", "ACC-5"], "{0}: no row is added (ACC-9's state is dropped) or lost", table);
+            rows[0].Should().Be(("ACC-1", at.AddSeconds(n), null, null, n + 100), "{0}: due and synced as it was", table);
+            rows[1].Should().Be(("ACC-2", null, null, null, n + 200), "{0}: idle, the watermark kept", table);
+            rows[2].Should().Be(("ACC-3", at, at.AddSeconds(n + 300), lease, null), "{0}: the lease goes on", table);
+            rows[3].Next.Should().NotBeNull("{0}: a pending row without a due time is due now", table);
+            rows[4].Next.Should().BeNull("{0}: only a pending row is due", table);
+        }
+        (await TablesAndIndexesAsync(conn)).Should().NotContain("sf_sync_state");
+
+        // Down: sf_sync_state again, a state row per inbox row, and the inbox columns gone
+        await MigrateToAsync(contexts, typeof(InboxOneRowPerRecord));
+        (await conn.QueryAsync<(string Type, string Entity, long? Synced)>(
+                "select entity_type, entity_id, synced_time from sf_sync_state where entity_id in ('ACC-1', 'ACC-2')"))
+            .Should().BeEquivalentTo(inboxes.SelectMany((inbox, n) => new[] { (inbox.Type, "ACC-1", n + 100), (inbox.Type, "ACC-2", (long?)(n + 200)) }));
+        (await conn.ExecuteScalarAsync<long>("select count(*) from sf_sync_state")).Should().Be(5 * inboxes.Length);
+        (await conn.ExecuteScalarAsync<long>(
+                "select count(*) from information_schema.columns where table_schema = current_schema() and column_name = 'synced_time'"))
+            .Should().Be(1, "only sf_sync_state has the state again");
         await conn.ExecuteAsync($"drop schema {schema} cascade");
     }
 

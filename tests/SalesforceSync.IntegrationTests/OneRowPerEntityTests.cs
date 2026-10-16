@@ -75,8 +75,8 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
         (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 1 && r.Status == "pending" && r.AttemptCount == 0);
         var again = await inbox.ClaimAsync(CancellationToken.None);
-        again.Events.Should().ContainSingle().Which.EventTime.Should().Be(SyncFixture.TimeOf(Event(entity, 1)));
-        again.SyncedTimes.Should().Equal(new Dictionary<string, long> { [entity] = SyncFixture.SyncedTime(1) },
+        again.Events.Should().ContainSingle().Which.Should().Match<InboxEvent>(e => e.EventTime == SyncFixture.TimeOf(Event(entity, 1))
+            && e.SyncedTime == SyncFixture.SyncedTime(1),
             "the engine supersedes an event that is not newer than the watermark (SyncEndToEndTests: without a write)");
     }
 
@@ -167,7 +167,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
             await SyncSchema.MigrateAsync(_contexts);
             _db = db;
         }
-        await ExecuteAsync(_db, $"truncate {Table}, sf_sync_state");
+        await ExecuteAsync(_db, $"truncate {Table}");
         return _db;
     }
 
@@ -195,7 +195,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     {
         await using var conn = await db.OpenConnectionAsync();
         return await conn.QuerySingleAsync<SyncStateRow>(
-            "select next_attempt_at, locked_until, lock_token, synced_time from sf_sync_state where entity_id = @entity", new { entity });
+            $"select next_attempt_at, locked_until, lock_token, synced_time from {Table} where entity_id = @entity", new { entity });
     }
 
     private static async Task ExecuteAsync(NpgsqlDataSource db, string sql, object? args = null)

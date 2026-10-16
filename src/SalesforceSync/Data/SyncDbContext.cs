@@ -11,12 +11,12 @@ namespace SalesforceSync.Data;
 
 /// <summary>
 /// The sync's tables, defined here and created by EF migrations (Data/Migrations, applied at startup by
-/// <see cref="SyncSchema"/>): one inbox table per synced object type, sf_sync_state, and the rate limiter's
+/// <see cref="SyncSchema"/>): one inbox table per synced object type, and the rate limiter's
 /// sf_rate_limit and sf_api_usage. The claim's statements are raw SQL (<see cref="InboxSql"/>) run through
 /// <c>Database.SqlQueryRaw</c>, since FOR UPDATE SKIP LOCKED and UPDATE ... RETURNING have no LINQ form.
 /// <para>
-/// To sync another object: a subclass of <see cref="InboxRow"/> that names the entity type its rows have in
-/// sf_sync_state (<see cref="IInboxRow"/>), a <c>DbSet</c> here and its <see cref="ConfigureInbox{TRow}"/> line in
+/// To sync another object: a subclass of <see cref="InboxRow"/> with its limits (<see cref="IInboxRow"/>), a
+/// <c>DbSet</c> here and its <see cref="ConfigureInbox{TRow}"/> line in
 /// <see cref="OnModelCreating"/>, with its table; then a migration (<c>dotnet ef migrations add ...</c>) creates it.
 /// </para>
 /// </summary>
@@ -27,8 +27,6 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
     public DbSet<AccountRelationshipInboxRow> AccountRelationshipInbox => Set<AccountRelationshipInboxRow>();
 
     public DbSet<ContactInboxRow> ContactInbox => Set<ContactInboxRow>();
-
-    public DbSet<SyncState> SyncStates => Set<SyncState>();
 
     /// <summary>The tables of all inbox row types, as the model names them.</summary>
     public IReadOnlyList<string> InboxTables => [.. Model.GetEntityTypes()
@@ -64,19 +62,6 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
         modelBuilder.Entity<ContactInboxRow>(entity => ConfigureInbox(entity, "sf_contact_inbox"));
 
-        // Every synced entity's sync state, one row per (entity type, entity id) for all object types. Claiming an
-        // entity is locking and leasing its row here; the inboxes hold the entities' newest events only.
-        modelBuilder.Entity<SyncState>(entity =>
-        {
-            entity.ToTable("sf_sync_state");
-            VacuumOften(entity);
-            entity.HasKey(s => new { s.EntityType, s.EntityId }).HasName("sf_sync_state_pkey");
-            // The claim (InboxSql.ClaimEntities): an entity type's due entities, the longest-waiting first. Idle
-            // entities (null) are not in the index.
-            entity.HasIndex(s => new { s.EntityType, s.NextAttemptAt }).HasDatabaseName("sf_sync_state_ready")
-                .HasFilter("next_attempt_at is not null");
-        });
-
         // The shared token bucket and daily budget guard: one row, created here. Bucket size, refill rate and budget
         // are set from configuration at worker startup (RateLimitInitializer).
         modelBuilder.Entity<RateLimitState>(entity =>
@@ -106,14 +91,18 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
     private static partial Regex WordStart();
 
     /// <summary>
-    /// An inbox table: one row per entity, holding its newest Kafka event and what became of it; the id is a
-    /// bigserial. Columns with a database default are left out of an insert while they hold the CLR default, so a new
-    /// row gets the database's clock and 'pending'.
+    /// An inbox table: one row per entity, holding its newest Kafka event, what became of it and the entity's sync state
+    /// (due when, leased by whom, synced up to); the id is a bigserial. Columns with a database default are left out of
+    /// an insert while they hold the CLR default, so a new row gets the database's clock and 'pending'.
     /// </summary>
     private static void ConfigureInbox<TRow>(EntityTypeBuilder<TRow> entity, string table) where TRow : InboxRow
     {
         entity.ToTable(table);
-        VacuumOften(entity);
+        // A hot table: vacuumed after 2% (plus 1,000 rows) of it is dead instead of the default 20%. Every event rewrites
+        // its entity's row and every claim and outcome updates it again, and the claims read the front of the ready
+        // index, where the dead index entries those updates leave behind collect. The default lets that grow with the table.
+        entity.HasStorageParameter("autovacuum_vacuum_scale_factor", 0.02);
+        entity.HasStorageParameter("autovacuum_vacuum_threshold", 1000);
         entity.HasKey(r => r.Id).HasName($"{table}_pkey");
         entity.Property(r => r.Id).UseSerialColumn();
         entity.Property(r => r.Payload).HasColumnType("jsonb");
@@ -123,20 +112,9 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         entity.Property(r => r.AttemptCount).HasDefaultValue(0);
         entity.Property(r => r.ReceivedAt).HasDefaultValueSql("now()");
         entity.Property(r => r.LastUpdated).HasDefaultValueSql("now()");
-        // One row per entity, which a newer event overwrites (InboxSql.Store's on conflict). Also how a claim finds the
-        // entities' rows (InboxSql.ClaimEvents) and its lease's end whether the row is still pending (InboxSql.EndLease).
+        // One row per entity, which a newer event overwrites (InboxSql.Store's on conflict)
         entity.HasIndex(r => r.EntityId).IsUnique().HasDatabaseName($"{table}_entity_id");
-    }
-
-    /// <summary>
-    /// For the hot tables (the inboxes, sf_sync_state): vacuum after 2% (plus 1,000 rows) of the table is dead instead
-    /// of the default 20%. Every event rewrites its entity's inbox row and every claim and outcome updates it again,
-    /// every stored event, claim and outcome updates its entity's state row, and the claims read the front of the ready
-    /// index, where the dead index entries those updates leave behind collect. The default lets that grow with the table.
-    /// </summary>
-    private static void VacuumOften(EntityTypeBuilder entity)
-    {
-        entity.HasStorageParameter("autovacuum_vacuum_scale_factor", 0.02);
-        entity.HasStorageParameter("autovacuum_vacuum_threshold", 1000);
+        // The claim (InboxSql.Claim): the due rows, the longest-waiting first. Idle rows (null) are not in the index.
+        entity.HasIndex(r => r.NextAttemptAt).HasDatabaseName($"{table}_ready").HasFilter("next_attempt_at is not null");
     }
 }

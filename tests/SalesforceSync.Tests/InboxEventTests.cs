@@ -198,9 +198,8 @@ public sealed class InboxEventTests
     [InlineData("2026-10-14T00:59:59.999999Z", "an older event that arrived late")]
     public void An_event_not_newer_than_what_is_synced_is_superseded_without_a_write(string time, string because)
     {
-        var synced = new Dictionary<string, long> { ["ACC-1"] = Micros("2026-10-14T01:00:00Z") };
-
-        var batch = Prepare(synced, Row(5, Account("ACC-1", "late", time)), Row(6, Account("ACC-2", "other entity", time)));
+        var batch = Prepare(Row(5, Account("ACC-1", "late", time)) with { SyncedTime = Micros("2026-10-14T01:00:00Z") },
+            Row(6, Account("ACC-2", "other entity", time)));
 
         batch.SupersededRowIds.Should().Equal([5L], because);
         batch.Work.Should().ContainSingle().Which.EntityId.Should().Be("ACC-2", "watermarks are per entity");
@@ -209,9 +208,8 @@ public sealed class InboxEventTests
     [Fact]
     public void An_event_newer_than_what_is_synced_is_written_even_by_a_microsecond()
     {
-        var synced = new Dictionary<string, long> { ["ACC-1"] = Micros("2026-10-14T01:00:00Z") };
-
-        Prepare(synced, Row(5, Account("ACC-1", "newer", "2026-10-14T01:00:00.000001Z"))).Work.Should().ContainSingle();
+        Prepare(Row(5, Account("ACC-1", "newer", "2026-10-14T01:00:00.000001Z")) with { SyncedTime = Micros("2026-10-14T01:00:00Z") })
+            .Work.Should().ContainSingle();
     }
 
     [Fact]
@@ -244,8 +242,8 @@ public sealed class InboxEventTests
         var batch = PreparedBatch.Prepare(Relationships,
         [
             new InboxEvent(2, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""",
-                DateTimeOffset.Parse("2026-10-14T02:00:00Z", System.Globalization.CultureInfo.InvariantCulture))
-        ], new Dictionary<string, long>());
+                DateTimeOffset.Parse("2026-10-14T02:00:00Z", System.Globalization.CultureInfo.InvariantCulture), null)
+        ]);
 
         batch.Invalid.Should().ContainSingle().Which.RowId.Should().Be(2);
         batch.SupersededRowIds.Should().BeEmpty();
@@ -343,7 +341,7 @@ public sealed class InboxEventTests
 
         if (valid)
         {
-            use.Should().NotThrow().Which.ClaimEvents.Should().Contain($"update {table} ");
+            use.Should().NotThrow().Which.Claim.Should().Contain($"update {table} ");
         }
         else
         {
@@ -365,7 +363,8 @@ public sealed class InboxEventTests
     public void No_inbox_statement_reads_inside_the_payload()
     {
         var sql = InboxSql.For("sf_account_inbox");
-        string[] claimAndOutcomes = [sql.Store, InboxSql.ClaimEntities, sql.ClaimEvents, InboxSql.LockHeld, sql.Unchanged, sql.Done, sql.EndLease];
+        // Fail and Dead read their @errors object with ->, not the payload
+        string[] claimAndOutcomes = [sql.Store, sql.Claim, sql.Done, sql.Supersede, sql.Release, sql.Hold, sql.EndLease];
 
         claimAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
     }
@@ -381,12 +380,7 @@ public sealed class InboxEventTests
 
     private static PreparedBatch Prepare(params InboxEvent[] rows)
     {
-        return PreparedBatch.Prepare(Accounts, rows, new Dictionary<string, long>());
-    }
-
-    private static PreparedBatch Prepare(Dictionary<string, long> synced, params InboxEvent[] rows)
-    {
-        return PreparedBatch.Prepare(Accounts, rows, synced);
+        return PreparedBatch.Prepare(Accounts, rows);
     }
 
     private static long Micros(string time)
@@ -403,7 +397,7 @@ public sealed class InboxEventTests
     /// <summary>A claimed row of <paramref name="entityId"/>, with the time its payload has (or none, if it can't be read).</summary>
     private static InboxEvent Row(long id, string entityId, string payload)
     {
-        return new(id, entityId, payload, Accounts.TryRead(payload, out var read, out _) ? read.Time : DateTimeOffset.UnixEpoch);
+        return new(id, entityId, payload, Accounts.TryRead(payload, out var read, out _) ? read.Time : DateTimeOffset.UnixEpoch, null);
     }
 
     private static TEvent Read<TEvent>(string json)

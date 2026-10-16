@@ -18,7 +18,7 @@ public static class SyncSchema
     /// <summary>
     /// What the current schema has: the migration history (@history), else the sync's tables in the shape of
     /// <see cref="InitialSchema"/> (made by sql/schema.sql before there were migrations; sf_sync_state.lock_token came
-    /// with its last change), in an older shape, or none. Looked up in the current schema (the search path's first), where
+    /// with its last change), in an older shape (any of @tables), or none. Looked up in the current schema (the search path's first), where
     /// the migrations create their tables (EF's own check for the history table looks in public).
     /// </summary>
     private const string ExistingShape = """
@@ -67,7 +67,8 @@ public static class SyncSchema
     /// </summary>
     private static async Task BaselineAsync(SyncDbContext db, CancellationToken ct)
     {
-        string[] tables = [.. db.Model.GetEntityTypes().Select(e => e.GetTableName()!), "sf_inbox"];
+        // The model's tables and the ones it no longer has
+        string[] tables = [.. db.Model.GetEntityTypes().Select(e => e.GetTableName()!), "sf_inbox", "sf_sync_state"];
         var shape = await db.Database.QuerySingleAsync<string>(ExistingShape, ct,
             new { history = HistoryRepository.DefaultTableName, tables });
         if (shape == "older")

@@ -31,7 +31,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         held.Status.Should().Be("pending");
         held.AttemptCount.Should().Be(0, "an unknown outcome doesn't spend an attempt");
         held.LockToken.Should().BeNull("the old worker can't record anything on it any more");
-        held.LockedUntil.Should().BeAfter(heldAt.AddSeconds(1)).And.BeBefore(heldAt + Hold + TimeSpan.FromSeconds(1));
+        held.NextAttemptAt.Should().BeAfter(heldAt.AddSeconds(1)).And.BeBefore(heldAt + Hold + TimeSpan.FromSeconds(1));
         ((string?)(await app.GetRecordAsync("Account", acct))?["Description"]).Should().Be("v1", "Salesforce did apply the write");
 
         // A newer event arrives during the hold, overwrites the row and has to wait, although nobody is working on the account
@@ -39,7 +39,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         await Eventually.ValueAsync(() => app.GetInboxRowAsync(acct), row => row?.Version == 2, "v2 to be stored");
         await Task.Delay(TimeSpan.FromSeconds(1.5));
         var during = (await app.GetInboxRowAsync(acct))!;
-        DateTime.UtcNow.Should().BeBefore(held.LockedUntil!.Value, "the check must fall inside the hold");
+        DateTime.UtcNow.Should().BeBefore(held.NextAttemptAt!.Value, "the check must fall inside the hold");
         during.Should().Match<InboxRow>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0,
             "nothing of a held entity may be claimed");
         during.LockToken.Should().BeNull();
@@ -47,7 +47,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
 
         // After the hold, normal processing converges: read, diff, write the newest
         (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
-        DateTime.UtcNow.Should().BeOnOrAfter(held.LockedUntil!.Value, "nothing was processed before the hold ended");
+        DateTime.UtcNow.Should().BeOnOrAfter(held.NextAttemptAt!.Value, "nothing was processed before the hold ended");
 
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v2");
         ((decimal?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Score__c"]).Should().Be(2m);
