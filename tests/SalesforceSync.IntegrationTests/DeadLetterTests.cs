@@ -31,7 +31,7 @@ public sealed class DeadLetterTests(FewRetriesFixture app)
 
         await app.PublishRelationshipAsync(rel, 1, parent, child, new JsonObject { ["type"] = "Subsidiary" });
 
-        (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Equal((1L, "dead"));
+        (await app.WaitForInboxSettledAsync(rel, version: 1, SyncFixture.Relationships)).Should().Be((1L, "dead"));
         var dead = (await app.GetInboxRowsAsync(rel, SyncFixture.Relationships))[0];
         dead.ErrorCode.Should().Be("DEPENDENCY_NOT_SYNCED", "the cause stays on the dead letter");
         dead.AttemptCount.Should().Be(FewRetriesFixture.MaxRetries);
@@ -49,11 +49,11 @@ public sealed class DeadLetterTests(FewRetriesFixture app)
               returning entity_id
             )
             insert into sf_sync_state as s (entity_type, entity_id, next_attempt_at)
-            select distinct 'accountRelationship', entity_id, now() from requeued
+            select 'accountRelationship', entity_id, now() from requeued
             on conflict (entity_type, entity_id) do update set next_attempt_at = coalesce(s.next_attempt_at, now())
             """);
 
-        (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Equal((1L, "done"));
+        (await app.WaitForInboxSettledAsync(rel, version: 1, SyncFixture.Relationships)).Should().Be((1L, "done"));
         ((string?)(await app.GetRecordAsync("Account_Relationship__c", rel))!["RelatedAccountId__c"]).Should().Be(child);
     }
 }

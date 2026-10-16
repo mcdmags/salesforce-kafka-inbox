@@ -9,8 +9,8 @@ namespace SalesforceSync.Inbox;
 public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
 {
     /// <summary>
-    /// Stores one event as a new pending row, with its time (meta.time), and makes its entity due. Nothing makes a row
-    /// unique: see <see cref="InboxRepository{TEntity}.AddAsync"/>.
+    /// Stores one event, with its time (meta.time), in its entity's row, unless the row holds a newer one, and makes its
+    /// entity due: see <see cref="InboxRepository{TEntity}.AddAsync"/>.
     /// </summary>
     Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct);
 
@@ -30,42 +30,49 @@ public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
     Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct);
 
     /// <summary>
-    /// The batch failed as a whole (a Salesforce call failed that provably wasn't applied): every claimed event is
+    /// The batch failed as a whole (a Salesforce call failed that provably wasn't applied): every claimed row is
     /// retried with backoff.
     /// </summary>
     Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct);
 }
 
-/// <summary>A batch of entities leased to this worker: their claimed events, and what was already synced for them.</summary>
+/// <summary>A batch of entities leased to this worker: their claimed rows, and what was already synced for them.</summary>
 /// <param name="Token">Identifies the lease; every outcome statement is conditional on it.</param>
 /// <param name="SyncedTimes">
 /// Entity id -> the time (microseconds since the epoch) of its newest synced event: its sf_sync_state.synced_time.
 /// </param>
-/// <param name="Events">The claimed events of every leased entity.</param>
+/// <param name="Events">The claimed row of every leased entity: one per entity.</param>
 public sealed record InboxClaim(
     Guid Token,
     IReadOnlyList<InboxEvent> Events,
     IReadOnlyDictionary<string, long> SyncedTimes)
 {
-    /// <summary>The inbox row ids of the claimed events.</summary>
+    /// <summary>The inbox row ids of the claimed rows.</summary>
     public long[] RowIds => [.. Events.Select(e => e.RowId)];
 
-    public string[] EntityIds => [.. Events.Select(e => e.EntityId).Distinct(StringComparer.Ordinal)];
+    /// <summary>The event_time of each claimed row as the claim read it, in <see cref="RowIds"/> order.</summary>
+    public DateTimeOffset[] EventTimes => [.. Events.Select(e => e.EventTime)];
+
+    public string[] EntityIds => [.. Events.Select(e => e.EntityId)];
 }
 
 /// <summary>A pending inbox row as claimed: the entity it belongs to and the raw event.</summary>
-/// <param name="AttemptCount">Times the event was claimed, this claim included.</param>
-/// <param name="RowId">The inbox row's primary key (its id column; one row per event). Not the entity id.</param>
+/// <param name="AttemptCount">Times the row was claimed since its event was stored, this claim included.</param>
+/// <param name="RowId">The inbox row's primary key (its id column; one row per entity). Not the entity id.</param>
 /// <param name="EntityId">The entity the event is about: the Kafka message key.</param>
 /// <param name="Payload">The event as received, JSON.</param>
-public sealed record InboxEvent(long RowId, string EntityId, string Payload, int AttemptCount);
+/// <param name="EventTime">
+/// The row's event_time as the claim read it: every outcome is recorded only while the row still has it (a newer event
+/// stored meanwhile has overwritten the row; see <see cref="InboxSql.Template.Unchanged"/>).
+/// </param>
+public sealed record InboxEvent(long RowId, string EntityId, string Payload, int AttemptCount, DateTimeOffset EventTime);
 
 /// <summary>
-/// An entity whose newest event (row <paramref name="RowId"/>) is in Salesforce: the row ends done, and its event_time
-/// is the entity's watermark (sf_sync_state.synced_time).
+/// An entity whose event (row <paramref name="RowId"/>) is in Salesforce: the row ends done, and its event_time is the
+/// entity's watermark (sf_sync_state.synced_time).
 /// </summary>
 /// <param name="EntityId">The entity: the Kafka message key.</param>
-/// <param name="RowId">The inbox row id of the newest event (not the entity id).</param>
+/// <param name="RowId">The entity's inbox row id (not the entity id).</param>
 public sealed record SyncedEntity(string EntityId, long RowId);
 
 /// <summary>An inbox row with the error to store on it.</summary>
@@ -76,7 +83,7 @@ public sealed record FailedEvent(long RowId, string Error, string? Code);
 
 /// <summary>What to record for the rows of a claim, by kind of outcome.</summary>
 /// <param name="Synced">Done; the entity's watermark advances.</param>
-/// <param name="Superseded">Not written: an event of the same entity is newer, or as new was already synced.</param>
+/// <param name="Superseded">Not written: an event as new was already synced.</param>
 /// <param name="Released">Back to the inbox for the next claim, no attempt spent.</param>
 /// <param name="Dead">Dead-lettered at once.</param>
 /// <param name="Failed">Retried with backoff, dead-lettered after <see cref="SyncOptions.MaxRetries"/>.</param>

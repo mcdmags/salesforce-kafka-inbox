@@ -17,19 +17,21 @@ public sealed class CoalesceDelayTests(SyncFixture app)
     private const string Schema = "coalesce_delay_test";
 
     [Fact]
-    public async Task An_idle_entity_is_claimable_only_after_the_delay_with_the_events_stored_meanwhile()
+    public async Task An_idle_entity_is_claimable_only_after_the_delay_with_the_newest_event_stored_meanwhile()
     {
         await using var db = await SchemaAsync();
         var inbox = Inbox(db, TimeSpan.FromSeconds(2));
         var entity = SyncFixture.NewAccountId();
+        var newer = SyncFixture.BaseTime.AddMilliseconds(1);
 
         await inbox.AddAsync(entity, SyncFixture.BaseTime, "{}", CancellationToken.None);
-        await inbox.AddAsync(entity, SyncFixture.BaseTime, "{}", CancellationToken.None);
+        await inbox.AddAsync(entity, newer, "{}", CancellationToken.None);
 
         (await inbox.ClaimAsync(CancellationToken.None)).Events.Should().BeEmpty("the entity is due only after the delay");
         var claim = await Eventually.ValueAsync(() => inbox.ClaimAsync(CancellationToken.None), c => c.Events.Count > 0,
             "the entity to be due", TimeSpan.FromSeconds(10));
-        claim.Events.Should().HaveCount(2, "the second event arrived during the delay and is claimed with the first");
+        claim.Events.Should().ContainSingle("the second event arrived during the delay and overwrote the first")
+            .Which.EventTime.Should().Be(newer);
         await DropAsync(db);
     }
 
@@ -41,9 +43,10 @@ public sealed class CoalesceDelayTests(SyncFixture app)
 
         await Inbox(db, TimeSpan.Zero).AddAsync(entity, SyncFixture.BaseTime, "{}", CancellationToken.None);
         var inbox = Inbox(db, TimeSpan.FromMinutes(1));
-        await inbox.AddAsync(entity, SyncFixture.BaseTime, "{}", CancellationToken.None);
+        await inbox.AddAsync(entity, SyncFixture.BaseTime.AddMilliseconds(1), "{}", CancellationToken.None);
 
-        (await inbox.ClaimAsync(CancellationToken.None)).Events.Should().HaveCount(2, "the first event made it due at once");
+        (await inbox.ClaimAsync(CancellationToken.None)).Events.Should().ContainSingle("the first event made it due at once")
+            .Which.EventTime.Should().Be(SyncFixture.BaseTime.AddMilliseconds(1));
         await DropAsync(db);
     }
 

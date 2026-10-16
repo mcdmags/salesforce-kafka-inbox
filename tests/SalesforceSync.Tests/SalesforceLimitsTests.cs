@@ -226,8 +226,6 @@ public sealed class SalesforceLimitsTests
         new SyncOptions().UnknownOutcomeHold.Should().Be(SalesforceLimitsOptions.MaxApiTimeout);
         new SyncOptionsValidator().Validate(null, new SyncOptions { UnknownOutcomeHold = TimeSpan.Zero })
             .FailureMessage.Should().Contain("UnknownOutcomeHold");
-        new SyncOptionsValidator().Validate(null, new SyncOptions { MaxEventsPerEntity = 0 })
-            .FailureMessage.Should().Contain("MaxEventsPerEntity");
         new SyncOptionsValidator().Validate(null, new SyncOptions()).Succeeded.Should().BeTrue();
     }
 

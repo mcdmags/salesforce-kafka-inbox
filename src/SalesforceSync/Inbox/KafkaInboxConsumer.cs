@@ -7,11 +7,12 @@ namespace SalesforceSync.Inbox;
 /// <summary>
 /// Kafka -> Postgres inbox. Each topic carries one entity type (<see cref="ISalesforceEntitySync.Topic"/>, or
 /// <c>Kafka:Topics:&lt;EntityType&gt;</c>). A message is read with that type's typed event, and its value is stored
-/// unchanged in the type's inbox table together with the entity's id taken from the event. The Kafka message key and
-/// the order of arrival are not used: an entity's events are ordered by their own time when they are processed, so
-/// they may come over any partition, in any order. The offset is stored for commit only after the row is in the
-/// inbox; a redelivery (or a retried insert) just stores the event again, which ends superseded. A message that can
-/// never be synced (not a valid event of its topic's type) is logged with its offset and skipped.
+/// unchanged in the type's inbox table together with the entity's id taken from the event, in the entity's one row
+/// unless that holds a newer event. The Kafka message key and the order of arrival are not used: an entity's events
+/// are ordered by their own time, so they may come over any partition, in any order. The offset is stored for commit
+/// only after the event is in the inbox; a redelivery (or a retried store) just stores the event over itself again,
+/// which ends superseded. A message that can never be synced (not a valid event of its topic's type) is logged with
+/// its offset and skipped.
 /// </summary>
 public sealed class KafkaInboxConsumer(
     IConsumer<string, string> consumer,

@@ -34,19 +34,19 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         held.LockedUntil.Should().BeAfter(heldAt.AddSeconds(1)).And.BeBefore(heldAt + Hold + TimeSpan.FromSeconds(1));
         ((string?)(await app.GetRecordAsync("Account", acct))?["Description"]).Should().Be("v1", "Salesforce did apply the write");
 
-        // A newer event arrives during the hold and has to wait, although nobody is working on the account
+        // A newer event arrives during the hold, overwrites the row and has to wait, although nobody is working on the account
         await app.PublishAsync(acct, 2, new JsonObject { ["name"] = "v2", ["description"] = "v2" }, new JsonObject { ["score"] = 2 });
-        await Eventually.ValueAsync(() => app.GetInboxRowsAsync(acct), rows => rows.Count == 2, "v2 to be stored");
+        await Eventually.ValueAsync(() => app.GetInboxRowsAsync(acct), rows => rows.Count == 1 && rows[0].Version == 2, "v2 to be stored");
         await Task.Delay(TimeSpan.FromSeconds(1.5));
-        var during = await app.GetInboxRowsAsync(acct);
+        var during = (await app.GetInboxRowsAsync(acct)).Should().ContainSingle().Subject;
         DateTime.UtcNow.Should().BeBefore(held.LockedUntil!.Value, "the check must fall inside the hold");
-        during.Should().OnlyContain(r => r.Status == "pending" && r.AttemptCount == 0, "nothing of a held entity may be claimed");
-        during[1].LockToken.Should().BeNull();
+        during.Should().Match<InboxRow>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0,
+            "nothing of a held entity may be claimed");
+        during.LockToken.Should().BeNull();
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v1");
 
         // After the hold, normal processing converges: read, diff, write the newest
-        var settled = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
-        settled.Should().Equal((1L, "superseded"), (2L, "done"));
+        (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
         DateTime.UtcNow.Should().BeOnOrAfter(held.LockedUntil!.Value, "nothing was processed before the hold ended");
 
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v2");
@@ -71,7 +71,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         // never went out after the Account's answer was lost)
         await Eventually.ValueAsync(() => app.GetInboxRowsAsync(acct),
             rows => rows.Count == 1 && rows[0].ErrorCode == "UNKNOWN_OUTCOME", "the hold");
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
+        (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
         (await app.GetInboxRowsAsync(acct))[0].ErrorCode.Should().BeNull("the error is cleared once the event is done");
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("the lost write had landed; nothing is written twice");
         (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().ContainSingle();
