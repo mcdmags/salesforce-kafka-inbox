@@ -207,7 +207,8 @@ public sealed partial class InboxSql
         /// deferred with this statement alone.
         /// They are pending, and due now (held or deferred: when the hold or deferral ends) instead of at the lease's
         /// end, which the store kept as an overwritten row's next_attempt_at. Ending a lease needs no check of the
-        /// claimed event: the row is due again either way. A retried claim ends the leases of the attempt it lost the same way.
+        /// claimed event: the row is due again either way. A retried claim ends the leases of the attempt it lost the
+        /// same way.
         /// </summary>
         public const string EndLease = """
             update {inbox} i
