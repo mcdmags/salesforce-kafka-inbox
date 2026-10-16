@@ -97,9 +97,9 @@ comes from the EF model, the entity type from the row type (`IInboxRow.EntityTyp
 express is LINQ (`ExecuteUpdate` for the lease-conditional outcomes superseded, released, held and deferred, and for
 releasing a lost claim attempt's leases; the rate limiter's usage count and writes); storing an event, the claim, done,
 fail, dead-letter and the end of a lease are the SQL texts of `InboxSql` run unchanged through
-`Database.SqlQueryRaw` / `ExecuteSqlRaw` with named `NpgsqlParameter`s, since `FOR UPDATE SKIP LOCKED`,
-`UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have no LINQ form. The rate limiter's `RateLimitSql` only locks its
-row (`FOR UPDATE`) and reads the database clock.
+`Database.SqlQueryRaw` / `ExecuteSqlRaw`, their `@name` parameters bound from an anonymous object's properties
+(`new { entityType, token }`), since `FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have
+no LINQ form. The rate limiter's `RateLimitSql` only locks its row (`FOR UPDATE`) and reads the database clock.
 
 ### The Describe cache
 
