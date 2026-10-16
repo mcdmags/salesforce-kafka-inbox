@@ -100,11 +100,12 @@ public sealed partial class InboxSql
         /// Overwritten, the row is pending again with no attempts and no error, whatever it was (done, dead, or claimed:
         /// see <see cref="StillClaimed"/>). An event as new as the row's (a Kafka redelivery) overwrites it too, unless
         /// the row is done: then that time is in Salesforce already, and the redelivery changes nothing, without a
-        /// claim or a Salesforce call. An older event changes nothing. A new or idle entity (next_attempt_at null) is due after @coalesceDelay
-        /// (<see cref="SyncOptions.CoalesceDelay"/>), so the rest of a burst of its events overwrites the row before it
-        /// is claimed and only the newest is written. An entity that is already due, backing off, deferred or held
-        /// keeps its time, and so does a leased one: its next_attempt_at is the lease's end, so a worker that holds the
-        /// entity keeps it, and the outcome transaction makes it due (<see cref="EndLease"/>).
+        /// claim or a Salesforce call. An older event changes nothing. A new or idle entity (next_attempt_at null) is
+        /// due after @coalesceDelay (<see cref="SyncOptions.CoalesceDelay"/>), so the rest of a burst of its events
+        /// overwrites the row before it is claimed and only the newest is written. An entity that is already due,
+        /// backing off, deferred or held keeps its time, and so does a leased one: its next_attempt_at is the lease's
+        /// end, so a worker that holds the entity keeps it, and the outcome transaction makes it due
+        /// (<see cref="EndLease"/>).
         /// <para>
         /// Under READ COMMITTED the conflicting row is locked, and if another transaction is updating it (a claim or an
         /// outcome), the store waits for that transaction and then applies to the row as it left it, its WHERE checked
@@ -122,10 +123,10 @@ public sealed partial class InboxSql
             """;
 
         /// <summary>
-        /// Picks and leases up to @batchSize due rows, the longest-waiting first, bumps each one's attempt_count and
-        /// returns them with their payloads and event times. The lease is lock_token and next_attempt_at
-        /// moved to the lease's end (now + @lease): a leased row is not due until then, and an expired lease (its worker
-        /// died) is simply due again and taken over without anyone resetting it. FOR UPDATE SKIP LOCKED: a row another
+        /// Picks and leases up to @batchSize due rows, the longest-waiting first, and returns them with their payloads
+        /// and event times. The lease is lock_token and next_attempt_at moved to the lease's end (now + @lease): a
+        /// leased row is not due until then, and an expired lease (its worker died) is simply due again and taken over
+        /// without anyone resetting it. FOR UPDATE SKIP LOCKED: a row another
         /// transaction is claiming, recording or storing an event in is skipped, not waited for. Under READ COMMITTED
         /// a row whose lease another worker committed after this statement's snapshot is re-checked on its new version
         /// when it is locked, and dropped because it is not due any more; so one entity is never leased twice
@@ -135,7 +136,7 @@ public sealed partial class InboxSql
         /// </summary>
         public const string Claim = """
             update {inbox} i
-            set next_attempt_at = now() + @lease, lock_token = @token, attempt_count = i.attempt_count + 1, last_updated = now()
+            set next_attempt_at = now() + @lease, lock_token = @token, last_updated = now()
             where i.id = any(array(
               select d.id from {inbox} d
               where d.next_attempt_at <= now()
@@ -183,26 +184,25 @@ public sealed partial class InboxSql
         /// </summary>
         public const string Release = $$"""
             update {inbox} i
-            set attempt_count = greatest(i.attempt_count - 1, 0), last_updated = now(),
-                next_attempt_at = now() + @delay, lock_token = null
+            set last_updated = now(), next_attempt_at = now() + @delay, lock_token = null
             where {{StillClaimed}}
             """;
 
         /// <summary>
-        /// Transient failure: the rows stay pending and back off exponentially, by their attempt_count, or are
-        /// dead-lettered (and idle) once claimed @maxRetries times; the lease ends. @errors is a JSON object, row id ->
-        /// [error, code], so a whole batch's failures are one statement. The object is an uncorrelated scalar subquery,
+        /// Transient failure: one more failed attempt (attempt_count); the rows stay pending and back off exponentially,
+        /// by their attempts, or are dead-lettered (and idle) at the @maxRetries-th; the lease ends. @errors is a JSON
+        /// object, row id -> [error, code], so a whole batch's failures are one statement. The object is an uncorrelated scalar subquery,
         /// which Postgres evaluates once per statement and then only looks up a key in per row. (Joined in as a one-row
         /// CTE it was copied once per row: 230 ms for 5,000 rows.)
         /// </summary>
         public const string Fail = $$"""
             update {inbox} i
-            set last_updated = now(),
+            set last_updated = now(), attempt_count = i.attempt_count + 1,
                 last_error = (select @errors::jsonb) -> i.id::text ->> 0,
                 last_error_code = (select @errors::jsonb) -> i.id::text ->> 1,
-                status = case when i.attempt_count >= @maxRetries then 'dead' else 'pending' end,
-                next_attempt_at = case when i.attempt_count < @maxRetries
-                                       then now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count - 1))) end,
+                status = case when i.attempt_count + 1 >= @maxRetries then 'dead' else 'pending' end,
+                next_attempt_at = case when i.attempt_count + 1 < @maxRetries
+                                       then now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) end,
                 lock_token = null
             where {{StillClaimed}}
             """;
@@ -226,7 +226,7 @@ public sealed partial class InboxSql
         /// </summary>
         public const string Hold = $$"""
             update {inbox} i
-            set attempt_count = greatest(i.attempt_count - 1, 0), last_updated = now(), last_error = @error, last_error_code = @code,
+            set last_updated = now(), last_error = @error, last_error_code = @code,
                 next_attempt_at = now() + @hold, lock_token = null
             where {{StillClaimed}}
             """;

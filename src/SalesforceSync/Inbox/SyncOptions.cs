@@ -36,13 +36,13 @@ public sealed class SyncOptions
     public TimeSpan UnknownOutcomeHold { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
-    /// Claims of an entity's row (its attempt_count, reset by each newer event) before it is dead-lettered on a
-    /// transient failure (permanent errors: immediately).
+    /// Transient failures of an entity's event (its row's attempt_count, reset by each newer event) at which it is
+    /// dead-lettered (permanent errors: immediately).
     /// </summary>
     public int MaxRetries { get; set; } = 8;
 
     /// <summary>
-    /// The entity's backoff after the first transient failure; doubles per attempt (its row's attempt_count) up to
+    /// The entity's backoff after the first transient failure; doubles per failure (its row's attempt_count) up to
     /// <see cref="MaxRetryDelay"/>.
     /// </summary>
     public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromSeconds(30);

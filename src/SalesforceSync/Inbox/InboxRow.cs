@@ -26,8 +26,8 @@ public abstract class InboxRow
     public string Status { get; set; } = null!;
 
     /// <summary>
-    /// Times this event was claimed (a newer event starts again at 0); it is dead-lettered after
-    /// <see cref="SyncOptions.MaxRetries"/>.
+    /// Times this event failed transiently (a newer event starts again at 0); it is dead-lettered at
+    /// <see cref="SyncOptions.MaxRetries"/>. A claim, a release, a deferral, a hold or a lost lease spends none.
     /// </summary>
     public int AttemptCount { get; set; }
 

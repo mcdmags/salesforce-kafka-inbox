@@ -470,10 +470,10 @@ public abstract class DrainBenchmarkBase
         // account event writes two records (Account, Profile).
         var claims = await Count("select count(*) from sf_claim_audit");
         var overlaps = await Count("select count(*) from sf_claim_overlaps");
-        // attempt_count counts claims of the row's event, so retries = attempts beyond the first (of the last event
+        // attempt_count counts the failures of the row's event, so retries = attempt_count (of the last event
         // only: a newer event starts again at 0). Mostly relationships claimed before their Accounts were in the org
         // (DEPENDENCY_NOT_SYNCED).
-        var retries = await Count($"select coalesce(sum(greatest(attempt_count - 1, 0)), 0) from ({inbox}) i");
+        var retries = await Count($"select coalesce(sum(attempt_count), 0) from ({inbox}) i");
         var relationshipEvents = _events.Count(e => e.Table == RelationshipTable);
 
         var stats = _store.GetStats();

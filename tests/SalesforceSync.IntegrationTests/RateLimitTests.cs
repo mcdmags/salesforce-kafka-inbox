@@ -145,7 +145,7 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
         await using var conn = await app.Db.OpenConnectionAsync();
         var maxRetry = await conn.ExecuteScalarAsync<int>(
             "select max(attempt_count) from sf_account_inbox where entity_id = any(@ids)", new { ids });
-        maxRetry.Should().Be(1, "rate-limited attempts are handed back without spending a retry");
+        maxRetry.Should().Be(0, "rate-limited attempts are handed back without spending a retry");
 
         async Task<long> DoneAsync()
         {

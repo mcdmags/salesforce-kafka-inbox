@@ -161,7 +161,7 @@ public sealed class LeaseTests(SyncFixture app)
         await using var tx = await conn.BeginTransactionAsync();
         await conn.StoreAsync(Sql.Table, acct, SyncFixture.TimeOf(e), e.ToJsonString(), tx);
         var rows = await conn.QueryAsync<InboxEvent>($"""
-            update {Sql.Table} set lock_token = @token, next_attempt_at = now() + @lease, attempt_count = attempt_count + 1
+            update {Sql.Table} set lock_token = @token, next_attempt_at = now() + @lease
             where entity_id = @acct
             returning id, entity_id, payload::text, event_time
             """, new { token, lease, acct }, tx);

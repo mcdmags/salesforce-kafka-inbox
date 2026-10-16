@@ -36,7 +36,7 @@ each contact as a **Contact** of its Account, which may not be synced yet either
 | Problem | Solution |
 |---|---|
 | Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to that object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, and marks the entity due on that row in the same statement, before storing its offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. An inbox keeps **one row per entity**, holding its newest event: a newer event overwrites it, an older one changes nothing, and neither does a redelivery of an event that is synced already. A message that isn't a valid event of its topic's type (see below) is logged with its offset and skipped, rather than blocking its partition. |
-| Ordering across parallel batches | Workers claim **entities, not events**: every entity has one inbox row, which holds its sync state too (due time, lease), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due rows, which it then leases (`lock_token`, and `next_attempt_at` moved to the lease's end, so a leased row is not due until then; `attempt_count + 1`) and reads, in one statement. Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
+| Ordering across parallel batches | Workers claim **entities, not events**: every entity has one inbox row, which holds its sync state too (due time, lease), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due rows, which it then leases (`lock_token`, and `next_attempt_at` moved to the lease's end, so a leased row is not due until then) and reads, in one statement. Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
 | Bursts of updates to one entity | Pending events for an entity are **coalesced** in the inbox: every event carries the full record, so an event with a newer `meta.time` (or the same, stored later) overwrites the entity's row, and what a claim writes is the newest event stored before it. Five updates in five seconds become one Salesforce write with the newest data. An idle entity is due `Sync:CoalesceDelay` (50 ms) after its first new event, so the rest of a burst overwrites the row before it is claimed: fewer calls, for a sync up to that much later. An event that overwrites a row while a worker writes the event it claimed is not lost: that worker's outcome is recorded only on rows that still hold the event time it claimed, and the newer event is claimed next. |
 | Late or replayed older events | **Never stored**: the entity's row is overwritten only by an event newer than the one it holds, or as new while that one is not `done` yet (`InboxSql.Store`, by `event_time`). An older event, or a redelivery of an event already in Salesforce, changes nothing and is never claimed, so it can't be written. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement is conditional on its `lock_token` on the entity's row. |
@@ -277,7 +277,7 @@ create table sf_account_inbox (                 -- and sf_account_relationship_i
   entity_id       text        not null,          -- the entity's id, read from the typed event by the consumer
   payload         jsonb       not null,          -- the Kafka message value, unchanged; never read by SQL
   status          text        not null default 'pending',  -- pending | done | dead
-  attempt_count   int         not null default 0,          -- times this event was claimed (a newer event starts at 0)
+  attempt_count   int         not null default 0,          -- times this event failed (a newer event starts at 0)
   last_error      text,
   last_error_code text,
   last_updated    timestamptz not null default now(),
@@ -333,7 +333,7 @@ some latency is acceptable, or set 0 for no added delay.
 **Claim** (`InboxSql.Claim`, the same statement for every type), in a transaction of its own, so the rows are read
 before the commit is sent: lock up to `Sync:BatchSize` of the inbox's rows that are due (`next_attempt_at <= now()`),
 longest-waiting first, off the ready index, `FOR UPDATE SKIP LOCKED`; lease them (`lock_token`, `next_attempt_at =
-now() + Sync:Lease`), `attempt_count + 1`, and return them with their payloads and their `event_time`. Only
+now() + Sync:Lease`), and return them with their payloads and their `event_time`. Only
 pending rows are due: every outcome that finishes a row sets its `next_attempt_at` null. A leased
 row is not due until its lease ends, so "due" is the only condition: no separate lease check, and a lease that
 expired (its worker died) is simply due again.
@@ -536,8 +536,8 @@ outcome is unknown is held rather than retried at once.
 A transient failure (`UNABLE_TO_LOCK_ROW`, `DEPENDENCY_NOT_SYNCED`, `INVALID_RECORD_TYPE`, a create answered with `DUPLICATE_VALUE` because
 someone else created the record first, an unknown error code, a failed read) is retried
 with exponential backoff of the entity: `Sync:RetryBaseDelay` (30 s) doubling per attempt (the row's
-`attempt_count`) up to `Sync:MaxRetryDelay` (1 h); an event is dead-lettered once it was claimed `Sync:MaxRetries` (8)
-times (`attempt_count`; a newer event of the entity starts again at 0). With the defaults the attempts come about 30 s, 1 min, 2 min,
+`attempt_count`, which only a failure increments) up to `Sync:MaxRetryDelay` (1 h); an event is dead-lettered once
+it failed `Sync:MaxRetries` (8) times (`attempt_count`; a newer event of the entity starts again at 0). With the defaults the attempts come about 30 s, 1 min, 2 min,
 4 min, 8 min, 16 min and 32 min apart: roughly an hour from the first failure to the dead letter. Permanent errors
 are dead-lettered at once. The error code that caused it stays in `last_error_code`. Rate limits, records that were
 not attempted and unknown outcomes don't spend an attempt.
