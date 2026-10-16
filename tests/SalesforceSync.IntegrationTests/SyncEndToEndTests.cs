@@ -238,7 +238,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         (await app.WaitForInboxSettledAsync(acct, version: 4)).Should().Be((4L, "superseded"));
         (await app.GetRecordAsync("Account", acct)).Should().BeNull("v4 is not newer than v5, the watermark, so it is not written");
-        (await app.GetSyncStateAsync(acct)).Should().Be(new SyncStateRow(null, null, null, SyncFixture.SyncedTime(5)),
+        (await app.GetSyncStateAsync(acct)).Should().Be(new SyncStateRow(null, null, SyncFixture.SyncedTime(5)),
             "the entity is idle again, its watermark unchanged");
     }
 

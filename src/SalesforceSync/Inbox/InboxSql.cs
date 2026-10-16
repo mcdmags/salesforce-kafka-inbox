@@ -7,9 +7,10 @@ namespace SalesforceSync.Inbox;
 /// The statements for one inbox table (one per synced object type, all the same shape; see SyncDbContext). An inbox has
 /// one row per entity (entity_id is unique) that holds the entity's newest event, a newer event overwriting it
 /// (<see cref="Template.Store"/>), and the entity's sync state: when it is due (next_attempt_at), the lease of the worker
-/// processing it (lock_token, locked_until) and its watermark (synced_time). No statement reads inside the payload: an
-/// event's entity is its entity_id column, its time its event_time column (both set by the consumer). An entity is
-/// claimed by locking and leasing its row, so two workers can never hold one entity: they would lock the same row.
+/// processing it (lock_token; the lease ends at next_attempt_at, after which the row is simply due again) and its
+/// watermark (synced_time). No statement reads inside the payload: an event's entity is its entity_id column, its time
+/// its event_time column (both set by the consumer). An entity is claimed by locking and leasing its row, so two
+/// workers can never hold one entity: they would lock the same row.
 /// <para>
 /// Every outcome statement updates only the claimed rows that its claim's token still holds and that still hold the
 /// event the claim read (<see cref="Template.StillClaimed"/>), and ends their lease. The consumer writes the same row, so
@@ -106,7 +107,8 @@ public sealed partial class InboxSql
         /// event changes nothing. A new or idle entity (next_attempt_at null) is due after @coalesceDelay
         /// (<see cref="SyncOptions.CoalesceDelay"/>), so the rest of a burst of its events overwrites the row before it
         /// is claimed and only the newest is written. An entity that is already due, backing off, deferred or held
-        /// keeps its time. The watermark and the lease are left as they are: a worker that holds the entity keeps it.
+        /// keeps its time, and so does a leased one: its next_attempt_at is the lease's end, so a worker that holds the
+        /// entity keeps it, and the outcome transaction makes it due (<see cref="EndLease"/>). The watermark is left as it is.
         /// <para>
         /// Under READ COMMITTED the conflicting row is locked, and if another transaction is updating it (a claim or an
         /// outcome), the store waits for that transaction and then applies to the row as it left it, its WHERE checked
@@ -125,21 +127,22 @@ public sealed partial class InboxSql
 
         /// <summary>
         /// Picks and leases up to @batchSize due rows, the longest-waiting first, bumps each one's attempt_count and
-        /// returns them with their payloads, event times and watermarks. FOR UPDATE SKIP LOCKED: a row another
+        /// returns them with their payloads, event times and watermarks. The lease is lock_token and next_attempt_at
+        /// moved to the lease's end (now + @lease): a leased row is not due until then, and an expired lease (its worker
+        /// died) is simply due again and taken over without anyone resetting it. FOR UPDATE SKIP LOCKED: a row another
         /// transaction is claiming, recording or storing an event in is skipped, not waited for. Under READ COMMITTED
         /// a row whose lease another worker committed after this statement's snapshot is re-checked on its new version
-        /// when it is locked, and dropped because it is leased now; so one entity is never leased twice
+        /// when it is locked, and dropped because it is not due any more; so one entity is never leased twice
         /// (ClaimRaceTests). Only pending rows are due: every outcome that finishes a row sets next_attempt_at null.
-        /// The lease leaves next_attempt_at as it was: the lock_token/locked_until check keeps a leased row out, and
-        /// an expired lease is taken over without anyone resetting it. The picked ids are an array, not a CTE joined
-        /// back: with statistics from a backlog, the join was planned as a hash join over a scan of the whole table.
+        /// The picked ids are an array, not a CTE joined back: with statistics from a backlog, the join was planned as
+        /// a hash join over a scan of the whole table.
         /// </summary>
         public const string Claim = """
             update {inbox} i
-            set locked_until = now() + @lease, lock_token = @token, attempt_count = i.attempt_count + 1, last_updated = now()
+            set next_attempt_at = now() + @lease, lock_token = @token, attempt_count = i.attempt_count + 1, last_updated = now()
             where i.id = any(array(
               select d.id from {inbox} d
-              where d.next_attempt_at <= now() and (d.locked_until is null or d.locked_until < now())
+              where d.next_attempt_at <= now()
               order by d.next_attempt_at
               limit @batchSize
               for update skip locked))
@@ -177,7 +180,7 @@ public sealed partial class InboxSql
             update {inbox} i
             set status = 'done', last_updated = now(), last_error = null, last_error_code = null,
                 synced_time = greatest(i.synced_time, (extract(epoch from i.event_time) * 1000000)::bigint),
-                next_attempt_at = null, locked_until = null, lock_token = null
+                next_attempt_at = null, lock_token = null
             where {{StillClaimed}}
             """;
 
@@ -185,7 +188,7 @@ public sealed partial class InboxSql
         public const string Supersede = $$"""
             update {inbox} i
             set status = 'superseded', last_updated = now(), last_error = null, last_error_code = null,
-                next_attempt_at = null, locked_until = null, lock_token = null
+                next_attempt_at = null, lock_token = null
             where {{StillClaimed}}
             """;
 
@@ -196,7 +199,7 @@ public sealed partial class InboxSql
         public const string Release = $$"""
             update {inbox} i
             set attempt_count = greatest(i.attempt_count - 1, 0), last_updated = now(),
-                next_attempt_at = greatest(i.next_attempt_at, now() + @delay), locked_until = null, lock_token = null
+                next_attempt_at = now() + @delay, lock_token = null
             where {{StillClaimed}}
             """;
 
@@ -215,7 +218,7 @@ public sealed partial class InboxSql
                 status = case when i.attempt_count >= @maxRetries then 'dead' else 'pending' end,
                 next_attempt_at = case when i.attempt_count < @maxRetries
                                        then now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count - 1))) end,
-                locked_until = null, lock_token = null
+                lock_token = null
             where {{StillClaimed}}
             """;
 
@@ -228,7 +231,7 @@ public sealed partial class InboxSql
             set last_updated = now(),
                 last_error = (select @errors::jsonb) -> i.id::text ->> 0,
                 last_error_code = (select @errors::jsonb) -> i.id::text ->> 1,
-                status = 'dead', next_attempt_at = null, locked_until = null, lock_token = null
+                status = 'dead', next_attempt_at = null, lock_token = null
             where {{StillClaimed}}
             """;
 
@@ -239,21 +242,21 @@ public sealed partial class InboxSql
         public const string Hold = $$"""
             update {inbox} i
             set attempt_count = greatest(i.attempt_count - 1, 0), last_updated = now(), last_error = @error, last_error_code = @code,
-                next_attempt_at = now() + @hold, locked_until = null, lock_token = null
+                next_attempt_at = now() + @hold, lock_token = null
             where {{StillClaimed}}
             """;
 
         /// <summary>
-        /// Last in an outcome transaction: ends the lease on the claimed rows (@ids) that @token still holds after the
-        /// outcomes, which are the rows a newer event overwrote during the lease (see <see cref="StillClaimed"/>). They are
-        /// pending and stay due (the store kept next_attempt_at, which the claim left set), now or after @delay,
-        /// whichever is later. Such a row gets no coalesce delay (<see cref="Store"/>): its event has already waited as
-        /// long as the batch's Salesforce calls took, and newer events that arrive before the next claim overwrite it
-        /// anyway.
+        /// Ends the lease on the rows (@ids) that @token still holds, due after @delay. Last in an outcome transaction,
+        /// those are the rows a newer event overwrote during the lease (see <see cref="StillClaimed"/>): pending, and
+        /// due now (held or deferred: when the hold or deferral ends) instead of at the lease's end, which the store
+        /// kept as their next_attempt_at. Such a row gets no coalesce delay (<see cref="Store"/>): its event has already
+        /// waited as long as the batch's Salesforce calls took, and newer events that arrive before the next claim
+        /// overwrite it anyway. A retried claim ends the leases of the attempt it lost the same way (due now).
         /// </summary>
         public const string EndLease = """
             update {inbox} i
-            set locked_until = null, lock_token = null, next_attempt_at = greatest(i.next_attempt_at, now() + @delay)
+            set lock_token = null, next_attempt_at = now() + @delay
             where i.id = any(@ids) and i.lock_token = @token
             """;
     }

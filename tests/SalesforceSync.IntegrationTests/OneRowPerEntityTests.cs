@@ -195,7 +195,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     {
         await using var conn = await db.OpenConnectionAsync();
         return await conn.QuerySingleAsync<SyncStateRow>(
-            $"select next_attempt_at, locked_until, lock_token, synced_time from {Table} where entity_id = @entity", new { entity });
+            $"select next_attempt_at, lock_token, synced_time from {Table} where entity_id = @entity", new { entity });
     }
 
     private static async Task ExecuteAsync(NpgsqlDataSource db, string sql, object? args = null)

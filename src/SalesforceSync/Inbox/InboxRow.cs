@@ -42,15 +42,12 @@ public abstract class InboxRow
     public DateTimeOffset LastUpdated { get; set; }
 
     /// <summary>
-    /// Null: nothing to do (the row is not pending). Else claimable from then on (backoff, deferral or hold included);
-    /// a claim leaves it as it is.
+    /// Null: nothing to do (the row is not pending). Else claimable from then on (backoff, deferral or hold included).
+    /// A claim moves it to the end of its lease, so a leased row is not due until the lease ends or expires.
     /// </summary>
     public DateTimeOffset? NextAttemptAt { get; set; }
 
-    /// <summary>Lease while a worker processes the entity.</summary>
-    public DateTimeOffset? LockedUntil { get; set; }
-
-    /// <summary>Which claim holds the lease.</summary>
+    /// <summary>Which claim holds the lease (until <see cref="NextAttemptAt"/>).</summary>
     public Guid? LockToken { get; set; }
 
     /// <summary>

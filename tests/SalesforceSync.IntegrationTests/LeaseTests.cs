@@ -149,8 +149,8 @@ public sealed class LeaseTests(SyncFixture app)
         await app.AccountInbox.RecordAsync(claim, Synced(claimed[0]), CancellationToken.None);
 
         var row = (await app.GetInboxRowAsync(acct))!;
-        row.Should().Match<InboxRow>(r => r.Status == "done" && r.LockToken == null && r.LockedUntil == null);
-        (await app.GetSyncStateAsync(acct)).Should().Be(new SyncStateRow(null, null, null, SyncFixture.SyncedTime(1)),
+        row.Should().Match<InboxRow>(r => r.Status == "done" && r.LockToken == null && r.NextAttemptAt == null);
+        (await app.GetSyncStateAsync(acct)).Should().Be(new SyncStateRow(null, null, SyncFixture.SyncedTime(1)),
             "the watermark is the event's time (its event_time); recorded again (after a commit whose outcome was unknown), it " +
             "finds the lease already ended and nothing is left to do");
     }
@@ -166,7 +166,7 @@ public sealed class LeaseTests(SyncFixture app)
         await using var tx = await conn.BeginTransactionAsync();
         await conn.StoreAsync(Sql.Table, acct, SyncFixture.TimeOf(e), e.ToJsonString(), tx);
         var rows = await conn.QueryAsync<InboxEvent>($"""
-            update {Sql.Table} set lock_token = @token, locked_until = now() + @lease, attempt_count = attempt_count + 1
+            update {Sql.Table} set lock_token = @token, next_attempt_at = now() + @lease, attempt_count = attempt_count + 1
             where entity_id = @acct
             returning id, entity_id, payload::text, event_time, synced_time
             """, new { token, lease, acct }, tx);

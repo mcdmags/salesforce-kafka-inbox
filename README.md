@@ -36,7 +36,7 @@ each contact as a **Contact** of its Account, which may not be synced yet either
 | Problem | Solution |
 |---|---|
 | Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to that object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, and marks the entity due on that row in the same statement, before storing its offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. An inbox keeps **one row per entity**, holding its newest event: a newer event overwrites it, an older one changes nothing. A redelivery overwrites the row with itself and ends `superseded`. A message that isn't a valid event of its topic's type (see below) is logged with its offset and skipped, rather than blocking its partition. |
-| Ordering across parallel batches | Workers claim **entities, not events**: every entity has one inbox row, which holds its sync state too (due time, lease, watermark), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due, unleased rows, which it then leases (`locked_until`, `lock_token`, `attempt_count + 1`) and reads, in one statement. Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
+| Ordering across parallel batches | Workers claim **entities, not events**: every entity has one inbox row, which holds its sync state too (due time, lease, watermark), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due rows, which it then leases (`lock_token`, and `next_attempt_at` moved to the lease's end, so a leased row is not due until then; `attempt_count + 1`) and reads, in one statement. Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
 | Bursts of updates to one entity | Pending events for an entity are **coalesced** in the inbox: every event carries the full record, so an event with a newer `meta.time` (or the same, stored later) overwrites the entity's row, and what a claim writes is the newest event stored before it. Five updates in five seconds become one Salesforce write with the newest data. An idle entity is due `Sync:CoalesceDelay` (50 ms) after its first new event, so the rest of a burst overwrites the row before it is claimed: fewer calls, for a sync up to that much later. An event that overwrites a row while a worker writes the event it claimed is not lost: that worker's outcome is recorded only on rows that still hold the event time it claimed, and the newer event is claimed next. |
 | Late or replayed older events | **Sync watermark** in the entity's inbox row (`synced_time`): when the event written to Salesforce ends `done`, its `meta.time` becomes the entity's `synced_time` (never moving back), in the same statement and only while the worker still holds the lease. A claimed event at or before the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement and the watermark are conditional on its `lock_token` on the entity's row. |
@@ -94,9 +94,9 @@ they all live on the abstract `InboxRow`; `AccountInboxRow`, `AccountRelationshi
 name their tables (independent entity types, no shared table) and their batch's query and write sizes, and the one
 `InboxRepository<TRow>` (`IRepository<TRow>`, registered as an open generic) serves them all. The table name comes
 from the EF model, the batch's query and write sizes from the row type (`IInboxRow`'s static `MaxValuesPerQuery` and
-`MaxRecordsPerWrite`). What EF can express is LINQ (`ExecuteUpdate` for releasing a lost claim attempt's leases; the
-rate limiter's usage count and writes); storing an event, the claim, every outcome (done, superseded, released, fail,
-dead-letter, hold) and the end of a lease are the SQL texts of `InboxSql` run unchanged through
+`MaxRecordsPerWrite`). What EF can express is LINQ (the rate limiter's usage count and writes); storing an event, the
+claim, every outcome (done, superseded, released, fail, dead-letter, hold) and the end of a lease (also of a lost
+claim attempt's leases) are the SQL texts of `InboxSql` run unchanged through
 `Database.SqlQueryRaw` / `ExecuteSqlRaw`, their `@name` parameters bound from an anonymous object's properties
 (`new { ids, times, token }`), since `FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have
 no LINQ form. The rate limiter's `RateLimitSql` only locks its row (`FOR UPDATE`) and reads the database clock.
@@ -282,9 +282,8 @@ create table sf_account_inbox (                 -- and sf_account_relationship_i
   last_error_code text,
   last_updated    timestamptz not null default now(),
   event_time      timestamptz not null,                    -- the event's meta.time, read by the consumer
-  next_attempt_at timestamptz,            -- null: nothing to do (not pending); else claimable from then on (backoff included)
-  locked_until    timestamptz,            -- lease while a worker processes the entity
-  lock_token      uuid,                   -- which claim holds the lease
+  next_attempt_at timestamptz,            -- null: nothing to do (not pending); else claimable from then on (backoff and lease included)
+  lock_token      uuid,                   -- which claim holds the lease (until next_attempt_at)
   synced_time     bigint                  -- watermark: the newest event time written to Salesforce, microseconds
 );
 create unique index sf_account_inbox_entity_id on sf_account_inbox (entity_id);
@@ -316,7 +315,7 @@ by less than one, would be taken as not newer and superseded.
 **Store** (`InboxSql.Store`, one statement): insert the event into the entity's row (`on conflict (entity_id) do
 update ... where event_time <= excluded.event_time`), keeping the row's watermark and any lease on it. A new entity,
 or an idle one (`next_attempt_at` null), becomes due after `Sync:CoalesceDelay`, and one that is already due,
-backing off, deferred or held keeps its time. The delay is what lets a burst coalesce: the events of an entity that
+backing off, deferred, held or leased keeps its time (a leased row's is the lease's end). The delay is what lets a burst coalesce: the events of an entity that
 arrive within it overwrite its row one after the other, and only the last is claimed and written, so a longer delay
 means fewer Salesforce calls, and each entity synced up to that much later. A row overwritten during a lease gets no
 delay when the lease ends: its event arrived during the batch's Salesforce calls, so it has already waited, and more
@@ -333,14 +332,15 @@ that got most of the reduction in the streaming benchmark (about 11% fewer calls
 some latency is acceptable, or set 0 for no added delay.
 
 **Claim** (`InboxSql.Claim`, the same statement for every type), in a transaction of its own, so the rows are read
-before the commit is sent: lock up to `Sync:BatchSize` of the inbox's rows that are due (`next_attempt_at <= now()`)
-and not leased, longest-waiting first, off the ready index, `FOR UPDATE SKIP LOCKED`; lease them (`lock_token`,
-`locked_until = now() + Sync:Lease`), `attempt_count + 1`, and return them with their payloads, their `event_time`
-and their watermarks. Only pending rows are due: every outcome that finishes a row sets its `next_attempt_at` null.
-The claim leaves `next_attempt_at` as it is.
+before the commit is sent: lock up to `Sync:BatchSize` of the inbox's rows that are due (`next_attempt_at <= now()`),
+longest-waiting first, off the ready index, `FOR UPDATE SKIP LOCKED`; lease them (`lock_token`, `next_attempt_at =
+now() + Sync:Lease`), `attempt_count + 1`, and return them with their payloads, their `event_time` and their
+watermarks. Only pending rows are due: every outcome that finishes a row sets its `next_attempt_at` null. A leased
+row is not due until its lease ends, so "due" is the only condition: no separate lease check, and a lease that
+expired (its worker died) is simply due again.
 
 Two workers can't hold one entity: they would lock the same row. Under READ COMMITTED a worker that reads a row
-before another worker's lease on it commits re-checks the row when it locks it, finds it leased, and drops it
+before another worker's lease on it commits re-checks the row when it locks it, finds it no longer due, and drops it
 (`ClaimRaceTests`). Storing an event locks the row too, so a claim skips an entity whose event is being stored, and a
 second event of the entity waits until the first has committed, and then overwrites it.
 
@@ -356,9 +356,9 @@ costs measured for the earlier claims are in [docs/benchmarks/README.md](docs/be
 Then, per claimed entity, in C#: deserialize its event, supersede it if it is not newer than the entity's watermark,
 otherwise map → write → advance the watermark (one statement for the batch marks the rows `done` and moves the
 watermarks). An event that can't be read is dead-lettered on its own (`INVALID_EVENT`). All outcome statements are
-set-based and conditional on the `lock_token` of the entity's row, and each ends the lease of the rows it records:
-done, superseded and dead-lettered rows are idle (`next_attempt_at` null), retried, released and deferred ones due
-again when their backoff or deferral ends, held ones when the hold ends.
+set-based and conditional on the `lock_token` of the entity's row, and each ends the lease of the rows it records
+by setting `next_attempt_at`: done, superseded and dead-lettered rows are idle (null), retried, released and deferred
+ones due again when their backoff or deferral ends, held ones when the hold ends.
 
 **Overwritten while claimed** (explained step by step in
 [A newer event while an entity is being synced](#a-newer-event-while-an-entity-is-being-synced)). The lease keeps other
@@ -368,8 +368,9 @@ claimed. So every outcome statement updates only the claimed rows that still hol
 row looked up by primary key and compared timestamptz to timestamptz, exactly: the times are the microseconds read
 back from the column) and records outcomes on those only: done, superseded, released, retried, dead, held. An
 overwritten row stays pending with the newer event, done doesn't move the watermark to it, and the transaction's
-last statement (`EndLease`, run only if the outcomes left a claimed row under the lease) ends its lease, leaving it
-due, so the next claim writes it. The consumer and the outcome update the same row, so Postgres's row lock orders
+last statement (`EndLease`, run only if the outcomes left a claimed row under the lease) ends its lease and makes
+it due now (held or deferred: when the hold or deferral ends), not when the lease would have ended, so the next
+claim writes it. The consumer and the outcome update the same row, so Postgres's row lock orders
 them (see below).
 
 ```sql
@@ -382,7 +383,7 @@ select id, status, attempt_count, last_error_code, payload
 from sf_account_inbox where entity_id = 'ACC-000001';
 
 -- Its state: due when, leased by whom, synced up to
-select next_attempt_at, locked_until, lock_token, synced_time from sf_account_inbox where entity_id = 'ACC-000001';
+select next_attempt_at, lock_token, synced_time from sf_account_inbox where entity_id = 'ACC-000001';
 ```
 
 (Queries like these, for people, may look inside the payload; the worker's own SQL never does.)
@@ -440,13 +441,13 @@ result and then replaces the row with "B", `pending` and due. Either way "B" is 
 
 ### How a lease works
 
-A lease is two columns of the entity's inbox row: `lock_token` (which claim owns the entity) and
-`locked_until` (until when). It is what keeps an entity to one worker while that worker talks to Salesforce, without
-holding a database lock or a transaction all that time.
+A lease is two columns of the entity's inbox row: `lock_token` (which claim owns the entity) and `next_attempt_at`
+(until when), as a queue's visibility timeout: a leased row is simply not due until its lease ends. It is what keeps
+an entity to one worker while that worker talks to Salesforce, without holding a database lock or a transaction all
+that time.
 
-1. **Take.** In the claim transaction, `Claim` locks due, unleased rows (`FOR UPDATE SKIP LOCKED`) and
-   leases them: a new `lock_token`, `locked_until = now() + Sync:Lease`. The transaction commits; the row locks go,
-   the lease stays.
+1. **Take.** In the claim transaction, `Claim` locks due rows (`FOR UPDATE SKIP LOCKED`) and leases them: a new
+   `lock_token`, `next_attempt_at = now() + Sync:Lease`. The transaction commits; the row locks go, the lease stays.
 2. **While live.** Other workers skip the entity. This worker calls Salesforce outside any transaction and stops
    (cancels the call) at 80% of the lease, measured from the claim, so it gives up before anyone else can claim the
    entity.
@@ -455,12 +456,12 @@ holding a database lock or a transaction all that time.
    lease expired and was claimed by another changes nothing, and only rows that still hold the event the claim read
    (see [Overwritten while claimed](#the-inbox)). Each statement also ends the lease of its rows and sets
    `next_attempt_at`: null for a finished row, else when it is due again (now, or the end of the backoff, deferral or
-   hold). Its last statement (`EndLease`) ends the lease of the rows left, those a newer event overwrote meanwhile:
-   they stay due, since nothing clears `next_attempt_at` while a row is leased and a store keeps it. An event stored
+   hold). Its last statement (`EndLease`) ends the lease of the rows left, those a newer event overwrote meanwhile
+   (a store keeps a leased row's `next_attempt_at`, the lease's end), and makes them due now. An event stored
    at the same moment is never left behind: the store and the outcome update the same row, so either the store came
    first (the outcome skips the overwritten row and `EndLease` ends its lease) or it waits for the outcome
    transaction and then overwrites the finished row and makes the idle entity due (`ClaimRaceTests`).
-4. **Crash.** Nothing to clean up. The lease expires, the entity is still due, and the next claim takes it. Its read
+4. **Crash.** Nothing to clean up. The lease expires, which makes the entity due, and the next claim takes it. Its read
    of Salesforce shows what the crashed worker did or didn't save. (A write whose outcome is unknown is held instead;
    see [Unknown outcomes](#unknown-outcomes).)
 
@@ -608,8 +609,8 @@ the entity were released and a newer event synced in the meantime, the late writ
 | Guarantee | How | Test |
 |---|---|---|
 | Two workers or pods never hold the same entity at once | the entity's one inbox row: locked `FOR UPDATE SKIP LOCKED` and leased, its lease re-checked when it is locked | `ConcurrencyTests.Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version` (3 pods × 8 loops, claim audit: 0 overlaps); `ClaimRaceTests` (claims while another claim or a store of the entity is open, events stored concurrently) |
-| An event stored while its entity's lease ends is not left behind | storing and ending a lease update the same row, so its lock orders them; a store keeps a due row's time and makes an idle row due, and a lease ends without clearing an overwritten row's due time | `ClaimRaceTests.An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due` |
-| An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | the claim requires the entity to be unleased | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
+| An event stored while its entity's lease ends is not left behind | storing and ending a lease update the same row, so its lock orders them; a store keeps a due row's time and makes an idle row due, and the lease of an overwritten row ends with it due now (`EndLease`), not at the lease's end | `ClaimRaceTests.An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due` |
+| An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | a leased row is not due until its lease ends (its `next_attempt_at`) | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
 | Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | a row is overwritten only by an event as new or newer, and the watermark | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
 | An event stored while its entity's older event is being written is not lost: the older one's outcome isn't recorded on it, the watermark doesn't move to it, and it is written next | every outcome statement updates only claimed rows whose `event_time` is still the one the claim read (`InboxSql.Template.StillClaimed`, in its WHERE); storing updates the same row, so the row lock orders the two, and an outcome that waited for a store re-checks its WHERE on the row the store left (READ COMMITTED); `EndLease` ends the overwritten row's lease and leaves it due | `OneRowPerEntityTests.An_outcome_for_a_claimed_event_is_not_recorded_on_the_newer_event_that_overwrote_it` and `ClaimRaceTests.An_outcome_that_waits_for_a_store_of_a_newer_event_is_not_recorded_on_it` (done, failed, dead, superseded, released, failed all, deferred, held), `LeaseTests.A_newer_event_stored_while_the_claimed_one_is_written_is_written_next_whatever_the_claimed_ones_outcome`, `ClaimRaceTests.An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due` |
 | A worker whose lease expired can't record outcomes or move the watermark | every statement is conditional on the `lock_token` of the entity's row | `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark`, `LeaseTests.Done_completes_an_event_and_sets_the_watermark_to_its_time_only_under_its_lease_and_only_once` |
@@ -647,6 +648,7 @@ The migrations, in order:
 | `InboxOneRowPerRecord` | Keeps each entity's newest row and makes `entity_id` unique |
 | `StateInInboxRow` | Moves every entity's state from `sf_sync_state` into its inbox row (`next_attempt_at` only for a pending row; a state row without an inbox row, which only a row deleted by hand leaves, is dropped), adds each inbox's ready index and drops `sf_sync_state` |
 | `DropReceivedAt` | Drops `received_at` from the inboxes: the sync orders events by `event_time`, and `last_updated` shows when a row last changed |
+| `LeaseInNextAttemptAt` | Drops `locked_until` from the inboxes: a lease ends at the row's `next_attempt_at` (a lease in progress keeps its end there; an expired one leaves the row due) |
 
 At startup `SyncSchemaInitializer` (registered before the workers) runs `SyncSchema.MigrateAsync`: under a
 session-level advisory lock (`0x5346_5348`), so pods that start together migrate one at a time and each finds the work

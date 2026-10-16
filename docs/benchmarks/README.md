@@ -683,8 +683,9 @@ Allocated 48 to 84 MB in all four runs; 0 overlapping claims, not done, wrong or
   before comparing its claims with the numbers above.
 - **One hot row per entity**: the consumer, the claim and the outcomes all update the entity's inbox row, so a store
   waits for an outcome transaction that has the row locked (milliseconds), and a claim skips a row being stored.
-  Every outcome and lease change is a new row version that is never HOT (`next_attempt_at` is indexed); not
-  re-measured since `sf_sync_state` was removed.
+  Every claim, outcome and lease change is a new row version that is never HOT (`next_attempt_at` is indexed, and
+  the claim moves it to the lease's end since `LeaseInNextAttemptAt`); not re-measured since `sf_sync_state` was
+  removed.
 - **Statistics**: no planner settings are pinned; every statement is written so that its only sensible plan is an
   index lookup by key. A new statement must be checked with stale statistics too (idle-then-backlog and
   backlog-then-drained), or it can reintroduce a plan that scans a whole table or index.

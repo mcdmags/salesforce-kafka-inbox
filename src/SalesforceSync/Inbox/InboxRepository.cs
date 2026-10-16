@@ -11,9 +11,8 @@ namespace SalesforceSync.Inbox;
 
 /// <summary>
 /// <see cref="IRepository{TEntity}"/> on Postgres, for any inbox row type: the store, claim and outcome statements and
-/// the end of a lease are the <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL; releasing
-/// a lost claim's leases is LINQ (<c>ExecuteUpdate</c>). The table comes from the EF model. Each unit of work runs
-/// through EF's execution strategy (<see cref="PostgresRetryStrategy"/>).
+/// the end of a lease are the <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL. The table
+/// comes from the EF model. Each unit of work runs through EF's execution strategy (<see cref="PostgresRetryStrategy"/>).
 /// </summary>
 public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TEntity>
     where TEntity : InboxRow, IInboxRow, new()
@@ -39,9 +38,9 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// Locks and leases a batch of due rows and reads them with their watermarks (<see cref="InboxSql.Template.Claim"/>),
     /// in a transaction of its own, so the rows are read before the commit is sent. A fresh token per attempt: if a
     /// commit's outcome is unknown and the claim is retried, rows leased by the lost attempt are not mistaken for this
-    /// one's. The retry releases them first, so they don't wait for their lease to expire (and a lease nobody works on
-    /// is never taken over). The transaction ends before Salesforce is called: from then on the lease (lock_token,
-    /// locked_until) protects the entities, not a lock.
+    /// one's. The retry ends their leases first (<see cref="InboxSql.Template.EndLease"/>), so they don't wait for the
+    /// leases to expire (and a lease nobody works on is never taken over). The transaction ends before Salesforce is
+    /// called: from then on the lease (lock_token, and next_attempt_at as its end) protects the entities, not a lock.
     /// </summary>
     public Task<InboxClaim> ClaimAsync(CancellationToken ct)
     {
@@ -49,20 +48,16 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         var attemptedRowIds = new HashSet<long>();
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
-            if (attemptedRowIds.Count > 0)
+            var sql = InboxSql.For(db.TableOf<TEntity>());
+            var ids = attemptedRowIds.ToArray();
+            foreach (var lost in attempted)
             {
-                var lost = attempted.ToArray();
-                var lostRowIds = attemptedRowIds.ToArray();
-                await db.Set<TEntity>()
-                    .Where(r => lostRowIds.Contains(r.Id) && r.LockToken != null && lost.Contains(r.LockToken.Value))
-                    .ExecuteUpdateAsync(u => u
-                        .SetProperty(r => r.LockedUntil, (DateTimeOffset?)null)
-                        .SetProperty(r => r.LockToken, (Guid?)null), t);
+                await db.Database.ExecuteAsync(sql.EndLease, t, new { ids, token = lost, delay = TimeSpan.Zero });
             }
 
             var token = Guid.NewGuid();
             attempted.Add(token);
-            var events = await db.Database.QueryAsync<InboxEvent>(InboxSql.For(db.TableOf<TEntity>()).Claim, t, new
+            var events = await db.Database.QueryAsync<InboxEvent>(sql.Claim, t, new
             {
                 token,
                 lease = _opt.Lease,
