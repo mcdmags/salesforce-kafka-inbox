@@ -48,7 +48,7 @@ public sealed class EngineFlowTests
         outcomes.Synced.Should().ContainSingle().Which.Should().Be(
             new SyncedEntity("ACC-1", PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T02:00:00Z")), 2));
         outcomes.Superseded.Should().BeEquivalentTo([1L, 4L], "an older event, and one that is not newer than the watermark");
-        outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.EventId == 3 && f.Code == SalesforceErrors.InvalidEvent);
+        outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.RowId == 3 && f.Code == SalesforceErrors.InvalidEvent);
         outcomes.Released.Should().BeEmpty();
         outcomes.Failed.Should().BeEmpty();
     }

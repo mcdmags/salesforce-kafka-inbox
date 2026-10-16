@@ -147,7 +147,7 @@ public sealed class LeaseTests(SyncFixture app)
             new { token, lease, entityType = SyncFixture.Accounts, acct }, tx);
         var rows = (await conn.QueryAsync<InboxEvent>(Sql.ClaimEvents, new { entityIds = new[] { acct }, maxPerEntity = 20 }, tx)).ToList();
         await tx.CommitAsync();
-        return [.. rows.Select(r => r.Id)];
+        return [.. rows.Select(r => r.RowId)];
     }
 
     private static InboxClaim ClaimOf(string acct, Guid token, long[] ids)

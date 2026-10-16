@@ -152,24 +152,47 @@ public class SyncFixture : IAsyncLifetime
         ConnectionString = inbox;
         _db = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(inbox) { ApplicationName = TestsApplicationName }.ConnectionString);
 
-        var instanceUrl = _org.Url.GetLeftPart(UriPartial.Authority);
+        WorkerSettings["ConnectionStrings:inboxdb"] = inbox;
+        WorkerSettings["ConnectionStrings:kafka"] = kafka;
+        WorkerSettings["Salesforce:InstanceUrl"] = _org.Url.GetLeftPart(UriPartial.Authority);
+        WorkerSettings["ConnectionStrings:redis"] = _redis?.GetConnectionString();
+        await StartPodsAsync(ct);
+        await OnStartedAsync();
+    }
+
+    private async Task StartPodsAsync(CancellationToken ct)
+    {
         for (var i = 0; i < Pods; i++)
         {
             var name = $"pod-{i}";
             var settings = new Dictionary<string, string?>(WorkerSettings)
             {
-                ["ConnectionStrings:inboxdb"] = inbox,
-                ["ConnectionStrings:kafka"] = kafka,
-                ["Salesforce:InstanceUrl"] = instanceUrl,
                 // Pods share a process here, so name them apart (the mock org counts requests per User-Agent)
-                ["Salesforce:UserAgentInstance"] = name,
-                ["ConnectionStrings:redis"] = _redis?.GetConnectionString()
+                ["Salesforce:UserAgentInstance"] = name
             };
             // Started one at a time: StartAsync returns once the schema is applied, so later pods find it in place
             _pods.Add(await WorkerPod.StartAsync(name, settings, ct));
         }
+    }
 
-        await OnStartedAsync();
+    /// <summary>
+    /// Runs the pods with this Sync:CoalesceDelay from now on: if theirs differs, they are replaced by new pods (same
+    /// containers, org and consumer group), like a rollout of a changed setting. It stays in effect for the
+    /// collection's later tests, so only tests that don't depend on the delay may skip calling this.
+    /// </summary>
+    public async Task UseCoalesceDelayAsync(TimeSpan delay)
+    {
+        var value = delay.ToString("c", CultureInfo.InvariantCulture);
+        if (WorkerSettings["Sync:CoalesceDelay"] == value)
+        {
+            return;
+        }
+
+        await Task.WhenAll(_pods.Select(p => p.DisposeAsync().AsTask()));
+        _pods.Clear();
+        WorkerSettings["Sync:CoalesceDelay"] = value;
+        using var cts = new CancellationTokenSource(StartupTimeout);
+        await StartPodsAsync(cts.Token);
     }
 
     public async Task DisposeAsync()

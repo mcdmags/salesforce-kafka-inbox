@@ -188,10 +188,10 @@ public sealed class InboxEventTests
             Row(9, Account("ACC-1", "oldest, stored last", time: "2026-10-14T00:00:00Z")));
 
         var work = batch.Work.Should().ContainSingle().Subject;
-        work.EventId.Should().Be(7);
+        work.RowId.Should().Be(7);
         work.Time.Should().Be(Micros("2026-10-14T03:00:00Z"));
         work.Unit.Records[0].Fields.Should().Contain("Name", "newest, but stored first");
-        batch.SupersededIds.Should().BeEquivalentTo([8L, 9L]);
+        batch.SupersededRowIds.Should().BeEquivalentTo([8L, 9L]);
         batch.Invalid.Should().BeEmpty();
     }
 
@@ -202,8 +202,8 @@ public sealed class InboxEventTests
             Row(4, Account("ACC-1", "second", time: "2026-10-14T01:00:00+00:00")),
             Row(3, Account("ACC-1", "first", time: "2026-10-14T03:00:00+02:00"))); // the same instant
 
-        batch.Work.Should().ContainSingle().Which.EventId.Should().Be(4);
-        batch.SupersededIds.Should().Equal(3L);
+        batch.Work.Should().ContainSingle().Which.RowId.Should().Be(4);
+        batch.SupersededRowIds.Should().Equal(3L);
     }
 
     [Fact]
@@ -227,7 +227,7 @@ public sealed class InboxEventTests
 
         var batch = Prepare(synced, Row(5, Account("ACC-1", "late", time)), Row(6, Account("ACC-2", "other entity", time)));
 
-        batch.SupersededIds.Should().Equal([5L], because);
+        batch.SupersededRowIds.Should().Equal([5L], because);
         batch.Work.Should().ContainSingle().Which.EntityId.Should().Be("ACC-2", "watermarks are per entity");
     }
 
@@ -249,7 +249,7 @@ public sealed class InboxEventTests
             Row(3, Account("ACC-1", "A", "2026-10-14T03:00:00Z")));
 
         var work = batch.Work.Should().ContainSingle().Subject;
-        work.EventId.Should().Be(3);
+        work.RowId.Should().Be(3);
         work.Unit.Records[0].Fields.Should().Contain("Name", "A");
     }
 
@@ -262,9 +262,9 @@ public sealed class InboxEventTests
             Row(3, /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T05:00:00", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "no offset" } }"""),
             Row(4, /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T05:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "x", "numberOfEmployees": "lots" } }"""));
 
-        batch.Invalid.Select(i => i.Id).Should().Equal(2L, 3L, 4L);
-        batch.Work.Should().ContainSingle().Which.EventId.Should().Be(1);
-        batch.SupersededIds.Should().BeEmpty();
+        batch.Invalid.Select(i => i.RowId).Should().Equal(2L, 3L, 4L);
+        batch.Work.Should().ContainSingle().Which.RowId.Should().Be(1);
+        batch.SupersededRowIds.Should().BeEmpty();
     }
 
     [Fact]
@@ -286,8 +286,8 @@ public sealed class InboxEventTests
             new InboxEvent(2, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""", 1)
         ], new Dictionary<string, long>());
 
-        batch.Invalid.Should().ContainSingle().Which.Id.Should().Be(2);
-        batch.SupersededIds.Should().Equal([1L], "the newest event is the entity's state; an older one is not written in its place");
+        batch.Invalid.Should().ContainSingle().Which.RowId.Should().Be(2);
+        batch.SupersededRowIds.Should().Equal([1L], "the newest event is the entity's state; an older one is not written in its place");
         batch.Work.Should().BeEmpty();
     }
 

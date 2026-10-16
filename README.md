@@ -1049,6 +1049,10 @@ dotnet test tests/SalesforceSync.Tests           # unit tests only (no Docker, u
 dotnet test tests/SalesforceSync.IntegrationTests
 ```
 
+The build checks XML doc comments in every project (`Directory.Build.props` turns on `GenerateDocumentationFile`):
+a comment that documents some parameters but not all (CS1573), a `cref` that doesn't resolve (CS1574) and the like
+are warnings, so `dotnet build -warnaserror` fails on them. Undocumented public members (CS1591) are allowed.
+
 Libraries: **xUnit** (2.x), **FluentAssertions** (pinned to 7.x, `[7.2.2]`: version 8 needs a commercial license),
 **AutoFixture** (+ `AutoFixture.Xunit2` for `[AutoData]`) for values that only need to exist or be unique (keys,
 names, numbers that are written and read back; documented examples such as the 15 → 18-character id stay

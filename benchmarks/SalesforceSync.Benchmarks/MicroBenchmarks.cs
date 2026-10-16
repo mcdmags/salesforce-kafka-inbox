@@ -33,7 +33,7 @@ public class MicroBenchmarks
     {
         // Full records, as the source sends them; ids are deliberately not in version order
         _tenEvents = [.. Enumerable.Range(1, 10).Select(v => new InboxEvent(
-            Id: 11 - v,
+            RowId: 11 - v,
             EntityId: "ACC-000001",
             Payload: new JsonObject
             {
@@ -79,7 +79,7 @@ public class MicroBenchmarks
     [Benchmark]
     public long CoalesceTenEvents()
     {
-        return PreparedBatch.Coalesce(_tenRead).Row.Id;
+        return PreparedBatch.Coalesce(_tenRead).Row.RowId;
     }
 
     /// <summary>What the engine does with a claimed entity: read its ten events, keep the newest, map it.</summary>
