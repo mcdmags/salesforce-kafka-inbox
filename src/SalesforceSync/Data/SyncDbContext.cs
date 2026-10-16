@@ -110,7 +110,6 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         entity.Property(r => r.EventTime).IsRequired();
         entity.Property(r => r.Status).HasDefaultValueSql("'pending'");
         entity.Property(r => r.AttemptCount).HasDefaultValue(0);
-        entity.Property(r => r.ReceivedAt).HasDefaultValueSql("now()");
         entity.Property(r => r.LastUpdated).HasDefaultValueSql("now()");
         // One row per entity, which a newer event overwrites (InboxSql.Store's on conflict)
         entity.HasIndex(r => r.EntityId).IsUnique().HasDatabaseName($"{table}_entity_id");

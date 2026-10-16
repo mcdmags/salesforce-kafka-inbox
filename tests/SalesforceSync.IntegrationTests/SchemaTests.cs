@@ -75,7 +75,7 @@ public sealed class SchemaTests(SyncFixture app)
 
         var account = await Columns(SyncFixture.InboxTable());
         account.Select(c => c.Split(' ')[0]).Should().Equal(
-            "id", "entity_id", "payload", "status", "attempt_count", "last_error", "last_error_code", "received_at", "last_updated",
+            "id", "entity_id", "payload", "status", "attempt_count", "last_error", "last_error_code", "last_updated",
             "event_time", "next_attempt_at", "locked_until", "lock_token", "synced_time");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await Columns(SyncFixture.InboxTable(SyncFixture.Contacts))).Should().Equal(account);
@@ -179,7 +179,8 @@ public sealed class SchemaTests(SyncFixture app)
             await conn.ExecuteAsync($"insert into {table} (entity_id, payload) values (@id, @payload::jsonb)", new { id = $"ACC-{++entity}", payload });
         }
 
-        await SyncSchema.MigrateAsync(contexts);
+        // Up to InboxEventTime only: a later migration drops received_at, which the fill uses for unreadable rows
+        await MigrateToAsync(contexts, typeof(InboxEventTime));
 
         // Null: the row got its received_at
         var stored = await conn.QueryAsync<long?>(
