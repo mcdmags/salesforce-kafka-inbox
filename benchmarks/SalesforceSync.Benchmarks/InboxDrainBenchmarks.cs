@@ -73,8 +73,6 @@ public abstract class DrainBenchmarkBase
     /// <summary>False: the whole inbox is loaded before draining. True: events keep arriving while pods drain.</summary>
     protected abstract bool StreamIngest { get; }
 
-    private const int IngestChunk = 20;
-
     /// <summary>Share of events that change a relationship between two already-seen accounts (like the load generator).</summary>
     private const double RelationshipShare = 0.15;
 
@@ -184,18 +182,14 @@ public abstract class DrainBenchmarkBase
         await Task.WhenAll(loops.Append(ingest));
     }
 
-    /// <summary>Inserts the events in small chunks, in per-account version order, as fast as possible (like the Kafka consumer).</summary>
+    /// <summary>Stores the events one at a time, in per-account version order, as fast as possible (like the Kafka consumer).</summary>
     private async Task IngestAsync(CancellationToken ct)
     {
         await using var db = await _contexts.CreateDbContextAsync(ct);
-        foreach (var chunk in _events.Chunk(IngestChunk))
+        foreach (var e in _events)
         {
-            foreach (var inbox in chunk.GroupBy(e => (e.Table, e.Type)))
-            {
-                await db.Database.ExecuteAsync(InboxSql.For(inbox.Key.Table).Store, ct, Param("entityType", inbox.Key.Type),
-                    Param("entityIds", inbox.Select(r => r.EntityId).ToArray()), Param("payloads", inbox.Select(r => r.Payload).ToArray()),
-                    Param("coalesceDelay", TimeSpan.FromMilliseconds(CoalesceDelayMs)));
-            }
+            await db.Database.ExecuteAsync(InboxSql.For(e.Table).Store, ct, Param("entityType", e.Type), Param("entityId", e.EntityId),
+                Param("payload", e.Payload), Param("coalesceDelay", TimeSpan.FromMilliseconds(CoalesceDelayMs)));
         }
     }
 

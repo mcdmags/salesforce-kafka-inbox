@@ -30,8 +30,8 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     public Task AddAsync(string entityId, string payload, CancellationToken ct)
     {
         return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).Store, t,
-                Param("entityType", db.EntityTypeOf<TEntity>()), Param("entityIds", new[] { entityId }),
-                Param("payloads", new[] { payload }), Param("coalesceDelay", _opt.CoalesceDelay)), ct);
+                Param("entityType", db.EntityTypeOf<TEntity>()), Param("entityId", entityId),
+                Param("payload", payload), Param("coalesceDelay", _opt.CoalesceDelay)), ct);
     }
 
     /// <summary>
