@@ -464,6 +464,56 @@ holding a database lock or a transaction all that time.
    of Salesforce shows what the crashed worker did or didn't save. (A write whose outcome is unknown is held instead;
    see [Unknown outcomes](#unknown-outcomes).)
 
+### Why the lease needs a lock token
+
+The row's `event_time` tells an outcome whether the row still holds the **event** the claim read (a newer event
+overwrites it). `lock_token` tells it whether this claim is still the **owner**. Both are needed, because the same
+event can be claimed twice: a row is claimable again as soon as its lease ends, and nothing stops the old worker from
+coming back after that.
+
+**How the same event gets claimed twice** (rare, but it can't be ruled out):
+
+- **A worker slower than its lease.** It is paused (a long garbage collection, a suspended or CPU-starved container or
+  VM), it can't reach Postgres to record its outcome (a network blip or a failover longer than the rest of the lease),
+  or a call takes longer than expected. Startup requires `Sync:Lease` to be longer than the HTTP request timeout, and a
+  worker cancels its Salesforce call at 80% of the lease, but a pause or an outage doesn't respect either.
+- **A claim retried after a lost commit.** The claim's commit succeeds, but the connection drops before the answer
+  arrives, and the claim is retried. The first attempt's leases exist, but no running code owns them; the retry
+  releases them by that attempt's `lock_token`.
+
+In both cases the stale claim and the new one hold the same `event_time`, so only a value that is new on every claim
+can tell them apart: that is the lock token. (`attempt_count` can't: a release, a hold and a deferral decrement it, so
+an old claim's number can come back.)
+
+**What would go wrong without it:**
+
+1. **Older data over newer in Salesforce, silently.**
+
+   ```
+   A claims ACC-1 (event 09:59) and freezes; its lease ends
+   B claims ACC-1 (event 09:59) and starts writing
+   A wakes up and records "done": nothing says A no longer owns the row
+     -> ACC-1 is finished and unleased while B is still writing
+   a new event C arrives; worker D claims and writes it      -> Salesforce = C
+   B's write of 09:59 lands                                   -> Salesforce = 09:59 (older)
+   ```
+
+   The inbox says C is `done` and the watermark is at C, so nothing corrects it until the record changes again at the
+   source. No error is raised.
+2. **A hold cancelled.** A gets no answer from Salesforce (its write may still land) and records a hold; B, which
+   took over, records `done` on top and clears it. The next event is written at once, and A's lost write lands after
+   it: the same overwrite as in 1. The hold exists to prevent exactly this.
+3. **Wrong bookkeeping.** B succeeds, then A records `failed`: the row is synced again for nothing (extra calls), or,
+   if that was A's last allowed attempt, a record B just synced is dead-lettered (a false alarm). Or A's hold lands on
+   B's success and pauses the record for 10 minutes for no reason.
+4. **A retried claim can't clean up.** The lost attempt's rows stay invisible until their lease ends.
+
+**What it doesn't prevent:** the old and the new worker writing the same event in the moment between a lease ending
+and the old worker noticing. That is harmless: an upsert by external id writes the same values twice. The token makes
+sure only the current owner's outcome counts, so a worker that no longer owns a record can't change its state, its
+hold or its watermark. Tests: `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark`
+(a lease expires mid-batch) and `ClaimRetryTests` (a claim retried after a lost commit).
+
 ### Why the Salesforce calls run outside a transaction
 
 A batch uses two short transactions: the claim (`InboxRepository.ClaimAsync`) and the outcomes
