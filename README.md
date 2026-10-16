@@ -477,7 +477,7 @@ coming back after that.
   releases them by that attempt's `lock_token`.
 
 In both cases the stale claim and the new one hold the same `event_time`, so only a value that is new on every claim
-can tell them apart: that is the lock token. (`attempt_count` can't: a release, a hold and a deferral decrement it, so
+can tell them apart: that is the lock token. (`attempt_count` can't: a release and a hold decrement it, so
 an old claim's number can come back.)
 
 **What would go wrong without it:**
