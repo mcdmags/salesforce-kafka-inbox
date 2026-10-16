@@ -117,25 +117,19 @@ public sealed partial class InboxSql
     public static class Template
     {
         /// <summary>
-        /// Stores events (@entityIds[i], @payloads[i], in that order) and makes their entities due, in one statement:
-        /// a new entity's state row is created, and a new or idle one (next_attempt_at null) is due after @coalesceDelay
+        /// Stores one event (@entityId, @payload) and makes its entity due, in one statement: a new entity's state row
+        /// is created, and a new or idle one (next_attempt_at null) is due after @coalesceDelay
         /// (<see cref="SyncOptions.CoalesceDelay"/>), so the rest of a burst of its events is claimed with it and merged
         /// into one write. An entity that is already due, backing off, deferred or held keeps its time. Upserting the
         /// state row takes its row lock, which is what makes storing safe against an outcome transaction ending the
-        /// entity's lease at the same time (see <see cref="EndLease"/>). Entities in id order, so two stores never lock
-        /// rows in opposite orders.
+        /// entity's lease at the same time (see <see cref="EndLease"/>).
         /// </summary>
         public const string Store = """
             with stored as (
-              insert into {inbox} (entity_id, payload)
-              select u.entity_id, u.payload::jsonb
-              from unnest(@entityIds::text[], @payloads::text[]) with ordinality as u(entity_id, payload, n)
-              order by u.n
-              returning entity_id
+              insert into {inbox} (entity_id, payload) values (@entityId, @payload::jsonb)
             )
             insert into sf_sync_state as s (entity_type, entity_id, next_attempt_at)
-            select @entityType, stored.entity_id, now() + @coalesceDelay
-            from stored group by stored.entity_id order by stored.entity_id
+            values (@entityType, @entityId, now() + @coalesceDelay)
             on conflict (entity_type, entity_id)
             do update set next_attempt_at = coalesce(s.next_attempt_at, now() + @coalesceDelay)
             """;
