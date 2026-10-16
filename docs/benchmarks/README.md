@@ -20,6 +20,14 @@ types, the shared Describe cache and the simplification into fewer files (PR #20
 inbox's lease, due-time and `synced_time` columns and their indexes, `InboxSql.PinPlans`) no longer exist; their
 numbers are kept as the record of that design, not as a description of the current one.
 
+**And the inbox has changed since.** Every number on this page was measured with one inbox row per event. The
+inboxes now keep one row per entity (migration `InboxOneRowPerRecord`): a newer event overwrites the entity's row, a
+claim takes at most one row per entity, and `Sync:MaxEventsPerEntity` is gone (see the
+[main README](../../README.md#the-inbox)). So the counts of `done` and `superseded` rows, the coalescing as events per
+done row, the [leasing cost by rows leased](#leasing-cost-by-rows-leased) and the preloaded drains of 5,000 rows
+describe that design. The drain benchmarks now preload each entity's newest event only (100 or 1,000 account rows,
+plus relationships) and print `entities` (inbox rows) and the coalescing as events per entity claim.
+
 [Sequential, limiter-only vs full](#sequential-limiter-only-vs-full) compares `main`'s version with one that has no
 parallel processing or race-condition handling, measured on `main` at 01b53b3.
 
@@ -51,8 +59,8 @@ whether two runs did the same thing.
    a plain reference query. All matched, before and after.
 3. **Drain benchmarks** (BenchmarkDotNet, `InboxDrainBenchmarks`, `StreamingIngestBenchmarks`): P pods x W
    worker loops drain 5,000 events. Every iteration checks that each account ends at its newest version, no
-   record's write history goes backwards, every inbox row is `done` or `superseded`, and the claim audit shows no
-   two overlapping claims of one entity.
+   record's write history goes backwards, every inbox row is `done` or `superseded` (now also: every entity's row
+   holds its newest event), and the claim audit shows no two overlapping claims of one entity.
 4. **Micro benchmarks** (no database).
 
 ## Correctness
@@ -287,8 +295,8 @@ LockHeads (75 entities) and ClaimEntities: median of 5 and 3 runs, slowest run i
 
 ### Leasing cost by rows leased
 
-Deep backlog (100 entities x 1,000 pending rows, analyzed), 75 entities per claim, `Sync:MaxEventsPerEntity` 1 to
-40; median of 5 runs, measured under load (load average about 25). On a quiet machine leasing costs about 11 µs
+Deep backlog (100 entities x 1,000 pending rows, analyzed), 75 entities per claim, `Sync:MaxEventsPerEntity` (since
+removed: a claim now takes one row per entity, the first line below) 1 to 40; median of 5 runs, measured under load (load average about 25). On a quiet machine leasing costs about 11 µs
 per row.
 
 | Events per entity | Rows leased | ClaimEntities median ms | slowest | µs per row |
@@ -301,9 +309,8 @@ per row.
 
 A claim of 75 entities locks them (LockHeads) in about 2 ms (median over the 108 scenarios); the slowest scenario
 median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest single run 21.5 ms, under load. Leasing
-dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. Lower
-`Sync:MaxEventsPerEntity` to make those claims cheaper, at the price of more Salesforce calls per event. A
-claim-wide row budget was not added: it would split deep backlogs into more, smaller writes.
+dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
+entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
 
 ## Latest run: main at 2d20c16
 
@@ -665,10 +672,12 @@ Allocated 48 to 84 MB in all four runs; 0 overlapping claims, not done, wrong or
 
 ## Remaining risks
 
-(As of the `sf_sync_state` claim.)
+(As of the `sf_sync_state` claim and one inbox row per entity.)
 
-- **Deep backlogs**: a claim reads (and bumps `attempt_count` on) up to `Sync:MaxEventsPerEntity` events per entity,
-  so its cost grows with that setting. `Sync:MaxEventsPerEntity` is the knob.
+- **Overwritten rows**: every event of an entity rewrites its one inbox row (a new row version and index entries,
+  but no new row), and a claimed row overwritten meanwhile makes the outcome transaction skip it and the entity due
+  again: one more claim, not one more write of the old event. Not measured yet; re-run the streaming benchmark
+  before comparing its claims with the numbers above.
 - **Statistics**: no planner settings are pinned; every statement is written so that its only sensible plan is an
   index lookup by key. A new statement must be checked with stale statistics too (idle-then-backlog and
   backlog-then-drained), or it can reintroduce a plan that scans a whole table or index.

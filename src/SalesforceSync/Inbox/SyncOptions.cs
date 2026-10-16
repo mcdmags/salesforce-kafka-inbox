@@ -17,13 +17,6 @@ public sealed class SyncOptions
     public int BatchSize { get; set; } = 75;
 
     /// <summary>
-    /// Pending events of one entity taken per claim (the oldest first). An event is the full record, so only the
-    /// newest of them is written; the bound keeps a deep backlog for one entity from being claimed and loaded whole.
-    /// What is left is taken by the following claims.
-    /// </summary>
-    public int MaxEventsPerEntity { get; set; } = 20;
-
-    /// <summary>
     /// How long a claim owns its entities (sf_sync_state.locked_until; lock_token says who). Between the claim
     /// transaction and the outcome transaction nothing else holds them: no transaction or row lock spans the Salesforce
     /// calls. The worker stops calling Salesforce at 80% of it, and a worker that crashes needs no cleanup: the lease
@@ -40,14 +33,14 @@ public sealed class SyncOptions
     public TimeSpan UnknownOutcomeHold { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
-    /// Claims of an event (its attempt_count) before it is dead-lettered on a transient failure (permanent errors:
-    /// immediately).
+    /// Claims of an entity's row (its attempt_count, reset by each newer event) before it is dead-lettered on a
+    /// transient failure (permanent errors: immediately).
     /// </summary>
     public int MaxRetries { get; set; } = 8;
 
     /// <summary>
-    /// The entity's backoff after the first transient failure; doubles per attempt (of its most-attempted failed event)
-    /// up to <see cref="MaxRetryDelay"/>.
+    /// The entity's backoff after the first transient failure; doubles per attempt (its row's attempt_count) up to
+    /// <see cref="MaxRetryDelay"/>.
     /// </summary>
     public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromSeconds(30);
 
@@ -55,10 +48,10 @@ public sealed class SyncOptions
 
     /// <summary>
     /// How long an idle entity waits after a new event before it is due (one already due or backing off keeps its
-    /// time), so the rest of a burst of its events is claimed with it and merged into one write: fewer Salesforce
-    /// calls, for an entity synced up to this much later. Zero: due at once. Less than <see cref="Lease"/>. 50 ms: the
-    /// streaming benchmark's 4 workers x 1 pod made about 11% fewer calls than with none, as many as with 100 ms
-    /// (docs/benchmarks/README.md).
+    /// time), so the rest of a burst of its events overwrites its row before it is claimed and only the newest is
+    /// written: fewer Salesforce calls, for an entity synced up to this much later. Zero: due at once. Less than
+    /// <see cref="Lease"/>. 50 ms: the streaming benchmark's 4 workers x 1 pod made about 11% fewer calls than with
+    /// none, as many as with 100 ms (docs/benchmarks/README.md).
     /// </summary>
     public TimeSpan CoalesceDelay { get; set; } = TimeSpan.FromMilliseconds(50);
 
@@ -96,7 +89,6 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
                        "(a batch is read with one Composite request: 5 queries of up to 100 external ids).");
         }
 
-        AtLeastOne(nameof(o.MaxEventsPerEntity), o.MaxEventsPerEntity);
         Positive(nameof(o.Lease), o.Lease);
         Positive(nameof(o.UnknownOutcomeHold), o.UnknownOutcomeHold);
         AtLeastOne(nameof(o.MaxRetries), o.MaxRetries);

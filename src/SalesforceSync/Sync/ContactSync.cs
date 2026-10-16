@@ -96,4 +96,8 @@ public sealed class ContactSObject
 public sealed class ContactInboxRow : InboxRow, IInboxRow
 {
     public static string EntityType => ContactSync.Type;
+    // A full batch's read in one Composite request (5 queries)
+    public static int MaxValuesPerQuery => 100;
+    // A margin under Salesforce's 200
+    public static int MaxRecordsPerWrite => 180;
 }

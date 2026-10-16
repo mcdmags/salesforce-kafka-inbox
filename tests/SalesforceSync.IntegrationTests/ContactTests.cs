@@ -19,7 +19,7 @@ public sealed class ContactTests(SyncFixture app)
         await app.WaitForInboxSettledAsync(acct, 1);
 
         await app.PublishContactAsync(contact, 1, acct, new JsonObject { ["lastName"] = "Lovelace", ["phone"] = "+1 555 0101" });
-        (await app.WaitForInboxSettledAsync(contact, 1, SyncFixture.Contacts)).Should().Equal((1L, "done"));
+        (await app.WaitForInboxSettledAsync(contact, version: 1, SyncFixture.Contacts)).Should().Be((1L, "done"));
 
         var record = await app.GetRecordAsync("Contact", contact);
         record.Should().NotBeNull();
@@ -32,11 +32,11 @@ public sealed class ContactTests(SyncFixture app)
         ((string?)write["body"]!["records"]!.AsArray().Single()!["AccountId__c"]).Should().Be(acct, "the key as text");
 
         await app.PublishContactAsync(contact, 2, acct, new JsonObject { ["lastName"] = "Lovelace", ["phone"] = "+1 555 0101" });
-        (await app.WaitForInboxSettledAsync(contact, 2, SyncFixture.Contacts)).Should().Equal((1L, "done"), (2L, "done"));
+        (await app.WaitForInboxSettledAsync(contact, version: 2, SyncFixture.Contacts)).Should().Be((2L, "done"));
         (await app.GetHistoryAsync("Contact", contact)).Should().ContainSingle("an unchanged contact is not written");
 
         await app.PublishContactAsync(contact, 3, acct, new JsonObject { ["lastName"] = "Lovelace" });
-        (await app.WaitForInboxSettledAsync(contact, 3, SyncFixture.Contacts)).Should().Equal((1L, "done"), (2L, "done"), (3L, "done"));
+        (await app.WaitForInboxSettledAsync(contact, version: 3, SyncFixture.Contacts)).Should().Be((3L, "done"));
         var writes = await app.GetHistoryAsync("Contact", contact);
         writes.Should().HaveCount(2, "the same contact, updated by its external id");
         writes[1].Select(kv => kv.Key).Should().Equal(["Phone"], "only what differs is sent");
@@ -80,11 +80,11 @@ public sealed class ContactTests(SyncFixture app)
         await app.PublishContactAsync(noAccount, 1, "", new JsonObject { ["lastName"] = "Orphan" });
         await app.PublishContactAsync(good, 1, acct, new JsonObject { ["lastName"] = "Good" });
 
-        (await app.WaitForInboxSettledAsync(noName, 1, SyncFixture.Contacts)).Should().Equal((1L, "dead"));
+        (await app.WaitForInboxSettledAsync(noName, version: 1, SyncFixture.Contacts)).Should().Be((1L, "dead"));
         (await app.GetInboxRowsAsync(noName, SyncFixture.Contacts))[0].ErrorCode.Should().Be("REQUIRED_FIELD_MISSING");
-        (await app.WaitForInboxSettledAsync(noAccount, 1, SyncFixture.Contacts)).Should().Equal((1L, "dead"));
+        (await app.WaitForInboxSettledAsync(noAccount, version: 1, SyncFixture.Contacts)).Should().Be((1L, "dead"));
         (await app.GetInboxRowsAsync(noAccount, SyncFixture.Contacts))[0].ErrorCode.Should().Be("INVALID_EVENT");
-        (await app.WaitForInboxSettledAsync(good, 1, SyncFixture.Contacts)).Should().Equal((1L, "done"));
+        (await app.WaitForInboxSettledAsync(good, version: 1, SyncFixture.Contacts)).Should().Be((1L, "done"));
         (await app.GetWriteRequestsAsync(noName, noAccount)).Should().BeEmpty("both failed before any call");
     }
 
@@ -108,7 +108,7 @@ public sealed class ContactTests(SyncFixture app)
 
         await app.PublishContactAsync(contact, 2, acct, new JsonObject { ["lastName"] = "v2" });
 
-        (await app.WaitForInboxSettledAsync(contact, 2, SyncFixture.Contacts)).Should().Equal((1L, "superseded"), (2L, "done"));
+        (await app.WaitForInboxSettledAsync(contact, version: 2, SyncFixture.Contacts)).Should().Be((2L, "done"));
         (await app.GetHistoryAsync("Contact", contact)).Select(w => (string?)w["LastName"]).Should().Equal(["v1", "v2"],
             "the older record is never written after the newer one");
     }

@@ -9,16 +9,16 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// The one sync engine for every Salesforce object. <see cref="UpsertBatchAsync{TEvent, TRow}"/>
-/// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds the events, and the
-/// strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
+/// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds each entity's newest
+/// event, and the strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
 /// <item>Claims up to <see cref="SyncOptions.BatchSize"/> due entities: each one's sf_sync_state row is locked with
 /// FOR UPDATE SKIP LOCKED and leased, so no two workers in any pod ever process the same entity at once, and its
-/// oldest pending events are read from the inbox table.</item>
-/// <item>Per entity, reads the claimed events and keeps the one with the newest event time (events carry the full
-/// record); the others are superseded, and so is the newest if it is not newer than what was already synced. Arrival
-/// order plays no part, so events may come out of order, over any partitions. An event that can't be read or
-/// mapped is dead-lettered on its own.</item>
+/// pending inbox row is read.</item>
+/// <item>Per entity, reads the claimed event: the newest one stored (events carry the full record, and a newer event
+/// overwrites the entity's row), superseded if it is not newer than what was already synced. Arrival order plays no
+/// part, so events may come out of order, over any partitions. An event that can't be read or mapped is
+/// dead-lettered on its own.</item>
 /// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
 /// one Composite request reads the current records (more only when very long ids need more than 5 queries), then
 /// what differs is written with sObject Collections upserts, one per level and object: one upsert call when the
@@ -26,7 +26,8 @@ namespace SalesforceSync.Sync;
 /// call), whatever the objects.</item>
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
-/// every claimed event is held (the write's outcome is unknown) or retried.</item>
+/// every claimed entity is held (the write's outcome is unknown) or retried. An entity whose row a newer event
+/// overwrote meanwhile gets no outcome: its row stays pending and the entity due.</item>
 /// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="PreparedBatch"/> and the
 /// ones in <c>Sync/Upsert</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
@@ -69,15 +70,15 @@ public sealed class SalesforceBatchUpsertService(
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
 
-        // 1. Claim events from the inbox table (short transaction; the lease, not a transaction, protects the rows
-        // until step 4)
+        // 1. Claim entities and their rows from the inbox table (short transaction; the lease, not a transaction,
+        // protects the entities until step 4)
         var claim = await inbox.ClaimAsync(ct);
         if (claim.Events.Count == 0)
         {
             return 0;
         }
 
-        // 2. Per entity: keep the newest event, drop it if it isn't newer than what is synced, map it to records
+        // 2. Per entity: drop its event if it isn't newer than what is synced, else map it to records
         var batch = PreparedBatch.Prepare(strategy, claim.Events, claim.SyncedTimes);
 
         // 3. Salesforce (outside any transaction): read, decide, send, interpret. Not inside one on purpose: Salesforce
@@ -92,7 +93,7 @@ public sealed class SalesforceBatchUpsertService(
             results = batch.Work.Count == 0
                 ? []
                 : (await WriteToSalesforceAsync(batch.Units, [.. strategy.Queries([.. batch.Work.Select(w => w.Unit)])],
-                    leaseCts.Token)).ToDictionary(r => r.Key);
+                    TRow.MaxValuesPerQuery, TRow.MaxRecordsPerWrite, leaseCts.Token)).ToDictionary(r => r.Key);
         }
         catch (UnknownOutcomeException ex)
         {
@@ -125,7 +126,8 @@ public sealed class SalesforceBatchUpsertService(
     /// <summary>
     /// The Salesforce half of a batch, for any sObjects: one Composite request reads the current records (one per 5
     /// queries; only very long ids make more than 5, as each query's URL must fit a call), then what differs is
-    /// written with sObject Collections upserts by external id, one per level and object (and 200 records).
+    /// written with sObject Collections upserts by external id, one per level and object (and
+    /// <paramref name="maxRecordsPerWrite"/> records).
     /// Each write request (more than 5 upserts are split over further requests) is one call: its upsert on its own when
     /// it has one (a single object), else one Composite request of them, parents first. Returns one outcome per unit.
     /// Nothing here touches the inbox.
@@ -139,10 +141,12 @@ public sealed class SalesforceBatchUpsertService(
     /// </remarks>
     /// <param name="units">At most <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
     /// <param name="queries">The strategy's reads: the units' records and the records their lookups and foreign keys point at.</param>
+    /// <param name="maxValuesPerQuery">The row type's <see cref="IInboxRow.MaxValuesPerQuery"/>.</param>
+    /// <param name="maxRecordsPerWrite">The row type's <see cref="IInboxRow.MaxRecordsPerWrite"/>.</param>
     /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
     /// <param name="ct">Cancels the calls; shutdown, not a failure.</param>
     internal async Task<List<UpsertResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
-        IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
+        IReadOnlyList<SoqlQuery> queries, int maxValuesPerQuery, int maxRecordsPerWrite, CancellationToken ct)
     {
         if (units.Count > ReadQueryBuilder.MaxEntitiesPerBatch)
         {
@@ -169,11 +173,11 @@ public sealed class SalesforceBatchUpsertService(
         }
 
         // 3. Read: one Composite call with the strategy's queries (more only if long ids split them into more than 5)
-        var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas), schemas.Keys, ct);
+        var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas, maxValuesPerQuery), schemas.Keys, ct);
 
         // 4. Decide per record: unchanged, create or update (by what the read found), and how each lookup is linked;
         // the writes are grouped into collections and Composite requests
-        var plan = WritePlanner.Plan(normalized, current);
+        var plan = WritePlanner.Plan(normalized, current, maxRecordsPerWrite);
         results.AddRange(plan.NotSent);
 
         // 5. Send. A request of one object is its Collections upsert; a request of several objects (Accounts and their

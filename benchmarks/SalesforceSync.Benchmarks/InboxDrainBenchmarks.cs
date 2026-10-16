@@ -28,7 +28,7 @@ namespace SalesforceSync.Benchmarks;
 /// land: every account must end at its newest version, the org's write history must show each account's
 /// versions only moving forward, every relationship must end at its newest version linked to the right two
 /// Accounts, the claim audit (sql/claim-audit.sql) must show no two overlapping claims on the same entity, and
-/// every inbox row must end done or superseded (an older event claimed together with a newer one of its entity).
+/// every entity's one inbox row must hold its newest event and end done (or superseded: as new as the watermark).
 /// </para>
 /// </summary>
 [Config(typeof(DrainConfig))]
@@ -57,7 +57,10 @@ public abstract class DrainBenchmarkBase
 
     public abstract int Events { get; set; }
 
-    /// <summary>Fewer accounts = more updates per account = more coalescing and ordering pressure.</summary>
+    /// <summary>
+    /// Fewer accounts = more updates per account = more coalescing (events overwriting an unclaimed row) and ordering
+    /// pressure.
+    /// </summary>
     public abstract int Accounts { get; set; }
 
     /// <summary>Simulated Salesforce round trip.</summary>
@@ -365,12 +368,22 @@ public abstract class DrainBenchmarkBase
         return (events, versions);
     }
 
+    /// <summary>
+    /// Loads the events as storing them one after the other would leave the inbox (InboxSql.Store): per entity one row,
+    /// its newest event (of two as new, the one stored later), and the entity due. Copied into a temporary table first,
+    /// since one insert can't overwrite a row twice.
+    /// </summary>
     private async Task PreloadAsync(NpgsqlConnection conn)
     {
         foreach (var inbox in _events.GroupBy(e => (e.Table, e.Type)))
         {
+            await using (var stage = new NpgsqlCommand(
+                             "create temp table preload (seq bigserial, entity_id text, event_time timestamptz, payload jsonb)", conn))
+            {
+                await stage.ExecuteNonQueryAsync();
+            }
             await using (var importer = await conn.BeginBinaryImportAsync(
-                             $"copy {inbox.Key.Table} (entity_id, event_time, payload) from stdin (format binary)"))
+                             "copy preload (entity_id, event_time, payload) from stdin (format binary)"))
             {
                 foreach (var e in inbox)
                 {
@@ -381,12 +394,14 @@ public abstract class DrainBenchmarkBase
                 }
                 await importer.CompleteAsync();
             }
-            // What storing does for each event: its entity is due
-            await using var due = new NpgsqlCommand(
-                $"insert into sf_sync_state (entity_type, entity_id, next_attempt_at) select distinct @type, entity_id, now() from {inbox.Key.Table}",
-                conn);
-            due.Parameters.AddWithValue("type", inbox.Key.Type);
-            await due.ExecuteNonQueryAsync();
+            await using var store = new NpgsqlCommand($"""
+                insert into {inbox.Key.Table} (entity_id, event_time, payload)
+                select distinct on (entity_id) entity_id, event_time, payload from preload order by entity_id, event_time desc, seq desc;
+                insert into sf_sync_state (entity_type, entity_id, next_attempt_at) select distinct @type, entity_id, now() from preload;
+                drop table preload;
+                """, conn);
+            store.Parameters.AddWithValue("type", inbox.Key.Type);
+            await store.ExecuteNonQueryAsync();
         }
     }
 
@@ -432,37 +447,44 @@ public abstract class DrainBenchmarkBase
         {
             return await db.Database.QuerySingleAsync<long>(sql, default);
         }
-        // One query over both inbox tables; "superseded" is a normal end for an older event claimed with a newer one
-        var inbox = string.Join(" union all ", InboxTables.Select(t => $"select status, attempt_count from {t}"));
+        // One query over both inbox tables, one row per entity; "superseded" ends an event as new as the watermark
+        var inbox = string.Join(" union all ", InboxTables.Select(t => $"select entity_id, event_time, status, attempt_count from {t}"));
         var rows = await Count($"select count(*) from ({inbox}) i");
         var notDone = await Count($"select count(*) from ({inbox}) i where status not in ('done', 'superseded')");
         var superseded = await Count($"select count(*) from ({inbox}) i where status = 'superseded'");
-        // A done row is an entity synced from its newest claimed event; the superseded rows are the events coalesced
-        // into it (or dropped by the watermark). Events per done row is therefore the coalescing, per entity sync:
-        // counting records written instead would mix in that an account event writes two records (Account, Profile).
-        var done = await Count($"select count(*) from ({inbox}) i where status = 'done'");
+        // Every entity's row holds its newest event (the entity ids of the two types never collide: ACC- and REL-)
+        var newest = _expected.ToDictionary(e => e.Key.Key, e => Time(e.Value), StringComparer.Ordinal);
+        var stale = (await db.Database.QueryAsync<StoredEvent>($"select entity_id as EntityId, event_time as EventTime from ({inbox}) i", default))
+            .Count(r => newest.GetValueOrDefault(r.EntityId) != r.EventTime);
+        // An entity claim takes the entity's row once its newest events have overwritten it, so events per claim is the
+        // coalescing (claims also count retries). Counting records written instead would mix in that an
+        // account event writes two records (Account, Profile).
         var claims = await Count("select count(*) from sf_claim_audit");
         var overlaps = await Count("select count(*) from sf_claim_overlaps");
-        // attempt_count counts claims of the event, so retries = attempts beyond the first. Mostly relationships
-        // claimed before their Accounts were in the org (DEPENDENCY_NOT_SYNCED).
+        // attempt_count counts claims of the row's event, so retries = attempts beyond the first (of the last event
+        // only: a newer event starts again at 0). Mostly relationships claimed before their Accounts were in the org
+        // (DEPENDENCY_NOT_SYNCED).
         var retries = await Count($"select coalesce(sum(greatest(attempt_count - 1, 0)), 0) from ({inbox}) i");
         var relationshipEvents = _events.Count(e => e.Table == RelationshipTable);
 
         var stats = _store.GetStats();
         Console.WriteLine(
             $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms coalesceDelay={CoalesceDelayMs}ms] " +
-            $"events={Events} relationshipEvents={relationshipEvents} {stats} done={done} superseded={superseded} " +
-            $"coalescing={(double)Events / Math.Max(1, done):F2} events/entity sync " +
-            $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} wrong={wrong.Count} regressions={regressions}");
+            $"events={Events} relationshipEvents={relationshipEvents} {stats} entities={rows} superseded={superseded} " +
+            $"coalescing={(double)Events / Math.Max(1, claims):F2} events/entity claim " +
+            $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} stale={stale} wrong={wrong.Count} regressions={regressions}");
 
-        if (wrong.Count > 0 || rows != Events || notDone > 0 || overlaps > 0 || regressions > 0)
+        if (wrong.Count > 0 || rows != _expected.Count || stale > 0 || notDone > 0 || overlaps > 0 || regressions > 0)
         {
             throw new InvalidOperationException(
-                $"Correctness check failed: {wrong.Count} entities not at newest version, {notDone} of {rows}/{Events} " +
-                $"inbox rows not done, {overlaps} overlapping claims, {regressions} entities received an older version " +
-                "after a newer one. " + string.Join("; ", wrong.Take(5)));
+                $"Correctness check failed: {wrong.Count} entities not at newest version, {rows} inbox rows for {_expected.Count} " +
+                $"entities, {stale} not at the newest event, {notDone} not done, {overlaps} overlapping claims, {regressions} " +
+                "entities received an older version after a newer one. " + string.Join("; ", wrong.Take(5)));
         }
     }
+
+    /// <summary>An inbox row's entity and event time, as the verification reads them.</summary>
+    private sealed record StoredEvent(string EntityId, DateTimeOffset EventTime);
 
     private const string RelationshipObject = "Account_Relationship__c";
 
@@ -527,9 +549,10 @@ public class InboxDrainBenchmarks : DrainBenchmarkBase
 }
 
 /// <summary>
-/// Events keep arriving (in per-account version order, like Kafka) while the pods drain, so the same account is
-/// claimed, released and claimed again many times by different workers in different pods. This is the race the
-/// head-row claim must prevent.
+/// Events keep arriving (in per-account version order, like Kafka, through InboxSql.Store) while the pods drain, so
+/// the same account is claimed, released and claimed again many times by different workers in different pods, and its
+/// row is overwritten while a worker writes the event it claimed: the races the lease and the outcomes' check of the
+/// claimed event time must handle.
 /// </summary>
 public class StreamingIngestBenchmarks : DrainBenchmarkBase
 {

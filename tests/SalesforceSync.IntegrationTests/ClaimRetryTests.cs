@@ -27,10 +27,7 @@ public sealed class ClaimRetryTests(SyncFixture app)
         var entity = SyncFixture.NewAccountId();
         await using (var conn = await db.OpenConnectionAsync())
         {
-            for (var i = 0; i < 3; i++)
-            {
-                await conn.StoreAsync(SyncFixture.InboxTable(), SyncFixture.Accounts, entity, SyncFixture.BaseTime, "{}");
-            }
+            await conn.StoreAsync(SyncFixture.InboxTable(), SyncFixture.Accounts, entity, SyncFixture.BaseTime, "{}");
         }
 
         // The claim commits, and then the commit "fails": the entity is leased, but the worker can't know it
@@ -43,7 +40,7 @@ public sealed class ClaimRetryTests(SyncFixture app)
         var claim = await inbox.ClaimAsync(CancellationToken.None);
 
         lostCommit.Commits.Should().Be(2, "the claim ran again");
-        claim.Events.Should().HaveCount(3);
+        claim.Events.Should().ContainSingle();
         await using var check = await db.OpenConnectionAsync();
         (await check.QuerySingleAsync<Guid?>("select lock_token from sf_sync_state where entity_id = @entity", new { entity }))
             .Should().Be(claim.Token, "the lost attempt's lease was released, not left to expire, and the retry leased the entity");

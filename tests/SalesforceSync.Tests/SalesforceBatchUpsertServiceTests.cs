@@ -188,7 +188,8 @@ public sealed class SalesforceBatchUpsertServiceTests
             ("GOOD", RawAccount("GOOD", new() { ["Name"] = "Good" }))
         };
         var results = await _upserter.WriteToSalesforceAsync(units,
-            [.. AccountSync.Queries([.. units.Select(u => u.Unit)])], CancellationToken.None);
+            [.. AccountSync.Queries([.. units.Select(u => u.Unit)])],
+            AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
 
         var bad = results.Should().ContainSingle(r => r.Key == "BAD").Subject;
         bad.Outcome.Should().Be(SyncOutcome.PermanentFailure);
@@ -255,7 +256,8 @@ public sealed class SalesforceBatchUpsertServiceTests
         lost.Outcome.Should().Be(SyncOutcome.TransientFailure);
         (lost.PrimaryError?.Code).Should().Be("DUPLICATE_VALUE");
         await Upserter().WriteToSalesforceAsync([("A1", RawAccount("A1", new() { ["Name"] = "Theirs" }))],
-            [new SoqlQuery("Account", "ExternalId__c", ["A1"])], CancellationToken.None);
+            [new SoqlQuery("Account", "ExternalId__c", ["A1"])],
+            AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
 
         (await Account("A1", new() { ["name"] = "Ours" }, [])).Outcome.Should().Be(SyncOutcome.Saved);
 
@@ -398,7 +400,7 @@ public sealed class SalesforceBatchUpsertServiceTests
                 new SoqlQuery("Account", "ExternalId__c", [.. units.Select(u => u.Key)]),
                 new SoqlQuery("Contact", "ExternalId__c", [.. units.Select(u => $"C-{u.Key}")]),
                 new SoqlQuery("Profile__c", "ExternalId__c", [.. units.Select(u => $"P-{u.Key}")])
-            ], CancellationToken.None);
+            ], AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
         }
 
         await Send(("OLD1", Unit("OLD1", "Gold")), ("OLD2", Unit("OLD2", "Gold")));
@@ -640,7 +642,8 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         var result = (await _upserter.WriteToSalesforceAsync(
             [("X1", new UpsertUnit([SObjectRecord.From("acct", new UnknownRecordTypeAccount { ExternalId = "X1" })]))],
-            [new SoqlQuery("Account", "ExternalId__c", ["X1"])], CancellationToken.None)).Single();
+            [new SoqlQuery("Account", "ExternalId__c", ["X1"])],
+            AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None)).Single();
 
         result.Outcome.Should().Be(SyncOutcome.TransientFailure, "the record type may be created or assigned any time");
         result.PrimaryError!.Code.Should().Be(SalesforceErrors.InvalidRecordType);
@@ -661,7 +664,8 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         var result = (await _upserter.WriteToSalesforceAsync(
             [("A1", RawAccount("A1", new() { ["Name"] = "Acme", ["RecordTypeId"] = unknownId }))],
-            [new SoqlQuery("Account", "ExternalId__c", ["A1"])], CancellationToken.None)).Single();
+            [new SoqlQuery("Account", "ExternalId__c", ["A1"])],
+            AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None)).Single();
 
         result.Outcome.Should().Be(SyncOutcome.TransientFailure);
         result.PrimaryError!.Code.Should().Be(SalesforceErrors.InvalidRecordType);
@@ -838,7 +842,8 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         var rel = new JsonObject { ["externalId"] = "R1", ["accountExternalId"] = "A1", ["relatedAccountExternalId"] = "A2" };
         var unit = RelationshipStrategy.Map("R1", Read<AccountRelationshipEvent>(new JsonObject { ["accountRelationship"] = rel }));
-        var rejected = (await upserter.WriteToSalesforceAsync([("R1", unit)], [.. RelationshipStrategy.Queries([unit])], CancellationToken.None)).Single();
+        var rejected = (await upserter.WriteToSalesforceAsync([("R1", unit)], [.. RelationshipStrategy.Queries([unit])],
+            AccountRelationshipInboxRow.MaxValuesPerQuery, AccountRelationshipInboxRow.MaxRecordsPerWrite, CancellationToken.None)).Single();
 
         (rejected.Outcome, rejected.PrimaryError?.Code).Should().Be((outcome, code));
     }
@@ -1087,7 +1092,8 @@ public sealed class SalesforceBatchUpsertServiceTests
     private Task<List<UpsertResult>> Upsert<TEvent>(UpsertStrategy<TEvent> strategy, params (string Key, TEvent Event)[] items)
     {
         var units = items.Select(i => (i.Key, strategy.Map(i.Key, i.Event))).ToList();
-        return _upserter.WriteToSalesforceAsync(units, [.. strategy.Queries([.. units.Select(u => u.Item2)])], CancellationToken.None);
+        return _upserter.WriteToSalesforceAsync(units, [.. strategy.Queries([.. units.Select(u => u.Item2)])],
+            AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
     }
 
     private static JsonObject WithoutProfile(string key, string name)

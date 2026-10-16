@@ -8,28 +8,26 @@ internal sealed record ReadQuery(CompositeQuery Query, string SObject);
 
 /// <summary>
 /// Builds the batch's read: the strategy's queries as SOQL, each selecting every field the diff compares and the Ids
-/// the lookups need (or the external ids that show a parent exists), split into chunks of at most 100 values whose
-/// URL fits a call (<see cref="SalesforceRestClient.MaxUrlBytes"/>).
+/// the lookups need (or the external ids that show a parent exists), split into chunks of at most the row type's
+/// <see cref="Inbox.IInboxRow.MaxValuesPerQuery"/> values whose URL fits a call (<see cref="SalesforceRestClient.MaxUrlBytes"/>).
 /// </summary>
 internal static class ReadQueryBuilder
 {
-    /// <summary>External ids per query, at most; fewer when long ids would make its URL too long.</summary>
-    internal const int MaxValuesPerQuery = 100;
-
     /// <summary>
-    /// Entities per batch. Not a Salesforce limit of its own: it keeps a batch's read to one Composite request while
-    /// the ids are short, i.e. 5 queries of <see cref="MaxValuesPerQuery"/> external ids each, where an entity can need
-    /// up to 3 ids per 100 (a relationship: itself and two Accounts). Ids long enough to split the queries further
-    /// cost more read calls, not a failure. The write side would allow more (5 collections of 200 records).
+    /// Entities per batch. Not a Salesforce limit of its own: with the row types' 100 external ids per query, it keeps
+    /// a batch's read to one Composite request while the ids are short: 5 queries of 100 ids, where an entity can need
+    /// up to 3 ids (a relationship: itself and two Accounts). Ids long enough to split the queries further cost more
+    /// read calls, not a failure. The write side would allow more (5 collections of the row types' 180 records).
     /// </summary>
-    internal const int MaxEntitiesPerBatch = MaxValuesPerQuery;
+    internal const int MaxEntitiesPerBatch = 100;
 
     /// <summary>
-    /// One query per chunk of values, named q0, q1, ...; more than one Composite request takes (5) are sent as several.
+    /// One query per chunk of at most <paramref name="maxValuesPerQuery"/> values (the row type's), named q0, q1, ...;
+    /// more than one Composite request takes (5) are sent as several.
     /// </summary>
     /// <exception cref="InvalidOperationException">A query's URL is too long even with a single value.</exception>
     public static List<ReadQuery> Build(IReadOnlyList<NormalizedUnit> units, IReadOnlyList<SoqlQuery> queries,
-        IReadOnlyDictionary<string, SObjectSchema> schemas)
+        IReadOnlyDictionary<string, SObjectSchema> schemas, int maxValuesPerQuery)
     {
         var records = units.SelectMany(u => u.Records).ToList();
         var composite = new List<ReadQuery>();
@@ -39,7 +37,7 @@ internal static class ReadQueryBuilder
             var target = schemas[query.SObject];
             var fields = FieldsToSelect(target, query, records);
 
-            foreach (var soql in Chunked(target.Name, fields, query.WhereField, query.Values.Distinct(StringComparer.Ordinal)))
+            foreach (var soql in Chunked(target.Name, fields, query.WhereField, query.Values.Distinct(StringComparer.Ordinal), maxValuesPerQuery))
             {
                 composite.Add(new ReadQuery(new CompositeQuery($"q{composite.Count}", soql), target.Name));
             }
@@ -49,11 +47,12 @@ internal static class ReadQueryBuilder
     }
 
     /// <summary>
-    /// The values in order as queries of at most <see cref="MaxValuesPerQuery"/> values: a query takes the next value
+    /// The values in order as queries of at most <paramref name="maxValues"/> values: a query takes the next value
     /// while its URL, as the client sends it, still fits. Percent-encoding works character by character, so a URL's
     /// length is the empty query's plus each value's encoded literal and separator: counted per value, not rebuilt.
     /// </summary>
-    private static IEnumerable<string> Chunked(string sobject, List<string> fields, string whereField, IEnumerable<string> values)
+    private static IEnumerable<string> Chunked(string sobject, List<string> fields, string whereField, IEnumerable<string> values,
+        int maxValues)
     {
         var empty = SalesforceRestClient.QueryUrl(SalesforceRestClient.Soql(sobject, fields, whereField, [])).Length;
         var separator = Uri.EscapeDataString(",").Length;
@@ -62,7 +61,7 @@ internal static class ReadQueryBuilder
         foreach (var value in values)
         {
             var literal = Uri.EscapeDataString(SalesforceRestClient.SoqlLiteral(value)).Length;
-            if (chunk.Count > 0 && chunk.Count < MaxValuesPerQuery && length + separator + literal <= SalesforceRestClient.MaxUrlBytes)
+            if (chunk.Count > 0 && chunk.Count < maxValues && length + separator + literal <= SalesforceRestClient.MaxUrlBytes)
             {
                 chunk.Add(value);
                 length += separator + literal;

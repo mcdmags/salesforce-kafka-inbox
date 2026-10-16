@@ -17,7 +17,7 @@ public sealed class RelationshipTests(SyncFixture app)
         await app.WaitForInboxSettledAsync(child, 1);
 
         await app.PublishRelationshipAsync(rel, 1, parent, child, new JsonObject { ["type"] = "Parent", ["isActive"] = true });
-        (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Equal((1L, "done"));
+        (await app.WaitForInboxSettledAsync(rel, version: 1, SyncFixture.Relationships)).Should().Be((1L, "done"));
 
         var write = (await app.GetWriteRequestsAsync(rel)).Should().ContainSingle("one upsert, the Accounts' keys as text").Subject;
         ((string?)write["url"]).Should().Be("/services/data/v62.0/composite/sobjects/Account_Relationship__c/ExternalId__c");
@@ -82,10 +82,8 @@ public sealed class RelationshipTests(SyncFixture app)
 
         await app.PublishRelationshipAsync(rel, 1, SyncFixture.NewAccountId(), "", []);
 
-        var rows = await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships);
-        rows[0].Status.Should().Be("dead");
+        (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Be((1L, "dead"));
         (await app.GetInboxRowsAsync(rel, SyncFixture.Relationships))[0].ErrorCode.Should().Be("INVALID_EVENT");
-        rows.Should().ContainSingle("it is stored in the relationship inbox, not the account one");
-        (await app.GetInboxAsync(rel)).Should().BeEmpty();
+        (await app.GetInboxAsync(rel)).Should().BeEmpty("it is stored in the relationship inbox, not the account one");
     }
 }

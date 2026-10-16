@@ -20,7 +20,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         var acct = SyncFixture.NewAccountId();
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, new JsonObject { ["tier"] = "Gold" });
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
+        (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
 
         var write = (await app.GetWriteRequestsAsync(acct)).Should().ContainSingle("one call for both objects").Subject;
         write["allOrNone"]!.GetValue<bool>().Should().BeFalse();
@@ -55,7 +55,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         }
         (await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().BeNull();
 
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
+        (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
         (await app.GetInboxRowsAsync(acct))[0].AttemptCount.Should().BePositive();
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("the retries had nothing left to write on the Account");
         ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["AccountId__c"]).Should().Be(acct);
@@ -71,7 +71,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         await app.PublishAsync(bad, 1, new JsonObject { ["name"] = Any.String("Bad ") }, new JsonObject { ["tier"] = "Gold" });
         await app.PublishAsync(good, 1, new JsonObject { ["name"] = Any.String("Good ") }, new JsonObject { ["tier"] = "Silver" });
 
-        (await app.WaitForInboxSettledAsync(bad, expectedRows: 1)).Should().Equal((1L, "dead"));
+        (await app.WaitForInboxSettledAsync(bad, version: 1)).Should().Be((1L, "dead"));
         (await app.GetInboxRowsAsync(bad))[0].ErrorCode.Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION",
             "the Account's own error, not the Profile's missing parent");
         (await app.GetRecordAsync("Account", bad)).Should().BeNull();
@@ -79,12 +79,12 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         (await app.GetWriteRequestsAsync(SyncFixture.ProfileIdFor(bad))).Should().NotBeEmpty(
             "the Profile is in the same Composite request as its Account: the org decides, and rejects it without its Account");
 
-        (await app.WaitForInboxSettledAsync(good, expectedRows: 1)).Should().Equal((1L, "done"));
+        (await app.WaitForInboxSettledAsync(good, version: 1)).Should().Be((1L, "done"));
         ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(good)))!["AccountId__c"]).Should().Be(good);
     }
 
     [Fact]
-    public async Task Inserted_and_updated_pending_together_become_one_create_with_the_newest_data()
+    public async Task An_insert_overwritten_by_an_update_before_it_is_claimed_becomes_one_create_with_the_newest_data()
     {
         var acct = SyncFixture.NewAccountId();
 
@@ -92,13 +92,13 @@ public sealed class CollectionsWriteTests(SyncFixture app)
             SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1", ["rating"] = "Hot" }, []),
             SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = "v2" }, []));
 
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().Equal((1L, "superseded"), (2L, "done"));
+        (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
         var write = (await AccountWritesAsync(acct)).Should().ContainSingle().Subject;
         Records(write).Single().Should().ContainKey("Name").And.NotContainKey("Rating",
             "the newest event says updated, but Salesforce doesn't have the record: it is created from the full record");
         var history = (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle().Subject;
         ((string?)history["Name"]).Should().Be("v2");
-        history.ContainsKey("Rating").Should().BeFalse("nothing of the superseded insert is written");
+        history.ContainsKey("Rating").Should().BeFalse("nothing of the overwritten insert is written");
     }
 
     [Fact]
@@ -107,7 +107,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         var acct = SyncFixture.NewAccountId();
         var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1", ["rating"] = "Hot" }, []);
         await app.InsertIntoInboxAsync(acct, v1);
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
 
         // The same data again, as a later "inserted" (a source that re-sends its inserts)
         var again = (JsonObject)v1.DeepClone();
@@ -115,7 +115,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         again["account"]!["rating"] = "Cold";
         await app.InsertIntoInboxAsync(acct, again);
 
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().OnlyContain(r => r.Status == "done");
+        (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
         var writes = await AccountWritesAsync(acct);
         writes.Should().HaveCount(2);
         ((string?)writes[1]["method"], (string?)writes[1]["url"]).Should().Be(("PATCH", AccountUpsert),
@@ -130,10 +130,10 @@ public sealed class CollectionsWriteTests(SyncFixture app)
     {
         var acct = SyncFixture.NewAccountId();
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "Acme", ["rating"] = "Hot" }, new JsonObject { ["tier"] = "Gold" });
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
 
         await app.PublishAsync(acct, 2, new JsonObject { ["name"] = "Acme", ["rating"] = "Cold" }, new JsonObject { ["tier"] = "Gold" });
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
+        await app.WaitForInboxSettledAsync(acct, version: 2);
 
         var writes = await app.GetWriteRequestsAsync(acct);
         writes.Select(w => (string?)w["url"] ?? "composite").Should().Equal(["composite", AccountUpsert],
@@ -147,10 +147,10 @@ public sealed class CollectionsWriteTests(SyncFixture app)
     {
         var acct = SyncFixture.NewAccountId();
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "Acme", ["rating"] = "Hot" }, new JsonObject { ["tier"] = "Gold" });
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
 
         await app.PublishAsync(acct, 2, new JsonObject { ["name"] = "Acme", ["rating"] = "Cold" }, new JsonObject { ["tier"] = "Silver" });
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().OnlyContain(r => r.Status == "done");
+        (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
 
         var writes = await app.GetWriteRequestsAsync(acct, SyncFixture.ProfileIdFor(acct));
         writes.Should().HaveCount(2, "the creates in one Composite request, then the change in another");

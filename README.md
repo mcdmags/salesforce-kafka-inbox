@@ -32,16 +32,16 @@ each contact as a **Contact** of its Account, which may not be synced yet either
 
 | Problem | Solution |
 |---|---|
-| Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to that object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, and marks the entity due in `sf_sync_state` in the same statement, before storing its offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. A redelivery is simply stored again and ends `superseded`. A message that isn't a valid event of its topic's type (see below) is logged with its offset and skipped, rather than blocking its partition. |
-| Ordering across parallel batches | Workers claim **entities, not events**: every entity has one row in **`sf_sync_state`** (all object types), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due, unleased ones, which it then leases (`locked_until`, `lock_token`) before reading their oldest pending events (`attempt_count + 1`). Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
-| Bursts of updates to one entity | Pending events for an entity are **coalesced**: every event carries the full record, so of the events claimed together only the one with the newest `meta.time` is written (ties: the one stored later) and the others are marked `superseded`. Five updates in five seconds become one Salesforce write with the newest data. An idle entity is due `Sync:CoalesceDelay` (50 ms) after its first new event, so the rest of a burst is claimed with it: fewer calls, for a sync up to that much later. At most `Sync:MaxEventsPerEntity` (20) events of an entity are taken per claim, so a deep backlog is never leased or loaded whole. |
+| Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to that object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, and marks the entity due in `sf_sync_state` in the same statement, before storing its offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. An inbox keeps **one row per entity**, holding its newest event: a newer event overwrites it, an older one changes nothing. A redelivery overwrites the row with itself and ends `superseded`. A message that isn't a valid event of its topic's type (see below) is logged with its offset and skipped, rather than blocking its partition. |
+| Ordering across parallel batches | Workers claim **entities, not events**: every entity has one row in **`sf_sync_state`** (all object types), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due, unleased ones, which it then leases (`locked_until`, `lock_token`) before reading their pending inbox rows (one per entity, `attempt_count + 1`). Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
+| Bursts of updates to one entity | Pending events for an entity are **coalesced** in the inbox: every event carries the full record, so an event with a newer `meta.time` (or the same, stored later) overwrites the entity's row, and what a claim writes is the newest event stored before it. Five updates in five seconds become one Salesforce write with the newest data. An idle entity is due `Sync:CoalesceDelay` (50 ms) after its first new event, so the rest of a burst overwrites the row before it is claimed: fewer calls, for a sync up to that much later. An event that overwrites a row while a worker writes the event it claimed is not lost: that worker's outcome is recorded only on rows that still hold the event time it claimed, and the newer event is claimed next. |
 | Late or replayed older events | **Sync watermark** in the entity's `sf_sync_state` row: when the event written to Salesforce ends `done`, its `meta.time` becomes the entity's `synced_time` (never moving back), in the same statement and only while the worker still holds the lease. A claimed event at or before the watermark is marked `superseded` without touching Salesforce. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement and the watermark are conditional on its `lock_token` on the entity's `sf_sync_state` row. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
 | Records that belong together | Written in the same batch, **parents first**: one Composite request of the Accounts' **Collections upsert**, then the Profiles'. The org's foreign keys are **Text fields holding the parent's external id** (`Profile__c.AccountId__c` = the account key), declared with `[SObjectForeignKey]`: written as the text, never resolved to an Id, never a reference. A parent of another inbox (a relationship's or a contact's Account) must already be in Salesforce: the read checks, and a missing one makes the entity wait (`DEPENDENCY_NOT_SYNCED`) with nothing sent. Each record is saved or rejected on its own (`allOrNone: false`); the entity is done, and its watermark advanced, only when all of its records are in. A child whose new parent failed is still sent (same request): the org decides, and the parent's error decides the entity. (For orgs with real **Lookup** fields the engine still resolves them to Ids and links a new child to its new parent by `@{reference}` in the same Composite request.) See [Writing to Salesforce](#writing-to-salesforce). |
 | Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. The event's `meta.type` is not consulted. |
 | Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the second and time to the millisecond, int/long within their `digits`, 18-character ids checked against their case suffix, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event. The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
-| Batching and API calls | **1 read call per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries of ≤100 external ids, each query's URL within Salesforce's 16,384-byte limit on a call's URI and headers; only very long ids, which split the queries further, take a second read call per 5 more queries). Then, after the diff, the writes: **one sObject Collections upsert per level and object** (≤200 records), by external id with exactly the planned fields, grouped into write requests of ≤5 upserts (more are split over further requests), **one call each**: a request of one upsert (writes of one object) is that upsert on its own; a request of several (Accounts and their Profiles, or a new child linked to its new parent by a Lookup's `@{reference}`) is **one Composite request** of them, parents first. So a batch of new Accounts with their Profiles costs 2 calls (one read, one Composite write), Account-only changes (relationships, contacts likewise) 2 (one read, one upsert), and Account plus Profile changes 2. The rule is the engine's, not the example objects': any strategy, with any objects, gets it. See [One request per batch](#one-request-per-batch). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
+| Batching and API calls | **1 read call per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries of ≤100 external ids, the row type's `MaxValuesPerQuery`, each query's URL within Salesforce's 16,384-byte limit on a call's URI and headers; only very long ids, which split the queries further, take a second read call per 5 more queries). Then, after the diff, the writes: **one sObject Collections upsert per level and object** (≤180 records, the row type's `MaxRecordsPerWrite`, under Salesforce's 200), by external id with exactly the planned fields, grouped into write requests of ≤5 upserts (more are split over further requests), **one call each**: a request of one upsert (writes of one object) is that upsert on its own; a request of several (Accounts and their Profiles, or a new child linked to its new parent by a Lookup's `@{reference}`) is **one Composite request** of them, parents first. So a batch of new Accounts with their Profiles costs 2 calls (one read, one Composite write), Account-only changes (relationships, contacts likewise) 2 (one read, one upsert), and Account plus Profile changes 2. The rule is the engine's, not the example objects': any strategy, with any objects, gets it. See [One request per batch](#one-request-per-batch). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
 | Record types | Every synced object has a record type, named by developer name on its sObject class (`[SObject("Account", …, RecordType = "Business")]`). Its Id comes from the `recordTypeInfos` of the object's cached Describe, so it costs no extra call, and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't offer fails the entity before any call (`INVALID_RECORD_TYPE`, retried) and makes the next batch describe again. See [Record types](#record-types). |
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a parent not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (skipped because of another entity's record) → back to the inbox without spending an attempt. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
@@ -78,8 +78,8 @@ The sync is three layers, each with one job:
 | Layer | Classes | Does |
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `UpsertAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryStrategy`) | Sends requests and returns raw results. Decides nothing. |
-| **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → keep the newest event per entity → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the two ways a batch can fail (unknown outcome → hold, anything else → retry all). |
-| **Rules, no I/O** | `PreparedBatch.Prepare` (coalesce, watermark, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, parents first, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (one Collections upsert per level and object, 200 records each, 5 per request: one alone, several as one Composite request), `WriteResultInterpreter` (per-record results → outcome per entity, for Composite subrequests and upserts alike) | Pure and deterministic; unit-tested without a database or HTTP. |
+| **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → supersede an entity's event if it isn't newer than the watermark → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the two ways a batch can fail (unknown outcome → hold, anything else → retry all). |
+| **Rules, no I/O** | `PreparedBatch.Prepare` (read, watermark, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, parents first, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (one Collections upsert per level and object, the row type's `MaxRecordsPerWrite` records each, 5 per request: one alone, several as one Composite request), `WriteResultInterpreter` (per-record results → outcome per entity, for Composite subrequests and upserts alike) | Pure and deterministic; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`). The
 model defines every table in `OnModelCreating` (partial indexes with `HasFilter`, autovacuum settings with
@@ -89,12 +89,15 @@ column, and a unit test fails when the model has changed without a migration. Ev
 they all live on the abstract `InboxRow`; `AccountInboxRow`, `AccountRelationshipInboxRow` and `ContactInboxRow` only
 name their tables (independent entity types, no shared table) and their entity type in `sf_sync_state` (`SyncState`), and
 the one `InboxRepository<TRow>` (`IRepository<TRow>`, registered as an open generic) serves them all. The table name
-comes from the EF model, the entity type from the row type (`IInboxRow.EntityType`, a static property). What EF can
-express is LINQ (`ExecuteUpdate` for the lease-conditional outcomes superseded, released and held, and for releasing a
-lost claim attempt's leases); storing an event, the claim, done, fail, dead-letter and the end of a lease are the SQL
-texts of `InboxSql` run unchanged through `Database.SqlQueryRaw` / `ExecuteSqlRaw`, their `@name` parameters bound from
-an anonymous object's properties (`new { entityType, token }`), since `FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING`
-and `INSERT ... ON CONFLICT` have no LINQ form.
+comes from the EF model, the entity type and the batch's query and write sizes from the row type (`IInboxRow`'s
+static `EntityType`, `MaxValuesPerQuery` and `MaxRecordsPerWrite`). What EF can
+express is LINQ (`ExecuteUpdate` for the lease-conditional outcomes superseded, released and held, and for
+releasing a lost claim attempt's leases); storing an event, the claim, the
+check that a claimed row still holds its event, done, fail, dead-letter and the end of a lease are the SQL texts of
+`InboxSql` run unchanged through
+`Database.SqlQueryRaw` / `ExecuteSqlRaw`, their `@name` parameters bound from an anonymous object's properties
+(`new { entityType, token }`), since `FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have
+no LINQ form.
 
 ### The Describe cache
 
@@ -186,8 +189,8 @@ JSON with the source system's own field names (nothing in an event is a Salesfor
 - **Order**: `meta.time`, an ISO-8601 time with an offset or `Z`. **The Kafka message key is not used, and neither is
   arrival order**: an entity's events may come over any partition, through any consumer, in any order. The event with
   the newest `meta.time` wins; an event that is not newer than what was already synced is superseded. This relies on
-  the source's clock. Two events of an entity with the same time: the one stored later wins if they are claimed
-  together, otherwise the first one synced stays.
+  the source's clock. Two events of an entity with the same time: the one stored later overwrites the other's row,
+  and is written unless the first one was already synced (then it is superseded).
 - **Type**: `meta.type`, `"inserted"` or `"updated"` (any case), is required. It is validated at ingest, where a
   missing or other value (`deleted`, ...) makes the event invalid. Deletes are out of scope. It does not decide
   whether a record is created or updated: Salesforce's current state does.
@@ -203,8 +206,9 @@ Every event carries the entity's complete current state. There is no "field not 
   cleared. (A checkbox is never null in Salesforce, so an empty one becomes `false`.)
 - The diff still writes **only the fields that differ** from Salesforce, so a full record in which one field changed
   is a one-field update, and an unchanged record writes nothing. A new record is created with its non-empty fields.
-- **Coalescing takes the newest event**, it doesn't merge: several pending events of an entity become one write of
-  the newest full record (by `meta.time`; ties by row id). Merging would keep a field the newest event no longer has.
+- **Coalescing takes the newest event**, it doesn't merge: an entity's inbox row keeps only its newest event, so
+  several events stored before a claim become one write of the newest full record (by `meta.time`; ties: the one
+  stored later). Merging would keep a field the newest event no longer has.
 - A required field must therefore be in every event: an account event without a `name` is dead-lettered
   (`REQUIRED_FIELD_MISSING`), because it would empty `Account.Name`.
 - The one thing that isn't cleared by absence is a whole object: an account event **without a `profile`** writes
@@ -281,26 +285,31 @@ create table sf_account_inbox (                 -- and sf_account_relationship_i
   entity_id       text        not null,          -- the entity's id, read from the typed event by the consumer
   payload         jsonb       not null,          -- the Kafka message value, unchanged; never read by SQL
   status          text        not null default 'pending',  -- pending | done | superseded | dead
-  attempt_count   int         not null default 0,          -- times this event was claimed
+  attempt_count   int         not null default 0,          -- times this event was claimed (a newer event starts at 0)
   last_error      text,
   last_error_code text,
-  received_at     timestamptz not null default now(),
+  received_at     timestamptz not null default now(),      -- when this event was stored
   last_updated    timestamptz not null default now(),
   event_time      timestamptz not null                     -- the event's meta.time, read by the consumer
 );
-create index sf_account_inbox_pending on sf_account_inbox (entity_id, id) where status = 'pending';
+create unique index sf_account_inbox_entity_id on sf_account_inbox (entity_id);
 ```
 
 Both kinds of table vacuum after 2% of their rows changed (`autovacuum_vacuum_scale_factor = 0.02`, threshold
 1,000), not the default 20%: every event and every claim updates them.
 
+**One row per entity.** `entity_id` is unique: an inbox row is an entity's newest event and what became of it, not
+one event. Every event is the full record, so keeping only the newest loses nothing the sync needs (Kafka, within its
+retention, is the history). A newer event overwrites the row, whatever its status, as a new event: pending, no
+attempts, no error. An older one changes nothing. One as new (a Kafka redelivery) overwrites it too; its claim then
+finds it not newer than the watermark and ends it `superseded`, without a Salesforce call. A rule on the payload
+instead would wrongly drop the last event of A → B → A; by time, the last A is newer than B and is written.
+
 Of the event, an inbox has only its entity and its time as columns, both read in C# by the consumer, and there is
 **no SQL that names a JSON field** (except the one-time fill of `event_time` for rows stored before it existed, in the
-`InboxEventTime` migration): the event's field names are yours to change in the payload classes. There is also no
-uniqueness rule: a Kafka redelivery becomes a second row, which ends `superseded` (its time is not newer than what was
-synced); a rule on the payload would wrongly drop the last event of A → B → A. The sync's own bookkeeping is the
-entity's `sf_sync_state` row: `synced_time` is set, to the written event's `event_time` in microseconds, when that
-event ends `done`.
+`InboxEventTime` migration): the event's field names are yours to change in the payload classes. The sync's own
+bookkeeping is the entity's `sf_sync_state` row: `synced_time` is set, to the written event's `event_time` in
+microseconds, when that event ends `done`.
 
 `event_time` holds `meta.time` to the microsecond the way the engine counts it: .NET reads the time to 100 ns ticks
 and the engine cuts them to whole microseconds to compare an event with the watermark, so the consumer stores that
@@ -308,12 +317,15 @@ cut time. Postgres keeps microseconds too, but it would round a finer time (`.12
 watermark would then be 1 µs later than the event as the engine reads it: an event of that same microsecond, newer
 by less than one, would be taken as not newer and superseded.
 
-**Store** (`InboxSql.Store`, one statement): insert the event, and upsert the entity's state row: a new entity, or an
-idle one (`next_attempt_at` null), becomes due after `Sync:CoalesceDelay`, and one that is already due, backing off
-or held keeps its time. The delay is what lets a burst coalesce: the events of an entity that arrive within
-it are claimed together and written once, so a longer delay means fewer Salesforce calls, and each entity synced up
-to that much later. Events left pending when a lease ends get no delay: they arrived during the batch's Salesforce
-calls, so they have already waited, and more of the burst that arrive before the next claim merge with them anyway.
+**Store** (`InboxSql.Store`, one statement): upsert the entity's state row, then insert the event into the entity's
+inbox row (`on conflict (entity_id) do update ... where event_time <= excluded.event_time`). The state row: a new
+entity, or an idle one (`next_attempt_at` null), becomes due after `Sync:CoalesceDelay`, and one that is already due,
+backing off or held keeps its time. The delay is what lets a burst coalesce: the events of an entity that
+arrive within it overwrite its row one after the other, and only the last is claimed and written, so a longer delay
+means fewer Salesforce calls, and each entity synced up to that much later. A row overwritten during a lease gets no
+delay when the lease ends: its event arrived during the batch's Salesforce calls, so it has already waited, and more
+of the burst that arrive before the next claim overwrite it anyway. The state row comes first (the inbox insert reads
+from it) because its row lock is what orders a store against a claim or an outcome transaction of the same entity.
 
 | Setting (`Sync:`) | Default | Meaning |
 |---|---|---|
@@ -329,36 +341,44 @@ some latency is acceptable, or set 0 for no added delay.
 1. `ClaimEntities`: lock up to `Sync:BatchSize` of the type's state rows that are due (`next_attempt_at <= now()`) and
    not leased, longest-waiting first, off the ready index, `FOR UPDATE SKIP LOCKED`; lease them (`lock_token`,
    `locked_until = now() + Sync:Lease`) and return them with their watermarks.
-2. `ClaimEvents`: per claimed entity, its oldest `Sync:MaxEventsPerEntity` pending events (a `LATERAL ... LIMIT` probe
-   of the pending index), `attempt_count + 1`, returned with their payloads.
+2. `ClaimEvents`: the claimed entities' inbox rows that are pending (at most one each, by the unique `entity_id`
+   index), `attempt_count + 1`, returned with their payloads and their `event_time`.
 
 Two workers can't hold one entity: they would lock the same row. Under READ COMMITTED a worker that reads a state row
 before another worker's lease on it commits re-checks the row when it locks it, finds it leased, and drops it
-(`ClaimRaceTests`). Events of one entity can't commit out of id order either, which is what the earlier claim (locking
-an entity's oldest pending event row) had to guard against with an extra advisory lock: storing an event locks the
-entity's state row, so a second event of the entity waits until the first has committed.
+(`ClaimRaceTests`). Storing an event locks the entity's state row too, so a second event of the entity waits until
+the first has committed, and then overwrites it.
 
 **Plans.** Every lookup is by key: a primary key (`= any` of an array, never a join the planner could turn into a
-scan), the pending index per entity, or the front of the ready index. Checked with `EXPLAIN ANALYZE` (generic plans)
+scan), the unique `entity_id` index, or the front of the ready index. Checked with `EXPLAIN ANALYZE` (generic plans)
 against statistics taken while everything was idle and then a 100,000-entity backlog, and against statistics taken
 during a backlog that had since drained: the same index plans each time, so no planner settings are pinned. Claim and
 outcome costs measured for the earlier claim are in [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
-Then, per claimed entity, in C#: deserialize its events, keep the one with the newest `meta.time` (the rest are
-`superseded`), supersede that one too if it is not newer than the entity's watermark, otherwise map → write → advance
-the watermark (one statement for the batch marks the events `done` and moves the watermarks). An event that can't be
-read is dead-lettered on its own (`INVALID_EVENT`). All outcome statements are set-based and conditional on the
-`lock_token` of the entity's state row; the last one ends the lease and leaves the entity due again if it has pending
-events left (now, or when its backoff ends), idle otherwise.
+Then, per claimed entity, in C#: deserialize its event, supersede it if it is not newer than the entity's watermark,
+otherwise map → write → advance the watermark (one statement for the batch marks the rows `done` and moves the
+watermarks). An event that can't be read is dead-lettered on its own (`INVALID_EVENT`). All outcome statements are
+set-based and conditional on the `lock_token` of the entity's state row; the last one ends the lease and leaves the
+entity due again if its row is pending (now, or when its backoff ends), idle otherwise.
+
+**Overwritten while claimed.** The lease keeps other workers away from an entity, not the consumer: a newer event can
+overwrite the row while the worker writes the event it claimed. So every outcome transaction, right after locking
+the entity's state rows (`LockHeld`), reads which claimed rows still hold the `event_time` the claim read
+(`Unchanged`: the claim's row ids and times, `unnest(@ids, @times)`, each row looked up by primary key and compared
+timestamptz to timestamptz, exactly: the times are the microseconds read back from the column) and records outcomes
+on those only: done, superseded, released, retried, dead, held. An overwritten row stays pending with the newer event,
+done doesn't move the watermark to it, and `EndLease` finds it pending and makes the entity due, so the next claim
+writes it. No store can change the rows between that check and the commit: storing locks the entity's state row
+before it writes the inbox row, and the outcome transaction holds that lock.
 
 ```sql
 -- Dead letters of one type, by cause
 select entity_id, payload -> 'meta' ->> 'time' as time, last_error_code, last_error
 from sf_account_inbox where status = 'dead' order by id desc;
 
--- Everything an inbox holds for one entity, in arrival order
+-- What an inbox holds for one entity: its newest event
 select id, status, attempt_count, last_error_code, payload
-from sf_account_inbox where entity_id = 'ACC-000001' order by id;
+from sf_account_inbox where entity_id = 'ACC-000001';
 
 -- Its state: due when, leased by whom, synced up to
 select * from sf_sync_state where entity_type = 'account' and entity_id = 'ACC-000001';
@@ -380,12 +400,14 @@ holding a database lock or a transaction all that time.
    entity.
 3. **Release.** The outcome transaction first locks the state rows its token still holds (`LockHeld`), then records
    done, superseded, retry or dead; every statement, done (which also moves the watermark) included, only
-   touches events of entities `where lock_token = @token`, so a worker whose lease expired and was claimed by another
-   changes nothing. Its last statement (`EndLease`) clears the lease and sets `next_attempt_at`: null if no pending
-   event is left, else now (or the end of the backoff). An event stored at the same moment is never left
-   behind: storing upserts the same state row, so either the store committed before the outcome transaction locked the
-   row (and `EndLease`, a later statement, sees the event) or it waits for that transaction and then makes the idle
-   entity due (`ClaimRaceTests`).
+   touches rows of entities `where lock_token = @token`, so a worker whose lease expired and was claimed by another
+   changes nothing, and only rows that still hold the event the claim read (see
+   [Overwritten while claimed](#the-inbox)). Its last statement (`EndLease`) clears the lease and sets
+   `next_attempt_at`: null if the entity's row isn't pending, else now (or the end of the backoff). An
+   event stored at the same moment is never left behind: storing upserts the same state row first, so either the
+   store committed before the outcome transaction locked the row (the outcomes skip the overwritten row, and
+   `EndLease`, a later statement, sees it pending) or it waits for that transaction and then overwrites the finished
+   row and makes the idle entity due (`ClaimRaceTests`).
 4. **Crash.** Nothing to clean up. The lease expires, the entity is still due, and the next claim takes it. Its read
    of Salesforce shows what the crashed worker did or didn't save. (A write whose outcome is unknown is held instead;
    see [Unknown outcomes](#unknown-outcomes).)
@@ -413,9 +435,9 @@ outcome is unknown is held rather than retried at once.
 
 A transient failure (`UNABLE_TO_LOCK_ROW`, `DEPENDENCY_NOT_SYNCED`, `INVALID_RECORD_TYPE`, a create answered with `DUPLICATE_VALUE` because
 someone else created the record first, an unknown error code, a failed read) is retried
-with exponential backoff of the entity: `Sync:RetryBaseDelay` (30 s) doubling per attempt (of its most-attempted
-failed event) up to `Sync:MaxRetryDelay` (1 h); an event is dead-lettered once it was claimed `Sync:MaxRetries` (8)
-times (`attempt_count`). With the defaults the attempts come about 30 s, 1 min, 2 min,
+with exponential backoff of the entity: `Sync:RetryBaseDelay` (30 s) doubling per attempt (the row's
+`attempt_count`) up to `Sync:MaxRetryDelay` (1 h); an event is dead-lettered once it was claimed `Sync:MaxRetries` (8)
+times (`attempt_count`; a newer event of the entity starts again at 0). With the defaults the attempts come about 30 s, 1 min, 2 min,
 4 min, 8 min, 16 min and 32 min apart: roughly an hour from the first failure to the dead letter. Permanent errors
 are dead-lettered at once. The error code that caused it stays in `last_error_code`. Records that were not attempted
 and unknown outcomes don't spend an attempt. A call Salesforce refused because of its API limits (429,
@@ -449,14 +471,16 @@ with requeued as (
   returning entity_id
 )
 insert into sf_sync_state as s (entity_type, entity_id, next_attempt_at)
-select distinct 'accountRelationship', entity_id, now() from requeued
+select 'accountRelationship', entity_id, now() from requeued
 on conflict (entity_type, entity_id) do update set next_attempt_at = coalesce(s.next_attempt_at, now());
 ```
 
 (`sf_account_inbox` with `'account'`, `sf_contact_inbox` with `'contact'` the same way. The state upsert is what makes
 the entities due again, as storing an event does.)
 
-A re-queued event still obeys the watermark: if a newer event of the entity has been synced since, it is superseded.
+A re-queued event still obeys the watermark: if an event as new has been synced since, it is superseded. A newer
+event of a dead-lettered entity needs no re-queue: it overwrites the dead row, which is pending again (and the dead
+letter's error is gone with the old event).
 
 ### Unknown outcomes
 
@@ -472,9 +496,9 @@ the entity were released and a newer event synced in the meantime, the late writ
   describe or the read are never unknown: nothing was written. These follow the normal rules at once.
 - **What happens**: every entity of that batch is held: its state row gets `locked_until = now() +
   Sync:UnknownOutcomeHold` (and `next_attempt_at` the same) and no `lock_token` (the old worker can't record anything
-  on it); its claimed events stay `pending` with `last_error_code = 'UNKNOWN_OUTCOME'`, and the attempt doesn't count.
-  The watermark doesn't move. The claim skips an entity with a live lease, so events arriving for it meanwhile wait
-  too. After the hold, normal processing (read, diff,
+  on it); its claimed row stays `pending` with `last_error_code = 'UNKNOWN_OUTCOME'`, and the attempt doesn't count.
+  The watermark doesn't move. The claim skips an entity with a live lease, so an event arriving for it meanwhile
+  (which overwrites the row, error included) waits too. After the hold, normal processing (read, diff,
   write the newest event) converges whether or not the lost write landed.
 - **The cost**: that entity's updates wait up to the hold.
 - **Why 10 minutes**: it is Salesforce's API request timeout, after which the lost request has completed or been
@@ -491,7 +515,8 @@ the entity were released and a newer event synced in the meantime, the late writ
 | Two workers or pods never hold the same entity at once | the entity's one `sf_sync_state` row: locked `FOR UPDATE SKIP LOCKED` and leased, its lease re-checked when it is locked | `ConcurrencyTests.Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version` (3 pods × 8 loops, claim audit: 0 overlaps); `ClaimRaceTests` (claims while another claim or a store of the entity is open, events stored concurrently) |
 | An event stored while its entity's lease ends is not left behind | storing and ending a lease both lock the entity's state row; the lease ends with a fresh check for pending events | `ClaimRaceTests.An_event_stored_while_its_entitys_lease_ends_leaves_the_entity_due` |
 | An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | the claim requires the entity to be unleased | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
-| Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | newest-time coalescing + watermark | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
+| Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | a row is overwritten only by an event as new or newer, and the watermark | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
+| An event stored while its entity's older event is being written is not lost: the older one's outcome isn't recorded on it, the watermark doesn't move to it, and it is written next | every outcome applies only to claimed rows whose `event_time` is still the one the claim read (`InboxSql.Unchanged`), checked under the entity's state-row lock, which storing takes before it writes the row; `EndLease` finds the row pending | `OneRowPerEntityTests.An_outcome_for_a_claimed_event_is_not_recorded_on_the_newer_event_that_overwrote_it` (done, failed, dead, superseded, released, failed all, held), `LeaseTests.A_newer_event_stored_while_the_claimed_one_is_written_is_written_next_whatever_the_claimed_ones_outcome`, `ClaimRaceTests.An_event_stored_while_its_entitys_lease_ends_leaves_the_entity_due` |
 | A worker whose lease expired can't record outcomes or move the watermark | every statement is conditional on the `lock_token` of the entity's state row | `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark`, `LeaseTests.Done_completes_an_event_and_sets_the_watermark_to_its_time_only_under_its_lease_and_only_once` |
 | Dropped Postgres connections cause no overlap, loss or regression | `PostgresRetryStrategy` (EF execution strategy), idempotent statements | `ConcurrencyTests.Pods_survive_their_Postgres_connections_being_dropped` |
 | A write with an unknown outcome can't be overtaken by a newer write | the hold | `UnknownOutcomeTests.Entity_is_held_after_a_write_with_an_unknown_outcome_and_ends_at_the_newest_event` |
@@ -502,7 +527,11 @@ longer than the rest of the lease to apply the request, a newer write can be ove
 while its worker is still running (clock stall, a pause longer than the 20% margin) lets a second worker claim the
 entity; the first can no longer record anything, but a request it already sent is in Salesforce's hands. (3)
 Ordering is only as good as `meta.time`: two different events of an entity with the same time are not ordered by
-content, and a source clock that goes backwards makes a newer change look older (it is superseded).
+content (the one stored later overwrites the other; if it does so while the other is being written, the check by
+time can't tell them apart, the other's outcome is recorded on it and it isn't written until a newer event comes),
+and a source clock that goes backwards makes a newer change look older (it changes nothing, or is superseded). (4)
+The inbox holds each entity's newest event only, not a log: an event overwritten before it was claimed, or older
+than the row when it arrived, leaves no trace in Postgres; Kafka, within its retention, has it.
 
 ### Schema and migrations
 
@@ -589,7 +618,8 @@ bounded: Salesforce allows 16,384 bytes for a call's URI and headers together (4
 4,096 of them for the headers (`SalesforceRestClient.HeaderAllowanceBytes`: the bearer token, Host, User-Agent and the
 rest) and holds every URL it sends to the remaining 12,288 bytes (`MaxUrlBytes`), counted as sent, after
 percent-encoding (`'`, `,` and spaces take 3 bytes, a non-ASCII character up to 12). `ReadQueryBuilder` fills a
-query with up to 100 external ids while its URL still fits, then starts the next; the read sends 5 queries per
+query with up to the row type's `MaxValuesPerQuery` external ids (100 for the built-in objects; at most 2,000, a
+query's result page, `SalesforceRestClient.MaxQueryValues`) while its URL still fits, then starts the next; the read sends 5 queries per
 Composite request (one call each) and merges the results by reference id. Short ids give exactly the 1 read call
 above; 100 ids of 250 characters take 3 queries per object, so a batch of Accounts and Profiles reads in 2 calls. A
 query that doesn't fit even with one id (an absurd field list) fails the batch with a message naming the object and
@@ -598,8 +628,9 @@ field.
 ### One request per batch
 
 Every batch is read and diffed first; only then is the API chosen. Every write is an **sObject Collections upsert**
-by external id with exactly the planned fields, one upsert per level and object (≤200 records: children that link a
-new parent by `@{reference}` get an upsert of their own). The upserts are grouped into write requests of at most 5
+by external id with exactly the planned fields, one upsert per level and object (≤ the row type's `MaxRecordsPerWrite`, 180 for the built-in objects, under
+Salesforce's 200: children that link a new parent by `@{reference}` get an upsert of their own; more records of one
+object take further upserts). The upserts are grouped into write requests of at most 5
 (Composite's limit on sObject Collections subrequests; an entity's records always share a request), each **one call**:
 
 - **The writes are of one object** (only Accounts changed, or only relationships, or only contacts): the request is
@@ -615,11 +646,11 @@ foreign keys or lookups, which give the order.
 | Write request | Write calls |
 |---|---|
 | new Accounts with their new Profiles | 1 Composite: Accounts' upsert, then Profiles' (`AccountId__c` = the account key) |
-| Account-only changes, ≤200 | 1 upsert |
+| Account-only changes, ≤180 | 1 upsert |
 | Account-only changes + Profile-only changes | 1 Composite: Accounts, then Profiles |
 | Accounts and Profiles both changed, of existing accounts | 1 Composite: Accounts, then Profiles |
 | new relationships or contacts whose Accounts exist | 1 upsert, the Accounts' keys as text |
-| 300 changed Accounts | 2 upserts (two requests): 200, then 100 |
+| 300 changed Accounts | 2 upserts (two requests): 180, then 120 |
 | a new parent with a new child by a Lookup field (not in the examples) | 1 Composite, the child pointing at `@{Account[i].id}` |
 
 An upsert, alone or as a subrequest, looks like this:
@@ -672,8 +703,8 @@ Composite request's answer lost: the whole batch is held). What earlier requests
 though they may have saved their records: every write is matched by external id, so the retry reads Salesforce again
 and writes only what still differs, and those entities end `done` without being written twice.
 
-**`Sync:BatchSize`** is 1 to 100 entities (default 75). The bound comes from the read, not the write: a query takes
-100 external ids and a Composite request 5 queries, and a relationship needs up to three ids per entity (itself and
+**`Sync:BatchSize`** is 1 to 100 entities (default 75). The bound comes from the read, not the write: the built-in row types query
+100 external ids at a time (`MaxValuesPerQuery`) and a Composite request takes 5 queries, and a relationship needs up to three ids per entity (itself and
 two Accounts).
 
 ### Record types
@@ -725,7 +756,7 @@ external id, with the planned fields.)
 
 A redelivered insert therefore writes nothing and creates no duplicate, and an `updated` event for a record that
 isn't in Salesforce (its insert was lost or dead-lettered, or the record was deleted there) creates it. An
-`inserted` and an `updated` event pending together are coalesced first, so they become one write of the newest
+`updated` event stored before its `inserted` one was claimed overwrites it, so they become one write of the newest
 data. A create that Salesforce answers with `DUPLICATE_VALUE` (someone created the record between the read and the
 write) is retried, and the retry's read turns it into an update.
 
@@ -786,7 +817,7 @@ succeeded**. Until then Salesforce can show the new Account with the old or no P
 | an update [sent as an upsert](#one-request-per-batch) that created the record, or failed creating it with `REQUIRED_FIELD_MISSING` (deleted after the read) | retried with backoff; the retry reads it again |
 | its whole subrequest went down because of another entity's record (`PROCESSING_HALTED` on a reference without a value) | released, no retry spent |
 | a subrequest that failed as a whole for any other reason | retried with backoff, never dead-lettered (it says nothing about one record's data) |
-| the call itself failed (any write request of the batch) | every event of the batch: provably not applied (429 and `REQUEST_LIMIT_EXCEEDED` included) → retried; otherwise [unknown outcome](#unknown-outcomes) → held |
+| the call itself failed (any write request of the batch) | every entity of the batch: provably not applied (429 and `REQUEST_LIMIT_EXCEEDED` included) → retried; otherwise [unknown outcome](#unknown-outcomes) → held |
 
 ### Lookup fields: Composite and `referenceId`
 
@@ -814,8 +845,8 @@ example objects uses it (the unit tests cover it with test-only classes). A look
 ```
 
 One upsert per level and object, parents before children. Salesforce's limits are constants in
-`SalesforceRestClient`: 200 records per collection, 25 subrequests per Composite request of which **5** may be
-collections or queries. Units that need more are split over further write requests, an entity's records always in the
+`SalesforceRestClient`: 200 records per collection (`MaxCollectionRecords`; a row type writes at most its
+`MaxRecordsPerWrite` of them), 25 subrequests per Composite request of which **5** may be collections or queries. Units that need more are split over further write requests, an entity's records always in the
 same one. Children that link by reference get an upsert of their own (`Contact_ref`). If a parent fails, its
 reference has no value, which fails the **whole subrequest** of children that use references (`PROCESSING_HALTED`).
 The other entities' parents are in, so their children go back to the inbox without spending a retry and are written
@@ -871,10 +902,15 @@ public sealed class AccountRelationshipSObject
 }
 
 // 3. Inbox row: the object's inbox table. Every column is on InboxRow, so every object's inbox has the same fields
-//    and the entity type of its entities in sf_sync_state (IInboxRow)
+//    and the entity type of its entities in sf_sync_state and its batch's query and write sizes (IInboxRow; checked
+//    at registration: 1 to 2,000 ids per query, 1 to 200 records per upsert)
 public sealed class AccountRelationshipInboxRow : InboxRow, IInboxRow
 {
     public static string EntityType => AccountRelationshipSync.Type;
+    // A full batch's read in one Composite request: 5 queries, up to 3 ids per relationship (itself, two Accounts)
+    public static int MaxValuesPerQuery => 100;
+    // A margin under Salesforce's 200
+    public static int MaxRecordsPerWrite => 180;
 }
 //    ... and in SyncDbContext: a DbSet<AccountRelationshipInboxRow>, and in OnModelCreating
 //    modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
@@ -1100,14 +1136,18 @@ with the worker's own SQL, so a lease lasts exactly as long as the test wants.
 Covered: create Account + linked Profile, a full record in which one field changed (only that field is sent), a
 field that becomes null or absent being cleared, an event without a profile leaving the Profile alone, the diff
 being taken against the record in Salesforce (a direct edit in Salesforce is corrected by the next event),
-bursts coalesced to the newest full record, stale versions superseded without a write (the watermark being the
-`synced_time` of the entity's `sf_sync_state` row), unchanged events skip the
-write, exactly 3 API calls per batch of new Accounts and Profiles (the read, the Accounts' upsert, the Profiles'), a redelivered event stored again and superseded, an older event claimed with a
-newer one superseded in the same claim, A → B → A ending at A, one account's events under different or no Kafka keys
+bursts coalesced to the newest full record, stale versions never written (left out of the row, or superseded by
+the watermark: the `synced_time` of the entity's `sf_sync_state` row), unchanged events skip the
+write, exactly 3 API calls per batch of new Accounts and Profiles (the read, the Accounts' upsert, the Profiles'), a
+redelivered event overwriting its row and superseded without a write, an older event stored after a newer one changing
+nothing, A → B → A ending at A, one account's events under different or no Kafka keys
 ending at the newest `meta.time`, invalid events (no time offset, no or an unknown `meta.type`, another type's event,
-not JSON) skipped at ingest, a deep backlog taken 20 events at a time, an event waiting for its entity's lease, an
+not JSON) skipped at ingest, an event waiting for its entity's lease, a newer event overwriting the row whatever its
+status and an older one leaving it as it is (`OneRowPerEntityTests`), an outcome for a claimed event never recorded on
+the newer event that overwrote it meanwhile, an
 expired worker unable to record anything, the unknown-outcome hold, every inbox table created at startup with
-identical columns, the partial indexes and autovacuum settings, migrating again changing nothing, a database created
+identical columns, the unique `entity_id` indexes, the partial ready index and autovacuum settings, `InboxOneRowPerRecord`
+keeping each entity's newest row, migrating again changing nothing, a database created
 before migrations recorded as migrated with its rows kept, and older shapes stopping startup untouched. Tests
 publish version N as `meta.time` = a fixed base time + N ms, and read it back from the stored payload. Relationships
 (`RelationshipTests`): one upsert with the two Accounts' keys as text once both exist, later only changed fields
@@ -1172,7 +1212,8 @@ engine does with a claim (newest `meta.time` wins, ties, watermark, A → B → 
 admits (the typed read: id, time with offset, `meta.type`), the classification of failed writes (unknown outcome or
 not; a 429 or `REQUEST_LIMIT_EXCEEDED` is not, and is retried with backoff), inbox table names as plain identifiers, every normalization rule (including the documented 15 → 18-character id
 example), error classification, the Postgres execution strategy (retried, not retried, gives up) and startup validation
-(`Salesforce:RequestTimeout` within the API timeout and shorter than the lease).
+(`Salesforce:RequestTimeout` within the API timeout and shorter than the lease, and every registered row type's query
+and write limits).
 
 ### Concurrency: many threads, many pods, same accounts
 
@@ -1186,20 +1227,20 @@ land in the org and show up in the mock's write history. Batches are small
   moment a worker sets an entity's `lock_token` until that worker clears it, ordered by a sequence; no two claims on the
   same account may overlap.
 - No out-of-order write: in every record's write history, the version carried in the data (`Description`
-  `vN` on the Account, `Score__c` on the Profile) only moves forward. Every event ends `done` or `superseded`
-  (superseded: claimed together with a newer event of its account).
+  `vN` on the Account, `Score__c` on the Profile) only moves forward. Every account's inbox row ends holding its
+  newest event, `done`.
 - Every Account and Profile ends with the version 25 values.
 - Every account was claimed repeatedly (real contention) and all 3 pods wrote to Salesforce (`/__fake/clients`, per
   User-Agent).
 
 `ClaimRaceTests` replays the interleavings this can't force on purpose: a claim while another claim of the entity is
-open, a claim while an event of it is being stored, two events of it stored at once, and an event stored while its
-lease ends.
+open, a claim while an event of it is being stored, two events of it stored at once (the second waits, then
+overwrites the first), and an event stored while its lease ends (the claimed event's done is not recorded on it).
 
 `Pods_survive_their_Postgres_connections_being_dropped` repeats this while every worker and consumer connection
 is terminated (`pg_terminate_backend`) every 200 ms (the test's own sessions are spared by their
-`application_name`): every event still ends `done`, with no overlapping claims and
-no out-of-order writes. The fixture allows 15 short Postgres retries (`Postgres:Retry`, at most about 12 s, inside
+`application_name`): every account's row still ends at its newest event, `done` (or `superseded`, if a store cut off
+by a dropped connection was retried), with no overlapping claims and no out-of-order writes. The fixture allows 15 short Postgres retries (`Postgres:Retry`, at most about 12 s, inside
 the 20 s lease), so a unit of work outlasts the chaos instead of giving up and leaving its lease to expire.
 
 ## Benchmarks
@@ -1222,22 +1263,24 @@ workers in 1 pod; it still checks correctness on every iteration.
 
 Results, the SQL statement measurements and the before/after of this tuning: [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
-The micro benchmarks need no database: coalescing, the typed mapping (`MapAccountEvent`: event JSON →
+The micro benchmarks need no database: preparing a claim's rows (`PrepareTenEntities`), the typed mapping (`MapAccountEvent`: event JSON →
 payload → sObjects → records; `MapPayloadToSObject` and `MapSObjectToRecord` for its two halves) and the type-aware
 diff.
 
 Both drain benchmarks run P **pods** (independent service providers: own connection pool and
 HTTP client, like separate processes) x W worker loops against one Postgres inbox and one org. Each iteration
 **fails** if any account doesn't end at its newest version, any record's write history shows an older version
-after a newer one, any inbox row isn't `done` or `superseded`, or the claim audit shows two overlapping claims on
-the same entity. Each iteration prints a `//` line with the mock org's counters (`api`, `writeRequests`,
-`recordsOk`, ...), `done` (entity syncs) and `superseded` rows, the coalescing (events per entity sync), claims,
-retries, overlaps and regressions.
+after a newer one, any entity's inbox row doesn't hold its newest event or isn't `done` or `superseded`, or the
+claim audit shows two overlapping claims on the same entity. Each iteration prints a `//` line with the mock org's
+counters (`api`, `writeRequests`, `recordsOk`, ...), `entities` (inbox rows) and `superseded` rows, the coalescing
+(events per entity claim), claims, retries, overlaps, stale rows and regressions.
 
-- `InboxDrainBenchmarks`: the whole inbox is loaded, then drained. Params: `Pods` (1/3), `Workers` (1/4/8),
+- `InboxDrainBenchmarks`: the events are loaded as storing them in order would leave the inbox (each entity's newest,
+  through a temporary table), then drained. Params: `Pods` (1/3), `Workers` (1/4/8),
   `Accounts` (100/1000), `LatencyMs` (0/25), `Events` (5000).
-- `StreamingIngestBenchmarks`: events keep arriving while the pods drain (batches of 10 accounts), so the
-  same account is claimed, released and re-claimed by different workers in different pods. Params: `Pods`
+- `StreamingIngestBenchmarks`: events keep arriving (`InboxSql.Store`) while the pods drain (batches of 10
+  accounts), so the same account is claimed, released and re-claimed by different workers in different pods, and its
+  row is overwritten while a worker writes the event it claimed. Params: `Pods`
   (1/3), `Workers` (4/8), 50 accounts, 5000 events, 5 ms latency, `CoalesceDelayMs` (the `Sync:CoalesceDelay`
   default, 50 ms).
 
@@ -1532,7 +1575,8 @@ setup: the AppHost starts it and passes the connection string.
   a missing parent (below) and add it here, e.g. in `appsettings.json`:
   `"Salesforce": { "ParentMissingMessages": [ "Account not found" ] }` (or `Salesforce__ParentMissingMessages__0`).
   Empty, such a rejection is what its code says (`FIELD_CUSTOM_VALIDATION_EXCEPTION`: permanent, dead-lettered).
-  `Sync` values that can't work (no workers, `BatchSize` outside 1-100, ...), a missing `Salesforce:InstanceUrl` and a
+  `Sync` values that can't work (no workers, `BatchSize` outside 1-100, ...), a row type's limits outside
+  Salesforce's (`MaxValuesPerQuery` 1-2,000, `MaxRecordsPerWrite` 1-200), a missing `Salesforce:InstanceUrl` and a
   `Salesforce:RequestTimeout` above 10 minutes or not shorter than `Sync:Lease` fail startup.
 - The mock org was built from Salesforce's documentation. These behaviours are worth confirming in the sandbox:
   - an empty checkbox (`null`) is stored as `false`, and an empty text (`""`) as empty;

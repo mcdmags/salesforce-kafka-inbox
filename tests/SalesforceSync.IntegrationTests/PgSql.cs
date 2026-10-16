@@ -91,6 +91,11 @@ public static class PgSql
         }
         var value = reader.GetValue(ordinal);
         var type = Nullable.GetUnderlyingType(target) ?? target;
+        if (type == typeof(DateTimeOffset) && value is DateTime utc)
+        {
+            // timestamptz is read as a UTC DateTime
+            return new DateTimeOffset(utc);
+        }
         return type.IsInstanceOfType(value) ? value : System.Convert.ChangeType(value, type);
     }
 }
