@@ -479,8 +479,8 @@ coming back after that.
   releases them by that attempt's `lock_token`.
 
 In both cases the stale claim and the new one hold the same `event_time`, so only a value that is new on every claim
-can tell them apart: that is the lock token. (`attempt_count` can't: a release, a hold and a deferral decrement it, so
-an old claim's number can come back.)
+can tell them apart: that is the lock token. (`attempt_count` can't: it counts failures, not claims, so two claims of
+the same event can have the same number.)
 
 **What would go wrong without it:**
 
@@ -495,8 +495,8 @@ an old claim's number can come back.)
    B's write of 09:59 lands                                   -> Salesforce = 09:59 (older)
    ```
 
-   The inbox says C is `done` and the watermark is at C, so nothing corrects it until the record changes again at the
-   source. No error is raised.
+   The inbox says C is `done`, so nothing corrects it until the record changes again at the source. No error is
+   raised.
 2. **A hold cancelled.** A gets no answer from Salesforce (its write may still land) and records a hold; B, which
    took over, records `done` on top and clears it. The next event is written at once, and A's lost write lands after
    it: the same overwrite as in 1. The hold exists to prevent exactly this.
@@ -507,8 +507,8 @@ an old claim's number can come back.)
 
 **What it doesn't prevent:** the old and the new worker writing the same event in the moment between a lease ending
 and the old worker noticing. That is harmless: an upsert by external id writes the same values twice. The token makes
-sure only the current owner's outcome counts, so a worker that no longer owns a record can't change its state, its
-hold or its watermark. Tests: `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark`
+sure only the current owner's outcome counts, so a worker that no longer owns a record can't change its state or its
+hold. Tests: `LeaseTests.Worker_whose_lease_expired_can_record_nothing`
 (a lease expires mid-batch) and `ClaimRetryTests` (a claim retried after a lost commit).
 
 ### Why the Salesforce calls run outside a transaction
