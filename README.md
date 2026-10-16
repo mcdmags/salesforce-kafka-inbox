@@ -44,7 +44,7 @@ each contact as a **Contact** of its Account, which may not be synced yet either
 | Records that belong together | Written in the same batch, **parents first**: one Composite request of the Accounts' **Collections upsert**, then the Profiles'. The org's foreign keys are **Text fields holding the parent's external id** (`Profile__c.AccountId__c` = the account key), declared with `[SObjectForeignKey]`: written as the text, never resolved to an Id, never a reference. A parent of another inbox (a relationship's or a contact's Account) must already be in Salesforce: the read checks, and a missing one makes the entity wait (`DEPENDENCY_NOT_SYNCED`) with nothing sent. Each record is saved or rejected on its own (`allOrNone: false`); the entity is done, and its watermark advanced, only when all of its records are in. A child whose new parent failed is still sent (same request): the org decides, and the parent's error decides the entity. (For orgs with real **Lookup** fields the engine still resolves them to Ids and links a new child to its new parent by `@{reference}` in the same Composite request.) See [Writing to Salesforce](#writing-to-salesforce). |
 | Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. The event's `meta.type` is not consulted. |
 | Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the second and time to the millisecond, int/long within their `digits`, 18-character ids checked against their case suffix, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event. The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
-| Batching and API calls | **1 read call per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries of ≤100 external ids, each query's URL within Salesforce's 16,384-byte limit on a call's URI and headers; only very long ids, which split the queries further, take a second read call per 5 more queries). Then, after the diff, the writes: **one sObject Collections upsert per level and object** (≤200 records), by external id with exactly the planned fields, grouped into write requests of ≤5 upserts (more are split over further requests), **one call each**: a request of one upsert (writes of one object) is that upsert on its own; a request of several (Accounts and their Profiles, or a new child linked to its new parent by a Lookup's `@{reference}`) is **one Composite request** of them, parents first. So a batch of new Accounts with their Profiles costs 2 calls (one read, one Composite write), Account-only changes (relationships, contacts likewise) 2 (one read, one upsert), and Account plus Profile changes 2. The rule is the engine's, not the example objects': any strategy, with any objects, gets it. See [One request per batch](#one-request-per-batch). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
+| Batching and API calls | **1 read call per batch** of up to `Sync:BatchSize` entities (75, max 100): one Composite request with all reads (≤5 queries of ≤100 external ids, the row type's `MaxValuesPerQuery`, each query's URL within Salesforce's 16,384-byte limit on a call's URI and headers; only very long ids, which split the queries further, take a second read call per 5 more queries). Then, after the diff, the writes: **one sObject Collections upsert per level and object** (≤180 records, the row type's `MaxRecordsPerWrite`, under Salesforce's 200), by external id with exactly the planned fields, grouped into write requests of ≤5 upserts (more are split over further requests), **one call each**: a request of one upsert (writes of one object) is that upsert on its own; a request of several (Accounts and their Profiles, or a new child linked to its new parent by a Lookup's `@{reference}`) is **one Composite request** of them, parents first. So a batch of new Accounts with their Profiles costs 2 calls (one read, one Composite write), Account-only changes (relationships, contacts likewise) 2 (one read, one upsert), and Account plus Profile changes 2. The rule is the engine's, not the example objects': any strategy, with any objects, gets it. See [One request per batch](#one-request-per-batch). Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
 | Record types | Every synced object has a record type, named by developer name on its sObject class (`[SObject("Account", …, RecordType = "Business")]`). Its Id comes from the `recordTypeInfos` of the object's cached Describe, so it costs no extra call, and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't offer fails the entity before any call (`INVALID_RECORD_TYPE`, retried) and makes the next batch describe again. See [Record types](#record-types). |
 | Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a parent not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; **not attempted** (skipped because of another entity's record) → back to the inbox without spending an attempt. The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
@@ -83,7 +83,7 @@ The sync is three layers, each with one job:
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `UpsertAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
 | **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → supersede an entity's event if it isn't newer than the watermark → map → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | `PreparedBatch.Prepare` (read, watermark, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, parents first, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (one Collections upsert per level and object, 200 records each, 5 per request: one alone, several as one Composite request), `WriteResultInterpreter` (per-record results → outcome per entity, for Composite subrequests and upserts alike) | Pure and deterministic; unit-tested without a database or HTTP. |
+| **Rules, no I/O** | `PreparedBatch.Prepare` (read, watermark, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, parents first, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (one Collections upsert per level and object, the row type's `MaxRecordsPerWrite` records each, 5 per request: one alone, several as one Composite request), `WriteResultInterpreter` (per-record results → outcome per entity, for Composite subrequests and upserts alike) | Pure and deterministic; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`). The
 model defines every table in `OnModelCreating` (partial indexes with `HasFilter`, autovacuum settings with
@@ -93,7 +93,8 @@ column, and a unit test fails when the model has changed without a migration. Ev
 they all live on the abstract `InboxRow`; `AccountInboxRow`, `AccountRelationshipInboxRow` and `ContactInboxRow` only
 name their tables (independent entity types, no shared table) and their entity type in `sf_sync_state` (`SyncState`), and
 the one `InboxRepository<TRow>` (`IRepository<TRow>`, registered as an open generic) serves them all. The table name
-comes from the EF model, the entity type from the row type (`IInboxRow.EntityType`, a static property). What EF can
+comes from the EF model, the entity type and the batch's query and write sizes from the row type (`IInboxRow`'s
+static `EntityType`, `MaxValuesPerQuery` and `MaxRecordsPerWrite`). What EF can
 express is LINQ (`ExecuteUpdate` for the lease-conditional outcomes superseded, released, held and deferred, and for
 releasing a lost claim attempt's leases; the rate limiter's usage count and writes); storing an event, the claim, the
 check that a claimed row still holds its event, done, fail, dead-letter and the end of a lease are the SQL texts of
@@ -621,7 +622,8 @@ bounded: Salesforce allows 16,384 bytes for a call's URI and headers together (4
 4,096 of them for the headers (`SalesforceRestClient.HeaderAllowanceBytes`: the bearer token, Host, User-Agent and the
 rest) and holds every URL it sends to the remaining 12,288 bytes (`MaxUrlBytes`), counted as sent, after
 percent-encoding (`'`, `,` and spaces take 3 bytes, a non-ASCII character up to 12). `ReadQueryBuilder` fills a
-query with up to 100 external ids while its URL still fits, then starts the next; the read sends 5 queries per
+query with up to the row type's `MaxValuesPerQuery` external ids (100 for the built-in objects; at most 2,000, a
+query's result page, `SalesforceRestClient.MaxQueryValues`) while its URL still fits, then starts the next; the read sends 5 queries per
 Composite request (one call each) and merges the results by reference id. Short ids give exactly the 1 read call
 above; 100 ids of 250 characters take 3 queries per object, so a batch of Accounts and Profiles reads in 2 calls. A
 query that doesn't fit even with one id (an absurd field list) fails the batch with a message naming the object and
@@ -630,8 +632,9 @@ field.
 ### One request per batch
 
 Every batch is read and diffed first; only then is the API chosen. Every write is an **sObject Collections upsert**
-by external id with exactly the planned fields, one upsert per level and object (≤200 records: children that link a
-new parent by `@{reference}` get an upsert of their own). The upserts are grouped into write requests of at most 5
+by external id with exactly the planned fields, one upsert per level and object (≤ the row type's `MaxRecordsPerWrite`, 180 for the built-in objects, under
+Salesforce's 200: children that link a new parent by `@{reference}` get an upsert of their own; more records of one
+object take further upserts). The upserts are grouped into write requests of at most 5
 (Composite's limit on sObject Collections subrequests; an entity's records always share a request), each **one call**:
 
 - **The writes are of one object** (only Accounts changed, or only relationships, or only contacts): the request is
@@ -647,11 +650,11 @@ foreign keys or lookups, which give the order.
 | Write request | Write calls |
 |---|---|
 | new Accounts with their new Profiles | 1 Composite: Accounts' upsert, then Profiles' (`AccountId__c` = the account key) |
-| Account-only changes, ≤200 | 1 upsert |
+| Account-only changes, ≤180 | 1 upsert |
 | Account-only changes + Profile-only changes | 1 Composite: Accounts, then Profiles |
 | Accounts and Profiles both changed, of existing accounts | 1 Composite: Accounts, then Profiles |
 | new relationships or contacts whose Accounts exist | 1 upsert, the Accounts' keys as text |
-| 300 changed Accounts | 2 upserts (two requests): 200, then 100 |
+| 300 changed Accounts | 2 upserts (two requests): 180, then 120 |
 | a new parent with a new child by a Lookup field (not in the examples) | 1 Composite, the child pointing at `@{Account[i].id}` |
 
 An upsert, alone or as a subrequest, looks like this:
@@ -705,8 +708,8 @@ batch is held), deferred if it was rate limited. What earlier requests answered 
 though they may have saved their records: every write is matched by external id, so the retry reads Salesforce again
 and writes only what still differs, and those entities end `done` without being written twice.
 
-**`Sync:BatchSize`** is 1 to 100 entities (default 75). The bound comes from the read, not the write: a query takes
-100 external ids and a Composite request 5 queries, and a relationship needs up to three ids per entity (itself and
+**`Sync:BatchSize`** is 1 to 100 entities (default 75). The bound comes from the read, not the write: the built-in row types query
+100 external ids at a time (`MaxValuesPerQuery`) and a Composite request takes 5 queries, and a relationship needs up to three ids per entity (itself and
 two Accounts).
 
 ### Record types
@@ -847,8 +850,8 @@ example objects uses it (the unit tests cover it with test-only classes). A look
 ```
 
 One upsert per level and object, parents before children. Salesforce's limits are constants in
-`SalesforceRestClient`: 200 records per collection, 25 subrequests per Composite request of which **5** may be
-collections or queries. Units that need more are split over further write requests, an entity's records always in the
+`SalesforceRestClient`: 200 records per collection (`MaxCollectionRecords`; a row type writes at most its
+`MaxRecordsPerWrite` of them), 25 subrequests per Composite request of which **5** may be collections or queries. Units that need more are split over further write requests, an entity's records always in the
 same one. Children that link by reference get an upsert of their own (`Contact_ref`). If a parent fails, its
 reference has no value, which fails the **whole subrequest** of children that use references (`PROCESSING_HALTED`).
 The other entities' parents are in, so their children go back to the inbox without spending a retry and are written
@@ -904,10 +907,15 @@ public sealed class AccountRelationshipSObject
 }
 
 // 3. Inbox row: the object's inbox table. Every column is on InboxRow, so every object's inbox has the same fields
-//    and the entity type of its entities in sf_sync_state (IInboxRow)
+//    and the entity type of its entities in sf_sync_state and its batch's query and write sizes (IInboxRow; checked
+//    at registration: 1 to 2,000 ids per query, 1 to 200 records per upsert)
 public sealed class AccountRelationshipInboxRow : InboxRow, IInboxRow
 {
     public static string EntityType => AccountRelationshipSync.Type;
+    // A full batch's read in one Composite request: 5 queries, up to 3 ids per relationship (itself, two Accounts)
+    public static int MaxValuesPerQuery => 100;
+    // A margin under Salesforce's 200
+    public static int MaxRecordsPerWrite => 180;
 }
 //    ... and in SyncDbContext: a DbSet<AccountRelationshipInboxRow>, and in OnModelCreating
 //    modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
@@ -1224,7 +1232,8 @@ not), inbox table names as plain identifiers, every normalization rule (includin
 example), error classification, the Postgres execution strategy (retried, not retried, gives up), the daily budget
 (the configured allocation as the maximum, lowered by the one Salesforce reports), the token bucket's decision
 (`TokenBucketTests`: granted with the refill capped at the capacity, out of tokens, paused, over the budget until the
-oldest bucket leaves a default or configured window, at least a minute), startup validation and throttle decisions.
+oldest bucket leaves a default or configured window, at least a minute), startup validation (including every
+registered row type's query and write limits) and throttle decisions.
 
 ### Concurrency: many threads, many pods, same accounts
 
@@ -1763,8 +1772,8 @@ passes the connection string.
   parent the read didn't find), whatever its code. Find the message your org returns for a child whose Text key names
   a missing parent (below) and add it here, e.g. in `appsettings.json`:
   `"Salesforce": { "ParentMissingMessages": [ "Account not found" ] }` (or `Salesforce__ParentMissingMessages__0`).
-  Empty, such a rejection is what its code says (`FIELD_CUSTOM_VALIDATION_EXCEPTION`: permanent, dead-lettered). `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-100, ...) and a missing
-  `Salesforce:InstanceUrl` fail startup.
+  Empty, such a rejection is what its code says (`FIELD_CUSTOM_VALIDATION_EXCEPTION`: permanent, dead-lettered). `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-100, ...), a row type's limits outside
+  Salesforce's (`MaxValuesPerQuery` 1-2,000, `MaxRecordsPerWrite` 1-200) and a missing `Salesforce:InstanceUrl` fail startup.
 - The mock org was built from Salesforce's documentation. These behaviours are worth confirming in the sandbox:
   - an empty checkbox (`null`) is stored as `false`, and an empty text (`""`) as empty;
   - a number with more decimals than the field allows is rounded;

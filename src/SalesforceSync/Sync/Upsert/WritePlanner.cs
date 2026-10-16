@@ -19,7 +19,10 @@ internal sealed record WritePlan(IReadOnlyList<CompositeWrite> Requests, IReadOn
 /// </summary>
 internal static class WritePlanner
 {
-    public static WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current)
+    /// <param name="units">The batch's units, normalized against Describe.</param>
+    /// <param name="current">What the read found.</param>
+    /// <param name="maxRecordsPerWrite">The row type's <see cref="Inbox.IInboxRow.MaxRecordsPerWrite"/>: records per collection.</param>
+    public static WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current, int maxRecordsPerWrite)
     {
         var planned = new List<PlannedUnit>();
         var decided = new List<UpsertResult>();
@@ -48,7 +51,7 @@ internal static class WritePlanner
             }
         }
 
-        var (requests, tooLarge) = CompositeWrite.Pack(planned);
+        var (requests, tooLarge) = CompositeWrite.Pack(planned, maxRecordsPerWrite);
         decided.AddRange(tooLarge);
         return new WritePlan(requests, decided);
     }

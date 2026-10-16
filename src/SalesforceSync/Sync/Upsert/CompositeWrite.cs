@@ -28,12 +28,15 @@ internal sealed partial class CompositeWrite
     /// Distributes the units' writes over requests. Records are grouped into one collection per level and object;
     /// children that point at their parent by reference get a collection of their own, because one reference without
     /// a value (its parent failed) fails that whole subrequest, and children with a literal Id should not go down with
-    /// it. A request takes 5 collections of 200 records; a unit that fits none of the requests so far starts another,
-    /// so an entity's records (and the references between them) share a request, and its outcome is read from that
-    /// request's answers alone.
+    /// it. A request takes 5 collections of <paramref name="maxRecordsPerWrite"/> records; a unit that fits none of the
+    /// requests so far starts another, so an entity's records (and the references between them) share a request, and its
+    /// outcome is read from that request's answers alone.
     /// </summary>
+    /// <param name="units">The units with writes, in order.</param>
+    /// <param name="maxRecordsPerWrite">The row type's <see cref="Inbox.IInboxRow.MaxRecordsPerWrite"/>: records per collection.</param>
     /// <returns>The requests, and a permanent failure for each unit that can't fit any request.</returns>
-    public static (List<CompositeWrite> Requests, List<UpsertResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units)
+    public static (List<CompositeWrite> Requests, List<UpsertResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units,
+        int maxRecordsPerWrite)
     {
         var requests = new List<CompositeWrite>();
         var tooLarge = new List<UpsertResult>();
@@ -41,16 +44,16 @@ internal sealed partial class CompositeWrite
         foreach (var unit in units)
         {
             var needed = unit.Writes.GroupBy(w => w.Collection).ToDictionary(g => g.Key, g => g.Count());
-            if (needed.Count > SalesforceRestClient.MaxCompositeCollections || needed.Values.Any(n => n > SalesforceRestClient.MaxCollectionRecords))
+            if (needed.Count > SalesforceRestClient.MaxCompositeCollections || needed.Values.Any(n => n > maxRecordsPerWrite))
             {
                 tooLarge.Add(new(unit.Key, SyncOutcome.PermanentFailure, [new SalesforceError(null, "LIMIT_EXCEEDED",
                     $"The unit needs {needed.Count} collections; a Composite request takes {SalesforceRestClient.MaxCompositeCollections} " +
-                    $"of {SalesforceRestClient.MaxCollectionRecords} records")]));
+                    $"of {maxRecordsPerWrite} records")]));
                 continue;
             }
 
             // First request with room, so units needing the same collections end up together
-            var request = requests.FirstOrDefault(r => r.Fits(needed));
+            var request = requests.FirstOrDefault(r => r.Fits(needed, maxRecordsPerWrite));
             if (request is null)
             {
                 requests.Add(request = new CompositeWrite());
@@ -79,11 +82,11 @@ internal sealed partial class CompositeWrite
             [.. c.Writes.Select(w => w.Body())]))];
     }
 
-    /// <summary>Whether a unit needing these collections (key -> records) still fits within Salesforce's limits.</summary>
-    private bool Fits(IReadOnlyDictionary<CollectionKey, int> needed)
+    /// <summary>Whether a unit needing these collections (key -> records) still fits within the limits.</summary>
+    private bool Fits(IReadOnlyDictionary<CollectionKey, int> needed, int maxRecordsPerWrite)
     {
         return _byKey.Keys.Union(needed.Keys).Count() <= SalesforceRestClient.MaxCompositeCollections
-               && needed.All(n => (_byKey.GetValueOrDefault(n.Key)?.Count ?? 0) + n.Value <= SalesforceRestClient.MaxCollectionRecords);
+               && needed.All(n => (_byKey.GetValueOrDefault(n.Key)?.Count ?? 0) + n.Value <= maxRecordsPerWrite);
     }
 
     private void Add(PlannedUnit unit)

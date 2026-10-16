@@ -184,7 +184,7 @@ public sealed class UpsertStepsTests
         var queries = ReadQueryBuilder.Build(units,
             [new SoqlQuery("account", "ExternalId__c", ids), new SoqlQuery("Contact", "ExternalId__c", ["C1"]), new SoqlQuery("Profile__c", "ExternalId__c", ["P1"]),
                 new SoqlQuery("Profile__c", "ExternalId__c", [])],
-            Schemas);
+            Schemas, maxValuesPerQuery: 100);
 
         queries.Select(q => (q.Query.ReferenceId, q.SObject)).Should().Equal(("q0", "Account"), ("q1", "Account"), ("q2", "Contact"), ("q3", "Profile__c"));
         queries[0].Query.Soql.Should().StartWith("SELECT Name,ExternalId__c,Id FROM Account WHERE ExternalId__c IN ('A0',");
@@ -197,11 +197,33 @@ public sealed class UpsertStepsTests
     [Fact]
     public void A_hundred_short_ids_are_one_query()
     {
-        var ids = Enumerable.Range(0, ReadQueryBuilder.MaxValuesPerQuery).Select(i => $"A{i}").ToList();
+        var ids = Enumerable.Range(0, 100).Select(i => $"A{i}").ToList();
 
-        var queries = BuildAccountRead(ids);
+        var queries = BuildAccountRead(ids, maxValuesPerQuery: 100);
 
         queries.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void Queries_take_at_most_the_given_number_of_values()
+    {
+        var ids = Enumerable.Range(0, 7).Select(i => $"A{i}").ToList();
+
+        var queries = BuildAccountRead(ids, maxValuesPerQuery: 3);
+
+        queries.Select(q => ids.Count(id => q.Query.Soql.Contains($"'{id}'"))).Should().Equal(3, 3, 1);
+    }
+
+    [Fact]
+    public void The_URL_limit_wins_over_a_large_number_of_values()
+    {
+        var ids = Enumerable.Range(0, SalesforceRestClient.MaxQueryValues).Select(i => $"{i:D4}{new string('a', 96)}").ToList();
+
+        var queries = BuildAccountRead(ids, SalesforceRestClient.MaxQueryValues);
+
+        queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(q.Query.Soql)));
+        queries.Select(q => ids.Count(id => q.Query.Soql.Contains($"'{id}'"))).Should().OnlyContain(n => n < SalesforceRestClient.MaxQueryValues)
+            .And.Subject.Sum().Should().Be(ids.Count);
     }
 
     [Theory]
@@ -209,9 +231,9 @@ public sealed class UpsertStepsTests
     [InlineData('é')] // 2 bytes of UTF-8, 6 escaped
     public void Long_ids_are_split_by_URL_length_each_query_fitting_and_full(char c)
     {
-        var ids = Enumerable.Range(0, ReadQueryBuilder.MaxValuesPerQuery).Select(i => $"{i:D3}{new string(c, 247)}").ToList();
+        var ids = Enumerable.Range(0, 100).Select(i => $"{i:D3}{new string(c, 247)}").ToList();
 
-        var queries = BuildAccountRead(ids);
+        var queries = BuildAccountRead(ids, maxValuesPerQuery: 100);
 
         queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(q.Query.Soql)));
         var chunks = queries.Select(q => ids.Where(id => q.Query.Soql.Contains($"'{id}'")).ToList()).ToList();
@@ -224,7 +246,7 @@ public sealed class UpsertStepsTests
     [Fact]
     public void A_value_whose_query_alone_does_not_fit_a_URL_fails_naming_the_read()
     {
-        var build = () => BuildAccountRead(["A1", new string('x', SalesforceRestClient.MaxUrlBytes)]);
+        var build = () => BuildAccountRead(["A1", new string('x', SalesforceRestClient.MaxUrlBytes)], maxValuesPerQuery: 100);
 
         build.Should().Throw<InvalidOperationException>().WithMessage("The read of Account by ExternalId__c does not fit a URL*");
     }
@@ -248,7 +270,7 @@ public sealed class UpsertStepsTests
             new PlannedUnit("NEW", [Write("Account", create: true), Write("Profile__c", create: true, depth: 1)]),
             new PlannedUnit("OLD", [Write("Account", create: false), Write("Profile__c", create: false, depth: 1)]),
             new PlannedUnit("NEW2", [Write("Account", create: true)])
-        ]);
+        ], MaxRecordsPerWrite);
 
         TooLarge.Should().BeEmpty();
         var request = Requests.Should().ContainSingle().Subject;
@@ -265,21 +287,42 @@ public sealed class UpsertStepsTests
             new PlannedUnit("A", [Write("Account", true), Write("Account", false, 1), Write("Profile__c", true, 1), Write("Profile__c", false, 2)]),
             new PlannedUnit("B", [Write("Account_Relationship__c", true), Write("Account_Relationship__c", false, 1)]),
             new PlannedUnit("C", [Write("Account", true)])
-        ]);
+        ], MaxRecordsPerWrite);
 
         Requests.Select(r => r.Units.Select(u => u.Key)).Should().BeEquivalentTo<string[]>([["A", "C"], ["B"]],
             "B would be a 5th and 6th collection; C still fits the first request");
     }
 
     [Fact]
-    public void A_collection_takes_200_records()
+    public void A_collection_takes_up_to_200_records()
     {
         var units = Enumerable.Range(0, SalesforceRestClient.MaxCollectionRecords + 1)
             .Select(i => new PlannedUnit($"A{i}", [Write("Account", create: true)])).ToList();
 
-        var (Requests, TooLarge) = CompositeWrite.Pack(units);
+        var (Requests, TooLarge) = CompositeWrite.Pack(units, SalesforceRestClient.MaxCollectionRecords);
 
         Requests.Select(r => r.Units.Count).Should().Equal(SalesforceRestClient.MaxCollectionRecords, 1);
+    }
+
+    [Fact]
+    public void Writes_are_split_at_the_given_number_of_records_per_collection()
+    {
+        var (Requests, TooLarge) = CompositeWrite.Pack(
+            [.. Enumerable.Range(0, 3).Select(i => new PlannedUnit($"A{i}", [Write("Account", create: true)]))], maxRecordsPerWrite: 2);
+
+        TooLarge.Should().BeEmpty();
+        Requests.Select(r => r.BuildRequests().Single().Records.Count).Should().Equal(2, 1);
+    }
+
+    [Fact]
+    public void A_unit_with_more_records_of_an_object_than_a_collection_takes_fails_alone()
+    {
+        var (Requests, TooLarge) = CompositeWrite.Pack(
+            [new PlannedUnit("BIG", [Write("Account", true), Write("Account", false)]), new PlannedUnit("OK", [Write("Account", true)])],
+            maxRecordsPerWrite: 1);
+
+        TooLarge.Should().ContainSingle().Which.Key.Should().Be("BIG");
+        Requests.Should().ContainSingle().Which.Units.Should().ContainSingle().Which.Key.Should().Be("OK");
     }
 
     [Fact]
@@ -287,7 +330,8 @@ public sealed class UpsertStepsTests
     {
         var tooMany = Enumerable.Range(0, SalesforceRestClient.MaxCompositeCollections + 1).Select(depth => Write("Account", true, depth)).ToList();
 
-        var (Requests, TooLarge) = CompositeWrite.Pack([new PlannedUnit("BIG", tooMany), new PlannedUnit("OK", [Write("Account", true)])]);
+        var (Requests, TooLarge) = CompositeWrite.Pack([new PlannedUnit("BIG", tooMany), new PlannedUnit("OK", [Write("Account", true)])],
+            MaxRecordsPerWrite);
 
         var failed = TooLarge.Should().ContainSingle().Subject;
         (failed.Key, failed.Outcome, failed.PrimaryError!.Code).Should().Be(("BIG", SyncOutcome.PermanentFailure, "LIMIT_EXCEEDED"));
@@ -296,16 +340,18 @@ public sealed class UpsertStepsTests
 
     // ---------- Helpers ----------
 
+    private const int MaxRecordsPerWrite = 180;
+
     private static SObjectRecord AccountRecord(string key, string name)
     {
         return new("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = name });
     }
 
     /// <summary>The read of Accounts by external id, selecting Name, ExternalId__c and Id.</summary>
-    private static List<ReadQuery> BuildAccountRead(IReadOnlyList<string> ids)
+    private static List<ReadQuery> BuildAccountRead(IReadOnlyList<string> ids, int maxValuesPerQuery)
     {
         return ReadQueryBuilder.Build(Normalized(new UpsertUnit([AccountRecord("A1", "Acme")])),
-            [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas);
+            [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas, maxValuesPerQuery);
     }
 
     private static List<NormalizedUnit> Normalized(UpsertUnit unit)
