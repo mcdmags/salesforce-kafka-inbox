@@ -129,8 +129,7 @@ namespace SalesforceSync.Data.Migrations
 
                     b
                         .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
-                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000)
-                        .HasAnnotation("SalesforceSync:EntityType", "account");
+                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
                 });
 
             modelBuilder.Entity("SalesforceSync.Sync.AccountRelationshipInboxRow", b =>
@@ -200,8 +199,7 @@ namespace SalesforceSync.Data.Migrations
 
                     b
                         .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
-                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000)
-                        .HasAnnotation("SalesforceSync:EntityType", "accountRelationship");
+                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
                 });
 
             modelBuilder.Entity("SalesforceSync.Sync.ContactInboxRow", b =>
@@ -271,8 +269,7 @@ namespace SalesforceSync.Data.Migrations
 
                     b
                         .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
-                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000)
-                        .HasAnnotation("SalesforceSync:EntityType", "contact");
+                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
                 });
 #pragma warning restore 612, 618
         }

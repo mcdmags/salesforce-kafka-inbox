@@ -2,8 +2,9 @@ namespace SalesforceSync.Inbox;
 
 /// <summary>
 /// One row of an inbox table: a Kafka event and what became of it. Every inbox table has exactly these columns (the
-/// inbox configuration in SyncDbContext), so they all live here; a synced object only adds a subclass that names its table
-/// (<see cref="Data.SyncDbContext"/> maps each subclass to its own table; the base is not an entity, there is no shared table).
+/// inbox configuration in SyncDbContext), so they all live here; a synced object only adds a subclass that names its entity
+/// type (<see cref="IInboxRow"/>) and gets its own table (<see cref="Data.SyncDbContext"/> maps each subclass to one;
+/// the base is not an entity, there is no shared table).
 /// </summary>
 public abstract class InboxRow
 {
@@ -35,4 +36,11 @@ public abstract class InboxRow
     public DateTimeOffset ReceivedAt { get; set; }
 
     public DateTimeOffset LastUpdated { get; set; }
+}
+
+/// <summary>An inbox row type: which entities of sf_sync_state its events are about.</summary>
+public interface IInboxRow
+{
+    /// <summary>sf_sync_state.entity_type of this inbox's entities, e.g. "account".</summary>
+    static abstract string EntityType { get; }
 }

@@ -62,7 +62,7 @@ public sealed class SalesforceBatchUpsertService(
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do).</returns>
     public async Task<int> UpsertBatchAsync<TEvent, TRow>(UpsertStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
-        where TRow : InboxRow, new()
+        where TRow : InboxRow, IInboxRow, new()
     {
         // Give up on Salesforce before the lease runs out, so another worker never claims an entity while this one
         // can still write to it. Started before the claim, so the margin is measured from when the lease began.

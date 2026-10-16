@@ -93,4 +93,7 @@ public sealed class ContactSObject
 }
 
 /// <summary>A row of <c>sf_contact_inbox</c>: events of the contact type.</summary>
-public sealed class ContactInboxRow : InboxRow;
+public sealed class ContactInboxRow : InboxRow, IInboxRow
+{
+    public static string EntityType => ContactSync.Type;
+}

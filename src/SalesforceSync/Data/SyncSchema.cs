@@ -3,7 +3,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using SalesforceSync.Data.Migrations;
-using static SalesforceSync.Data.SqlCommands;
 
 namespace SalesforceSync.Data;
 
@@ -47,14 +46,14 @@ public static class SyncSchema
             await db.Database.OpenConnectionAsync(t); // stays open: the lock is the session's
             try
             {
-                await db.Database.ExecuteAsync("select pg_advisory_lock(@key)", t, Param("key", MigrationLockKey));
+                await db.Database.ExecuteAsync("select pg_advisory_lock(@key)", t, new { key = MigrationLockKey });
                 await BaselineAsync(db, t);
                 await db.Database.MigrateAsync(t);
             }
             finally
             {
                 // Explicitly: closing only returns the session to the pool, lock and all
-                await db.Database.ExecuteAsync("select pg_advisory_unlock(@key)", CancellationToken.None, Param("key", MigrationLockKey));
+                await db.Database.ExecuteAsync("select pg_advisory_unlock(@key)", CancellationToken.None, new { key = MigrationLockKey });
                 await db.Database.CloseConnectionAsync();
             }
         }, ct);
@@ -70,7 +69,7 @@ public static class SyncSchema
     {
         string[] tables = [.. db.Model.GetEntityTypes().Select(e => e.GetTableName()!), "sf_inbox"];
         var shape = await db.Database.QuerySingleAsync<string>(ExistingShape, ct,
-            Param("history", HistoryRepository.DefaultTableName), Param("tables", tables));
+            new { history = HistoryRepository.DefaultTableName, tables });
         if (shape == "older")
         {
             throw new InvalidOperationException(

@@ -40,7 +40,7 @@ public sealed class EntitySyncService<TEvent, TRow>(
     IRepository<TRow> inbox,
     UpsertStrategy<TEvent> strategy,
     string defaultTopic) : ISalesforceEntitySync
-    where TRow : InboxRow, new()
+    where TRow : InboxRow, IInboxRow, new()
 {
     public string EntityType => strategy.EntityType;
 
