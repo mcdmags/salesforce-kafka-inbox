@@ -113,7 +113,6 @@ public sealed class LeaseTests(SyncFixture app)
             baseDelaySecs = 1d,
             maxDelaySecs = 1d
         })).Should().Be(0);
-        (await ExecuteAsync(Sql.Dead, new { ids = claimed, times, token = stale, errors })).Should().Be(0);
 
         // Every outcome the repository records is conditional on the token as well: none of them touches the row
         var inbox = app.AccountInbox;

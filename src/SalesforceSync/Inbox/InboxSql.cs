@@ -59,7 +59,6 @@ public sealed partial class InboxSql
         Claim = Template.Claim.Replace("{inbox}", table);
         Done = Template.Done.Replace("{inbox}", table);
         Fail = Template.Fail.Replace("{inbox}", table);
-        Dead = Template.Dead.Replace("{inbox}", table);
         Hold = Template.Hold.Replace("{inbox}", table);
         EndLease = Template.EndLease.Replace("{inbox}", table);
     }
@@ -77,9 +76,6 @@ public sealed partial class InboxSql
 
     /// <inheritdoc cref="Template.Fail"/>
     public string Fail { get; }
-
-    /// <inheritdoc cref="Template.Dead"/>
-    public string Dead { get; }
 
     /// <inheritdoc cref="Template.Hold"/>
     public string Hold { get; }
@@ -175,8 +171,9 @@ public sealed partial class InboxSql
             """;
 
         /// <summary>
-        /// Transient failure: one more failed attempt (attempt_count); the rows stay pending and back off exponentially,
-        /// by their attempts, or are dead-lettered (and idle) at the @maxRetries-th; the lease ends. @errors is a JSON
+        /// Failure: one more failed attempt (attempt_count); the rows stay pending and back off exponentially, by their
+        /// attempts, or are dead-lettered (and idle) at the @maxRetries-th; the lease ends. A permanent failure is
+        /// dead-lettered at once: @maxRetries 0. @errors is a JSON
         /// object, row id -> [error, code], so a whole batch's failures are one statement. The object is an uncorrelated scalar subquery,
         /// which Postgres evaluates once per statement and then only looks up a key in per row. (Joined in as a one-row
         /// CTE it was copied once per row: 230 ms for 5,000 rows.)
@@ -190,19 +187,6 @@ public sealed partial class InboxSql
                 next_attempt_at = case when i.attempt_count + 1 < @maxRetries
                                        then now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) end,
                 lock_token = null
-            where {{StillClaimed}}
-            """;
-
-        /// <summary>
-        /// Permanent failure: retrying the same data can't succeed, dead-letter now (idle; the lease ends). @errors as
-        /// in <see cref="Fail"/>.
-        /// </summary>
-        public const string Dead = $$"""
-            update {inbox} i
-            set last_updated = now(),
-                last_error = (select @errors::jsonb) -> i.id::text ->> 0,
-                last_error_code = (select @errors::jsonb) -> i.id::text ->> 1,
-                status = 'dead', next_attempt_at = null, lock_token = null
             where {{StillClaimed}}
             """;
 

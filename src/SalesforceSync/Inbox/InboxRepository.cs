@@ -83,13 +83,11 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             }
             if (outcomes.Dead.Count > 0)
             {
-                var ids = Ids(outcomes.Dead);
-                recorded += await db.Database.ExecuteAsync(sql.Dead, t,
-                    new { ids, times = claim.TimesOf(ids), errors = ErrorsJson(outcomes.Dead), token });
+                recorded += await FailAsync(db, sql, claim, outcomes.Dead, maxRetries: 0, t);
             }
             if (outcomes.Failed.Count > 0)
             {
-                recorded += await FailAsync(db, sql, claim, outcomes.Failed, t);
+                recorded += await FailAsync(db, sql, claim, outcomes.Failed, _opt.MaxRetries, t);
             }
             return recorded;
         }, ct);
@@ -128,7 +126,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
     {
         return InTransactionAsync(claim, TimeSpan.Zero,
-            (db, sql, t) => FailAsync(db, sql, claim, [.. claim.RowIds.Select(id => new FailedEvent(id, error, code))], t), ct);
+            (db, sql, t) => FailAsync(db, sql, claim, [.. claim.RowIds.Select(id => new FailedEvent(id, error, code))], _opt.MaxRetries, t), ct);
     }
 
     /// <summary>
@@ -152,27 +150,24 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         }, ct);
     }
 
-    private Task<int> FailAsync(SyncDbContext db, InboxSql sql, InboxClaim claim, IReadOnlyList<FailedEvent> rows, CancellationToken ct)
+    /// <summary>The rows failed: retried with backoff, or dead-lettered at the <paramref name="maxRetries"/>-th failure (0: now).</summary>
+    private Task<int> FailAsync(SyncDbContext db, InboxSql sql, InboxClaim claim, IReadOnlyList<FailedEvent> rows, int maxRetries,
+        CancellationToken ct)
     {
-        var ids = Ids(rows);
+        long[] ids = [.. rows.Select(r => r.RowId)];
         return db.Database.ExecuteAsync(sql.Fail, ct, new
         {
             ids,
             times = claim.TimesOf(ids),
             errors = ErrorsJson(rows),
             token = claim.Token,
-            maxRetries = _opt.MaxRetries,
+            maxRetries,
             baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
             maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
         });
     }
 
-    private static long[] Ids(IReadOnlyList<FailedEvent> rows)
-    {
-        return [.. rows.Select(r => r.RowId)];
-    }
-
-    /// <summary>{ "row id": [error, code] }, as InboxSql.Fail / Dead take the errors.</summary>
+    /// <summary>{ "row id": [error, code] }, as InboxSql.Fail takes the errors.</summary>
     private static string ErrorsJson(IReadOnlyList<FailedEvent> rows)
     {
         var errors = new Dictionary<string, string?[]>(StringComparer.Ordinal);
