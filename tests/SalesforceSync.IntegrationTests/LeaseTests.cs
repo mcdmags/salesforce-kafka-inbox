@@ -97,7 +97,6 @@ public sealed class LeaseTests(SyncFixture app)
         }
         var (claimed, times) = (claim.RowIds, claim.EventTimes);
         var rowBefore = await app.GetInboxRowAsync(acct);
-        var stateBefore = await app.GetSyncStateAsync(acct);
 
         // The first worker comes back and tries everything it could do with its old token
         var errors = $$"""{ "{{claimed[0]}}": ["late failure", "UNABLE_TO_LOCK_ROW"] }""";
@@ -124,7 +123,6 @@ public sealed class LeaseTests(SyncFixture app)
 
         (await app.GetInboxAsync(acct)).Should().Be((1L, "done"));
         (await app.GetInboxRowAsync(acct)).Should().Be(rowBefore, "the row is exactly as the worker that took over left it");
-        (await app.GetSyncStateAsync(acct)).Should().Be(stateBefore, "the worker that took over is unaffected");
     }
 
     [Fact]
@@ -143,9 +141,7 @@ public sealed class LeaseTests(SyncFixture app)
         await app.AccountInbox.RecordAsync(claim, Synced(claimed[0]), CancellationToken.None);
         await app.AccountInbox.RecordAsync(claim, Synced(claimed[0]), CancellationToken.None);
 
-        var row = (await app.GetInboxRowAsync(acct))!;
-        row.Should().Match<InboxRow>(r => r.Status == "done" && r.LockToken == null && r.NextAttemptAt == null);
-        (await app.GetSyncStateAsync(acct)).Should().Be(new SyncStateRow(null, null),
+        (await app.GetInboxRowAsync(acct)).Should().Match<InboxRow>(r => r.Status == "done" && r.LockToken == null && r.NextAttemptAt == null,
             "recorded again (after a commit whose outcome was unknown), it finds the lease already ended and nothing is left to do");
     }
 

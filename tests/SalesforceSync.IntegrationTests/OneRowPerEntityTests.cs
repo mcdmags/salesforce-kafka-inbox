@@ -122,9 +122,9 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
         (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0
                                                              && r.Error == null && r.ErrorCode == null, "nothing of v1's outcome lands on v2");
-        var state = await StateAsync(db, entity);
-        state.LockToken.Should().BeNull();
-        state.NextAttemptAt.Should().NotBeNull("v2 is pending, so its entity must be due");
+        var (nextAttemptAt, lockToken) = await StateAsync(db, entity);
+        lockToken.Should().BeNull();
+        nextAttemptAt.Should().NotBeNull("v2 is pending, so its entity must be due");
 
         var next = await Eventually.ValueAsync(() => inbox.ClaimAsync(CancellationToken.None), c => c.Events.Count > 0,
             "the entity to be claimed again", TimeSpan.FromSeconds(10));
@@ -201,10 +201,10 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         return new Row(row.Id, version, row.Status, row.AttemptCount, row.Error, row.ErrorCode, row.EventTime, row.LastUpdated);
     }
 
-    private static async Task<SyncStateRow> StateAsync(NpgsqlDataSource db, string entity)
+    private static async Task<(DateTime? NextAttemptAt, Guid? LockToken)> StateAsync(NpgsqlDataSource db, string entity)
     {
         await using var conn = await db.OpenConnectionAsync();
-        return await conn.QuerySingleAsync<SyncStateRow>(
+        return await conn.QuerySingleAsync<(DateTime?, Guid?)>(
             $"select next_attempt_at, lock_token from {Table} where entity_id = @entity", new { entity });
     }
 

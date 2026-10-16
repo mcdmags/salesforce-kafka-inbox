@@ -1021,7 +1021,7 @@ public sealed class AccountRelationshipInboxRow : InboxRow, IInboxRow
     // A margin under Salesforce's 200
     public static int MaxRecordsPerWrite => 180;
 }
-//    ... and in SyncDbContext: a DbSet<AccountRelationshipInboxRow>, and in OnModelCreating
+//    ... and in SyncDbContext.OnModelCreating
 //    modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
 //    Then a migration creates the table: dotnet ef migrations add <Name> --project src/SalesforceSync --output-dir Data/Migrations
 

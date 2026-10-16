@@ -437,15 +437,6 @@ public class SyncFixture : IAsyncLifetime
     private sealed record StoredRow(long Id, string Payload, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
         Guid? LockToken);
 
-    /// <summary>The sync state of the entity's inbox row, if it has one.</summary>
-    public async Task<SyncStateRow?> GetSyncStateAsync(string key, string entityType = Accounts)
-    {
-        await using var conn = await Db.OpenConnectionAsync();
-        return (await conn.QueryAsync<SyncStateRow>(
-            $"select next_attempt_at, lock_token from {InboxTable(entityType)} where entity_id = @key",
-            new { key })).SingleOrDefault();
-    }
-
     private static long VersionOf(string payload)
     {
         var time = DateTimeOffset.Parse((string)JsonNode.Parse(payload)!["meta"]!["time"]!, CultureInfo.InvariantCulture);
@@ -526,9 +517,6 @@ public class SyncFixture : IAsyncLifetime
 /// <summary>An inbox row as the tests see it; <paramref name="Version"/> comes from the payload's meta.time.</summary>
 public sealed record InboxRow(long Id, long Version, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
     Guid? LockToken);
-
-/// <summary>The sync state of an entity's inbox row as the tests see it.</summary>
-public sealed record SyncStateRow(DateTime? NextAttemptAt, Guid? LockToken);
 
 [CollectionDefinition(Name)]
 public sealed class SyncCollection : ICollectionFixture<SyncFixture>

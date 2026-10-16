@@ -128,9 +128,9 @@ public sealed class ClaimRaceTests(SyncFixture app)
         }
 
         (await race.RowAsync()).Should().Be((race.TimeOf(2), "pending", 0, null), "nothing of v1's outcome lands on v2");
-        var state = await race.StateAsync();
-        state.LockToken.Should().BeNull("the lease ended");
-        state.NextAttemptAt.Should().NotBeNull("v2 is pending, so it must be due, or it would never be claimed");
+        var (nextAttemptAt, lockToken) = await race.StateAsync();
+        lockToken.Should().BeNull("the lease ended");
+        nextAttemptAt.Should().NotBeNull("v2 is pending, so it must be due, or it would never be claimed");
         (await race.DueAsync()).Should().Be(outcome != "held",
             "v2 is due when the outcome transaction ends (held: when the hold ends), not when v1's lease would have");
     }
@@ -174,9 +174,9 @@ public sealed class ClaimRaceTests(SyncFixture app)
         }
 
         (await race.RowAsync()).Should().Be((race.TimeOf(3), "pending", 0, null));
-        var state = await race.StateAsync();
-        state.LockToken.Should().BeNull();
-        state.NextAttemptAt.Should().NotBeNull("v3 is pending, so it must be due, or it would never be claimed");
+        var (nextAttemptAt, lockToken) = await race.StateAsync();
+        lockToken.Should().BeNull();
+        nextAttemptAt.Should().NotBeNull("v3 is pending, so it must be due, or it would never be claimed");
         (await race.DueAsync()).Should().BeTrue("v3 is due now, not when v1's lease would have ended");
     }
 
@@ -252,9 +252,9 @@ public sealed class ClaimRaceTests(SyncFixture app)
             return worker.QueryAsync<InboxEvent>(Sql.Claim, new { token, lease = TimeSpan.FromMinutes(1), batchSize = 75 }, tx);
         }
 
-        public Task<SyncStateRow> StateAsync()
+        public Task<(DateTime? NextAttemptAt, Guid? LockToken)> StateAsync()
         {
-            return observer.QuerySingleAsync<SyncStateRow>(
+            return observer.QuerySingleAsync<(DateTime?, Guid?)>(
                 $"select next_attempt_at, lock_token from {Table} where entity_id = @Entity", new { Entity });
         }
 
