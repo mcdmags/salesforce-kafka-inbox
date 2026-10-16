@@ -33,8 +33,8 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     }
 
     /// <summary>
-    /// Locks and leases a batch of due rows and reads them (<see cref="InboxSql.Template.Claim"/>),
-    /// in a transaction of its own, so the rows are read before the commit is sent. A fresh token per attempt: if a
+    /// Locks and leases a batch of due rows and reads them (<see cref="InboxSql.Template.Claim"/>), in a transaction of
+    /// its own, so the rows are read before the commit is sent. A fresh token per attempt: if a
     /// commit's outcome is unknown and the claim is retried, rows leased by the lost attempt are not mistaken for this
     /// one's. The retry ends their leases first (<see cref="InboxSql.Template.EndLease"/>), so they don't wait for the
     /// leases to expire (and a lease nobody works on is never taken over). The transaction ends before Salesforce is
@@ -125,8 +125,8 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
     {
-        return InTransactionAsync(claim, TimeSpan.Zero,
-            (db, sql, t) => FailAsync(db, sql, claim, [.. claim.RowIds.Select(id => new FailedEvent(id, error, code))], _opt.MaxRetries, t), ct);
+        FailedEvent[] rows = [.. claim.RowIds.Select(id => new FailedEvent(id, error, code))];
+        return InTransactionAsync(claim, TimeSpan.Zero, (db, sql, t) => FailAsync(db, sql, claim, rows, _opt.MaxRetries, t), ct);
     }
 
     /// <summary>
@@ -134,8 +134,8 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// only the claimed rows this lease still holds that still hold the event the claim read
     /// (<see cref="InboxSql.Template.StillClaimed"/>), and returns how many rows they updated. If that is fewer than the claim's,
     /// <see cref="InboxSql.Template.EndLease"/> ends the lease on the rest (rows not attempted, and rows a newer event
-    /// overwrote meanwhile), due after <paramref name="delay"/>. Safe to repeat: an attempt whose commit outcome was unknown, or a lease lost
-    /// meanwhile, leaves no row under this token, and nothing is written.
+    /// overwrote meanwhile), due after <paramref name="delay"/>. Safe to repeat: an attempt whose commit outcome was
+    /// unknown, or a lease lost meanwhile, leaves no row under this token, and nothing is written.
     /// </summary>
     private Task InTransactionAsync(InboxClaim claim, TimeSpan delay, Func<SyncDbContext, InboxSql, CancellationToken, Task<int>> record,
         CancellationToken ct)

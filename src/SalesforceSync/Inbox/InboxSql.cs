@@ -142,9 +142,9 @@ public sealed partial class InboxSql
         /// The WHERE of every outcome statement: of the claimed rows (@ids, with the event_time @times the claim read
         /// for each), those that @token still holds and that still hold that event. A worker whose lease expired
         /// records nothing; a row the consumer overwrote with a newer event after the claim gets no outcome: it stays
-        /// pending with the newer event, Done doesn't mark it done, and <see cref="EndLease"/> ends its
-        /// lease, leaving it due. Each row is looked up by primary key; the times are compared as timestamptz, exactly:
-        /// @times are the values the claim read back from the column.
+        /// pending with the newer event, Done doesn't mark it done, and <see cref="EndLease"/> ends its lease, leaving it
+        /// due. Each row is looked up by primary key; the times are compared as timestamptz, exactly: @times are the
+        /// values the claim read back from the column.
         /// <para>
         /// Why an outcome and a store can't interleave: both update the entity's one row, so Postgres's row lock orders
         /// them. A store that committed before the outcome statement read the row changed its event_time, and the row
@@ -173,10 +173,10 @@ public sealed partial class InboxSql
         /// <summary>
         /// Failure: one more failed attempt (attempt_count); the rows stay pending and back off exponentially, by their
         /// attempts, or are dead-lettered (and idle) at the @maxRetries-th; the lease ends. A permanent failure is
-        /// dead-lettered at once: @maxRetries 0. @errors is a JSON
-        /// object, row id -> [error, code], so a whole batch's failures are one statement. The object is an uncorrelated scalar subquery,
-        /// which Postgres evaluates once per statement and then only looks up a key in per row. (Joined in as a one-row
-        /// CTE it was copied once per row: 230 ms for 5,000 rows.)
+        /// dead-lettered at once: @maxRetries 0. @errors is a JSON object, row id -> [error, code], so a whole batch's
+        /// failures are one statement. The object is an uncorrelated scalar subquery, which Postgres evaluates once per
+        /// statement and then only looks up a key in per row. (Joined in as a one-row CTE it was copied once per row:
+        /// 230 ms for 5,000 rows.)
         /// </summary>
         public const string Fail = $$"""
             update {inbox} i
@@ -204,8 +204,9 @@ public sealed partial class InboxSql
         /// <summary>
         /// Ends the lease on the rows (@ids) that @token still holds, due again after @delay, with no attempt spent:
         /// what becomes of a row that gets no outcome. Last in an outcome transaction, those are the rows not attempted
-        /// (skipped because of another entity's record, or the whole claim rate limited: deferred) and the rows a newer
-        /// event overwrote during the lease (see <see cref="StillClaimed"/>), whatever was recorded for the others.
+        /// (skipped because of another entity's record) and the rows a newer event overwrote during the lease (see
+        /// <see cref="StillClaimed"/>), whatever was recorded for the others; a claim rate limited as a whole is
+        /// deferred with this statement alone.
         /// They are pending, and due now (held or deferred: when the hold or deferral ends) instead of at the lease's
         /// end, which the store kept as an overwritten row's next_attempt_at. Such a row gets no coalesce delay
         /// (<see cref="Store"/>): its event has already waited as long as the batch's Salesforce calls took, and newer

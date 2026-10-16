@@ -268,8 +268,8 @@ or `updated`. Anything else is logged with its topic, partition and offset and s
 
 **One inbox table per object type**, all the same shape (one `ConfigureInbox` call per inbox row type in
 `SyncDbContext.OnModelCreating`; table names are code constants, checked to be plain identifiers before they are put
-into SQL). An inbox row also holds its entity's sync state: when it is due, the lease of the worker processing it
-no table is shared by the types. The tables the migrations create:
+into SQL). An inbox row also holds its entity's sync state: when it is due and the lease of the worker processing
+it; no table is shared by the types. The tables the migrations create:
 
 ```sql
 create table sf_account_inbox (                 -- and sf_account_relationship_inbox, sf_contact_inbox, ...
@@ -312,11 +312,11 @@ event, never by how a time is rounded on its way in.
 
 **Store** (`InboxSql.Store`, one statement): insert the event into the entity's row (`on conflict (entity_id) do
 update ... where event_time < excluded.event_time or (event_time = excluded.event_time and status <> 'done')`),
-keeping any lease on it. A new entity,
-or an idle one (`next_attempt_at` null), becomes due after `Sync:CoalesceDelay`, and one that is already due,
-backing off, deferred, held or leased keeps its time (a leased row's is the lease's end). The delay is what lets a burst coalesce: the events of an entity that
-arrive within it overwrite its row one after the other, and only the last is claimed and written, so a longer delay
-means fewer Salesforce calls, and each entity synced up to that much later. A row overwritten during a lease gets no
+keeping any lease on it. A new entity, or an idle one (`next_attempt_at` null), becomes due after
+`Sync:CoalesceDelay`, and one that is already due, backing off, deferred, held or leased keeps its time (a leased
+row's is the lease's end). The delay is what lets a burst coalesce: the events of an entity that arrive within it
+overwrite its row one after the other, and only the last is claimed and written, so a longer delay means fewer
+Salesforce calls, and each entity synced up to that much later. A row overwritten during a lease gets no
 delay when the lease ends: its event arrived during the batch's Salesforce calls, so it has already waited, and more
 of the burst that arrive before the next claim overwrite it anyway. The lock the store takes on the existing row is
 what orders it against a claim or an outcome of the same entity.
@@ -333,10 +333,9 @@ some latency is acceptable, or set 0 for no added delay.
 **Claim** (`InboxSql.Claim`, the same statement for every type), in a transaction of its own, so the rows are read
 before the commit is sent: lock up to `Sync:BatchSize` of the inbox's rows that are due (`next_attempt_at <= now()`),
 longest-waiting first, off the ready index, `FOR UPDATE SKIP LOCKED`; lease them (`lock_token`, `next_attempt_at =
-now() + Sync:Lease`), and return them with their payloads and their `event_time`. Only
-pending rows are due: every outcome that finishes a row sets its `next_attempt_at` null. A leased
-row is not due until its lease ends, so "due" is the only condition: no separate lease check, and a lease that
-expired (its worker died) is simply due again.
+now() + Sync:Lease`), and return them with their payloads and their `event_time`. Only pending rows are due: every
+outcome that finishes a row sets its `next_attempt_at` null. A leased row is not due until its lease ends, so "due"
+is the only condition: no separate lease check, and a lease that expired (its worker died) is simply due again.
 
 Two workers can't hold one entity: they would lock the same row. Under READ COMMITTED a worker that reads a row
 before another worker's lease on it commits re-checks the row when it locks it, finds it no longer due, and drops it
@@ -365,12 +364,11 @@ workers away from an entity, not the consumer: a newer event can overwrite the r
 claimed. So every outcome statement updates only the claimed rows that still hold the `event_time` the claim read
 (`InboxSql.Template.StillClaimed`, part of each statement's WHERE: the claim's row ids and times, `unnest(@ids, @times)`, each
 row looked up by primary key and compared timestamptz to timestamptz, exactly: the times are the microseconds read
-back from the column) and records outcomes on those only: done, retried, dead, held. An
-overwritten row stays pending with the newer event, not marked done, and the transaction's
-last statement (`EndLease`, run only if the outcomes left a claimed row under the lease) ends its lease and makes
-it due now (held or deferred: when the hold or deferral ends), not when the lease would have ended, so the next
-claim writes it. The consumer and the outcome update the same row, so Postgres's row lock orders
-them (see below).
+back from the column) and records outcomes on those only: done, retried, dead, held. An overwritten row stays
+pending with the newer event, not marked done, and the transaction's last statement (`EndLease`, run only if the
+outcomes left a claimed row under the lease) ends its lease and makes it due now (held: when the hold ends), not when
+the lease would have ended, so the next claim writes it. The consumer and the outcome update the same row, so
+Postgres's row lock orders them (see below).
 
 ```sql
 -- Dead letters of one type, by cause
@@ -455,10 +453,10 @@ that time.
    ends the lease of its rows and sets `next_attempt_at`: null for a finished row, else when it is due again (the end
    of the backoff or hold). Its last statement (`EndLease`) ends the lease of the rows left, those not attempted and
    those a newer event overwrote meanwhile (a store keeps a leased row's `next_attempt_at`, the lease's end), and
-   makes them due now (deferred or held: when that ends). An event stored
-   at the same moment is never left behind: the store and the outcome update the same row, so either the store came
-   first (the outcome skips the overwritten row and `EndLease` ends its lease) or it waits for the outcome
-   transaction and then overwrites the finished row and makes the idle entity due (`ClaimRaceTests`).
+   makes them due now (held: when the hold ends). A deferral is that statement alone, due when the deferral ends.
+   An event stored at the same moment is never left behind: the store and the outcome update the same row, so either
+   the store came first (the outcome skips the overwritten row and `EndLease` ends its lease) or it waits for the
+   outcome transaction and then overwrites the finished row and makes the idle entity due (`ClaimRaceTests`).
 4. **Crash.** Nothing to clean up. The lease expires, which makes the entity due, and the next claim takes it. Its read
    of Salesforce shows what the crashed worker did or didn't save. (A write whose outcome is unknown is held instead;
    see [Unknown outcomes](#unknown-outcomes).)
