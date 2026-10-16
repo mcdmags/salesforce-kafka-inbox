@@ -26,7 +26,6 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     [Theory]
     [InlineData("pending")]
     [InlineData("done")]
-    [InlineData("superseded")]
     [InlineData("dead")]
     public async Task A_newer_event_overwrites_the_row_and_makes_it_pending_with_no_attempts_or_errors(string status)
     {
@@ -62,7 +61,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task An_event_as_new_as_the_row_a_redelivery_makes_it_pending_again_and_its_claim_reads_it_with_its_watermark()
+    public async Task An_event_as_new_as_a_done_row_a_redelivery_changes_nothing()
     {
         var db = await SchemaAsync();
         var inbox = Inbox();
@@ -70,26 +69,40 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         await StoreAsync(inbox, entity, 1);
         var first = await inbox.ClaimAsync(CancellationToken.None);
         await inbox.RecordAsync(first, Synced(first), CancellationToken.None);
+        var before = await RowAsync(db, entity);
 
         await StoreAsync(inbox, entity, 1);
 
-        (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 1 && r.Status == "pending" && r.AttemptCount == 0);
-        var again = await inbox.ClaimAsync(CancellationToken.None);
-        again.Events.Should().ContainSingle().Which.Should().Match<InboxEvent>(e => e.EventTime == SyncFixture.TimeOf(Event(entity, 1))
-            && e.SyncedTime == SyncFixture.SyncedTime(1),
-            "the engine supersedes an event that is not newer than the watermark (SyncEndToEndTests: without a write)");
+        (await RowAsync(db, entity)).Should().Be(before, "its time is in Salesforce already");
+        (await inbox.ClaimAsync(CancellationToken.None)).Events.Should().BeEmpty("there is nothing to write");
+    }
+
+    [Theory]
+    [InlineData("pending")]
+    [InlineData("dead")]
+    public async Task An_event_as_new_as_a_row_that_is_not_done_overwrites_it_and_is_claimed(string status)
+    {
+        var db = await SchemaAsync();
+        var inbox = Inbox();
+        var entity = SyncFixture.NewAccountId();
+        await StoreAsync(inbox, entity, 1);
+        await ExecuteAsync(db, $"update {Table} set status = @status, attempt_count = 3, last_error = 'failed', next_attempt_at = null", new { status });
+
+        await StoreAsync(inbox, entity, 1);
+
+        (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 1 && r.Status == "pending" && r.AttemptCount == 0 && r.Error == null);
+        (await inbox.ClaimAsync(CancellationToken.None)).Events.Should().ContainSingle("a redelivery of an event not yet synced is written");
     }
 
     /// <summary>
     /// The race the one row per entity brings: a worker claims v1 and, while it writes v1 to Salesforce, the consumer
     /// overwrites the row with v2. Whatever the worker records for v1 must not land on v2: the row stays pending with v2,
-    /// the watermark is not moved, and the entity is due, so the next claim takes v2.
+    /// and the entity is due, so the next claim takes v2.
     /// </summary>
     [Theory]
     [InlineData("done")]
     [InlineData("failed")]
     [InlineData("dead")]
-    [InlineData("superseded")]
     [InlineData("released")]
     [InlineData("failed all")]
     [InlineData("deferred")]
@@ -109,17 +122,15 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
         (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0
                                                              && r.Error == null && r.ErrorCode == null, "nothing of v1's outcome lands on v2");
-        var state = await StateAsync(db, entity);
-        state.SyncedTime.Should().BeNull("the watermark doesn't move to v2, which was never written");
-        state.LockToken.Should().BeNull();
-        state.NextAttemptAt.Should().NotBeNull("v2 is pending, so its entity must be due");
+        var (nextAttemptAt, lockToken) = await StateAsync(db, entity);
+        lockToken.Should().BeNull();
+        nextAttemptAt.Should().NotBeNull("v2 is pending, so its entity must be due");
 
         var next = await Eventually.ValueAsync(() => inbox.ClaimAsync(CancellationToken.None), c => c.Events.Count > 0,
             "the entity to be claimed again", TimeSpan.FromSeconds(10));
         next.Events.Should().ContainSingle().Which.EventTime.Should().Be(SyncFixture.TimeOf(Event(entity, 2)), "the next claim writes v2");
         await inbox.RecordAsync(next, Synced(next), CancellationToken.None);
         (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 2 && r.Status == "done");
-        (await StateAsync(db, entity)).SyncedTime.Should().Be(SyncFixture.SyncedTime(2));
     }
 
     private static Task RecordAsync(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
@@ -130,10 +141,9 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         return outcome switch
         {
             "done" => inbox.RecordAsync(claim, Synced(claim), none),
-            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [], [failure]), none),
-            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [failure], []), none),
-            "superseded" => inbox.RecordAsync(claim, new BatchOutcomes([], [row], [], [], []), none),
-            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [row], [], []), none),
+            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
+            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
+            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
             "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
             "deferred" => inbox.DeferAsync(claim, TimeSpan.Zero, none),
             "held" => inbox.HoldAsync(claim, "lost", none),
@@ -143,7 +153,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
     private static BatchOutcomes Synced(InboxClaim claim)
     {
-        return new BatchOutcomes(claim.RowIds, [], [], [], []);
+        return new BatchOutcomes(claim.RowIds, [], []);
     }
 
     private static JsonObject Event(string entity, long version)
@@ -191,11 +201,11 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         return new Row(row.Id, version, row.Status, row.AttemptCount, row.Error, row.ErrorCode, row.EventTime, row.LastUpdated);
     }
 
-    private static async Task<SyncStateRow> StateAsync(NpgsqlDataSource db, string entity)
+    private static async Task<(DateTime? NextAttemptAt, Guid? LockToken)> StateAsync(NpgsqlDataSource db, string entity)
     {
         await using var conn = await db.OpenConnectionAsync();
-        return await conn.QuerySingleAsync<SyncStateRow>(
-            $"select next_attempt_at, locked_until, lock_token, synced_time from {Table} where entity_id = @entity", new { entity });
+        return await conn.QuerySingleAsync<(DateTime?, Guid?)>(
+            $"select next_attempt_at, lock_token from {Table} where entity_id = @entity", new { entity });
     }
 
     private static async Task ExecuteAsync(NpgsqlDataSource db, string sql, object? args = null)

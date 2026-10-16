@@ -4,7 +4,7 @@ namespace SalesforceSync.Inbox;
 
 /// <summary>
 /// One row of an inbox table: an entity's newest Kafka event, what became of it, and the entity's sync state (when it is
-/// due, the lease of the worker processing it, its watermark). One row per entity: a newer event overwrites it. Every
+/// due, the lease of the worker processing it). One row per entity: a newer event overwrites it. Every
 /// inbox table has exactly these columns (the inbox configuration in SyncDbContext), so they all live here; a synced
 /// object only adds a subclass with its limits (<see cref="IInboxRow"/>) and gets its own table (<see cref="Data.SyncDbContext"/> maps each subclass to one; the base is not an entity, there is no
 /// shared table).
@@ -19,18 +19,15 @@ public abstract class InboxRow
     /// <summary>The Kafka message value, unchanged (jsonb); never read by SQL.</summary>
     public string Payload { get; set; } = "";
 
-    /// <summary>
-    /// The event's time (its meta.time), to the microsecond as the watermark keeps it; set by the consumer. What
-    /// InboxSql.Done moves <see cref="SyncedTime"/> to.
-    /// </summary>
+    /// <summary>The event's time (its meta.time), cut to the microsecond (<see cref="ToWholeMicroseconds"/>); set by the consumer.</summary>
     public DateTimeOffset EventTime { get; set; }
 
-    /// <summary>pending | done | superseded | dead. Null on a new row: the database default ('pending') applies.</summary>
+    /// <summary>pending | done | dead. Null on a new row: the database default ('pending') applies.</summary>
     public string Status { get; set; } = null!;
 
     /// <summary>
-    /// Times this event was claimed (a newer event starts again at 0); it is dead-lettered after
-    /// <see cref="SyncOptions.MaxRetries"/>.
+    /// Times this event failed transiently (a newer event starts again at 0); it is dead-lettered at
+    /// <see cref="SyncOptions.MaxRetries"/>. A claim, a release, a deferral, a hold or a lost lease spends none.
     /// </summary>
     public int AttemptCount { get; set; }
 
@@ -42,22 +39,24 @@ public abstract class InboxRow
     public DateTimeOffset LastUpdated { get; set; }
 
     /// <summary>
-    /// Null: nothing to do (the row is not pending). Else claimable from then on (backoff, deferral or hold included);
-    /// a claim leaves it as it is.
+    /// Null: nothing to do (the row is not pending). Else claimable from then on (backoff, deferral or hold included).
+    /// A claim moves it to the end of its lease, so a leased row is not due until the lease ends or expires.
     /// </summary>
     public DateTimeOffset? NextAttemptAt { get; set; }
 
-    /// <summary>Lease while a worker processes the entity.</summary>
-    public DateTimeOffset? LockedUntil { get; set; }
-
-    /// <summary>Which claim holds the lease.</summary>
+    /// <summary>Which claim holds the lease (until <see cref="NextAttemptAt"/>).</summary>
     public Guid? LockToken { get; set; }
 
     /// <summary>
-    /// The time of the newest event written to Salesforce, microseconds since the epoch: the watermark. A newer event
-    /// overwriting the row keeps it.
+    /// An event time as <see cref="EventTime"/> stores it: cut to whole microseconds, in UTC. Postgres keeps microseconds,
+    /// and meta.time may have up to 9 fraction digits: cut here, which two events count as equally new (the store
+    /// compares their times) never depends on how a finer time would be rounded on its way in.
     /// </summary>
-    public long? SyncedTime { get; set; }
+    public static DateTimeOffset ToWholeMicroseconds(DateTimeOffset time)
+    {
+        var micros = (time - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
+        return DateTimeOffset.UnixEpoch.AddTicks(micros * TimeSpan.TicksPerMicrosecond);
+    }
 }
 
 /// <summary>

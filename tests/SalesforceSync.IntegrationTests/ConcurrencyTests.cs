@@ -228,9 +228,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
 
         output.WriteLine($"terminated {killed} worker connections");
         killed.Should().BePositive("the chaos loop should have dropped connections");
-        // Superseded only if a store was retried after a dropped connection had cut off its commit: the same event again
         var statuses = await InboxStatusesAsync(ids, versions);
-        statuses.Keys.Should().BeSubsetOf(["done", "superseded"], "no event may be lost or dead-lettered");
+        statuses.Keys.Should().Equal(["done"], "no event may be lost or dead-lettered");
         statuses.Values.Sum().Should().Be(ids.Length, "every account's row holds its newest event");
 
         await using var db = await app.Db.OpenConnectionAsync();

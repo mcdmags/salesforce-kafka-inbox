@@ -15,19 +15,13 @@ namespace SalesforceSync.Data;
 /// sf_rate_limit and sf_api_usage. The claim's statements are raw SQL (<see cref="InboxSql"/>) run through
 /// <c>Database.SqlQueryRaw</c>, since FOR UPDATE SKIP LOCKED and UPDATE ... RETURNING have no LINQ form.
 /// <para>
-/// To sync another object: a subclass of <see cref="InboxRow"/> with its limits (<see cref="IInboxRow"/>), a
-/// <c>DbSet</c> here and its <see cref="ConfigureInbox{TRow}"/> line in
-/// <see cref="OnModelCreating"/>, with its table; then a migration (<c>dotnet ef migrations add ...</c>) creates it.
+/// To sync another object: a subclass of <see cref="InboxRow"/> with its limits (<see cref="IInboxRow"/>) and its
+/// <see cref="ConfigureInbox{TRow}"/> line in <see cref="OnModelCreating"/>, with its table; then a migration
+/// (<c>dotnet ef migrations add ...</c>) creates it.
 /// </para>
 /// </summary>
 public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(options)
 {
-    public DbSet<AccountInboxRow> AccountInbox => Set<AccountInboxRow>();
-
-    public DbSet<AccountRelationshipInboxRow> AccountRelationshipInbox => Set<AccountRelationshipInboxRow>();
-
-    public DbSet<ContactInboxRow> ContactInbox => Set<ContactInboxRow>();
-
     /// <summary>The tables of all inbox row types, as the model names them.</summary>
     public IReadOnlyList<string> InboxTables => [.. Model.GetEntityTypes()
         .Where(e => e.ClrType.IsAssignableTo(typeof(InboxRow)))

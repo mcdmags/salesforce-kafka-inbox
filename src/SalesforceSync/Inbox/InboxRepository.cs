@@ -4,16 +4,14 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Sync;
 using SalesforceSync.Sync.Upsert;
 
 namespace SalesforceSync.Inbox;
 
 /// <summary>
 /// <see cref="IRepository{TEntity}"/> on Postgres, for any inbox row type: the store, claim and outcome statements and
-/// the end of a lease are the <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL; releasing
-/// a lost claim's leases is LINQ (<c>ExecuteUpdate</c>). The table comes from the EF model. Each unit of work runs
-/// through EF's execution strategy (<see cref="PostgresRetryStrategy"/>).
+/// the end of a lease are the <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL. The table
+/// comes from the EF model. Each unit of work runs through EF's execution strategy (<see cref="PostgresRetryStrategy"/>).
 /// </summary>
 public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TEntity>
     where TEntity : InboxRow, IInboxRow, new()
@@ -22,26 +20,25 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 
     /// <summary>
     /// One event into its entity's row unless that holds a newer one, and the entity made due
-    /// (<see cref="InboxSql.Template.Store"/>, one statement). A Kafka redelivery overwrites the row with the same event
-    /// and ends superseded (its time is not newer than what was synced), which is harmless; the last event of A -> B ->
-    /// A is newer than B and is written. Safe to retry for the same reason. The time is stored cut to the microsecond as
-    /// the engine cuts it (<see cref="PreparedBatch.ToWholeMicroseconds"/>), so the watermark InboxSql.Done takes from it
-    /// is the time the engine compares the entity's later events with.
+    /// (<see cref="InboxSql.Template.Store"/>, one statement). A Kafka redelivery of a synced event changes nothing, and
+    /// one of an event not yet synced overwrites the row with itself, which is harmless; the last event of A -> B -> A
+    /// is newer than B and is written. Safe to retry for the same reason. The time is stored cut to the microsecond
+    /// (<see cref="InboxRow.ToWholeMicroseconds"/>).
     /// </summary>
     public Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct)
     {
-        var time = PreparedBatch.ToWholeMicroseconds(eventTime);
+        var time = InboxRow.ToWholeMicroseconds(eventTime);
         return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).Store, t,
                 new { entityId, eventTime = time, payload, coalesceDelay = _opt.CoalesceDelay }), ct);
     }
 
     /// <summary>
-    /// Locks and leases a batch of due rows and reads them with their watermarks (<see cref="InboxSql.Template.Claim"/>),
-    /// in a transaction of its own, so the rows are read before the commit is sent. A fresh token per attempt: if a
+    /// Locks and leases a batch of due rows and reads them (<see cref="InboxSql.Template.Claim"/>), in a transaction of
+    /// its own, so the rows are read before the commit is sent. A fresh token per attempt: if a
     /// commit's outcome is unknown and the claim is retried, rows leased by the lost attempt are not mistaken for this
-    /// one's. The retry releases them first, so they don't wait for their lease to expire (and a lease nobody works on
-    /// is never taken over). The transaction ends before Salesforce is called: from then on the lease (lock_token,
-    /// locked_until) protects the entities, not a lock.
+    /// one's. The retry ends their leases first (<see cref="InboxSql.Template.EndLease"/>), so they don't wait for the
+    /// leases to expire (and a lease nobody works on is never taken over). The transaction ends before Salesforce is
+    /// called: from then on the lease (lock_token, and next_attempt_at as its end) protects the entities, not a lock.
     /// </summary>
     public Task<InboxClaim> ClaimAsync(CancellationToken ct)
     {
@@ -49,20 +46,16 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         var attemptedRowIds = new HashSet<long>();
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
-            if (attemptedRowIds.Count > 0)
+            var sql = InboxSql.For(db.TableOf<TEntity>());
+            var ids = attemptedRowIds.ToArray();
+            foreach (var lost in attempted)
             {
-                var lost = attempted.ToArray();
-                var lostRowIds = attemptedRowIds.ToArray();
-                await db.Set<TEntity>()
-                    .Where(r => lostRowIds.Contains(r.Id) && r.LockToken != null && lost.Contains(r.LockToken.Value))
-                    .ExecuteUpdateAsync(u => u
-                        .SetProperty(r => r.LockedUntil, (DateTimeOffset?)null)
-                        .SetProperty(r => r.LockToken, (Guid?)null), t);
+                await db.Database.ExecuteAsync(sql.EndLease, t, new { ids, token = lost, delay = TimeSpan.Zero });
             }
 
             var token = Guid.NewGuid();
             attempted.Add(token);
-            var events = await db.Database.QueryAsync<InboxEvent>(InboxSql.For(db.TableOf<TEntity>()).Claim, t, new
+            var events = await db.Database.QueryAsync<InboxEvent>(sql.Claim, t, new
             {
                 token,
                 lease = _opt.Lease,
@@ -75,7 +68,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 
     /// <summary>
     /// One statement per kind of outcome (not per entity), in the batch's second short transaction, then the leases
-    /// end. Safe to repeat: see <see cref="InTransactionAsync"/>.
+    /// end, the rows not attempted due again at once. Safe to repeat: see <see cref="InTransactionAsync"/>.
     /// </summary>
     public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
     {
@@ -88,24 +81,13 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
                 recorded += await db.Database.ExecuteAsync(sql.Done, t,
                     new { ids = outcomes.Synced.ToArray(), times = claim.TimesOf(outcomes.Synced), token });
             }
-            if (outcomes.Superseded.Count > 0)
-            {
-                recorded += await db.Database.ExecuteAsync(sql.Supersede, t,
-                    new { ids = outcomes.Superseded.ToArray(), times = claim.TimesOf(outcomes.Superseded), token });
-            }
-            if (outcomes.Released.Count > 0)
-            {
-                recorded += await ReleaseAsync(db, sql, claim, outcomes.Released, TimeSpan.Zero, t);
-            }
             if (outcomes.Dead.Count > 0)
             {
-                var ids = Ids(outcomes.Dead);
-                recorded += await db.Database.ExecuteAsync(sql.Dead, t,
-                    new { ids, times = claim.TimesOf(ids), errors = ErrorsJson(outcomes.Dead), token });
+                recorded += await FailAsync(db, sql, claim, outcomes.Dead, maxRetries: 0, t);
             }
             if (outcomes.Failed.Count > 0)
             {
-                recorded += await FailAsync(db, sql, claim, outcomes.Failed, t);
+                recorded += await FailAsync(db, sql, claim, outcomes.Failed, _opt.MaxRetries, t);
             }
             return recorded;
         }, ct);
@@ -131,25 +113,29 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         }), ct);
     }
 
-    /// <summary>Rate limited: hands the entities back, not before <paramref name="delay"/>, without spending an attempt.</summary>
+    /// <summary>
+    /// Rate limited: hands the entities back, not before <paramref name="delay"/>, without spending an attempt: only
+    /// their leases end (<see cref="InboxSql.Template.EndLease"/>).
+    /// </summary>
     public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
     {
-        return InTransactionAsync(claim, delay, (db, sql, t) => ReleaseAsync(db, sql, claim, claim.RowIds, delay, t), ct);
+        return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).EndLease, t,
+            new { ids = claim.RowIds, token = claim.Token, delay }), ct);
     }
 
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
     {
-        return InTransactionAsync(claim, TimeSpan.Zero,
-            (db, sql, t) => FailAsync(db, sql, claim, [.. claim.RowIds.Select(id => new FailedEvent(id, error, code))], t), ct);
+        FailedEvent[] rows = [.. claim.RowIds.Select(id => new FailedEvent(id, error, code))];
+        return InTransactionAsync(claim, TimeSpan.Zero, (db, sql, t) => FailAsync(db, sql, claim, rows, _opt.MaxRetries, t), ct);
     }
 
     /// <summary>
     /// Records outcomes in one transaction: <paramref name="record"/> runs the outcome statements, each of which updates
     /// only the claimed rows this lease still holds that still hold the event the claim read
     /// (<see cref="InboxSql.Template.StillClaimed"/>), and returns how many rows they updated. If that is fewer than the claim's,
-    /// <see cref="InboxSql.Template.EndLease"/> ends the lease on the rest (rows a newer event overwrote meanwhile),
-    /// due after <paramref name="delay"/>. Safe to repeat: an attempt whose commit outcome was unknown, or a lease lost
-    /// meanwhile, leaves no row under this token, and nothing is written.
+    /// <see cref="InboxSql.Template.EndLease"/> ends the lease on the rest (rows not attempted, and rows a newer event
+    /// overwrote meanwhile), due after <paramref name="delay"/>. Safe to repeat: an attempt whose commit outcome was
+    /// unknown, or a lease lost meanwhile, leaves no row under this token, and nothing is written.
     /// </summary>
     private Task InTransactionAsync(InboxClaim claim, TimeSpan delay, Func<SyncDbContext, InboxSql, CancellationToken, Task<int>> record,
         CancellationToken ct)
@@ -164,34 +150,24 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         }, ct);
     }
 
-    /// <summary>Not attempted (skipped because of another entity's record, or rate limited): no attempt spent.</summary>
-    private static Task<int> ReleaseAsync(SyncDbContext db, InboxSql sql, InboxClaim claim, IReadOnlyList<long> ids, TimeSpan delay,
+    /// <summary>The rows failed: retried with backoff, or dead-lettered at the <paramref name="maxRetries"/>-th failure (0: now).</summary>
+    private Task<int> FailAsync(SyncDbContext db, InboxSql sql, InboxClaim claim, IReadOnlyList<FailedEvent> rows, int maxRetries,
         CancellationToken ct)
     {
-        return db.Database.ExecuteAsync(sql.Release, ct, new { ids = ids.ToArray(), times = claim.TimesOf(ids), token = claim.Token, delay });
-    }
-
-    private Task<int> FailAsync(SyncDbContext db, InboxSql sql, InboxClaim claim, IReadOnlyList<FailedEvent> rows, CancellationToken ct)
-    {
-        var ids = Ids(rows);
+        long[] ids = [.. rows.Select(r => r.RowId)];
         return db.Database.ExecuteAsync(sql.Fail, ct, new
         {
             ids,
             times = claim.TimesOf(ids),
             errors = ErrorsJson(rows),
             token = claim.Token,
-            maxRetries = _opt.MaxRetries,
+            maxRetries,
             baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
             maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
         });
     }
 
-    private static long[] Ids(IReadOnlyList<FailedEvent> rows)
-    {
-        return [.. rows.Select(r => r.RowId)];
-    }
-
-    /// <summary>{ "row id": [error, code] }, as InboxSql.Fail / Dead take the errors.</summary>
+    /// <summary>{ "row id": [error, code] }, as InboxSql.Fail takes the errors.</summary>
     private static string ErrorsJson(IReadOnlyList<FailedEvent> rows)
     {
         var errors = new Dictionary<string, string?[]>(StringComparer.Ordinal);

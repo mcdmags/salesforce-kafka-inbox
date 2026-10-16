@@ -29,7 +29,7 @@ namespace SalesforceSync.Benchmarks;
 /// land: every account must end at its newest version, the org's write history must show each account's
 /// versions only moving forward, every relationship must end at its newest version linked to the right two
 /// Accounts, the claim audit (sql/claim-audit.sql) must show no two overlapping claims on the same entity, and
-/// every entity's one inbox row must hold its newest event and end done (or superseded: as new as the watermark).
+/// every entity's one inbox row must hold its newest event and end done.
 /// </para>
 /// </summary>
 [Config(typeof(DrainConfig))]
@@ -457,11 +457,10 @@ public abstract class DrainBenchmarkBase
         {
             return await db.Database.QuerySingleAsync<long>(sql, default);
         }
-        // One query over both inbox tables, one row per entity; "superseded" ends an event as new as the watermark
+        // One query over both inbox tables, one row per entity
         var inbox = string.Join(" union all ", InboxTables.Select(t => $"select entity_id, event_time, status, attempt_count from {t}"));
         var rows = await Count($"select count(*) from ({inbox}) i");
-        var notDone = await Count($"select count(*) from ({inbox}) i where status not in ('done', 'superseded')");
-        var superseded = await Count($"select count(*) from ({inbox}) i where status = 'superseded'");
+        var notDone = await Count($"select count(*) from ({inbox}) i where status <> 'done'");
         // Every entity's row holds its newest event (the entity ids of the two types never collide: ACC- and REL-)
         var newest = _expected.ToDictionary(e => e.Key.Key, e => Time(e.Value), StringComparer.Ordinal);
         var stale = (await db.Database.QueryAsync<StoredEvent>($"select entity_id as EntityId, event_time as EventTime from ({inbox}) i", default))
@@ -471,16 +470,16 @@ public abstract class DrainBenchmarkBase
         // account event writes two records (Account, Profile).
         var claims = await Count("select count(*) from sf_claim_audit");
         var overlaps = await Count("select count(*) from sf_claim_overlaps");
-        // attempt_count counts claims of the row's event, so retries = attempts beyond the first (of the last event
+        // attempt_count counts the failures of the row's event, so retries = attempt_count (of the last event
         // only: a newer event starts again at 0). Mostly relationships claimed before their Accounts were in the org
         // (DEPENDENCY_NOT_SYNCED).
-        var retries = await Count($"select coalesce(sum(greatest(attempt_count - 1, 0)), 0) from ({inbox}) i");
+        var retries = await Count($"select coalesce(sum(attempt_count), 0) from ({inbox}) i");
         var relationshipEvents = _events.Count(e => e.Table == RelationshipTable);
 
         var stats = _store.GetStats();
         Console.WriteLine(
             $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms coalesceDelay={CoalesceDelayMs}ms] " +
-            $"events={Events} relationshipEvents={relationshipEvents} {stats} entities={rows} superseded={superseded} " +
+            $"events={Events} relationshipEvents={relationshipEvents} {stats} entities={rows} " +
             $"coalescing={(double)Events / Math.Max(1, claims):F2} events/entity claim " +
             $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} stale={stale} wrong={wrong.Count} regressions={regressions}");
 
