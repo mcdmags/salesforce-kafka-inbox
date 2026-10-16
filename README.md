@@ -1294,18 +1294,7 @@ budget on the configuration.
 | `BudgetWindow` | `1.00:00:00` | The rolling window `DailyBudgetShare` is counted over: at most that many calls in any window of this length. 24 hours, as Salesforce counts the allocation; a shorter window doesn't scale the budget down, so it allows more calls per 24 hours |
 | `UsageBucket` | `00:10:00` | The granularity of the usage count: calls are counted in buckets of this length, and every bucket that overlaps the window counts in full (over- rather than under-counted by up to one bucket). Must be > 0 and shorter than `BudgetWindow`, or startup fails |
 | `MaxWait` | `00:00:20` | Longest wait for a token before the batch is handed back as rate limited |
-| `DailySoftRatio` / `DailySoftSpeed`, `DailyHardRatio` / `DailyHardPause`, `ConcurrentLimitPause` | 0.8 / 0.25, 0.95 / 15 min, 30 s | Slow down, pause (see below) |
-
-**How a call acquires a token.** `SalesforceRateLimiter.AcquireAsync`, in one transaction: lock the shared
-`sf_rate_limit` row (`select * ... for update`, the only raw SQL besides `select clock_timestamp()`, the database clock
-every pod shares), read this integration's calls in the buckets since `BudgetWindow + UsageBucket` ago (LINQ), and let
-`TokenBucket.Decide` (pure C#, unit-tested) refill the tokens (`min(capacity, tokens + elapsed x rate)`) and decide:
-wait until a pause ends, wait until the oldest bucket leaves the window when the budget is used up (at least a
-minute), wait until enough tokens have refilled, or grant. A grant writes the tokens back and adds the call to the
-current bucket with EF (a plain read-then-insert-or-update: the row lock serializes every acquire in every process).
-Not granted, it waits (with jitter) and tries again, until `MaxWait`. Applying the configuration, recording
-`Sforce-Limit-Info` and pausing lock the row the same way, refill with the same function, and delete the buckets older
-than the window.
+| `DailySoftRatio` / `DailySoftSpeed`, `DailyHardRatio` / `DailyHardPause`, `ConcurrentLimitPause` | 0.8 / 0.25, 0.95 / 15 min, 30 s | Slow down, pause (see [Slowing down and pausing](#slowing-down-and-pausing)) |
 
 | Salesforce limit | How it's applied |
 |---|---|
@@ -1321,10 +1310,77 @@ The limiter is registered by `AddSalesforceRateLimiting()`, which the worker (`A
 benchmark pods and the test pods all use. Its handler is always the outermost on the Salesforce client (rate limiter
 → gzip → auth), so every request takes a token before it is compressed and authenticated.
 
-Every pod applies the bucket size, rate and budget to the shared `sf_rate_limit` row at startup, so roll out
-configuration changes to all pods together. `sf_limit_status` shows the last reported usage and this integration's
-budget. A view can't read the configured window, so this integration's own calls are a query on `sf_api_usage`, e.g.
-over the default window: `select sum(calls) from sf_api_usage where bucket >= now() - interval '24 hours 10 minutes'`.
+### Where the limiter keeps its state
+
+| Where | What it holds | Rows |
+|---|---|---|
+| `sf_rate_limit` | What is true now, shared by every pod: the token bucket (`tokens`, `capacity`, `refill_per_sec`, `base_refill_per_sec`, `updated_at`), the shared pause (`paused_until`), this integration's budget (`daily_budget`) and what Salesforce last reported in `Sforce-Limit-Info` (`api_used`/`api_max`, `app_used`/`app_max`, `burst_used`/`burst_max`) | Exactly one (`name = 'salesforce'`), seeded by the migration |
+| `sf_api_usage` | This integration's own calls, counted per `UsageBucket` (10 minutes) | About 145 (24 hours / 10 minutes, plus the bucket that straddles the window's start) |
+| `sf_limit_status` | A view of `sf_rate_limit` for people: usage as percentages, the current and normal rate, the pause, the budget | None of its own |
+| Advisory locks | The [concurrency slots](#concurrency-slots-postgres-advisory-locks) | No table: Postgres's lock manager, in memory |
+
+**Why two tables.** `sf_rate_limit` is the current state, one row that every change locks. `sf_api_usage` is history,
+and the budget needs it: Salesforce counts the allocation over a rolling 24 hours, not from midnight, so a single
+counter can't say which calls have left the window. A row per call would be exact but means about 57,000 inserts and
+deletes a day. A row per 10-minute bucket keeps about 145 rows; a bucket that is partly inside the window counts in
+full, so usage is over-counted by up to one bucket of calls, the safe direction (the limiter stops a little early
+rather than overspending). A grant adds 1 to the current bucket; buckets older than `BudgetWindow + UsageBucket` are
+deleted.
+
+**How a call acquires a token.** `SalesforceRateLimiter.AcquireAsync`, in one transaction:
+
+1. Lock the `sf_rate_limit` row (`select * ... for update`, the only raw SQL besides `select clock_timestamp()`). Every
+   acquire in every pod queues here, so no two decide at once. The database clock is read in the same statement, so
+   every pod uses one clock, whatever its own says.
+2. Read this integration's calls in the buckets since `BudgetWindow + UsageBucket` ago (LINQ).
+3. `TokenBucket.Decide` (pure C#, unit-tested), in this order:
+   - paused: wait until `paused_until`;
+   - budget used up: wait until the oldest bucket leaves the window (at least a minute);
+   - too few tokens (`min(capacity, tokens + elapsed x rate)`): wait until enough have refilled;
+   - otherwise grant: write the tokens back and add the call to the current bucket (a plain read-then-insert-or-update
+     with EF: the row lock serializes it).
+4. Commit, which releases the lock.
+
+Not granted, it waits (with jitter) and tries again, until `MaxWait`. Then the batch is handed back as rate limited:
+its events are deferred without spending an attempt. Applying the configuration, recording `Sforce-Limit-Info` and
+pausing lock the row the same way, refill with the same function, and delete the buckets older than the window.
+
+### Slowing down and pausing
+
+Every Salesforce response carries `Sforce-Limit-Info: api-usage=used/limit` and, when the connected app has a quota of
+its own, `per-app-api-usage=...`. `SalesforceRateLimiter.ReportLimitsAsync` stores them on the row (at most every
+`ReportInterval`, 5 seconds, unless the throttle level changes) and takes the highest of three ratios: the org's usage
+(every integration and user), the connected app's usage, and this integration's own calls over its budget (from
+`sf_api_usage`).
+
+| Highest ratio | Effect on every pod |
+|---|---|
+| below `DailySoftRatio` (80%) | Normal: `refill_per_sec` = `base_refill_per_sec` (`MaxRequestsPerSecond`) |
+| `DailySoftRatio` or more | Slower: `refill_per_sec` = `base_refill_per_sec` x `DailySoftSpeed` (0.25) |
+| `DailyHardRatio` (95%) or more | Stopped: `paused_until` = now + `DailyHardPause` (15 minutes) |
+
+The normal rate is kept beside the current one, so slowing down and recovering never lose the configured rate.
+
+Responses that pause every pod (`paused_until`; `SalesforceBatchGate` starts no batch while it is in the future):
+
+| Salesforce answers | Pause |
+|---|---|
+| `REQUEST_LIMIT_EXCEEDED`, `TotalRequests` (the org's daily allocation) | `DailyHardPause` (15 minutes) |
+| `REQUEST_LIMIT_EXCEEDED`, `ConcurrentPerOrgLongTxn` (too many long-running requests) | `ConcurrentLimitPause` (30 seconds) |
+| 503, or 429 from something in front of Salesforce | `Retry-After`, or 30 seconds without one |
+
+### Configuration and monitoring
+
+Every pod applies the bucket size, rate and budget to the shared `sf_rate_limit` row at startup (keeping the current
+tokens and slowdown), so the last pod to start wins: roll out `RateLimit` changes to all pods together.
+
+```sql
+-- Salesforce's last report, the current and normal rate, the pause and this integration's budget
+select * from sf_limit_status;
+
+-- this integration's own calls over the default window (a view can't read the configured BudgetWindow)
+select sum(calls) from sf_api_usage where bucket >= now() - interval '24 hours 10 minutes';
+```
 
 ### Concurrency slots: Postgres advisory locks
 
