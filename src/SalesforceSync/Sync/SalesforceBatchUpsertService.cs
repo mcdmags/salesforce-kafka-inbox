@@ -102,7 +102,7 @@ public sealed class SalesforceBatchUpsertService(
             results = batch.Work.Count == 0
                 ? []
                 : (await WriteToSalesforceAsync(batch.Units, [.. strategy.Queries([.. batch.Work.Select(w => w.Unit)])],
-                    leaseCts.Token)).ToDictionary(r => r.Key);
+                    TRow.MaxValuesPerQuery, TRow.MaxRecordsPerWrite, leaseCts.Token)).ToDictionary(r => r.Key);
         }
         catch (UnknownOutcomeException ex)
         {
@@ -140,7 +140,8 @@ public sealed class SalesforceBatchUpsertService(
     /// <summary>
     /// The Salesforce half of a batch, for any sObjects: one Composite request reads the current records (one per 5
     /// queries; only very long ids make more than 5, as each query's URL must fit a call), then what differs is
-    /// written with sObject Collections upserts by external id, one per level and object (and 200 records).
+    /// written with sObject Collections upserts by external id, one per level and object (and
+    /// <paramref name="maxRecordsPerWrite"/> records).
     /// Each write request (more than 5 upserts are split over further requests) is one call: its upsert on its own when
     /// it has one (a single object), else one Composite request of them, parents first. Returns one outcome per unit.
     /// Nothing here touches the inbox.
@@ -154,10 +155,12 @@ public sealed class SalesforceBatchUpsertService(
     /// </remarks>
     /// <param name="units">At most <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
     /// <param name="queries">The strategy's reads: the units' records and the records their lookups and foreign keys point at.</param>
+    /// <param name="maxValuesPerQuery">The row type's <see cref="IInboxRow.MaxValuesPerQuery"/>.</param>
+    /// <param name="maxRecordsPerWrite">The row type's <see cref="IInboxRow.MaxRecordsPerWrite"/>.</param>
     /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
     /// <param name="ct">Cancels the calls; shutdown, not a failure.</param>
     internal async Task<List<UpsertResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
-        IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
+        IReadOnlyList<SoqlQuery> queries, int maxValuesPerQuery, int maxRecordsPerWrite, CancellationToken ct)
     {
         if (units.Count > ReadQueryBuilder.MaxEntitiesPerBatch)
         {
@@ -184,11 +187,11 @@ public sealed class SalesforceBatchUpsertService(
         }
 
         // 3. Read: one Composite call with the strategy's queries (more only if long ids split them into more than 5)
-        var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas), schemas.Keys, ct);
+        var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas, maxValuesPerQuery), schemas.Keys, ct);
 
         // 4. Decide per record: unchanged, create or update (by what the read found), and how each lookup is linked;
         // the writes are grouped into collections and Composite requests
-        var plan = WritePlanner.Plan(normalized, current);
+        var plan = WritePlanner.Plan(normalized, current, maxRecordsPerWrite);
         results.AddRange(plan.NotSent);
 
         // 5. Send. A request of one object is its Collections upsert; a request of several objects (Accounts and their

@@ -200,7 +200,25 @@ public static class SyncServiceCollectionExtensions
     private static void AddEntitySync<TEvent, TRow>(IServiceCollection services, UpsertStrategy<TEvent> strategy, string defaultTopic)
         where TRow : InboxRow, IInboxRow, new()
     {
+        ValidateLimits<TRow>();
         services.AddTransient<ISalesforceEntitySync>(sp => new EntitySyncService<TEvent, TRow>(
             sp.GetRequiredService<SalesforceBatchUpsertService>(), sp.GetRequiredService<IRepository<TRow>>(), strategy, defaultTopic));
+    }
+
+    /// <summary>A row type's query and write limits are within Salesforce's (<see cref="IInboxRow"/>).</summary>
+    /// <exception cref="InvalidOperationException">One is not; the message names the row type and the member.</exception>
+    internal static void ValidateLimits<TRow>() where TRow : IInboxRow
+    {
+        if (TRow.MaxValuesPerQuery is < 1 or > SalesforceRestClient.MaxQueryValues)
+        {
+            throw new InvalidOperationException($"{typeof(TRow).Name}.{nameof(IInboxRow.MaxValuesPerQuery)} ({TRow.MaxValuesPerQuery}) " +
+                                                $"must be 1 to {SalesforceRestClient.MaxQueryValues} (a query's result page).");
+        }
+
+        if (TRow.MaxRecordsPerWrite is < 1 or > SalesforceRestClient.MaxCollectionRecords)
+        {
+            throw new InvalidOperationException($"{typeof(TRow).Name}.{nameof(IInboxRow.MaxRecordsPerWrite)} ({TRow.MaxRecordsPerWrite}) " +
+                                                $"must be 1 to {SalesforceRestClient.MaxCollectionRecords} (records per sObject Collections upsert).");
+        }
     }
 }

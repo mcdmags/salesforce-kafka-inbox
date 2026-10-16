@@ -103,7 +103,7 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"OLD","Name":"Acme","Active__c":false}"""),
             ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"SAME","Name":"Same","Active__c":false}"""));
 
-        var plan = WritePlanner.Plan(
+        var plan = Plan(
             [Normalized(Account("NEW", "New")), Normalized(Account("OLD", "Changed")), Normalized(Account("SAME", "Same"))],
             current);
 
@@ -124,7 +124,7 @@ public sealed class WriteRulesTests
             ? CurrentRecords.None
             : Rows(("Account", $$"""{"Id":"{{existingAccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
 
-        var plan = WritePlanner.Plan([Normalized(AccountWithContact("A1"))], current);
+        var plan = Plan([Normalized(AccountWithContact("A1"))], current);
 
         var contact = plan.Requests.Single().BuildRequests().Single(r => r.ReferenceId.StartsWith("Contact")).Records.Single();
         contact.Should().ContainKey("AccountId", what).WhoseValue.Should().Be(value);
@@ -137,7 +137,7 @@ public sealed class WriteRulesTests
             ("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""),
             ("Contact", $$"""{"Id":"{{ContactId}}","ExternalId__c":"C-A1","LastName":"Doe","AccountId":"{{AccountId[..15]}}"}"""));
 
-        var plan = WritePlanner.Plan([Normalized(AccountWithContact("A1"))], current);
+        var plan = Plan([Normalized(AccountWithContact("A1"))], current);
 
         plan.Requests.Should().BeEmpty("a 15-character Id is the same record as its 18-character form");
         plan.NotSent.Should().ContainSingle().Which.Outcome.Should().Be(SyncOutcome.Unchanged);
@@ -150,7 +150,7 @@ public sealed class WriteRulesTests
     {
         var orphan = new UpsertUnit([what == "a lookup" ? Contact("C1", "MISSING") : Profile("P1", "Gold", "MISSING")]);
 
-        var plan = WritePlanner.Plan([Normalized(orphan)], CurrentRecords.None);
+        var plan = Plan([Normalized(orphan)], CurrentRecords.None);
 
         var result = plan.NotSent.Should().ContainSingle().Subject;
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced), what);
@@ -185,9 +185,9 @@ public sealed class WriteRulesTests
         var gadget = new SObjectRecord("gadget", "Gadget__c", "Key__c", "G1", new Dictionary<string, object?> { ["Widget__c"] = "W1" },
             ForeignKeys: [new SObjectLookup("Widget__c", "Widget__c", "Key__c", "W1")]);
 
-        var widgetsOnly = WritePlanner.Plan([Normalized(new UpsertUnit([widget])), Normalized(new UpsertUnit([Widget("W2")]))],
+        var widgetsOnly = Plan([Normalized(new UpsertUnit([widget])), Normalized(new UpsertUnit([Widget("W2")]))],
             CurrentRecords.None).Requests.Should().ContainSingle().Subject;
-        var both = WritePlanner.Plan([Normalized(new UpsertUnit([widget, gadget]))], CurrentRecords.None).Requests.Should().ContainSingle().Subject;
+        var both = Plan([Normalized(new UpsertUnit([widget, gadget]))], CurrentRecords.None).Requests.Should().ContainSingle().Subject;
 
         widgetsOnly.BuildRequests().Select(u => (u.ReferenceId, u.Url, u.Records.Count)).Should().Equal(
             [("Widget__c", "/services/data/v62.0/composite/sobjects/Widget__c/Key__c", 2)], "one object: one upsert, a call of its own");
@@ -211,7 +211,7 @@ public sealed class WriteRulesTests
             ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"A2","Name":"Acme","Active__c":false}"""),
             ("Profile__c", $$"""{"Id":"a00000000000001AAA","ExternalId__c":"P-A1","Tier__c":"Gold","AccountId__c":"{{storedKey}}"}"""));
 
-        var plan = WritePlanner.Plan([Normalized(AccountWithProfile("A1"))], current);
+        var plan = Plan([Normalized(AccountWithProfile("A1"))], current);
 
         if (written)
         {
@@ -255,7 +255,7 @@ public sealed class WriteRulesTests
     public void The_orgs_message_for_a_missing_parent_can_be_configured_to_mean_wait_for_it(string[] messages, SyncOutcome outcome, string code)
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
-        var request = WritePlanner.Plan([Normalized(new UpsertUnit([Profile("P1", "Gold", "A1")]))], current).Requests.Single();
+        var request = Plan([Normalized(new UpsertUnit([Profile("P1", "Gold", "A1")]))], current).Requests.Single();
         var errors = new SalesforceErrors(Options.Create(new SalesforceOptions { ParentMissingMessages = messages }));
 
         var result = new WriteResultInterpreter(errors).Interpret(request,
@@ -272,7 +272,7 @@ public sealed class WriteRulesTests
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false,"Locked__c":"old"}"""));
 
-        var plan = WritePlanner.Plan([Normalized(Account("A1", "Acme", locked: "new"))], current);
+        var plan = Plan([Normalized(Account("A1", "Acme", locked: "new"))], current);
 
         var result = plan.NotSent.Should().ContainSingle().Subject;
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.PermanentFailure, "INVALID_FIELD_FOR_INSERT_UPDATE"));
@@ -283,7 +283,7 @@ public sealed class WriteRulesTests
     [Fact]
     public void Building_a_request_twice_gives_the_same_request()
     {
-        var plan = WritePlanner.Plan([Normalized(AccountWithContact("A1")), Normalized(AccountWithContact("A2"))], CurrentRecords.None);
+        var plan = Plan([Normalized(AccountWithContact("A1")), Normalized(AccountWithContact("A2"))], CurrentRecords.None);
         var request = plan.Requests.Single();
 
         JsonSerializer.Serialize(request.BuildRequests()).Should().Be(JsonSerializer.Serialize(request.BuildRequests()));
@@ -367,7 +367,7 @@ public sealed class WriteRulesTests
     public void A_record_deleted_between_the_read_and_the_update_is_retried_not_dead_lettered()
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
-        var request = WritePlanner.Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
+        var request = Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
 
         var result = Interpret(request, Failed("Account", "ENTITY_IS_DELETED")).Single();
 
@@ -398,7 +398,7 @@ public sealed class WriteRulesTests
     public void Salesforce_rejecting_a_lookup_target_that_is_gone_means_wait_for_it()
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
-        var request = WritePlanner.Plan([Normalized(new UpsertUnit([Contact("C1", "A1")]))], current).Requests.Single();
+        var request = Plan([Normalized(new UpsertUnit([Contact("C1", "A1")]))], current).Requests.Single();
 
         var result = Interpret(request, new CollectionResult("Contact",
             [new RecordResult(false, null, [new SalesforceError(null, "INVALID_CROSS_REFERENCE_KEY", "invalid cross reference id", ["AccountId"])])], [])).Single();
@@ -412,7 +412,7 @@ public sealed class WriteRulesTests
     public void A_request_of_one_object_without_references_is_one_upsert_carrying_the_planned_fields()
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
-        var request = WritePlanner.Plan([Normalized(Account("A1", "New")), Normalized(Account("A2", "Created"))], current).Requests.Single();
+        var request = Plan([Normalized(Account("A1", "New")), Normalized(Account("A2", "Created"))], current).Requests.Single();
 
         var upsert = request.BuildRequests().Should().ContainSingle().Subject;
 
@@ -431,7 +431,7 @@ public sealed class WriteRulesTests
             ("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""),
             ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"A2","Name":"Acme","Active__c":false}"""),
             ("Profile__c", /*lang=json,strict*/ """{"Id":"a00000000000002AAA","ExternalId__c":"P-A2","Tier__c":"Silver","AccountId__c":"A2"}"""));
-        var request = WritePlanner.Plan([Normalized(Account("A1", "New")), Normalized(AccountWithProfile("A2"))], current).Requests.Single();
+        var request = Plan([Normalized(Account("A1", "New")), Normalized(AccountWithProfile("A2"))], current).Requests.Single();
 
         var upserts = request.BuildRequests();
 
@@ -448,7 +448,7 @@ public sealed class WriteRulesTests
         Request(AccountWithContact("A1")).BuildRequests().Select(u => u.ReferenceId).Should().Equal("Account", "Contact_ref");
 
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A2","Name":"Old","Active__c":false}"""));
-        var request = WritePlanner.Plan([Normalized(AccountWithContact("A1")), Normalized(Account("A2", "New"))], current).Requests.Single();
+        var request = Plan([Normalized(AccountWithContact("A1")), Normalized(Account("A2", "New"))], current).Requests.Single();
         request.BuildRequests().Select(u => (u.ReferenceId, u.Records.Count)).Should().Equal([("Account", 2), ("Contact_ref", 1)],
             "A2's update goes in the same upsert as A1's create");
     }
@@ -460,7 +460,7 @@ public sealed class WriteRulesTests
         var units = Enumerable.Range(0, 150).Select(i => Normalized(Account($"NEW{i}", "New")))
             .Concat(Enumerable.Range(0, 150).Select(i => Normalized(Account($"OLD{i}", "New")))).ToList();
 
-        var requests = WritePlanner.Plan(units, Rows([.. existing])).Requests;
+        var requests = Plan(units, Rows([.. existing])).Requests;
 
         requests.Select(r => r.BuildRequests().Single().Records.Count).Should().Equal([200, 100], "one upsert each");
         requests.SelectMany(r => r.Collections.SelectMany(c => c.Writes)).Should().HaveCount(300).And.OnlyHaveUniqueItems();
@@ -484,7 +484,7 @@ public sealed class WriteRulesTests
             ("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""),
             ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"A2","Name":"Old","Active__c":false}"""),
             ("Profile__c", /*lang=json,strict*/ """{"Id":"a00000000000001AAA","ExternalId__c":"P-A1","Tier__c":"Silver","AccountId__c":"A1"}"""));
-        var request = WritePlanner.Plan([Normalized(AccountWithProfile("A1")), Normalized(Account("A2", "Acme"))], current).Requests.Single();
+        var request = Plan([Normalized(AccountWithProfile("A1")), Normalized(Account("A2", "Acme"))], current).Requests.Single();
         var results = Interpret(request,
             new CollectionResult("Account", [new RecordResult(true, AccountId, [], false), new RecordResult(true, "001000000000002AAA", [], false)], []),
             profileAnswer).ToDictionary(r => r.Key);
@@ -498,7 +498,7 @@ public sealed class WriteRulesTests
     public void An_update_sent_as_an_upsert_that_created_the_record_is_retried_to_write_the_rest()
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
-        var request = WritePlanner.Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
+        var request = Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
 
         var result = Interpret(request, new CollectionResult("Account", [new RecordResult(true, AccountId, [], Created: true)], [])).Single();
 
@@ -512,7 +512,7 @@ public sealed class WriteRulesTests
     public void A_required_field_missing_on_an_update_sent_as_an_upsert_means_the_record_is_gone(bool exists, SyncOutcome outcome)
     {
         var current = exists ? Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}""")) : CurrentRecords.None;
-        var request = WritePlanner.Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
+        var request = Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
         var result = Interpret(request, Failed("Account", "REQUIRED_FIELD_MISSING")).Single();
 
         result.Outcome.Should().Be(outcome);
@@ -578,10 +578,16 @@ public sealed class WriteRulesTests
         return new(rows.Select(r => (r.SObject, Current(r.Json))));
     }
 
+    /// <summary>The plan with Salesforce's 200 records per collection.</summary>
+    private static WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current)
+    {
+        return WritePlanner.Plan(units, current, SalesforceRestClient.MaxCollectionRecords);
+    }
+
     /// <summary>The one request for these new units.</summary>
     private static CompositeWrite Request(params UpsertUnit[] units)
     {
-        return WritePlanner.Plan([.. units.Select(Normalized)], CurrentRecords.None).Requests.Single();
+        return Plan([.. units.Select(Normalized)], CurrentRecords.None).Requests.Single();
     }
 
     private static List<UpsertResult> Interpret(CompositeWrite request, params CollectionResult[] answers)

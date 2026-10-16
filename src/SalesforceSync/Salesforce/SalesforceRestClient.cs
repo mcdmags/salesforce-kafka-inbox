@@ -19,8 +19,18 @@ public sealed class SalesforceRestClient(HttpClient http)
     public const int MaxCompositeQueries = 5;
     public const int MaxCompositeCollections = 5;
 
-    /// <summary>sObject Collections: max records in one create or update.</summary>
+    /// <summary>
+    /// sObject Collections: max records in one create, update or upsert; the ceiling of a row type's
+    /// <see cref="Inbox.IInboxRow.MaxRecordsPerWrite"/>.
+    /// </summary>
     public const int MaxCollectionRecords = 200;
+
+    /// <summary>
+    /// External ids per query, at most, for its records to come back in one page: a query returns up to 2,000 records
+    /// per page and each external id matches at most one record. The ceiling of a row type's
+    /// <see cref="Inbox.IInboxRow.MaxValuesPerQuery"/>.
+    /// </summary>
+    public const int MaxQueryValues = 2_000;
 
     /// <summary>
     /// A REST call's URI and headers together may be at most 16,384 bytes: over it Salesforce answers 414 URI Too Long

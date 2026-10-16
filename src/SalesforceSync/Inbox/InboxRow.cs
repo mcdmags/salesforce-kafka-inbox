@@ -1,3 +1,5 @@
+using SalesforceSync.Salesforce;
+
 namespace SalesforceSync.Inbox;
 
 /// <summary>
@@ -43,9 +45,25 @@ public abstract class InboxRow
     public DateTimeOffset LastUpdated { get; set; }
 }
 
-/// <summary>An inbox row type: which entities of sf_sync_state its events are about.</summary>
+/// <summary>
+/// An inbox row type: which entities of sf_sync_state its events are about, and how many records its batches read per
+/// query and write per upsert (checked when its sync is registered).
+/// </summary>
 public interface IInboxRow
 {
     /// <summary>sf_sync_state.entity_type of this inbox's entities, e.g. "account".</summary>
     static abstract string EntityType { get; }
+
+    /// <summary>
+    /// External ids per SOQL query of this type's batch read, at most (1 to
+    /// <see cref="SalesforceRestClient.MaxQueryValues"/>: one result page). The URL still wins: a query takes ids only
+    /// while its URI and headers fit 16,384 bytes, so long ids give shorter queries.
+    /// </summary>
+    static abstract int MaxValuesPerQuery { get; }
+
+    /// <summary>
+    /// Records of one object per sObject Collections upsert, at most (1 to
+    /// <see cref="SalesforceRestClient.MaxCollectionRecords"/>, Salesforce's limit).
+    /// </summary>
+    static abstract int MaxRecordsPerWrite { get; }
 }
