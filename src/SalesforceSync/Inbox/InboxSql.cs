@@ -157,7 +157,7 @@ public sealed partial class InboxSql
               where o.entity_id = e.entity_id and o.status = 'pending'
               order by o.id limit @maxPerEntity) r
             where u.id = r.id
-            returning u.id as Id, u.entity_id as EntityId, u.payload::text as Payload, u.attempt_count as AttemptCount
+            returning u.id as RowId, u.entity_id as EntityId, u.payload::text as Payload, u.attempt_count as AttemptCount
             """;
 
         /// <summary>
