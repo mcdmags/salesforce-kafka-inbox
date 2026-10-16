@@ -58,7 +58,6 @@ public sealed partial class InboxSql
         Store = Template.Store.Replace("{inbox}", table);
         Claim = Template.Claim.Replace("{inbox}", table);
         Done = Template.Done.Replace("{inbox}", table);
-        Release = Template.Release.Replace("{inbox}", table);
         Fail = Template.Fail.Replace("{inbox}", table);
         Dead = Template.Dead.Replace("{inbox}", table);
         Hold = Template.Hold.Replace("{inbox}", table);
@@ -75,9 +74,6 @@ public sealed partial class InboxSql
 
     /// <inheritdoc cref="Template.Done"/>
     public string Done { get; }
-
-    /// <inheritdoc cref="Template.Release"/>
-    public string Release { get; }
 
     /// <inheritdoc cref="Template.Fail"/>
     public string Fail { get; }
@@ -179,16 +175,6 @@ public sealed partial class InboxSql
             """;
 
         /// <summary>
-        /// Not attempted (skipped because of another entity's record, or rate limited): the lease ends and the row is
-        /// due again, not before @delay, with no attempt spent.
-        /// </summary>
-        public const string Release = $$"""
-            update {inbox} i
-            set last_updated = now(), next_attempt_at = now() + @delay, lock_token = null
-            where {{StillClaimed}}
-            """;
-
-        /// <summary>
         /// Transient failure: one more failed attempt (attempt_count); the rows stay pending and back off exponentially,
         /// by their attempts, or are dead-lettered (and idle) at the @maxRetries-th; the lease ends. @errors is a JSON
         /// object, row id -> [error, code], so a whole batch's failures are one statement. The object is an uncorrelated scalar subquery,
@@ -232,16 +218,19 @@ public sealed partial class InboxSql
             """;
 
         /// <summary>
-        /// Ends the lease on the rows (@ids) that @token still holds, due after @delay. Last in an outcome transaction,
-        /// those are the rows a newer event overwrote during the lease (see <see cref="StillClaimed"/>): pending, and
-        /// due now (held or deferred: when the hold or deferral ends) instead of at the lease's end, which the store
-        /// kept as their next_attempt_at. Such a row gets no coalesce delay (<see cref="Store"/>): its event has already
-        /// waited as long as the batch's Salesforce calls took, and newer events that arrive before the next claim
-        /// overwrite it anyway. A retried claim ends the leases of the attempt it lost the same way (due now).
+        /// Ends the lease on the rows (@ids) that @token still holds, due again after @delay, with no attempt spent:
+        /// what becomes of a row that gets no outcome. Last in an outcome transaction, those are the rows not attempted
+        /// (skipped because of another entity's record, or the whole claim rate limited: deferred) and the rows a newer
+        /// event overwrote during the lease (see <see cref="StillClaimed"/>), whatever was recorded for the others.
+        /// They are pending, and due now (held or deferred: when the hold or deferral ends) instead of at the lease's
+        /// end, which the store kept as an overwritten row's next_attempt_at. Such a row gets no coalesce delay
+        /// (<see cref="Store"/>): its event has already waited as long as the batch's Salesforce calls took, and newer
+        /// events that arrive before the next claim overwrite it anyway. Ending a lease needs no check of the claimed
+        /// event: the row is due again either way. A retried claim ends the leases of the attempt it lost the same way.
         /// </summary>
         public const string EndLease = """
             update {inbox} i
-            set lock_token = null, next_attempt_at = now() + @delay
+            set lock_token = null, next_attempt_at = now() + @delay, last_updated = now()
             where i.id = any(@ids) and i.lock_token = @token
             """;
     }

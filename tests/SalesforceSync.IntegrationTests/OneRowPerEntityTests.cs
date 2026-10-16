@@ -141,9 +141,9 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         return outcome switch
         {
             "done" => inbox.RecordAsync(claim, Synced(claim), none),
-            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [failure]), none),
-            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure], []), none),
-            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [row], [], []), none),
+            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
+            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
+            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
             "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
             "deferred" => inbox.DeferAsync(claim, TimeSpan.Zero, none),
             "held" => inbox.HoldAsync(claim, "lost", none),
@@ -153,7 +153,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
     private static BatchOutcomes Synced(InboxClaim claim)
     {
-        return new BatchOutcomes(claim.RowIds, [], [], []);
+        return new BatchOutcomes(claim.RowIds, [], []);
     }
 
     private static JsonObject Event(string entity, long version)

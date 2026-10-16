@@ -70,7 +70,6 @@ public sealed class EngineFlowTests
         var outcomes = _inbox.Recorded!;
         outcomes.Synced.Should().Equal([2L]);
         outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.RowId == 3 && f.Code == SalesforceErrors.InvalidEvent);
-        outcomes.Released.Should().BeEmpty();
         outcomes.Failed.Should().BeEmpty();
         _gate.Released.Should().Be(1);
     }
@@ -305,7 +304,8 @@ public sealed class EngineFlowTests
         });
 
         outcomes.Synced.Should().Equal(1L, 2L);
-        outcomes.Released.Should().Equal(3L);
+        outcomes.Synced.Concat(outcomes.Dead.Concat(outcomes.Failed).Select(f => f.RowId)).Should().NotContain(3L,
+            "C was not attempted: it gets no outcome, its lease ends and it is due again");
         outcomes.Dead.Should().Equal(new FailedEvent(8, "bad", SalesforceErrors.InvalidEvent),
             new FailedEvent(4, "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));
         outcomes.Failed.Should().Equal(new FailedEvent(5, "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));

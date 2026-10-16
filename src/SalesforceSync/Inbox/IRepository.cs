@@ -73,11 +73,9 @@ public sealed record FailedEvent(long RowId, string Error, string? Code);
 
 /// <summary>What to record for the rows of a claim, by kind of outcome: inbox row ids (not entity ids).</summary>
 /// <param name="Synced">In Salesforce: done.</param>
-/// <param name="Released">Back to the inbox for the next claim, no attempt spent.</param>
 /// <param name="Dead">Dead-lettered at once.</param>
 /// <param name="Failed">Retried with backoff, dead-lettered after <see cref="SyncOptions.MaxRetries"/>.</param>
 public sealed record BatchOutcomes(
     IReadOnlyList<long> Synced,
-    IReadOnlyList<long> Released,
     IReadOnlyList<FailedEvent> Dead,
     IReadOnlyList<FailedEvent> Failed);

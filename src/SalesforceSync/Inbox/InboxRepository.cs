@@ -68,7 +68,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 
     /// <summary>
     /// One statement per kind of outcome (not per entity), in the batch's second short transaction, then the leases
-    /// end. Safe to repeat: see <see cref="InTransactionAsync"/>.
+    /// end, the rows not attempted due again at once. Safe to repeat: see <see cref="InTransactionAsync"/>.
     /// </summary>
     public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
     {
@@ -80,10 +80,6 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             {
                 recorded += await db.Database.ExecuteAsync(sql.Done, t,
                     new { ids = outcomes.Synced.ToArray(), times = claim.TimesOf(outcomes.Synced), token });
-            }
-            if (outcomes.Released.Count > 0)
-            {
-                recorded += await ReleaseAsync(db, sql, claim, outcomes.Released, TimeSpan.Zero, t);
             }
             if (outcomes.Dead.Count > 0)
             {
@@ -119,10 +115,14 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         }), ct);
     }
 
-    /// <summary>Rate limited: hands the entities back, not before <paramref name="delay"/>, without spending an attempt.</summary>
+    /// <summary>
+    /// Rate limited: hands the entities back, not before <paramref name="delay"/>, without spending an attempt: only
+    /// their leases end (<see cref="InboxSql.Template.EndLease"/>).
+    /// </summary>
     public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
     {
-        return InTransactionAsync(claim, delay, (db, sql, t) => ReleaseAsync(db, sql, claim, claim.RowIds, delay, t), ct);
+        return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).EndLease, t,
+            new { ids = claim.RowIds, token = claim.Token, delay }), ct);
     }
 
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
@@ -135,8 +135,8 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// Records outcomes in one transaction: <paramref name="record"/> runs the outcome statements, each of which updates
     /// only the claimed rows this lease still holds that still hold the event the claim read
     /// (<see cref="InboxSql.Template.StillClaimed"/>), and returns how many rows they updated. If that is fewer than the claim's,
-    /// <see cref="InboxSql.Template.EndLease"/> ends the lease on the rest (rows a newer event overwrote meanwhile),
-    /// due after <paramref name="delay"/>. Safe to repeat: an attempt whose commit outcome was unknown, or a lease lost
+    /// <see cref="InboxSql.Template.EndLease"/> ends the lease on the rest (rows not attempted, and rows a newer event
+    /// overwrote meanwhile), due after <paramref name="delay"/>. Safe to repeat: an attempt whose commit outcome was unknown, or a lease lost
     /// meanwhile, leaves no row under this token, and nothing is written.
     /// </summary>
     private Task InTransactionAsync(InboxClaim claim, TimeSpan delay, Func<SyncDbContext, InboxSql, CancellationToken, Task<int>> record,
@@ -150,13 +150,6 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
                 await db.Database.ExecuteAsync(sql.EndLease, t, new { ids = claim.RowIds, token = claim.Token, delay });
             }
         }, ct);
-    }
-
-    /// <summary>Not attempted (skipped because of another entity's record, or rate limited): no attempt spent.</summary>
-    private static Task<int> ReleaseAsync(SyncDbContext db, InboxSql sql, InboxClaim claim, IReadOnlyList<long> ids, TimeSpan delay,
-        CancellationToken ct)
-    {
-        return db.Database.ExecuteAsync(sql.Release, ct, new { ids = ids.ToArray(), times = claim.TimesOf(ids), token = claim.Token, delay });
     }
 
     private Task<int> FailAsync(SyncDbContext db, InboxSql sql, InboxClaim claim, IReadOnlyList<FailedEvent> rows, CancellationToken ct)

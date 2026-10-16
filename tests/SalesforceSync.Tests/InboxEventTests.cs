@@ -341,7 +341,7 @@ public sealed class InboxEventTests
     {
         var sql = InboxSql.For("sf_account_inbox");
         // Fail and Dead read their @errors object with ->, not the payload
-        string[] claimAndOutcomes = [sql.Store, sql.Claim, sql.Done, sql.Release, sql.Hold, sql.EndLease];
+        string[] claimAndOutcomes = [sql.Store, sql.Claim, sql.Done, sql.Hold, sql.EndLease];
 
         claimAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
     }

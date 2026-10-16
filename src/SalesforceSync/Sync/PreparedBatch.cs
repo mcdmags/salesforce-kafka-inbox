@@ -60,14 +60,14 @@ internal sealed record PreparedBatch(List<Work> Work, List<(long RowId, string E
     public List<(string Key, UpsertUnit Unit)> Units => [.. Work.Select(w => (w.EntityId, w.Unit))];
 
     /// <summary>
-    /// What to record in the inbox once Salesforce has answered: saved or unchanged entities are done, entities not
-    /// attempted are released, permanent failures and invalid rows are dead-lettered, the rest is retried.
+    /// What to record in the inbox once Salesforce has answered: saved or unchanged entities are done, permanent
+    /// failures and invalid rows are dead-lettered, the rest is retried. Entities not attempted get no outcome: their
+    /// leases end and they are due again, with no attempt spent.
     /// </summary>
     /// <param name="results">The outcome of every entity in <see cref="Work"/>, by entity id.</param>
     public BatchOutcomes Outcomes(IReadOnlyDictionary<string, UpsertResult> results)
     {
         var synced = new List<long>();
-        var released = new List<long>();
         var dead = Invalid.Select(i => new FailedEvent(i.RowId, i.Error, SalesforceErrors.InvalidEvent)).ToList();
         var failed = new List<FailedEvent>();
 
@@ -77,12 +77,12 @@ internal sealed record PreparedBatch(List<Work> Work, List<(long RowId, string E
             switch (result.Outcome)
             {
                 case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(work.RowId); break;
-                case SyncOutcome.NotAttempted: released.Add(work.RowId); break;
+                case SyncOutcome.NotAttempted: break;
                 case SyncOutcome.PermanentFailure: dead.Add(Failure(work, result)); break;
                 default: failed.Add(Failure(work, result)); break;
             }
         }
-        return new BatchOutcomes(synced, released, dead, failed);
+        return new BatchOutcomes(synced, dead, failed);
     }
 
     private static FailedEvent Failure(Work work, UpsertResult result)

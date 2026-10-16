@@ -36,7 +36,7 @@ public sealed class LeaseTests(SyncFixture app)
         (await app.GetRecordAsync("Account", acct)).Should().BeNull("nobody has written the account yet");
 
         // The first worker finishes without having written (as if its records were not attempted) and releases
-        await app.AccountInbox.RecordAsync(claim, new BatchOutcomes([], claim.RowIds, [], []), CancellationToken.None);
+        await app.AccountInbox.RecordAsync(claim, new BatchOutcomes([], [], []), CancellationToken.None);
 
         (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
         ((string?)(await app.GetRecordAsync("Account", acct))!["Name"]).Should().Be("v2");
@@ -69,8 +69,8 @@ public sealed class LeaseTests(SyncFixture app)
         await app.AccountInbox.RecordAsync(claim, outcome switch
         {
             "done" => Synced(row),
-            "failed" => new BatchOutcomes([], [], [], [failure]),
-            _ => new BatchOutcomes([], [], [failure], [])
+            "failed" => new BatchOutcomes([], [], [failure]),
+            _ => new BatchOutcomes([], [failure], [])
         }, CancellationToken.None);
 
         (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
@@ -118,7 +118,7 @@ public sealed class LeaseTests(SyncFixture app)
         // Every outcome the repository records is conditional on the token as well: none of them touches the row
         var inbox = app.AccountInbox;
         var failed = new FailedEvent(claimed[0], "x", "UNKNOWN_OUTCOME");
-        await inbox.RecordAsync(claim, new BatchOutcomes(claimed, claimed, [failed], [failed]), CancellationToken.None);
+        await inbox.RecordAsync(claim, new BatchOutcomes(claimed, [failed], [failed]), CancellationToken.None);
         await inbox.HoldAsync(claim, "x", CancellationToken.None);
         await inbox.DeferAsync(claim, TimeSpan.FromHours(1), CancellationToken.None);
         await inbox.FailAllAsync(claim, "x", "UNKNOWN_OUTCOME", CancellationToken.None);
@@ -171,7 +171,7 @@ public sealed class LeaseTests(SyncFixture app)
 
     private static BatchOutcomes Synced(long id)
     {
-        return new BatchOutcomes([id], [], [], []);
+        return new BatchOutcomes([id], [], []);
     }
 
     private async Task<int> ExecuteAsync(string sql, object args)

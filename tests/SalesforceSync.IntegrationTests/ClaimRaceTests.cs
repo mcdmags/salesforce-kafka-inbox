@@ -187,10 +187,10 @@ public sealed class ClaimRaceTests(SyncFixture app)
         var none = CancellationToken.None;
         return outcome switch
         {
-            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], [], []), none),
-            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [failure]), none),
-            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure], []), none),
-            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [row], [], []), none),
+            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], []), none),
+            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
+            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
+            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
             "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
             "deferred" => inbox.DeferAsync(claim, TimeSpan.Zero, none),
             "held" => inbox.HoldAsync(claim, "lost", none),

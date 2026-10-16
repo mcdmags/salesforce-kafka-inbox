@@ -95,8 +95,8 @@ name their tables (independent entity types, no shared table) and their batch's 
 `InboxRepository<TRow>` (`IRepository<TRow>`, registered as an open generic) serves them all. The table name comes
 from the EF model, the batch's query and write sizes from the row type (`IInboxRow`'s static `MaxValuesPerQuery` and
 `MaxRecordsPerWrite`). What EF can express is LINQ (the rate limiter's usage count and writes); storing an event, the
-claim, every outcome (done, released, fail, dead-letter, hold) and the end of a lease (also of a lost
-claim attempt's leases) are the SQL texts of `InboxSql` run unchanged through
+claim, every outcome (done, fail, dead-letter, hold) and the end of a lease (of rows released or deferred, and of a
+lost claim attempt's leases) are the SQL texts of `InboxSql` run unchanged through
 `Database.SqlQueryRaw` / `ExecuteSqlRaw`, their `@name` parameters bound from an anonymous object's properties
 (`new { ids, times, token }`), since `FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have
 no LINQ form. The rate limiter's `RateLimitSql` only locks its row (`FOR UPDATE`) and reads the database clock.
@@ -355,8 +355,9 @@ costs measured for the earlier claims are in [docs/benchmarks/README.md](docs/be
 Then, per claimed entity, in C#: deserialize its event, map → write → done (one statement for the batch marks the
 rows `done`). An event that can't be read is dead-lettered on its own (`INVALID_EVENT`). All outcome statements are
 set-based and conditional on the `lock_token` of the entity's row, and each ends the lease of the rows it records
-by setting `next_attempt_at`: done and dead-lettered rows are idle (null), retried, released and deferred
-ones due again when their backoff or deferral ends, held ones when the hold ends.
+by setting `next_attempt_at`: done and dead-lettered rows are idle (null), retried ones due again when their backoff
+ends, held ones when the hold ends. A row with no outcome (not attempted, or the whole claim deferred) only has its
+lease ended (`EndLease`): due again at once, or when the deferral ends, with no attempt spent.
 
 **Overwritten while claimed** (explained step by step in
 [A newer event while an entity is being synced](#a-newer-event-while-an-entity-is-being-synced)). The lease keeps other
@@ -364,7 +365,7 @@ workers away from an entity, not the consumer: a newer event can overwrite the r
 claimed. So every outcome statement updates only the claimed rows that still hold the `event_time` the claim read
 (`InboxSql.Template.StillClaimed`, part of each statement's WHERE: the claim's row ids and times, `unnest(@ids, @times)`, each
 row looked up by primary key and compared timestamptz to timestamptz, exactly: the times are the microseconds read
-back from the column) and records outcomes on those only: done, released, retried, dead, held. An
+back from the column) and records outcomes on those only: done, retried, dead, held. An
 overwritten row stays pending with the newer event, not marked done, and the transaction's
 last statement (`EndLease`, run only if the outcomes left a claimed row under the lease) ends its lease and makes
 it due now (held or deferred: when the hold or deferral ends), not when the lease would have ended, so the next
@@ -448,13 +449,13 @@ that time.
 2. **While live.** Other workers skip the entity. This worker calls Salesforce outside any transaction and stops
    (cancels the call) at 80% of the lease, measured from the claim, so it gives up before anyone else can claim the
    entity.
-3. **Release.** The outcome transaction records done, retry, dead, deferral or hold; every statement only
-   touches rows `where lock_token = @token`, so a worker whose
-   lease expired and was claimed by another changes nothing, and only rows that still hold the event the claim read
-   (see [Overwritten while claimed](#the-inbox)). Each statement also ends the lease of its rows and sets
-   `next_attempt_at`: null for a finished row, else when it is due again (now, or the end of the backoff, deferral or
-   hold). Its last statement (`EndLease`) ends the lease of the rows left, those a newer event overwrote meanwhile
-   (a store keeps a leased row's `next_attempt_at`, the lease's end), and makes them due now. An event stored
+3. **Release.** The outcome transaction records done, retry, dead or hold; every statement only touches rows
+   `where lock_token = @token`, so a worker whose lease expired and was claimed by another changes nothing, and only
+   rows that still hold the event the claim read (see [Overwritten while claimed](#the-inbox)). Each statement also
+   ends the lease of its rows and sets `next_attempt_at`: null for a finished row, else when it is due again (the end
+   of the backoff or hold). Its last statement (`EndLease`) ends the lease of the rows left, those not attempted and
+   those a newer event overwrote meanwhile (a store keeps a leased row's `next_attempt_at`, the lease's end), and
+   makes them due now (deferred or held: when that ends). An event stored
    at the same moment is never left behind: the store and the outcome update the same row, so either the store came
    first (the outcome skips the overwritten row and `EndLease` ends its lease) or it waits for the outcome
    transaction and then overwrites the finished row and makes the idle entity due (`ClaimRaceTests`).
