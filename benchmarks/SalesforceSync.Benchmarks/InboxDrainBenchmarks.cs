@@ -111,9 +111,9 @@ public abstract class DrainBenchmarkBase
 
     /// <summary>
     /// An event as the consumer stores it: the inbox table and entity type (in sf_sync_state) of its type, the entity's
-    /// id and the raw payload.
+    /// id, the event's time (its meta.time) and the raw payload.
     /// </summary>
-    private sealed record IngestRow(string Table, string Type, string EntityId, string Payload);
+    private sealed record IngestRow(string Table, string Type, string EntityId, DateTimeOffset EventTime, string Payload);
 
     /// <summary>
     /// meta of version N of an entity: time = base time + N ms, so per-entity time order = version order; the first
@@ -121,11 +121,16 @@ public abstract class DrainBenchmarkBase
     /// </summary>
     private static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
+    private static DateTimeOffset Time(long version)
+    {
+        return BaseTime.AddMilliseconds(version);
+    }
+
     private static JsonObject Meta(long version)
     {
         return new()
         {
-            ["time"] = BaseTime.AddMilliseconds(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+            ["time"] = Time(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
             ["type"] = version == 1 ? "inserted" : "updated"
         };
     }
@@ -190,7 +195,7 @@ public abstract class DrainBenchmarkBase
         foreach (var e in _events)
         {
             await db.Database.ExecuteAsync(InboxSql.For(e.Table).Store, ct, Param("entityType", e.Type), Param("entityId", e.EntityId),
-                Param("payload", e.Payload), Param("coalesceDelay", TimeSpan.FromMilliseconds(CoalesceDelayMs)));
+                Param("eventTime", e.EventTime), Param("payload", e.Payload), Param("coalesceDelay", TimeSpan.FromMilliseconds(CoalesceDelayMs)));
         }
     }
 
@@ -335,7 +340,7 @@ public abstract class DrainBenchmarkBase
                         ["isActive"] = true
                     }
                 };
-                events.Add(new IngestRow(RelationshipTable, AccountRelationshipSync.Type, relKey, relPayload.ToJsonString()));
+                events.Add(new IngestRow(RelationshipTable, AccountRelationshipSync.Type, relKey, Time(relVersion), relPayload.ToJsonString()));
                 continue;
             }
 
@@ -361,7 +366,7 @@ public abstract class DrainBenchmarkBase
                         ["profile"] = new JsonObject { ["score"] = version }
                     }
                 };
-                events.Add(new IngestRow(AccountTable, AccountSync.Type, key, payload.ToJsonString()));
+                events.Add(new IngestRow(AccountTable, AccountSync.Type, key, Time(version), payload.ToJsonString()));
             }
         }
 
@@ -373,12 +378,13 @@ public abstract class DrainBenchmarkBase
         foreach (var inbox in _events.GroupBy(e => (e.Table, e.Type)))
         {
             await using (var importer = await conn.BeginBinaryImportAsync(
-                             $"copy {inbox.Key.Table} (entity_id, payload) from stdin (format binary)"))
+                             $"copy {inbox.Key.Table} (entity_id, event_time, payload) from stdin (format binary)"))
             {
                 foreach (var e in inbox)
                 {
                     await importer.StartRowAsync();
                     await importer.WriteAsync(e.EntityId, NpgsqlDbType.Text);
+                    await importer.WriteAsync(e.EventTime, NpgsqlDbType.TimestampTz);
                     await importer.WriteAsync(e.Payload, NpgsqlDbType.Jsonb);
                 }
                 await importer.CompleteAsync();

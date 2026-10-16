@@ -262,7 +262,7 @@ serves each object's record types and which rejects an unknown `RecordTypeId` li
 (`UpsertStrategy.TryRead`, the same read the engine uses) and stores it only if it is valid: valid JSON for that
 type, the entity object with a non-empty id, a `meta.time` with an explicit offset, and a `meta.type` of `inserted`
 or `updated`. Anything else is logged with its topic, partition and offset and skipped. The row gets
-`entity_id` = the id from the event and `payload` = the message value, unchanged.
+`entity_id` = the id from the event, `event_time` = its `meta.time` and `payload` = the message value, unchanged.
 
 **One inbox table per object type**, all the same shape (one `ConfigureInbox` call per inbox row type in
 `SyncDbContext.OnModelCreating`; table names are code constants, checked to be plain identifiers before they are put
@@ -289,7 +289,8 @@ create table sf_account_inbox (                 -- and sf_account_relationship_i
   last_error      text,
   last_error_code text,
   received_at     timestamptz not null default now(),
-  last_updated    timestamptz not null default now()
+  last_updated    timestamptz not null default now(),
+  event_time      timestamptz not null                     -- the event's meta.time, read by the consumer
 );
 create index sf_account_inbox_pending on sf_account_inbox (entity_id, id) where status = 'pending';
 ```
@@ -297,11 +298,19 @@ create index sf_account_inbox_pending on sf_account_inbox (entity_id, id) where 
 Both kinds of table vacuum after 2% of their rows changed (`autovacuum_vacuum_scale_factor = 0.02`, threshold
 1,000), not the default 20%: every event and every claim updates them.
 
-There is no version or time column in an inbox and **no SQL that names a JSON field**: the event's field names are
-yours to change in the payload classes. There is also no uniqueness rule: a Kafka redelivery becomes a second row,
-which ends `superseded` (its time is not newer than what was synced); a rule on the payload would wrongly drop the
-last event of A → B → A. The sync's own bookkeeping is the entity's `sf_sync_state` row: `synced_time` is set, to the
-written event's `meta.time` in microseconds (supplied by C#), when that event ends `done`.
+Of the event, an inbox has only its entity and its time as columns, both read in C# by the consumer, and there is
+**no SQL that names a JSON field** (except the one-time fill of `event_time` for rows stored before it existed, in the
+`InboxEventTime` migration): the event's field names are yours to change in the payload classes. There is also no
+uniqueness rule: a Kafka redelivery becomes a second row, which ends `superseded` (its time is not newer than what was
+synced); a rule on the payload would wrongly drop the last event of A → B → A. The sync's own bookkeeping is the
+entity's `sf_sync_state` row: `synced_time` is set, to the written event's `event_time` in microseconds, when that
+event ends `done`.
+
+`event_time` holds `meta.time` to the microsecond the way the engine counts it: .NET reads the time to 100 ns ticks
+and the engine cuts them to whole microseconds to compare an event with the watermark, so the consumer stores that
+cut time. Postgres keeps microseconds too, but it would round a finer time (`.1234567` to `.123457`), and the
+watermark would then be 1 µs later than the event as the engine reads it: an event of that same microsecond, newer
+by less than one, would be taken as not newer and superseded.
 
 **Store** (`InboxSql.Store`, one statement): insert the event, and upsert the entity's state row: a new entity, or an
 idle one (`next_attempt_at` null), becomes due after `Sync:CoalesceDelay`, and one that is already due, backing off,
@@ -485,7 +494,7 @@ the entity were released and a newer event synced in the meantime, the late writ
 | An event stored while its entity's lease ends is not left behind | storing and ending a lease both lock the entity's state row; the lease ends with a fresh check for pending events | `ClaimRaceTests.An_event_stored_while_its_entitys_lease_ends_leaves_the_entity_due` |
 | An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | the claim requires the entity to be unleased | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
 | Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | newest-time coalescing + watermark | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
-| A worker whose lease expired can't record outcomes or move the watermark | every statement is conditional on the `lock_token` of the entity's state row | `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark`, `LeaseTests.Done_completes_an_event_and_sets_the_watermark_only_under_its_lease_and_only_once` |
+| A worker whose lease expired can't record outcomes or move the watermark | every statement is conditional on the `lock_token` of the entity's state row | `LeaseTests.Worker_whose_lease_expired_can_record_nothing_and_cannot_move_the_watermark`, `LeaseTests.Done_completes_an_event_and_sets_the_watermark_to_its_time_only_under_its_lease_and_only_once` |
 | Dropped Postgres connections cause no overlap, loss or regression | `PostgresRetryStrategy` (EF execution strategy), idempotent statements | `ConcurrencyTests.Pods_survive_their_Postgres_connections_being_dropped` |
 | A write with an unknown outcome can't be overtaken by a newer write | the hold | `UnknownOutcomeTests.Entity_is_held_after_a_write_with_an_unknown_outcome_and_ends_at_the_newest_event` |
 

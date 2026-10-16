@@ -15,13 +15,16 @@ public interface ISalesforceEntitySync
     string Topic { get; }
 
     /// <summary>
-    /// Checks a raw Kafka message value for this type and reads the id of the entity it is about.
+    /// Checks a raw Kafka message value for this type and reads the id of the entity it is about and the event's time.
     /// </summary>
     /// <returns>False with <paramref name="problem"/> if the message can never be synced (to skip it rather than store it).</returns>
-    bool TryReadEvent(string json, out string? entityId, out string? problem);
+    bool TryReadEvent(string json, out string? entityId, out DateTimeOffset eventTime, out string? problem);
 
-    /// <summary>Stores an event that passed <see cref="TryReadEvent"/> as a new row of this type's inbox, unchanged.</summary>
-    Task StoreEventAsync(string entityId, string json, CancellationToken ct);
+    /// <summary>
+    /// Stores an event that passed <see cref="TryReadEvent"/> as a new row of this type's inbox, unchanged, with the
+    /// time it read.
+    /// </summary>
+    Task StoreEventAsync(string entityId, DateTimeOffset eventTime, string json, CancellationToken ct);
 
     /// <returns>Inbox rows processed (0 = nothing to do).</returns>
     Task<int> SyncBatchAsync(CancellationToken ct);
@@ -43,16 +46,17 @@ public sealed class EntitySyncService<TEvent, TRow>(
 
     public string Topic => defaultTopic;
 
-    public bool TryReadEvent(string json, out string? entityId, out string? problem)
+    public bool TryReadEvent(string json, out string? entityId, out DateTimeOffset eventTime, out string? problem)
     {
         var ok = strategy.TryRead(json, out var read, out problem);
         entityId = read?.EntityId;
+        eventTime = read?.Time ?? default;
         return ok;
     }
 
-    public Task StoreEventAsync(string entityId, string json, CancellationToken ct)
+    public Task StoreEventAsync(string entityId, DateTimeOffset eventTime, string json, CancellationToken ct)
     {
-        return inbox.AddAsync(entityId, json, ct);
+        return inbox.AddAsync(entityId, eventTime, json, ct);
     }
 
     public Task<int> SyncBatchAsync(CancellationToken ct)
