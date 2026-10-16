@@ -6,7 +6,7 @@ namespace SalesforceSync.Inbox;
 /// Every recording is conditional on the claim's lease token (on the entities' sf_sync_state rows), so a worker whose
 /// lease expired records nothing.
 /// </summary>
-public interface IRepository<TEntity> where TEntity : InboxRow, new()
+public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
 {
     /// <summary>
     /// Stores one event as a new pending row, with its time (meta.time), and makes its entity due. Nothing makes a row

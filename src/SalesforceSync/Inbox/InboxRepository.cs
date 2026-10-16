@@ -6,19 +6,18 @@ using SalesforceSync.Data;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
 using SalesforceSync.Sync.Upsert;
-using static SalesforceSync.Data.SqlCommands;
 
 namespace SalesforceSync.Inbox;
 
 /// <summary>
 /// <see cref="IRepository{TEntity}"/> on Postgres, for any inbox row type: the store, claim, done and failure statements
 /// and the end of a lease are the <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL; the
-/// outcomes that are a plain conditional UPDATE are LINQ (<c>ExecuteUpdate</c>). The row type's entity type (its
-/// entities' key in sf_sync_state) comes from the EF model, like its table. Each unit of work runs through EF's
-/// execution strategy (<see cref="PostgresRetryStrategy"/>).
+/// outcomes that are a plain conditional UPDATE are LINQ (<c>ExecuteUpdate</c>). The table comes from the EF model,
+/// the entity type (its entities' key in sf_sync_state) from the row type itself (<see cref="IInboxRow"/>). Each unit
+/// of work runs through EF's execution strategy (<see cref="PostgresRetryStrategy"/>).
 /// </summary>
 public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TEntity>
-    where TEntity : InboxRow, new()
+    where TEntity : InboxRow, IInboxRow, new()
 {
     private readonly SyncOptions _opt = options.Value;
 
@@ -34,8 +33,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     {
         var time = PreparedBatch.ToWholeMicroseconds(eventTime);
         return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).Store, t,
-                Param("entityType", db.EntityTypeOf<TEntity>()), Param("entityId", entityId), Param("eventTime", time),
-                Param("payload", payload), Param("coalesceDelay", _opt.CoalesceDelay)), ct);
+                new { entityType = TEntity.EntityType, entityId, eventTime = time, payload, coalesceDelay = _opt.CoalesceDelay }), ct);
     }
 
     /// <summary>
@@ -52,7 +50,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
             var sql = InboxSql.For(db.TableOf<TEntity>());
-            var type = db.EntityTypeOf<TEntity>();
+            var type = TEntity.EntityType;
 
             if (attemptedEntityIds.Count > 0)
             {
@@ -68,9 +66,13 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 
             var token = Guid.NewGuid();
             attempted.Add(token);
-            var claimed = await db.Database.QueryAsync<ClaimedEntity>(InboxSql.ClaimEntities, t,
-                Param("entityType", type), Param("token", token), Param("lease", _opt.Lease),
-                Param("batchSize", Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)));
+            var claimed = await db.Database.QueryAsync<ClaimedEntity>(InboxSql.ClaimEntities, t, new
+            {
+                entityType = type,
+                token,
+                lease = _opt.Lease,
+                batchSize = Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)
+            });
             if (claimed.Count == 0)
             {
                 return new InboxClaim(token, [], new Dictionary<string, long>());
@@ -79,7 +81,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             attemptedEntityIds.UnionWith(entityIds);
 
             var events = await db.Database.QueryAsync<InboxEvent>(sql.ClaimEvents, t,
-                Param("entityIds", entityIds), Param("maxPerEntity", _opt.MaxEventsPerEntity));
+                new { entityIds, maxPerEntity = _opt.MaxEventsPerEntity });
             // Due without a pending event (its events finished by hand, say): idle again now, not leased for nothing
             var idle = entityIds.Except(events.Select(e => e.EntityId), StringComparer.Ordinal).ToArray();
             if (idle.Length > 0)
@@ -103,8 +105,8 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         {
             if (outcomes.Synced.Count > 0)
             {
-                await db.Database.ExecuteAsync(sql.Done, t, Param("entityType", type),
-                    Param("ids", outcomes.Synced.Select(s => s.RowId).ToArray()), Param("token", token));
+                await db.Database.ExecuteAsync(sql.Done, t,
+                    new { entityType = type, ids = outcomes.Synced.Select(s => s.RowId).ToArray(), token });
             }
             if (outcomes.Superseded.Count > 0)
             {
@@ -116,8 +118,8 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             }
             if (outcomes.Dead.Count > 0)
             {
-                await db.Database.ExecuteAsync(sql.Dead, t, Param("entityType", type), Param("ids", Ids(outcomes.Dead)),
-                    Param("errors", ErrorsJson(outcomes.Dead)), Param("token", token));
+                await db.Database.ExecuteAsync(sql.Dead, t,
+                    new { entityType = type, ids = Ids(outcomes.Dead), errors = ErrorsJson(outcomes.Dead), token });
             }
             if (outcomes.Failed.Count > 0)
             {
@@ -183,9 +185,9 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     {
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
-            var type = db.EntityTypeOf<TEntity>();
-            var held = await db.Database.QueryAsync<string>(InboxSql.LockHeld, t, Param("entityType", type),
-                Param("entityIds", claim.EntityIds), Param("token", claim.Token));
+            var type = TEntity.EntityType;
+            var held = await db.Database.QueryAsync<string>(InboxSql.LockHeld, t,
+                new { entityType = type, entityIds = claim.EntityIds, token = claim.Token });
             if (held.Count > 0)
             {
                 await record(db, InboxSql.For(db.TableOf<TEntity>()), type, t);
@@ -220,10 +222,16 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 
     private Task<int> FailAsync(SyncDbContext db, InboxSql sql, string type, IReadOnlyList<FailedEvent> rows, Guid token, CancellationToken ct)
     {
-        return db.Database.ExecuteAsync(sql.Fail, ct, Param("entityType", type),
-                Param("ids", Ids(rows)), Param("errors", ErrorsJson(rows)), Param("token", token),
-                Param("maxRetries", _opt.MaxRetries), Param("baseDelaySecs", _opt.RetryBaseDelay.TotalSeconds),
-                Param("maxDelaySecs", _opt.MaxRetryDelay.TotalSeconds));
+        return db.Database.ExecuteAsync(sql.Fail, ct, new
+        {
+            entityType = type,
+            ids = Ids(rows),
+            errors = ErrorsJson(rows),
+            token,
+            maxRetries = _opt.MaxRetries,
+            baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
+            maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
+        });
     }
 
     /// <summary>
@@ -232,8 +240,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// </summary>
     private static Task<int> EndLeaseAsync(SyncDbContext db, InboxSql sql, string[] entityIds, Guid token, TimeSpan delay, CancellationToken ct)
     {
-        return db.Database.ExecuteAsync(sql.EndLease, ct, Param("entityType", db.EntityTypeOf<TEntity>()),
-            Param("entityIds", entityIds), Param("token", token), Param("delay", delay));
+        return db.Database.ExecuteAsync(sql.EndLease, ct, new { entityType = TEntity.EntityType, entityIds, token, delay });
     }
 
     private static long[] Ids(IReadOnlyList<FailedEvent> rows)

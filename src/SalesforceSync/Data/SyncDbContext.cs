@@ -15,15 +15,13 @@ namespace SalesforceSync.Data;
 /// sf_rate_limit and sf_api_usage. The claim's statements are raw SQL (<see cref="InboxSql"/>) run through
 /// <c>Database.SqlQueryRaw</c>, since FOR UPDATE SKIP LOCKED and UPDATE ... RETURNING have no LINQ form.
 /// <para>
-/// To sync another object: a subclass of <see cref="InboxRow"/>, a <c>DbSet</c> here and its
-/// <see cref="ConfigureInbox{TRow}"/> line in <see cref="OnModelCreating"/>, with its table and the entity type its
-/// rows have in sf_sync_state; then a migration (<c>dotnet ef migrations add ...</c>) creates the table.
+/// To sync another object: a subclass of <see cref="InboxRow"/> that names the entity type its rows have in
+/// sf_sync_state (<see cref="IInboxRow"/>), a <c>DbSet</c> here and its <see cref="ConfigureInbox{TRow}"/> line in
+/// <see cref="OnModelCreating"/>, with its table; then a migration (<c>dotnet ef migrations add ...</c>) creates it.
 /// </para>
 /// </summary>
 public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(options)
 {
-    private const string EntityTypeAnnotation = "SalesforceSync:EntityType";
-
     public DbSet<AccountInboxRow> AccountInbox => Set<AccountInboxRow>();
 
     public DbSet<AccountRelationshipInboxRow> AccountRelationshipInbox => Set<AccountRelationshipInboxRow>();
@@ -41,13 +39,6 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
     public string TableOf<TRow>() where TRow : InboxRow
     {
         return Model.FindEntityType(typeof(TRow))?.GetTableName()
-               ?? throw new InvalidOperationException($"{typeof(TRow).Name} is not mapped in {nameof(SyncDbContext)}");
-    }
-
-    /// <summary>The entity type of a row type's entities in sf_sync_state (its strategy's type name, e.g. "account").</summary>
-    public string EntityTypeOf<TRow>() where TRow : InboxRow
-    {
-        return Model.FindEntityType(typeof(TRow))?.FindAnnotation(EntityTypeAnnotation)?.Value as string
                ?? throw new InvalidOperationException($"{typeof(TRow).Name} is not mapped in {nameof(SyncDbContext)}");
     }
 
@@ -69,10 +60,9 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
     {
         // The base is only shared code: without this, EF would make it an entity and map the rows as one hierarchy
         modelBuilder.Ignore<InboxRow>();
-        modelBuilder.Entity<AccountInboxRow>(entity => ConfigureInbox(entity, "sf_account_inbox", AccountSync.Type));
-        modelBuilder.Entity<AccountRelationshipInboxRow>(entity =>
-            ConfigureInbox(entity, "sf_account_relationship_inbox", AccountRelationshipSync.Type));
-        modelBuilder.Entity<ContactInboxRow>(entity => ConfigureInbox(entity, "sf_contact_inbox", ContactSync.Type));
+        modelBuilder.Entity<AccountInboxRow>(entity => ConfigureInbox(entity, "sf_account_inbox"));
+        modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
+        modelBuilder.Entity<ContactInboxRow>(entity => ConfigureInbox(entity, "sf_contact_inbox"));
 
         // Every synced entity's sync state, one row per (entity type, entity id) for all object types. Claiming an
         // entity is locking and leasing its row here; the inboxes hold the events only.
@@ -120,9 +110,9 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
     /// default are left out of an insert while they hold the CLR default, so a new row gets the database's clock and
     /// 'pending'.
     /// </summary>
-    private static void ConfigureInbox<TRow>(EntityTypeBuilder<TRow> entity, string table, string entityType) where TRow : InboxRow
+    private static void ConfigureInbox<TRow>(EntityTypeBuilder<TRow> entity, string table) where TRow : InboxRow
     {
-        entity.ToTable(table).HasAnnotation(EntityTypeAnnotation, entityType);
+        entity.ToTable(table);
         VacuumOften(entity);
         entity.HasKey(r => r.Id).HasName($"{table}_pkey");
         entity.Property(r => r.Id).UseSerialColumn();

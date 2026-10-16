@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Npgsql;
@@ -68,20 +70,18 @@ public static class DbContextFactoryExtensions
 }
 
 /// <summary>
-/// The statements EF can't express, run as written: named parameters (<c>@name</c>) in the text, an
-/// <see cref="NpgsqlParameter"/> each. They join the context's current transaction, if any.
+/// The statements EF can't express, run as written: named parameters (<c>@name</c>) in the text, bound from the
+/// properties of an object (<c>new { entityType, token }</c>), one <see cref="NpgsqlParameter"/> each. They join the
+/// context's current transaction, if any.
 /// </summary>
 public static class SqlCommands
 {
-    public static NpgsqlParameter Param(string name, object? value)
-    {
-        return new(name, value ?? DBNull.Value);
-    }
+    private static readonly ConcurrentDictionary<Type, PropertyInfo[]> Properties = new();
 
     /// <returns>Rows affected.</returns>
-    public static Task<int> ExecuteAsync(this DatabaseFacade db, string sql, CancellationToken ct, params NpgsqlParameter[] args)
+    public static Task<int> ExecuteAsync(this DatabaseFacade db, string sql, CancellationToken ct, object? args = null)
     {
-        return db.ExecuteSqlRawAsync(sql, args, ct);
+        return db.ExecuteSqlRawAsync(sql, Params(args), ct);
     }
 
     /// <summary>
@@ -89,13 +89,24 @@ public static class SqlCommands
     /// other type is matched by column name (case-insensitively) or <c>[Column]</c>. Read as is, never composed with
     /// further LINQ: EF would then wrap the statement in a subquery.
     /// </summary>
-    public static Task<List<T>> QueryAsync<T>(this DatabaseFacade db, string sql, CancellationToken ct, params NpgsqlParameter[] args)
+    public static Task<List<T>> QueryAsync<T>(this DatabaseFacade db, string sql, CancellationToken ct, object? args = null)
     {
-        return db.SqlQueryRaw<T>(sql, args).ToListAsync(ct);
+        return db.SqlQueryRaw<T>(sql, Params(args)).ToListAsync(ct);
     }
 
-    public static async Task<T> QuerySingleAsync<T>(this DatabaseFacade db, string sql, CancellationToken ct, params NpgsqlParameter[] args)
+    public static async Task<T> QuerySingleAsync<T>(this DatabaseFacade db, string sql, CancellationToken ct, object? args = null)
     {
         return (await db.QueryAsync<T>(sql, ct, args)).Single();
+    }
+
+    /// <summary>One parameter per property of <paramref name="args"/>, named after it (new { entityId } binds @entityId).</summary>
+    private static NpgsqlParameter[] Params(object? args)
+    {
+        if (args is null)
+        {
+            return [];
+        }
+        var properties = Properties.GetOrAdd(args.GetType(), type => type.GetProperties());
+        return [.. properties.Select(p => new NpgsqlParameter(p.Name, p.GetValue(args) ?? DBNull.Value))];
     }
 }

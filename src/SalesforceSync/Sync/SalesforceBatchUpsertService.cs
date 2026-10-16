@@ -65,7 +65,7 @@ public sealed class SalesforceBatchUpsertService(
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
     public async Task<int> UpsertBatchAsync<TEvent, TRow>(UpsertStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
-        where TRow : InboxRow, new()
+        where TRow : InboxRow, IInboxRow, new()
     {
         await using var admission = await gate.TryEnterAsync(ct);
         if (admission is null)

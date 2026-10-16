@@ -92,13 +92,14 @@ model defines every table in `OnModelCreating` (partial indexes with `HasFilter`
 column, and a unit test fails when the model has changed without a migration. Every inbox table has the same columns, so
 they all live on the abstract `InboxRow`; `AccountInboxRow`, `AccountRelationshipInboxRow` and `ContactInboxRow` only
 name their tables (independent entity types, no shared table) and their entity type in `sf_sync_state` (`SyncState`), and
-the one `InboxRepository<TRow>` (`IRepository<TRow>`, registered as an open generic) serves them all. The table name and
-the entity type come from the EF model. What EF can express is LINQ (`ExecuteUpdate` for the lease-conditional outcomes
-superseded, released, held and deferred, and for releasing a lost claim attempt's leases; the rate limiter's usage
-count and writes); storing an event, the claim, done, fail, dead-letter and the end of a lease are the SQL texts of
-`InboxSql` run unchanged through `Database.SqlQueryRaw` / `ExecuteSqlRaw` with named `NpgsqlParameter`s, since
-`FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have no LINQ form. The rate limiter's
-`RateLimitSql` only locks its row (`FOR UPDATE`) and reads the database clock.
+the one `InboxRepository<TRow>` (`IRepository<TRow>`, registered as an open generic) serves them all. The table name
+comes from the EF model, the entity type from the row type (`IInboxRow.EntityType`, a static property). What EF can
+express is LINQ (`ExecuteUpdate` for the lease-conditional outcomes superseded, released, held and deferred, and for
+releasing a lost claim attempt's leases; the rate limiter's usage count and writes); storing an event, the claim, done,
+fail, dead-letter and the end of a lease are the SQL texts of `InboxSql` run unchanged through
+`Database.SqlQueryRaw` / `ExecuteSqlRaw`, their `@name` parameters bound from an anonymous object's properties
+(`new { entityType, token }`), since `FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have
+no LINQ form. The rate limiter's `RateLimitSql` only locks its row (`FOR UPDATE`) and reads the database clock.
 
 ### The Describe cache
 
@@ -876,9 +877,13 @@ public sealed class AccountRelationshipSObject
 }
 
 // 3. Inbox row: the object's inbox table. Every column is on InboxRow, so every object's inbox has the same fields
-public sealed class AccountRelationshipInboxRow : InboxRow;
+//    and the entity type of its entities in sf_sync_state (IInboxRow)
+public sealed class AccountRelationshipInboxRow : InboxRow, IInboxRow
+{
+    public static string EntityType => AccountRelationshipSync.Type;
+}
 //    ... and in SyncDbContext: a DbSet<AccountRelationshipInboxRow>, and in OnModelCreating
-//    ConfigureInbox(modelBuilder.Entity<AccountRelationshipInboxRow>(), "sf_account_relationship_inbox", AccountRelationshipSync.Type);
+//    modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
 //    Then a migration creates the table: dotnet ef migrations add <Name> --project src/SalesforceSync --output-dir Data/Migrations
 
 // 4. Mapping and strategy: how to read an event (id, time, type), event -> records, and what to read

@@ -14,7 +14,6 @@ using SalesforceSync.Inbox;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
-using static SalesforceSync.Data.SqlCommands;
 
 namespace SalesforceSync.Benchmarks;
 
@@ -194,8 +193,14 @@ public abstract class DrainBenchmarkBase
         await using var db = await _contexts.CreateDbContextAsync(ct);
         foreach (var e in _events)
         {
-            await db.Database.ExecuteAsync(InboxSql.For(e.Table).Store, ct, Param("entityType", e.Type), Param("entityId", e.EntityId),
-                Param("eventTime", e.EventTime), Param("payload", e.Payload), Param("coalesceDelay", TimeSpan.FromMilliseconds(CoalesceDelayMs)));
+            await db.Database.ExecuteAsync(InboxSql.For(e.Table).Store, ct, new
+            {
+                entityType = e.Type,
+                entityId = e.EntityId,
+                eventTime = e.EventTime,
+                payload = e.Payload,
+                coalesceDelay = TimeSpan.FromMilliseconds(CoalesceDelayMs)
+            });
         }
     }
 
