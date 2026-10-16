@@ -102,21 +102,18 @@ public sealed class OptionsValidationTests
 
     private sealed class AtTheLimitsRow : IInboxRow
     {
-        public static string EntityType => "test";
         public static int MaxValuesPerQuery => 2_000;
         public static int MaxRecordsPerWrite => 200;
     }
 
     private sealed class TooManyValuesRow : IInboxRow
     {
-        public static string EntityType => "test";
         public static int MaxValuesPerQuery => 2_001;
         public static int MaxRecordsPerWrite => 200;
     }
 
     private sealed class NoRecordsRow : IInboxRow
     {
-        public static string EntityType => "test";
         public static int MaxValuesPerQuery => 100;
         public static int MaxRecordsPerWrite => 0;
     }

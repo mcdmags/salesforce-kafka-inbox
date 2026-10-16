@@ -4,21 +4,26 @@ using System.Text.RegularExpressions;
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// The statements for one inbox table (one per synced object type, all the same shape; see SyncDbContext) and its
-/// entities' rows in sf_sync_state. An inbox has one row per entity (entity_id is unique) that holds the entity's
-/// newest event: a newer event overwrites it (<see cref="Template.Store"/>). No statement reads inside the payload: an
+/// The statements for one inbox table (one per synced object type, all the same shape; see SyncDbContext). An inbox has
+/// one row per entity (entity_id is unique) that holds the entity's newest event, a newer event overwriting it
+/// (<see cref="Template.Store"/>), and the entity's sync state: when it is due (next_attempt_at), the lease of the worker
+/// processing it (lock_token, locked_until) and its watermark (synced_time). No statement reads inside the payload: an
 /// event's entity is its entity_id column, its time its event_time column (both set by the consumer). An entity is
-/// claimed by locking and leasing its state row (lock_token, locked_until), so two workers can never hold one entity:
-/// they would lock the same row. Every statement is safe to run again after an unknown commit (see
-/// PostgresRetryStrategy): outcomes apply only while the claim's token holds the entity's state row, and only to rows
-/// that still hold the event the claim read (<see cref="Template.Unchanged"/>). Outcome statements take arrays, so
-/// recording a batch costs a fixed number of round trips, not two per entity.
+/// claimed by locking and leasing its row, so two workers can never hold one entity: they would lock the same row.
+/// <para>
+/// Every outcome statement updates only the claimed rows that its claim's token still holds and that still hold the
+/// event the claim read (<see cref="Template.StillClaimed"/>), and ends their lease. The consumer writes the same row, so
+/// Postgres's row lock orders the two (see <see cref="Template.StillClaimed"/>). Every statement is safe to run again after an
+/// unknown commit (see PostgresRetryStrategy): storing the same event again is harmless (see
+/// InboxRepository.AddAsync), a retried claim first releases what the lost attempt leased (InboxRepository.ClaimAsync),
+/// and an outcome's first run ended the lease, so a second finds no row it holds. Outcome statements take arrays, so
+/// recording a batch costs a fixed number of round trips, not one per entity.
+/// </para>
 /// <para>
 /// Every lookup is by key: a primary key (= ANY of an array, never a join the planner could turn into a scan), the
 /// entity_id index, or the front of the ready index. With statistics as wrong as a queue's get (taken while
 /// everything was idle, or during a backlog that has since drained) these plans still don't change, so no planner
-/// setting is pinned. (A condition on the inbox's status next to "id = any(@ids)" is left out: it isn't needed, the
-/// row of an entity whose state row this token holds is pending.)
+/// setting is pinned.
 /// </para>
 /// </summary>
 public sealed partial class InboxSql
@@ -50,11 +55,13 @@ public sealed partial class InboxSql
     {
         Table = table;
         Store = Template.Store.Replace("{inbox}", table);
-        ClaimEvents = Template.ClaimEvents.Replace("{inbox}", table);
-        Unchanged = Template.Unchanged.Replace("{inbox}", table);
+        Claim = Template.Claim.Replace("{inbox}", table);
         Done = Template.Done.Replace("{inbox}", table);
+        Supersede = Template.Supersede.Replace("{inbox}", table);
+        Release = Template.Release.Replace("{inbox}", table);
         Fail = Template.Fail.Replace("{inbox}", table);
         Dead = Template.Dead.Replace("{inbox}", table);
+        Hold = Template.Hold.Replace("{inbox}", table);
         EndLease = Template.EndLease.Replace("{inbox}", table);
     }
 
@@ -63,14 +70,17 @@ public sealed partial class InboxSql
     /// <inheritdoc cref="Template.Store"/>
     public string Store { get; }
 
-    /// <inheritdoc cref="Template.ClaimEvents"/>
-    public string ClaimEvents { get; }
-
-    /// <inheritdoc cref="Template.Unchanged"/>
-    public string Unchanged { get; }
+    /// <inheritdoc cref="Template.Claim"/>
+    public string Claim { get; }
 
     /// <inheritdoc cref="Template.Done"/>
     public string Done { get; }
+
+    /// <inheritdoc cref="Template.Supersede"/>
+    public string Supersede { get; }
+
+    /// <inheritdoc cref="Template.Release"/>
+    public string Release { get; }
 
     /// <inheritdoc cref="Template.Fail"/>
     public string Fail { get; }
@@ -78,192 +88,173 @@ public sealed partial class InboxSql
     /// <inheritdoc cref="Template.Dead"/>
     public string Dead { get; }
 
+    /// <inheritdoc cref="Template.Hold"/>
+    public string Hold { get; }
+
     /// <inheritdoc cref="Template.EndLease"/>
     public string EndLease { get; }
-
-    /// <summary>
-    /// Picks and leases up to @batchSize due entities of @entityType, the longest-waiting first, and returns them with
-    /// their watermarks. FOR UPDATE SKIP LOCKED: an entity another transaction is claiming, recording or storing an
-    /// event of is skipped, not waited for. Under READ COMMITTED a row whose lease another worker committed after this
-    /// statement's snapshot is re-checked on its new version when it is locked, and dropped because it is leased now;
-    /// so one entity is never leased twice (ClaimRaceTests). The lease
-    /// leaves next_attempt_at as it was: the lock_token/locked_until check keeps a leased entity out, and an expired
-    /// lease is taken over without anyone resetting it. The picked ids are an array, not a CTE joined back: with
-    /// statistics from a backlog, the join was planned as a hash join over a scan of the whole table.
-    /// </summary>
-    public const string ClaimEntities = """
-        update sf_sync_state s
-        set locked_until = now() + @lease, lock_token = @token
-        where s.entity_type = @entityType
-          and s.entity_id = any(array(
-            select d.entity_id from sf_sync_state d
-            where d.entity_type = @entityType and d.next_attempt_at <= now()
-              and (d.locked_until is null or d.locked_until < now())
-            order by d.next_attempt_at
-            limit @batchSize
-            for update skip locked))
-        returning s.entity_id as EntityId, s.synced_time as SyncedTime
-        """;
-
-    /// <summary>
-    /// First in every outcome transaction: locks the state rows of @entityIds that @token still holds, until the
-    /// transaction ends, and returns their ids. From then on no claim can take them over (it skips locked rows), and a
-    /// consumer storing an event of one of them waits for this transaction before it touches the entity's inbox row
-    /// (see <see cref="Template.Store"/> and <see cref="Template.EndLease"/>).
-    /// In entity_id order, so two transactions never lock the same rows in opposite orders.
-    /// </summary>
-    public const string LockHeld = """
-        select s.entity_id from sf_sync_state s
-        where s.entity_type = @entityType and s.entity_id = any(@entityIds) and s.lock_token = @token
-        order by s.entity_id
-        for update
-        """;
 
     /// <summary>The statements with <c>{inbox}</c> for the table name.</summary>
     public static class Template
     {
         /// <summary>
-        /// Stores one event (@entityId, @eventTime, @payload) and makes its entity due, in one statement. The entity's
-        /// inbox row is created, or overwritten unless it holds a newer event: an event is the full record, so the
-        /// newest is all the sync needs. Overwritten, the row is pending again with no attempts and no error, whatever
-        /// it was (done, superseded, dead, or claimed: see <see cref="Unchanged"/>). An event as new as the row's (a
-        /// Kafka redelivery) overwrites it too; its claim then finds it not newer than the watermark and ends it
-        /// superseded without a Salesforce call. An older event changes nothing in the inbox. A new entity's state row
-        /// is created, and a new or idle one (next_attempt_at null) is due after @coalesceDelay
+        /// Stores one event (@entityId, @eventTime, @payload) in one statement. The entity's row is created, or
+        /// overwritten unless it holds a newer event: an event is the full record, so the newest is all the sync needs.
+        /// Overwritten, the row is pending again with no attempts and no error, whatever it was (done, superseded, dead,
+        /// or claimed: see <see cref="StillClaimed"/>). An event as new as the row's (a Kafka redelivery) overwrites it too; its
+        /// claim then finds it not newer than the watermark and ends it superseded without a Salesforce call. An older
+        /// event changes nothing. A new or idle entity (next_attempt_at null) is due after @coalesceDelay
         /// (<see cref="SyncOptions.CoalesceDelay"/>), so the rest of a burst of its events overwrites the row before it
         /// is claimed and only the newest is written. An entity that is already due, backing off or held keeps its
-        /// time.
+        /// time. The watermark and the lease are left as they are: a worker that holds the entity keeps it.
         /// <para>
-        /// The state row is upserted first (the inbox insert reads from it), which takes its row lock: a store waits for
-        /// an outcome transaction that holds the entity's state row (<see cref="LockHeld"/>) before it touches the inbox
-        /// row, which is what makes storing safe against that transaction recording outcomes and ending the lease (see
-        /// <see cref="Unchanged"/> and <see cref="EndLease"/>).
+        /// Under READ COMMITTED the conflicting row is locked, and if another transaction is updating it (a claim or an
+        /// outcome), the store waits for that transaction and then applies to the row as it left it, its WHERE checked
+        /// on that version.
         /// </para>
         /// </summary>
         public const string Store = """
-            with state as (
-              insert into sf_sync_state as s (entity_type, entity_id, next_attempt_at)
-              values (@entityType, @entityId, now() + @coalesceDelay)
-              on conflict (entity_type, entity_id)
-              do update set next_attempt_at = coalesce(s.next_attempt_at, now() + @coalesceDelay)
-              returning s.entity_id
-            )
-            insert into {inbox} as i (entity_id, event_time, payload)
-            select state.entity_id, @eventTime, @payload::jsonb from state
+            insert into {inbox} as i (entity_id, event_time, payload, next_attempt_at)
+            values (@entityId, @eventTime, @payload::jsonb, now() + @coalesceDelay)
             on conflict (entity_id) do update
             set payload = excluded.payload, event_time = excluded.event_time, status = 'pending', attempt_count = 0,
-                last_error = null, last_error_code = null, received_at = now(), last_updated = now()
+                last_error = null, last_error_code = null, received_at = now(), last_updated = now(),
+                next_attempt_at = coalesce(i.next_attempt_at, excluded.next_attempt_at)
             where i.event_time <= excluded.event_time
             """;
 
         /// <summary>
-        /// The claimed entities' rows, if pending (at most one per entity, found by the entity_id index), returned with
-        /// their payloads and event times, each one's attempt_count bumped. Run after <see cref="ClaimEntities"/>, in a
-        /// statement of its own: it sees every event committed before the entities were locked.
+        /// Picks and leases up to @batchSize due rows, the longest-waiting first, bumps each one's attempt_count and
+        /// returns them with their payloads, event times and watermarks. FOR UPDATE SKIP LOCKED: a row another
+        /// transaction is claiming, recording or storing an event in is skipped, not waited for. Under READ COMMITTED
+        /// a row whose lease another worker committed after this statement's snapshot is re-checked on its new version
+        /// when it is locked, and dropped because it is leased now; so one entity is never leased twice
+        /// (ClaimRaceTests). Only pending rows are due: every outcome that finishes a row sets next_attempt_at null.
+        /// The lease leaves next_attempt_at as it was: the lock_token/locked_until check keeps a leased row out, and
+        /// an expired lease is taken over without anyone resetting it. The picked ids are an array, not a CTE joined
+        /// back: with statistics from a backlog, the join was planned as a hash join over a scan of the whole table.
         /// </summary>
-        public const string ClaimEvents = """
+        public const string Claim = """
             update {inbox} i
-            set attempt_count = i.attempt_count + 1, last_updated = now()
-            where i.entity_id = any(@entityIds) and i.status = 'pending'
-            returning i.id as RowId, i.entity_id as EntityId, i.payload::text as Payload, i.event_time as EventTime
+            set locked_until = now() + @lease, lock_token = @token, attempt_count = i.attempt_count + 1, last_updated = now()
+            where i.id = any(array(
+              select d.id from {inbox} d
+              where d.next_attempt_at <= now() and (d.locked_until is null or d.locked_until < now())
+              order by d.next_attempt_at
+              limit @batchSize
+              for update skip locked))
+            returning i.id as RowId, i.entity_id as EntityId, i.payload::text as Payload, i.event_time as EventTime,
+                      i.synced_time as SyncedTime
             """;
 
         /// <summary>
-        /// Second in every outcome transaction, after <see cref="LockHeld"/>: of the claimed rows (@ids, with the
-        /// event_time @times the claim read for each), the ids of those that still hold that event. A row the consumer
-        /// overwrote with a newer event after the claim is not among them, and no outcome is recorded on it: it stays
-        /// pending with the newer event, Done doesn't move the watermark to it, and <see cref="EndLease"/> makes its
-        /// entity due again. Checked once per transaction: no store can change these rows before it ends, since storing
-        /// locks the entity's state row first (<see cref="Store"/>) and this transaction holds that lock. Each row is
-        /// looked up by primary key; the times are compared as timestamptz, exactly: @times are the values the claim read
-        /// back from the column.
+        /// The WHERE of every outcome statement: of the claimed rows (@ids, with the event_time @times the claim read
+        /// for each), those that @token still holds and that still hold that event. A worker whose lease expired
+        /// records nothing; a row the consumer overwrote with a newer event after the claim gets no outcome: it stays
+        /// pending with the newer event, Done doesn't move the watermark to it, and <see cref="EndLease"/> ends its
+        /// lease, leaving it due. Each row is looked up by primary key; the times are compared as timestamptz, exactly:
+        /// @times are the values the claim read back from the column.
+        /// <para>
+        /// Why an outcome and a store can't interleave: both update the entity's one row, so Postgres's row lock orders
+        /// them. A store that committed before the outcome statement read the row changed its event_time, and the row
+        /// doesn't match. One that has the row locked makes the outcome statement wait; under READ COMMITTED the
+        /// statement then checks this WHERE again on the row the store left (EvalPlanQual), whose event_time differs.
+        /// One that comes later waits for the outcome's transaction and then overwrites the finished row: pending again,
+        /// and due (next_attempt_at, null once finished, becomes now + @coalesceDelay).
+        /// </para>
         /// </summary>
-        public const string Unchanged = """
-            select c.id from unnest(@ids, @times) as c(id, event_time)
-            where exists (select 1 from {inbox} i where i.id = c.id and i.event_time = c.event_time)
+        public const string StillClaimed = """
+            i.id = any(@ids) and i.lock_token = @token
+              and exists (select 1 from unnest(@ids, @times) as c(id, event_time) where c.id = i.id and c.event_time = i.event_time)
             """;
 
         /// <summary>
-        /// The entities' events are in Salesforce: their rows are done, and each entity's watermark moves to
-        /// the event's time (its event_time in microseconds since the epoch; extract returns numeric, so exactly), never
-        /// back. Like every outcome, only while @token holds the entity's state row, so a worker whose lease expired
-        /// neither completes events nor moves the watermark.
+        /// The rows' events are in Salesforce: done, and each one's watermark moves to the event's time (its event_time
+        /// in microseconds since the epoch; extract returns numeric, so exactly), never back. The lease ends and the
+        /// entity is idle until a consumer stores its next event.
         /// </summary>
-        public const string Done = """
-            with done as (
-              update {inbox} i
-              set status = 'done', last_updated = now(), last_error = null, last_error_code = null
-              where i.id = any(@ids)
-                and exists (select 1 from sf_sync_state h
-                            where h.entity_type = @entityType and h.entity_id = i.entity_id and h.lock_token = @token)
-              returning i.entity_id, (extract(epoch from i.event_time) * 1000000)::bigint as synced_time
-            )
-            update sf_sync_state s
-            set synced_time = greatest(s.synced_time, done.synced_time)
-            from done
-            where s.entity_type = @entityType and s.entity_id = done.entity_id
+        public const string Done = $$"""
+            update {inbox} i
+            set status = 'done', last_updated = now(), last_error = null, last_error_code = null,
+                synced_time = greatest(i.synced_time, (extract(epoch from i.event_time) * 1000000)::bigint),
+                next_attempt_at = null, locked_until = null, lock_token = null
+            where {{StillClaimed}}
+            """;
+
+        /// <summary>Not written (an event as new was already synced): the row leaves the queue, and the lease ends.</summary>
+        public const string Supersede = $$"""
+            update {inbox} i
+            set status = 'superseded', last_updated = now(), last_error = null, last_error_code = null,
+                next_attempt_at = null, locked_until = null, lock_token = null
+            where {{StillClaimed}}
             """;
 
         /// <summary>
-        /// Transient failure: the rows stay pending (dead-lettered once a row was claimed @maxRetries times) and their
-        /// entities back off exponentially, by the row's attempt_count. @errors is a JSON object, row id -> [error,
-        /// code], so a whole batch's failures are one statement. The events are found by primary
-        /// key like every other outcome; the object is an uncorrelated scalar subquery, which Postgres evaluates once
-        /// per statement and then only looks up a key in per row. (Joined in as a one-row CTE it was copied once per
-        /// row: 230 ms for 5,000 rows.)
+        /// Not attempted (skipped because of another entity's record): the lease ends and the row is due again, with no
+        /// attempt spent.
         /// </summary>
-        public const string Fail = """
-            with failed as (
-              update {inbox} i
-              set last_updated = now(),
-                  last_error = (select @errors::jsonb) -> i.id::text ->> 0,
-                  last_error_code = (select @errors::jsonb) -> i.id::text ->> 1,
-                  status = case when i.attempt_count >= @maxRetries then 'dead' else 'pending' end
-              where i.id = any(@ids)
-                and exists (select 1 from sf_sync_state h
-                            where h.entity_type = @entityType and h.entity_id = i.entity_id and h.lock_token = @token)
-              returning i.entity_id, i.attempt_count
-            )
-            update sf_sync_state s
-            set next_attempt_at = now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, failed.attempt_count - 1)))
-            from failed
-            where s.entity_type = @entityType and s.entity_id = failed.entity_id
+        public const string Release = $$"""
+            update {inbox} i
+            set attempt_count = greatest(i.attempt_count - 1, 0), last_updated = now(),
+                next_attempt_at = greatest(i.next_attempt_at, now()), locked_until = null, lock_token = null
+            where {{StillClaimed}}
             """;
 
-        /// <summary>Permanent failure: retrying the same data can't succeed, dead-letter now. @errors as in <see cref="Fail"/>.</summary>
-        public const string Dead = """
+        /// <summary>
+        /// Transient failure: the rows stay pending and back off exponentially, by their attempt_count, or are
+        /// dead-lettered (and idle) once claimed @maxRetries times; the lease ends. @errors is a JSON object, row id ->
+        /// [error, code], so a whole batch's failures are one statement. The object is an uncorrelated scalar subquery,
+        /// which Postgres evaluates once per statement and then only looks up a key in per row. (Joined in as a one-row
+        /// CTE it was copied once per row: 230 ms for 5,000 rows.)
+        /// </summary>
+        public const string Fail = $$"""
             update {inbox} i
             set last_updated = now(),
                 last_error = (select @errors::jsonb) -> i.id::text ->> 0,
                 last_error_code = (select @errors::jsonb) -> i.id::text ->> 1,
-                status = 'dead'
-            where i.id = any(@ids)
-              and exists (select 1 from sf_sync_state h
-                          where h.entity_type = @entityType and h.entity_id = i.entity_id and h.lock_token = @token)
+                status = case when i.attempt_count >= @maxRetries then 'dead' else 'pending' end,
+                next_attempt_at = case when i.attempt_count < @maxRetries
+                                       then now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count - 1))) end,
+                locked_until = null, lock_token = null
+            where {{StillClaimed}}
             """;
 
         /// <summary>
-        /// Last in an outcome transaction: ends the lease on @entityIds. An entity whose row is still pending (retried,
-        /// released, or overwritten by a newer event during the lease) is due again: now, or when a failure's backoff
-        /// (<see cref="Fail"/>) ends, whichever is later; one whose row is finished is idle (next_attempt_at null) until
-        /// a consumer stores its next event. A row overwritten during the lease gets no coalesce delay
-        /// (<see cref="Store"/>): its event has already waited as long as the batch's Salesforce calls took, and newer
-        /// events that arrive before the next claim overwrite it anyway.
-        /// <para>
-        /// Why an event stored meanwhile is never left behind: storing upserts the entity's state row
-        /// (<see cref="Store"/>), and this transaction locked that row first (<see cref="LockHeld"/>). A store that got
-        /// the row lock before that had committed by the time this transaction got it, so this statement, which takes
-        /// its snapshot later, sees the pending row and keeps the entity due. A store that comes later waits for this
-        /// transaction to commit, then overwrites the inbox row as it was left and makes the idle entity due:
-        /// next_attempt_at null becomes now + @coalesceDelay.
-        /// </para>
+        /// Permanent failure: retrying the same data can't succeed, dead-letter now (idle; the lease ends). @errors as
+        /// in <see cref="Fail"/>.
+        /// </summary>
+        public const string Dead = $$"""
+            update {inbox} i
+            set last_updated = now(),
+                last_error = (select @errors::jsonb) -> i.id::text ->> 0,
+                last_error_code = (select @errors::jsonb) -> i.id::text ->> 1,
+                status = 'dead', next_attempt_at = null, locked_until = null, lock_token = null
+            where {{StillClaimed}}
+            """;
+
+        /// <summary>
+        /// The write's outcome is unknown: the rows stay pending with @error and @code, no attempt spent, and are not
+        /// due before @hold has passed; the lease ends, so the old worker can't record anything on them either.
+        /// </summary>
+        public const string Hold = $$"""
+            update {inbox} i
+            set attempt_count = greatest(i.attempt_count - 1, 0), last_updated = now(), last_error = @error, last_error_code = @code,
+                next_attempt_at = now() + @hold, locked_until = null, lock_token = null
+            where {{StillClaimed}}
+            """;
+
+        /// <summary>
+        /// Last in an outcome transaction: ends the lease on the claimed rows (@ids) that @token still holds after the
+        /// outcomes, which are the rows a newer event overwrote during the lease (see <see cref="StillClaimed"/>). They are
+        /// pending and stay due (the store kept next_attempt_at, which the claim left set), now or after @delay (the
+        /// hold, when the claim is held: see <see cref="Hold"/>; else zero), whichever is later. Such a row gets no
+        /// coalesce delay (<see cref="Store"/>): its event has already waited as long as the batch's Salesforce calls
+        /// took, and newer events that arrive before the next claim overwrite it anyway.
         /// </summary>
         public const string EndLease = """
-            update sf_sync_state s
-            set locked_until = null, lock_token = null,
-                next_attempt_at = case when exists (select 1 from {inbox} i where i.entity_id = s.entity_id and i.status = 'pending')
-                                       then greatest(s.next_attempt_at, now()) end
-            where s.entity_type = @entityType and s.entity_id = any(@entityIds) and s.lock_token = @token
+            update {inbox} i
+            set locked_until = null, lock_token = null, next_attempt_at = greatest(i.next_attempt_at, now() + @delay)
+            where i.id = any(@ids) and i.lock_token = @token
             """;
     }
 }

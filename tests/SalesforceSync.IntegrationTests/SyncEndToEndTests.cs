@@ -224,17 +224,17 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Watermark_is_the_synced_time_of_the_entitys_sync_state()
+    public async Task Watermark_is_the_synced_time_of_the_entitys_row()
     {
         var acct = SyncFixture.NewAccountId();
-        // As an earlier sync (or the upgrade from watermarks in the inboxes) leaves it: idle, v5 synced
+        // Set up by hand: a pending v4 whose entity has v5 synced. The claim reads the row's watermark with its event.
+        var v4 = SyncFixture.AccountEvent(acct, 4, new JsonObject { ["name"] = "v4" }, []);
         await using (var conn = await app.Db.OpenConnectionAsync())
         {
-            await conn.ExecuteAsync("insert into sf_sync_state (entity_type, entity_id, synced_time) values ('account', @acct, @time)",
-                new { acct, time = SyncFixture.SyncedTime(5) });
+            await conn.ExecuteAsync(
+                $"insert into {SyncFixture.InboxTable()} (entity_id, payload, event_time, next_attempt_at, synced_time) values (@acct, @payload::jsonb, @time, now(), @synced)",
+                new { acct, payload = v4.ToJsonString(), time = SyncFixture.TimeOf(v4).UtcDateTime, synced = SyncFixture.SyncedTime(5) });
         }
-
-        await app.PublishAsync(acct, 4, new JsonObject { ["name"] = "v4" }, []);
 
         (await app.WaitForInboxSettledAsync(acct, version: 4)).Should().Be((4L, "superseded"));
         (await app.GetRecordAsync("Account", acct)).Should().BeNull("v4 is not newer than v5, the watermark, so it is not written");

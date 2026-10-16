@@ -420,30 +420,31 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// The entity's inbox row (it has one at most: a newer event overwrites it), with its entity's lease (from
-    /// sf_sync_state), or null. The version is read here from the stored payload, like the worker does (in C#, not in SQL).
+    /// The entity's inbox row (it has one at most: a newer event overwrites it), or null. The version is read here from
+    /// the stored payload, like the worker does (in C#, not in SQL).
     /// </summary>
     public async Task<InboxRow?> GetInboxRowAsync(string key, string entityType = Accounts)
     {
         await using var conn = await Db.OpenConnectionAsync();
-        var rows = await conn.QueryAsync<(long Id, string Payload, string Status, int AttemptCount, string? ErrorCode, DateTime? LockedUntil, Guid? LockToken)>(
-            $"""
-            select i.id, i.payload::text, i.status, i.attempt_count, i.last_error_code, s.locked_until, s.lock_token
-            from {InboxTable(entityType)} i
-            left join sf_sync_state s on s.entity_type = @entityType and s.entity_id = i.entity_id
-            where i.entity_id = @key
-            """, new { key, entityType });
-        return rows.Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.LockedUntil, r.LockToken))
+        var rows = await conn.QueryAsync<StoredRow>(
+            $"select id, payload::text, status, attempt_count, last_error_code, next_attempt_at, locked_until, lock_token from {InboxTable(entityType)} where entity_id = @key",
+            new { key });
+        return rows.Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockedUntil,
+                r.LockToken))
             .SingleOrDefault();
     }
 
-    /// <summary>The entity's sf_sync_state row, if it has one.</summary>
+    /// <summary>An inbox row as read, its payload as stored.</summary>
+    private sealed record StoredRow(long Id, string Payload, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
+        DateTime? LockedUntil, Guid? LockToken);
+
+    /// <summary>The sync state of the entity's inbox row, if it has one.</summary>
     public async Task<SyncStateRow?> GetSyncStateAsync(string key, string entityType = Accounts)
     {
         await using var conn = await Db.OpenConnectionAsync();
         return (await conn.QueryAsync<SyncStateRow>(
-            "select next_attempt_at, locked_until, lock_token, synced_time from sf_sync_state where entity_type = @entityType and entity_id = @key",
-            new { key, entityType })).SingleOrDefault();
+            $"select next_attempt_at, locked_until, lock_token, synced_time from {InboxTable(entityType)} where entity_id = @key",
+            new { key })).SingleOrDefault();
     }
 
     private static long VersionOf(string payload)
@@ -462,7 +463,7 @@ public class SyncFixture : IAsyncLifetime
         await using var tx = await conn.BeginTransactionAsync();
         foreach (var e in events)
         {
-            await conn.StoreAsync(InboxTable(), Accounts, entityId, TimeOf(e), e.ToJsonString(), tx);
+            await conn.StoreAsync(InboxTable(), entityId, TimeOf(e), e.ToJsonString(), tx);
         }
         await tx.CommitAsync();
     }
@@ -523,13 +524,11 @@ public class SyncFixture : IAsyncLifetime
     }
 }
 
-/// <summary>
-/// An inbox row as the tests see it; <paramref name="Version"/> comes from the payload's meta.time, the lease from its
-/// entity's sf_sync_state row.
-/// </summary>
-public sealed record InboxRow(long Id, long Version, string Status, int AttemptCount, string? ErrorCode, DateTime? LockedUntil, Guid? LockToken);
+/// <summary>An inbox row as the tests see it; <paramref name="Version"/> comes from the payload's meta.time.</summary>
+public sealed record InboxRow(long Id, long Version, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
+    DateTime? LockedUntil, Guid? LockToken);
 
-/// <summary>An entity's sf_sync_state row as the tests see it.</summary>
+/// <summary>The sync state of an entity's inbox row as the tests see it.</summary>
 public sealed record SyncStateRow(DateTime? NextAttemptAt, DateTime? LockedUntil, Guid? LockToken, long? SyncedTime);
 
 [CollectionDefinition(Name)]

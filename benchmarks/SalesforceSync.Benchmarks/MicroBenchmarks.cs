@@ -16,8 +16,6 @@ public class MicroBenchmarks
 {
     private static readonly UpsertStrategy<AccountEvent> Accounts = AccountSync.Strategy;
 
-    private static readonly Dictionary<string, long> NothingSynced = [];
-
     private List<InboxEvent> _tenEvents = default!;
     private AccountPayload _payload = default!;
     private AccountSObject _sobject = default!;
@@ -63,7 +61,8 @@ public class MicroBenchmarks
                     }
                 }
             }.ToJsonString(),
-            EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero)))];
+            EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero),
+            SyncedTime: null))];
 
         _payload = JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchUpsertService.EventJson)!.Account!;
         _sobject = AccountSync.ToAccount(_payload);
@@ -76,7 +75,7 @@ public class MicroBenchmarks
     [Benchmark]
     public int PrepareTenEntities()
     {
-        return PreparedBatch.Prepare(Accounts, _tenEvents, NothingSynced).Work.Count;
+        return PreparedBatch.Prepare(Accounts, _tenEvents).Work.Count;
     }
 
     /// <summary>What the consumer does per message: typed read + validation (entity id, event time).</summary>

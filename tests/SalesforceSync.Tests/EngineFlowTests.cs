@@ -45,12 +45,10 @@ public sealed class EngineFlowTests
     {
         _inbox.Rows.AddRange(
         [
-            Row(2, "ACC-1", "2026-10-14T02:00:00Z", "new"),
+            Row(2, "ACC-1", "2026-10-14T02:00:00Z", "new") with { SyncedTime = PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z")) },
             Invalid(3, "ACC-2"),
-            Row(4, "ACC-3", "2026-10-14T01:00:00Z"),
+            Row(4, "ACC-3", "2026-10-14T01:00:00Z") with { SyncedTime = PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z")) },
         ]);
-        _inbox.Synced["ACC-1"] = PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
-        _inbox.Synced["ACC-3"] = PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
 
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(3);
 
@@ -153,7 +151,7 @@ public sealed class EngineFlowTests
     {
         return new(id, contact,
         $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""",
-            DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
+            DateTimeOffset.Parse("2026-10-14T01:00:00Z"), null);
     }
 
     // ---------- A batch written in more than one call ----------
@@ -369,20 +367,20 @@ public sealed class EngineFlowTests
     {
         return new(id, account,
         $$"""{ "meta": { "time": "{{time}}", "type": "updated" }, "account": { "externalId": "{{account}}", "name": "{{name}}", "profile": { "tier": "{{tier}}" } } }""",
-            DateTimeOffset.Parse(time));
+            DateTimeOffset.Parse(time), null);
     }
 
     private static InboxEvent Row(long id, string account, string time, string name = "Acme")
     {
         return new(id, account,
         $$"""{ "meta": { "time": "{{time}}", "type": "inserted" }, "account": { "externalId": "{{account}}", "name": "{{name}}" } }""",
-            DateTimeOffset.Parse(time));
+            DateTimeOffset.Parse(time), null);
     }
 
     /// <summary>A row whose payload can't be read.</summary>
     private static InboxEvent Invalid(long id, string account)
     {
-        return new(id, account, "not json", DateTimeOffset.UnixEpoch);
+        return new(id, account, "not json", DateTimeOffset.UnixEpoch, null);
     }
 
     /// <summary>Lets requests through to the org, or fails all of them, the read, or the Nth write.</summary>
@@ -422,7 +420,6 @@ public sealed class EngineFlowTests
     private sealed class RecordingInbox : IRepository<AccountInboxRow>
     {
         public List<InboxEvent> Rows { get; } = [];
-        public Dictionary<string, long> Synced { get; } = [];
         public List<string> Calls { get; } = [];
         public BatchOutcomes? Recorded { get; private set; }
 
@@ -434,7 +431,7 @@ public sealed class EngineFlowTests
         public Task<InboxClaim> ClaimAsync(CancellationToken ct)
         {
             Calls.Add("claim");
-            return Task.FromResult(new InboxClaim(Guid.NewGuid(), Rows, Synced));
+            return Task.FromResult(new InboxClaim(Guid.NewGuid(), Rows));
         }
 
         public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)

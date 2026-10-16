@@ -10,11 +10,10 @@ using SalesforceSync.Sync.Upsert;
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// <see cref="IRepository{TEntity}"/> on Postgres, for any inbox row type: the store, claim, done and failure statements
-/// and the end of a lease are the <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL; the
-/// outcomes that are a plain conditional UPDATE are LINQ (<c>ExecuteUpdate</c>). The table comes from the EF model,
-/// the entity type (its entities' key in sf_sync_state) from the row type itself (<see cref="IInboxRow"/>). Each unit
-/// of work runs through EF's execution strategy (<see cref="PostgresRetryStrategy"/>).
+/// <see cref="IRepository{TEntity}"/> on Postgres, for any inbox row type: the store, claim and outcome statements and
+/// the end of a lease are the <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL; releasing
+/// a lost claim's leases is LINQ (<c>ExecuteUpdate</c>). The table comes from the EF model. Each unit of work runs
+/// through EF's execution strategy (<see cref="PostgresRetryStrategy"/>).
 /// </summary>
 public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TEntity>
     where TEntity : InboxRow, IInboxRow, new()
@@ -33,222 +32,151 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     {
         var time = PreparedBatch.ToWholeMicroseconds(eventTime);
         return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).Store, t,
-                new { entityType = TEntity.EntityType, entityId, eventTime = time, payload, coalesceDelay = _opt.CoalesceDelay }), ct);
+                new { entityId, eventTime = time, payload, coalesceDelay = _opt.CoalesceDelay }), ct);
     }
 
     /// <summary>
-    /// Locks and leases a batch of entities with their watermarks, then reads their pending rows, in one
-    /// transaction. A fresh token per attempt: if a commit's outcome is unknown and the claim is retried, entities
-    /// leased by the lost attempt are not mistaken for this one's. The retry releases them first, so they don't wait
-    /// for their lease to expire (and a lease nobody works on is never taken over). The transaction ends before
-    /// Salesforce is called: from then on the lease (lock_token, locked_until) protects the entities, not a lock.
+    /// Locks and leases a batch of due rows and reads them with their watermarks (<see cref="InboxSql.Template.Claim"/>),
+    /// in a transaction of its own, so the rows are read before the commit is sent. A fresh token per attempt: if a
+    /// commit's outcome is unknown and the claim is retried, rows leased by the lost attempt are not mistaken for this
+    /// one's. The retry releases them first, so they don't wait for their lease to expire (and a lease nobody works on
+    /// is never taken over). The transaction ends before Salesforce is called: from then on the lease (lock_token,
+    /// locked_until) protects the entities, not a lock.
     /// </summary>
     public Task<InboxClaim> ClaimAsync(CancellationToken ct)
     {
         var attempted = new List<Guid>();
-        var attemptedEntityIds = new HashSet<string>(StringComparer.Ordinal);
+        var attemptedRowIds = new HashSet<long>();
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
-            var sql = InboxSql.For(db.TableOf<TEntity>());
-            var type = TEntity.EntityType;
-
-            if (attemptedEntityIds.Count > 0)
+            if (attemptedRowIds.Count > 0)
             {
                 var lost = attempted.ToArray();
-                var lostEntityIds = attemptedEntityIds.ToArray();
-                await db.SyncStates
-                    .Where(s => s.EntityType == type && lostEntityIds.Contains(s.EntityId) && s.LockToken != null
-                                && lost.Contains(s.LockToken.Value))
+                var lostRowIds = attemptedRowIds.ToArray();
+                await db.Set<TEntity>()
+                    .Where(r => lostRowIds.Contains(r.Id) && r.LockToken != null && lost.Contains(r.LockToken.Value))
                     .ExecuteUpdateAsync(u => u
-                        .SetProperty(s => s.LockedUntil, (DateTimeOffset?)null)
-                        .SetProperty(s => s.LockToken, (Guid?)null), t);
+                        .SetProperty(r => r.LockedUntil, (DateTimeOffset?)null)
+                        .SetProperty(r => r.LockToken, (Guid?)null), t);
             }
 
             var token = Guid.NewGuid();
             attempted.Add(token);
-            var claimed = await db.Database.QueryAsync<ClaimedEntity>(InboxSql.ClaimEntities, t, new
+            var events = await db.Database.QueryAsync<InboxEvent>(InboxSql.For(db.TableOf<TEntity>()).Claim, t, new
             {
-                entityType = type,
                 token,
                 lease = _opt.Lease,
                 batchSize = Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)
             });
-            if (claimed.Count == 0)
-            {
-                return new InboxClaim(token, [], new Dictionary<string, long>());
-            }
-            var entityIds = claimed.Select(c => c.EntityId).ToArray();
-            attemptedEntityIds.UnionWith(entityIds);
-
-            var events = await db.Database.QueryAsync<InboxEvent>(sql.ClaimEvents, t, new { entityIds });
-            // Due without a pending row (finished by hand, say): idle again now, not leased for nothing
-            var idle = entityIds.Except(events.Select(e => e.EntityId), StringComparer.Ordinal).ToArray();
-            if (idle.Length > 0)
-            {
-                await EndLeaseAsync(db, sql, idle, token, t);
-            }
-            var synced = claimed.Where(c => c.SyncedTime is not null)
-                .ToDictionary(c => c.EntityId, c => c.SyncedTime!.Value, StringComparer.Ordinal);
-            return new InboxClaim(token, events, synced);
+            attemptedRowIds.UnionWith(events.Select(e => e.RowId));
+            return new InboxClaim(token, events);
         }, ct);
     }
 
     /// <summary>
     /// One statement per kind of outcome (not per entity), in the batch's second short transaction, then the leases
-    /// end. Safe to repeat: see <see cref="InLeaseAsync"/>.
+    /// end. Safe to repeat: see <see cref="InTransactionAsync"/>.
     /// </summary>
     public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
     {
         var token = claim.Token;
-        return InLeaseAsync(claim, async (db, sql, type, unchanged, t) =>
+        return InTransactionAsync(claim, TimeSpan.Zero, async (db, sql, t) =>
         {
-            var synced = Only(outcomes.Synced, unchanged);
-            if (synced.Length > 0)
+            var recorded = 0;
+            if (outcomes.Synced.Count > 0)
             {
-                await db.Database.ExecuteAsync(sql.Done, t, new { entityType = type, ids = synced, token });
+                recorded += await db.Database.ExecuteAsync(sql.Done, t,
+                    new { ids = outcomes.Synced.ToArray(), times = claim.TimesOf(outcomes.Synced), token });
             }
-            var superseded = Only(outcomes.Superseded, unchanged);
-            if (superseded.Length > 0)
+            if (outcomes.Superseded.Count > 0)
             {
-                await SupersedeAsync(db, type, superseded, token, t);
+                recorded += await db.Database.ExecuteAsync(sql.Supersede, t,
+                    new { ids = outcomes.Superseded.ToArray(), times = claim.TimesOf(outcomes.Superseded), token });
             }
-            var released = Only(outcomes.Released, unchanged);
-            if (released.Length > 0)
+            if (outcomes.Released.Count > 0)
             {
-                await ReleaseAsync(db, type, released, token, t);
+                recorded += await ReleaseAsync(db, sql, claim, outcomes.Released, t);
             }
-            var dead = Only(outcomes.Dead, unchanged);
-            if (dead.Count > 0)
+            if (outcomes.Dead.Count > 0)
             {
-                await db.Database.ExecuteAsync(sql.Dead, t,
-                    new { entityType = type, ids = Ids(dead), errors = ErrorsJson(dead), token });
+                var ids = Ids(outcomes.Dead);
+                recorded += await db.Database.ExecuteAsync(sql.Dead, t,
+                    new { ids, times = claim.TimesOf(ids), errors = ErrorsJson(outcomes.Dead), token });
             }
-            var failed = Only(outcomes.Failed, unchanged);
-            if (failed.Count > 0)
+            if (outcomes.Failed.Count > 0)
             {
-                await FailAsync(db, sql, type, failed, token, t);
+                recorded += await FailAsync(db, sql, claim, outcomes.Failed, t);
             }
-            await EndLeaseAsync(db, sql, claim.EntityIds, token, t);
+            return recorded;
         }, ct);
     }
 
     /// <summary>
     /// The write's outcome is unknown: nobody may touch these entities until the hold has passed, by when Salesforce
-    /// has applied the lost write or dropped it. The rows stay pending and the entities leased, but under no token,
-    /// so the old worker can't record anything on them either; events arriving meanwhile wait too. No attempt is spent.
+    /// has applied the lost write or dropped it. The rows stay pending, not due before then, and no longer leased, so
+    /// the old worker can't record anything on them either; events arriving meanwhile wait too (a store keeps a row's
+    /// due time). No attempt is spent.
     /// </summary>
     public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
     {
         var hold = _opt.UnknownOutcomeHold;
-        var code = UnknownOutcomeException.Code;
-        var token = claim.Token;
-        var entityIds = claim.EntityIds;
-        return InLeaseAsync(claim, async (db, _, type, unchanged, t) =>
+        return InTransactionAsync(claim, hold, (db, sql, t) => db.Database.ExecuteAsync(sql.Hold, t, new
         {
-            await Held(db, type, [.. unchanged], token).ExecuteUpdateAsync(u => u
-                .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
-                .SetProperty(r => r.AttemptCount, r => Math.Max(r.AttemptCount - 1, 0))
-                .SetProperty(r => r.LastError, error)
-                .SetProperty(r => r.LastErrorCode, code), t);
-            await db.SyncStates
-                .Where(s => s.EntityType == type && entityIds.Contains(s.EntityId) && s.LockToken == token)
-                .ExecuteUpdateAsync(u => u
-                    .SetProperty(s => s.LockedUntil, _ => DateTimeOffset.UtcNow + hold)
-                    .SetProperty(s => s.NextAttemptAt, _ => DateTimeOffset.UtcNow + hold)
-                    .SetProperty(s => s.LockToken, (Guid?)null), t);
-        }, ct);
+            ids = claim.RowIds,
+            times = claim.EventTimes,
+            token = claim.Token,
+            error,
+            code = UnknownOutcomeException.Code,
+            hold
+        }), ct);
     }
 
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
     {
-        return InLeaseAsync(claim, async (db, sql, type, unchanged, t) =>
-        {
-            await FailAsync(db, sql, type, [.. unchanged.Select(id => new FailedEvent(id, error, code))], claim.Token, t);
-            await EndLeaseAsync(db, sql, claim.EntityIds, claim.Token, t);
-        }, ct);
+        return InTransactionAsync(claim, TimeSpan.Zero,
+            (db, sql, t) => FailAsync(db, sql, claim, [.. claim.RowIds.Select(id => new FailedEvent(id, error, code))], t), ct);
     }
 
     /// <summary>
-    /// Records outcomes in one transaction that first locks the claim's state rows its token still holds
-    /// (<see cref="InboxSql.LockHeld"/>). None: the lease was lost, or an attempt whose commit outcome was unknown
-    /// already recorded everything, and nothing is written. Every statement is also conditional on the token itself.
-    /// Then it reads which claimed rows still hold the event the claim read (<see cref="InboxSql.Template.Unchanged"/>):
-    /// <paramref name="record"/> gets their ids and records outcomes on those rows only. A row the consumer overwrote
-    /// with a newer event meanwhile is left pending as the consumer left it, and the lease's end makes its entity due.
+    /// Records outcomes in one transaction: <paramref name="record"/> runs the outcome statements, each of which updates
+    /// only the claimed rows this lease still holds that still hold the event the claim read
+    /// (<see cref="InboxSql.Template.StillClaimed"/>), and returns how many rows they updated. If that is fewer than the claim's,
+    /// <see cref="InboxSql.Template.EndLease"/> ends the lease on the rest (rows a newer event overwrote meanwhile),
+    /// due after <paramref name="delay"/> (the hold of a held claim, else zero). Safe to repeat: an attempt whose commit outcome was unknown, or a lease lost
+    /// meanwhile, leaves no row under this token, and nothing is written.
     /// </summary>
-    private Task InLeaseAsync(InboxClaim claim, Func<SyncDbContext, InboxSql, string, HashSet<long>, CancellationToken, Task> record,
+    private Task InTransactionAsync(InboxClaim claim, TimeSpan delay, Func<SyncDbContext, InboxSql, CancellationToken, Task<int>> record,
         CancellationToken ct)
     {
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
-            var type = TEntity.EntityType;
-            var held = await db.Database.QueryAsync<string>(InboxSql.LockHeld, t,
-                new { entityType = type, entityIds = claim.EntityIds, token = claim.Token });
-            if (held.Count > 0)
+            var sql = InboxSql.For(db.TableOf<TEntity>());
+            if (await record(db, sql, t) < claim.Events.Count)
             {
-                var sql = InboxSql.For(db.TableOf<TEntity>());
-                var unchanged = await db.Database.QueryAsync<long>(sql.Unchanged, t, new { ids = claim.RowIds, times = claim.EventTimes });
-                await record(db, sql, type, [.. unchanged], t);
+                await db.Database.ExecuteAsync(sql.EndLease, t, new { ids = claim.RowIds, token = claim.Token, delay });
             }
         }, ct);
     }
 
-    /// <summary>The ids that are <paramref name="unchanged"/>: the claimed rows an outcome may still be recorded on.</summary>
-    private static long[] Only(IEnumerable<long> ids, HashSet<long> unchanged)
-    {
-        return [.. ids.Where(unchanged.Contains)];
-    }
-
-    private static List<FailedEvent> Only(IEnumerable<FailedEvent> rows, HashSet<long> unchanged)
-    {
-        return [.. rows.Where(r => unchanged.Contains(r.RowId))];
-    }
-
-    /// <summary>The rows of a claim whose entities this lease still holds: every outcome below updates only these.</summary>
-    private static IQueryable<TEntity> Held(SyncDbContext db, string type, long[] ids, Guid token)
-    {
-        return db.Set<TEntity>().Where(r => ids.Contains(r.Id)
-            && db.SyncStates.Any(s => s.EntityType == type && s.EntityId == r.EntityId && s.LockToken == token));
-    }
-
-    /// <summary>Not written (an event as new was already synced): the row leaves the queue.</summary>
-    private static Task<int> SupersedeAsync(SyncDbContext db, string type, long[] ids, Guid token, CancellationToken ct)
-    {
-        return Held(db, type, ids, token).ExecuteUpdateAsync(u => u
-                .SetProperty(r => r.Status, "superseded")
-                .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
-                .SetProperty(r => r.LastError, (string?)null)
-                .SetProperty(r => r.LastErrorCode, (string?)null), ct);
-    }
-
     /// <summary>Not attempted (skipped because of another entity's record): no attempt spent.</summary>
-    private static Task<int> ReleaseAsync(SyncDbContext db, string type, long[] ids, Guid token, CancellationToken ct)
+    private static Task<int> ReleaseAsync(SyncDbContext db, InboxSql sql, InboxClaim claim, IReadOnlyList<long> ids, CancellationToken ct)
     {
-        return Held(db, type, ids, token).ExecuteUpdateAsync(u => u
-                .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
-                .SetProperty(r => r.AttemptCount, r => Math.Max(r.AttemptCount - 1, 0)), ct);
+        return db.Database.ExecuteAsync(sql.Release, ct, new { ids = ids.ToArray(), times = claim.TimesOf(ids), token = claim.Token });
     }
 
-    private Task<int> FailAsync(SyncDbContext db, InboxSql sql, string type, IReadOnlyList<FailedEvent> rows, Guid token, CancellationToken ct)
+    private Task<int> FailAsync(SyncDbContext db, InboxSql sql, InboxClaim claim, IReadOnlyList<FailedEvent> rows, CancellationToken ct)
     {
+        var ids = Ids(rows);
         return db.Database.ExecuteAsync(sql.Fail, ct, new
         {
-            entityType = type,
-            ids = Ids(rows),
+            ids,
+            times = claim.TimesOf(ids),
             errors = ErrorsJson(rows),
-            token,
+            token = claim.Token,
             maxRetries = _opt.MaxRetries,
             baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
             maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
         });
-    }
-
-    /// <summary>
-    /// <see cref="InboxSql.Template.EndLease"/>: the entities are due again if their row is pending, else idle.
-    /// </summary>
-    private static Task<int> EndLeaseAsync(SyncDbContext db, InboxSql sql, string[] entityIds, Guid token, CancellationToken ct)
-    {
-        return db.Database.ExecuteAsync(sql.EndLease, ct, new { entityType = TEntity.EntityType, entityIds, token });
     }
 
     private static long[] Ids(IReadOnlyList<FailedEvent> rows)
@@ -266,7 +194,4 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         }
         return JsonSerializer.Serialize(errors);
     }
-
-    /// <summary>A row of InboxSql.ClaimEntities: a claimed entity and its watermark, if anything was synced yet.</summary>
-    private sealed record ClaimedEntity(string EntityId, long? SyncedTime);
 }

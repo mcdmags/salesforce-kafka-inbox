@@ -17,7 +17,7 @@ public sealed class SyncOptions
     public int BatchSize { get; set; } = 75;
 
     /// <summary>
-    /// How long a claim owns its entities (sf_sync_state.locked_until; lock_token says who). Between the claim
+    /// How long a claim owns its entities (its inbox row's locked_until; lock_token says who). Between the claim
     /// transaction and the outcome transaction nothing else holds them: no transaction or row lock spans the Salesforce
     /// calls. The worker stops calling Salesforce at 80% of it, and a worker that crashes needs no cleanup: the lease
     /// expires and the entities are claimable again. Must be longer than <c>Salesforce:RequestTimeout</c>.

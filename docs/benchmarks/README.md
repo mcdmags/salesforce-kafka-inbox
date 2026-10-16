@@ -14,8 +14,10 @@ claim, the rate limiter in C# and `Sync:CoalesceDelay` (PR #35 to #46). The
 [run before it](#latest-run-main-at-7a145b0-after-the-simplification) measured `main` at 7a145b0, after the record
 types, the shared Describe cache and the simplification into fewer files (PR #20 to #24).
 
-**Since then the claim has changed.** Entities are now claimed by locking and leasing their row in one
-`sf_sync_state` table (`FOR UPDATE SKIP LOCKED`), and the inboxes hold only events (see the
+**Since then the claim has changed.** Entities were then claimed by locking and leasing their row in one
+`sf_sync_state` table (`FOR UPDATE SKIP LOCKED`), the inboxes holding only events. Every number on this page was
+measured with `sf_sync_state` or before it: it is gone now (migration `StateInInboxRow`), and an entity is claimed
+by locking and leasing its own inbox row, which holds its due time, lease and watermark (see the
 [main README](../../README.md#the-inbox)). The claim statements measured below (LockHeads, the claim lock, the
 inbox's lease, due-time and `synced_time` columns and their indexes, `InboxSql.PinPlans`) no longer exist; their
 numbers are kept as the record of that design, not as a description of the current one.
@@ -672,17 +674,22 @@ Allocated 48 to 84 MB in all four runs; 0 overlapping claims, not done, wrong or
 
 ## Remaining risks
 
-(As of the `sf_sync_state` claim and one inbox row per entity.)
+(As of the state in the inbox row: one row per entity, claimed and leased itself.)
 
 - **Overwritten rows**: every event of an entity rewrites its one inbox row (a new row version and index entries,
-  but no new row), and a claimed row overwritten meanwhile makes the outcome transaction skip it and the entity due
-  again: one more claim, not one more write of the old event. Not measured yet; re-run the streaming benchmark
+  but no new row), and a claimed row overwritten meanwhile gets no outcome, only the end of its lease, and stays
+  due: one more claim, not one more write of the old event. Not measured yet; re-run the streaming benchmark
   before comparing its claims with the numbers above.
+- **One hot row per entity**: the consumer, the claim and the outcomes all update the entity's inbox row, so a store
+  waits for an outcome transaction that has the row locked (milliseconds), and a claim skips a row being stored.
+  Every outcome and lease change is a new row version that is never HOT (`next_attempt_at` is indexed); not
+  re-measured since `sf_sync_state` was removed.
 - **Statistics**: no planner settings are pinned; every statement is written so that its only sensible plan is an
   index lookup by key. A new statement must be checked with stale statistics too (idle-then-backlog and
   backlog-then-drained), or it can reintroduce a plan that scans a whole table or index.
-- **Isolation**: the claim relies on READ COMMITTED: a state row leased by another worker after the claim's snapshot
-  is re-checked on its new version when it is locked. Under REPEATABLE READ that would be a serialization error
-  instead.
+- **Isolation**: the claim and the outcomes rely on READ COMMITTED: a row leased by another worker after the claim's
+  snapshot is re-checked on its new version when it is locked, and an outcome that waited for a store re-checks its
+  WHERE (the claimed `event_time`) on the row the store left. Under REPEATABLE READ both would be serialization
+  errors instead.
 - **Noise**: the drain numbers above were measured on a busy machine; compare work counts first and times only
   across alternating runs.

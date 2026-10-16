@@ -111,10 +111,10 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// An event as the consumer stores it: the inbox table and entity type (in sf_sync_state) of its type, the entity's
-    /// id, the event's time (its meta.time) and the raw payload.
+    /// An event as the consumer stores it: the inbox table of its type, the entity's id, the event's time (its meta.time)
+    /// and the raw payload.
     /// </summary>
-    private sealed record IngestRow(string Table, string Type, string EntityId, DateTimeOffset EventTime, string Payload);
+    private sealed record IngestRow(string Table, string EntityId, DateTimeOffset EventTime, string Payload);
 
     /// <summary>
     /// meta of version N of an entity: time = base time + N ms, so per-entity time order = version order; the first
@@ -197,7 +197,6 @@ public abstract class DrainBenchmarkBase
         {
             await db.Database.ExecuteAsync(InboxSql.For(e.Table).Store, ct, new
             {
-                entityType = e.Type,
                 entityId = e.EntityId,
                 eventTime = e.EventTime,
                 payload = e.Payload,
@@ -285,7 +284,7 @@ public abstract class DrainBenchmarkBase
         {
             await db.Database.ExecuteAsync($"truncate {table} restart identity", default);
         }
-        await db.Database.ExecuteAsync("truncate sf_sync_state; truncate sf_claim_audit", default);
+        await db.Database.ExecuteAsync("truncate sf_claim_audit", default);
 
         (_events, _expected) = Generate();
         if (!StreamIngest)
@@ -335,7 +334,7 @@ public abstract class DrainBenchmarkBase
                         ["isActive"] = true
                     }
                 };
-                events.Add(new IngestRow(RelationshipTable, AccountRelationshipSync.Type, relKey, Time(relVersion), relPayload.ToJsonString()));
+                events.Add(new IngestRow(RelationshipTable, relKey, Time(relVersion), relPayload.ToJsonString()));
                 continue;
             }
 
@@ -361,7 +360,7 @@ public abstract class DrainBenchmarkBase
                         ["profile"] = new JsonObject { ["score"] = version }
                     }
                 };
-                events.Add(new IngestRow(AccountTable, AccountSync.Type, key, Time(version), payload.ToJsonString()));
+                events.Add(new IngestRow(AccountTable, key, Time(version), payload.ToJsonString()));
             }
         }
 
@@ -375,7 +374,7 @@ public abstract class DrainBenchmarkBase
     /// </summary>
     private async Task PreloadAsync(NpgsqlConnection conn)
     {
-        foreach (var inbox in _events.GroupBy(e => (e.Table, e.Type)))
+        foreach (var inbox in _events.GroupBy(e => e.Table))
         {
             await using (var stage = new NpgsqlCommand(
                              "create temp table preload (seq bigserial, entity_id text, event_time timestamptz, payload jsonb)", conn))
@@ -395,12 +394,10 @@ public abstract class DrainBenchmarkBase
                 await importer.CompleteAsync();
             }
             await using var store = new NpgsqlCommand($"""
-                insert into {inbox.Key.Table} (entity_id, event_time, payload)
-                select distinct on (entity_id) entity_id, event_time, payload from preload order by entity_id, event_time desc, seq desc;
-                insert into sf_sync_state (entity_type, entity_id, next_attempt_at) select distinct @type, entity_id, now() from preload;
+                insert into {inbox.Key} (entity_id, event_time, payload, next_attempt_at)
+                select distinct on (entity_id) entity_id, event_time, payload, now() from preload order by entity_id, event_time desc, seq desc;
                 drop table preload;
                 """, conn);
-            store.Parameters.AddWithValue("type", inbox.Key.Type);
             await store.ExecuteNonQueryAsync();
         }
     }

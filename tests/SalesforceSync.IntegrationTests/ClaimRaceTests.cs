@@ -1,34 +1,41 @@
 using System.Text.Json.Nodes;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Npgsql;
+using SalesforceSync.Data;
 using SalesforceSync.Inbox;
+using SalesforceSync.Sync;
 
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Claims, stores and outcomes interleaved by hand on separate connections, in the account inbox but under an entity
-/// type of the test's own, which no pod claims, so every step happens exactly when the test says. Storing an event and
-/// claiming an entity both lock the entity's one sf_sync_state row, and storing locks it before it touches the
-/// entity's inbox row.
+/// Claims, stores and outcomes interleaved by hand on separate connections, in a schema of its own, so the pods (which
+/// work the public schema) never see its rows and every step happens exactly when the test says. Storing an event,
+/// claiming an entity and recording its outcome all update the entity's one inbox row, so Postgres's row lock orders
+/// them. The schema is created once and emptied before each test (see <see cref="OneRowPerEntityTests"/>).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class ClaimRaceTests(SyncFixture app)
 {
+    private const string Schema = "claim_race_test";
     private static readonly string Table = SyncFixture.InboxTable();
     private static readonly InboxSql Sql = InboxSql.For(Table);
+    private static NpgsqlDataSource? _db;
+    private static IDbContextFactory<SyncDbContext>? _contexts;
 
     [Fact]
     public async Task A_second_event_of_an_entity_waits_for_the_first_to_commit_then_overwrites_it_and_an_entity_being_stored_is_not_claimed()
     {
-        await using var race = await Race.StartAsync(app);
+        await using var race = await StartAsync();
+        await race.StoreAsync(race.Consumer1, 1);
 
         // Consumer 1 stores an event and hasn't committed; consumer 2's event of the same entity has to wait for it
         var slowStore = await race.Consumer1.BeginTransactionAsync();
-        await race.StoreAsync(race.Consumer1, 1, slowStore);
-        var secondStore = race.StoreAsync(race.Consumer2, 2);
-        await race.WaitUntilWaitingOnALockAsync(race.Consumer2, secondStore);
-        secondStore.IsCompleted.Should().BeFalse("the second event's store waits for the first to commit");
+        await race.StoreAsync(race.Consumer1, 2, slowStore);
+        var secondStore = race.StoreAsync(race.Consumer2, 3);
+        await race.WaitUntilBlockedByAsync(race.Consumer1, secondStore);
 
-        // Meanwhile a worker skips the entity: it is locked
+        // Meanwhile a worker skips the entity: its row is locked
         await using (var txA = await race.WorkerA.BeginTransactionAsync())
         {
             (await race.ClaimAsync(race.WorkerA, txA, Guid.NewGuid())).Should().BeEmpty();
@@ -39,21 +46,20 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await secondStore;
 
         await using var tx = await race.WorkerA.BeginTransactionAsync();
-        (await race.ClaimAsync(race.WorkerA, tx, Guid.NewGuid())).Should().Equal(race.Entity);
-        var events = await race.ClaimEventsAsync(race.WorkerA, tx);
+        var events = await race.ClaimAsync(race.WorkerA, tx, Guid.NewGuid());
         await tx.CommitAsync();
-        events.Should().ContainSingle("the entity has one row").Which.EventTime.Should().Be(race.TimeOf(2));
+        events.Should().ContainSingle("the entity has one row").Which.EventTime.Should().Be(race.TimeOf(3));
     }
 
     [Fact]
     public async Task A_second_worker_does_not_claim_an_entity_whose_claim_has_not_committed_yet()
     {
-        await using var race = await Race.StartAsync(app);
+        await using var race = await StartAsync();
         await race.StoreAsync(race.Consumer1, 1);
 
         var tokenA = Guid.NewGuid();
         await using var txA = await race.WorkerA.BeginTransactionAsync();
-        (await race.ClaimAsync(race.WorkerA, txA, tokenA)).Should().Equal(race.Entity);
+        (await race.ClaimAsync(race.WorkerA, txA, tokenA)).Should().ContainSingle();
 
         // B claims while A's claim is still open: A's lease isn't visible to B yet, but A's row lock is, and B skips it
         await using (var txB = await race.WorkerB.BeginTransactionAsync())
@@ -69,13 +75,13 @@ public sealed class ClaimRaceTests(SyncFixture app)
     [Fact]
     public async Task Claiming_leases_nothing_of_an_entity_another_worker_holds_a_live_lease_on()
     {
-        await using var race = await Race.StartAsync(app);
+        await using var race = await StartAsync();
         await race.StoreAsync(race.Consumer1, 1);
 
         var tokenA = Guid.NewGuid();
         await using (var txA = await race.WorkerA.BeginTransactionAsync())
         {
-            (await race.ClaimAsync(race.WorkerA, txA, tokenA)).Should().Equal(race.Entity);
+            (await race.ClaimAsync(race.WorkerA, txA, tokenA)).Should().ContainSingle();
             await txA.CommitAsync();
         }
 
@@ -91,103 +97,140 @@ public sealed class ClaimRaceTests(SyncFixture app)
     }
 
     /// <summary>
-    /// The race between a consumer storing an event and a worker recording the claimed one done and ending the
-    /// entity's lease (finding no pending row left would make the entity idle): whichever commits second, the new
-    /// event is not marked done in the old one's place, and its entity ends due.
+    /// The consumer has the row locked, storing v2, when the worker records v1's outcome: the outcome statement waits
+    /// for the store and then checks its WHERE again on the row the store left, whose event_time is v2's. Nothing of
+    /// v1's outcome lands on v2, the lease ends and v2 is due. (<see cref="OneRowPerEntityTests"/> covers a store that
+    /// committed before the outcome.)
     /// </summary>
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task An_event_stored_while_its_entitys_lease_ends_leaves_the_entity_due(bool storeFirst)
+    [InlineData("done")]
+    [InlineData("failed")]
+    [InlineData("dead")]
+    [InlineData("superseded")]
+    [InlineData("released")]
+    [InlineData("failed all")]
+    [InlineData("held")]
+    public async Task An_outcome_that_waits_for_a_store_of_a_newer_event_is_not_recorded_on_it(string outcome)
     {
-        await using var race = await Race.StartAsync(app);
+        await using var race = await StartAsync();
+        await race.StoreAsync(race.Consumer1, 1);
+        var inbox = new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions { CoalesceDelay = TimeSpan.Zero }));
+        var claim = await inbox.ClaimAsync(CancellationToken.None);
+        claim.Events.Should().ContainSingle();
+
+        await using (var store = await race.Consumer2.BeginTransactionAsync())
+        {
+            await race.StoreAsync(race.Consumer2, 2, store);
+            var recording = Record(inbox, claim, outcome);
+            await race.WaitUntilBlockedByAsync(race.Consumer2, recording);
+            await store.CommitAsync();
+            await recording;
+        }
+
+        (await race.RowAsync()).Should().Be((race.TimeOf(2), "pending", 0, null), "nothing of v1's outcome lands on v2");
+        var state = await race.StateAsync();
+        state.LockToken.Should().BeNull("the lease ended");
+        state.LockedUntil.Should().BeNull();
+        state.NextAttemptAt.Should().NotBeNull("v2 is pending, so it must be due, or it would never be claimed");
+        state.SyncedTime.Should().BeNull("the watermark doesn't move to v2, which was never written");
+    }
+
+    /// <summary>
+    /// The worker's outcome transaction has the row locked when the consumer stores a newer event: the store waits for
+    /// it, then overwrites the row as the transaction left it, pending again and due. Either way round: the claimed
+    /// event recorded done (the row finished and idle), or the row already overwritten during the lease and only its
+    /// lease ended.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due(bool overwrittenDuringTheLease)
+    {
+        await using var race = await StartAsync();
         await race.StoreAsync(race.Consumer1, 1);
         var token = Guid.NewGuid();
         List<InboxEvent> claimed;
         await using (var tx = await race.WorkerA.BeginTransactionAsync())
         {
-            (await race.ClaimAsync(race.WorkerA, tx, token)).Should().Equal(race.Entity);
-            claimed = await race.ClaimEventsAsync(race.WorkerA, tx);
+            claimed = await race.ClaimAsync(race.WorkerA, tx, token);
             await tx.CommitAsync();
         }
+        if (overwrittenDuringTheLease)
+        {
+            await race.StoreAsync(race.Consumer1, 2);
+        }
 
-        // The worker records v1 done and ends the lease; consumer 2 stores v2 at the same time
-        var store = storeFirst ? await race.Consumer2.BeginTransactionAsync() : null;
-        if (store is not null)
+        // The worker records v1 done and ends the lease, as the repository does; consumer 2 stores v3 meanwhile
+        await using (var record = await race.WorkerA.BeginTransactionAsync())
         {
-            await race.StoreAsync(race.Consumer2, 2, store);
-        }
-        await using var record = await race.WorkerA.BeginTransactionAsync();
-        var locking = race.LockHeldAsync(record, token);
-        Task? lateStore = null;
-        if (store is not null)
-        {
-            // The worker waits for the store to commit before it can lock the entity
-            await race.WaitUntilWaitingOnALockAsync(race.WorkerA, locking);
-            await store.CommitAsync();
-        }
-        (await locking).Should().Equal(race.Entity);
-        // As the repository records it: only on the claimed rows that still hold the event the claim read
-        var unchanged = await race.WorkerA.QueryAsync<long>(Sql.Unchanged, new
-        {
-            ids = claimed.Select(e => e.RowId).ToArray(),
-            times = claimed.Select(e => e.EventTime).ToArray()
-        }, record);
-        unchanged.Should().Equal(storeFirst ? [] : claimed.Select(e => e.RowId), "v2 overwrote the row only if it was stored first");
-        await race.WorkerA.ExecuteAsync(Sql.Done, new { entityType = race.EntityType, ids = unchanged.ToArray(), token }, record);
-        if (store is null)
-        {
-            // The store waits for the worker's transaction, which has locked the entity
-            lateStore = race.StoreAsync(race.Consumer2, 2);
-            await race.WaitUntilWaitingOnALockAsync(race.Consumer2, lateStore);
-        }
-        await race.WorkerA.ExecuteAsync(Sql.EndLease, new
-        {
-            entityType = race.EntityType,
-            entityIds = new[] { race.Entity },
-            token
-        }, record);
-        await record.CommitAsync();
-        if (lateStore is not null)
-        {
+            var args = new { ids = claimed.Select(e => e.RowId).ToArray(), times = claimed.Select(e => e.EventTime).ToArray(), token };
+            (await race.WorkerA.ExecuteAsync(Sql.Done, args, record)).Should().Be(overwrittenDuringTheLease ? 0 : 1);
+            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.ids, token, delay = TimeSpan.Zero }, record))
+                .Should().Be(overwrittenDuringTheLease ? 1 : 0, "only an overwritten row is left under the lease");
+            var lateStore = race.StoreAsync(race.Consumer2, 3);
+            await race.WaitUntilBlockedByAsync(race.WorkerA, lateStore);
+            await record.CommitAsync();
             await lateStore;
         }
 
+        (await race.RowAsync()).Should().Be((race.TimeOf(3), "pending", 0, null));
         var state = await race.StateAsync();
         state.LockToken.Should().BeNull();
-        state.NextAttemptAt.Should().NotBeNull("v2 is pending, so its entity must be due, or it would never be claimed");
-        state.SyncedTime.Should().Be(storeFirst ? null : SyncFixture.SyncedTime(1), "the watermark is v1's, if v1 was recorded done");
-        (await race.RowAsync()).Should().Be((race.TimeOf(2), "pending"));
+        state.NextAttemptAt.Should().NotBeNull("v3 is pending, so it must be due, or it would never be claimed");
+        state.SyncedTime.Should().Be(overwrittenDuringTheLease ? null : SyncFixture.SyncedTime(1), "the watermark is v1's, if v1 was recorded done");
     }
 
-    /// <summary>One entity of an entity type of its own, and connections for two consumers and two workers.</summary>
-    private sealed class Race : IAsyncDisposable
+    private static Task Record(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
     {
-        private Race(NpgsqlConnection consumer1, NpgsqlConnection consumer2, NpgsqlConnection workerA, NpgsqlConnection workerB,
-            NpgsqlConnection observer)
+        var row = claim.RowIds.Single();
+        var failure = new FailedEvent(row, "failed", "SOME_CODE");
+        var none = CancellationToken.None;
+        return outcome switch
         {
-            (Consumer1, Consumer2, WorkerA, WorkerB, Observer) = (consumer1, consumer2, workerA, workerB, observer);
-        }
+            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], [], [], []), none),
+            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [], [failure]), none),
+            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [failure], []), none),
+            "superseded" => inbox.RecordAsync(claim, new BatchOutcomes([], [row], [], [], []), none),
+            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [row], [], []), none),
+            "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
+            "held" => inbox.HoldAsync(claim, "lost", none),
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+        };
+    }
 
-        public NpgsqlConnection Consumer1 { get; }
-        public NpgsqlConnection Consumer2 { get; }
-        public NpgsqlConnection WorkerA { get; }
-        public NpgsqlConnection WorkerB { get; }
-        private NpgsqlConnection Observer { get; }
-
-        public string EntityType { get; } = $"claimRace{Guid.NewGuid():N}";
-        public string Entity { get; } = SyncFixture.NewAccountId();
-
-        public static async Task<Race> StartAsync(SyncFixture app)
+    /// <summary>The test's schema, migrated, with no rows, and a race in it.</summary>
+    private async Task<Race> StartAsync()
+    {
+        if (_db is null)
         {
-            return new Race(await app.Db.OpenConnectionAsync(), await app.Db.OpenConnectionAsync(), await app.Db.OpenConnectionAsync(),
-                await app.Db.OpenConnectionAsync(), await app.Db.OpenConnectionAsync());
+            var db = await app.CreateSchemaAsync(Schema);
+            _contexts = SyncDbContext.CreateFactory(db);
+            await SyncSchema.MigrateAsync(_contexts);
+            _db = db;
         }
+        await using (var conn = await _db.OpenConnectionAsync())
+        {
+            await conn.ExecuteAsync($"truncate {Table}");
+        }
+        return new Race(await _db.OpenConnectionAsync(), await _db.OpenConnectionAsync(), await _db.OpenConnectionAsync(),
+            await _db.OpenConnectionAsync(), await _db.OpenConnectionAsync());
+    }
+
+    /// <summary>One entity, and connections for two consumers and two workers.</summary>
+    private sealed class Race(NpgsqlConnection consumer1, NpgsqlConnection consumer2, NpgsqlConnection workerA, NpgsqlConnection workerB,
+        NpgsqlConnection observer) : IAsyncDisposable
+    {
+        public NpgsqlConnection Consumer1 { get; } = consumer1;
+        public NpgsqlConnection Consumer2 { get; } = consumer2;
+        public NpgsqlConnection WorkerA { get; } = workerA;
+        public NpgsqlConnection WorkerB { get; } = workerB;
+
+        private string Entity { get; } = SyncFixture.NewAccountId();
 
         public Task StoreAsync(NpgsqlConnection consumer, int version, NpgsqlTransaction? tx = null)
         {
             var e = SyncFixture.AccountEvent(Entity, version, new JsonObject { ["name"] = $"v{version}" }, []);
-            return consumer.StoreAsync(Table, EntityType, Entity, SyncFixture.TimeOf(e), e.ToJsonString(), tx);
+            return consumer.StoreAsync(Table, Entity, SyncFixture.TimeOf(e), e.ToJsonString(), tx);
         }
 
         /// <summary>The event_time version N is stored with.</summary>
@@ -196,44 +239,31 @@ public sealed class ClaimRaceTests(SyncFixture app)
             return SyncFixture.BaseTime.AddMilliseconds(version);
         }
 
-        /// <summary>The entity's inbox row: its event_time and status.</summary>
-        public async Task<(DateTimeOffset EventTime, string Status)> RowAsync()
+        /// <summary>The entity's inbox row: its event_time, status, attempts and error.</summary>
+        public async Task<(DateTimeOffset EventTime, string Status, int AttemptCount, string? Error)> RowAsync()
         {
-            var (time, status) = await Observer.QuerySingleAsync<(DateTime, string)>(
-                $"select event_time, status from {Table} where entity_id = @Entity", new { Entity });
-            return (new DateTimeOffset(time), status);
+            var (time, status, attempts, error) = await observer.QuerySingleAsync<(DateTime, string, int, string?)>(
+                $"select event_time, status, attempt_count, last_error from {Table} where entity_id = @Entity", new { Entity });
+            return (new DateTimeOffset(time), status, attempts, error);
         }
 
-        public async Task<List<string>> ClaimAsync(NpgsqlConnection worker, NpgsqlTransaction tx, Guid token)
+        public Task<List<InboxEvent>> ClaimAsync(NpgsqlConnection worker, NpgsqlTransaction tx, Guid token)
         {
-            return [.. (await worker.QueryAsync<(string EntityId, long? SyncedTime)>(InboxSql.ClaimEntities,
-                new { entityType = EntityType, token, lease = TimeSpan.FromMinutes(1), batchSize = 75 }, tx)).Select(c => c.EntityId)];
+            return worker.QueryAsync<InboxEvent>(Sql.Claim, new { token, lease = TimeSpan.FromMinutes(1), batchSize = 75 }, tx);
         }
 
-        public Task<List<InboxEvent>> ClaimEventsAsync(NpgsqlConnection worker, NpgsqlTransaction tx)
+        public Task<SyncStateRow> StateAsync()
         {
-            return worker.QueryAsync<InboxEvent>(Sql.ClaimEvents, new { entityIds = new[] { Entity } }, tx);
+            return observer.QuerySingleAsync<SyncStateRow>(
+                $"select next_attempt_at, locked_until, lock_token, synced_time from {Table} where entity_id = @Entity", new { Entity });
         }
 
-        public Task<List<string>> LockHeldAsync(NpgsqlTransaction tx, Guid token)
-        {
-            return WorkerA.QueryAsync<string>(InboxSql.LockHeld, new { entityType = EntityType, entityIds = new[] { Entity }, token }, tx);
-        }
-
-        public async Task<SyncStateRow> StateAsync()
-        {
-            return await Observer.QuerySingleAsync<SyncStateRow>(
-                "select next_attempt_at, locked_until, lock_token, synced_time from sf_sync_state where entity_type = @EntityType and entity_id = @Entity",
-                new { EntityType, Entity });
-        }
-
-        /// <summary>Waits until <paramref name="conn"/>'s statement (<paramref name="statement"/>) is blocked on a lock.</summary>
-        public async Task WaitUntilWaitingOnALockAsync(NpgsqlConnection conn, Task statement)
+        /// <summary>Waits until <paramref name="statement"/> is blocked on a lock that <paramref name="holder"/>'s transaction holds.</summary>
+        public async Task WaitUntilBlockedByAsync(NpgsqlConnection holder, Task statement)
         {
             var deadline = DateTime.UtcNow.AddSeconds(10);
-            while (!await Observer.ExecuteScalarAsync<bool>(
-                       "select coalesce((select wait_event_type = 'Lock' from pg_stat_activity where pid = @pid), false)",
-                       new { pid = conn.ProcessID }))
+            while (!await observer.ExecuteScalarAsync<bool>(
+                       "select exists (select 1 from pg_stat_activity where @pid = any(pg_blocking_pids(pid)))", new { pid = holder.ProcessID }))
             {
                 statement.IsCompleted.Should().BeFalse("the statement should be waiting for a lock");
                 DateTime.UtcNow.Should().BeBefore(deadline, "the statement should be waiting for a lock");
@@ -243,7 +273,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
 
         public async ValueTask DisposeAsync()
         {
-            foreach (var conn in new[] { Consumer1, Consumer2, WorkerA, WorkerB, Observer })
+            foreach (var conn in new[] { Consumer1, Consumer2, WorkerA, WorkerB, observer })
             {
                 await conn.DisposeAsync();
             }

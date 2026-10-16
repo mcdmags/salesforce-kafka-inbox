@@ -12,9 +12,8 @@ namespace SalesforceSync.Sync;
 /// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds each entity's newest
 /// event, and the strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
-/// <item>Claims up to <see cref="SyncOptions.BatchSize"/> due entities: each one's sf_sync_state row is locked with
-/// FOR UPDATE SKIP LOCKED and leased, so no two workers in any pod ever process the same entity at once, and its
-/// pending inbox row is read.</item>
+/// <item>Claims up to <see cref="SyncOptions.BatchSize"/> due entities: each one's inbox row is locked with FOR UPDATE
+/// SKIP LOCKED, leased and read, so no two workers in any pod ever process the same entity at once.</item>
 /// <item>Per entity, reads the claimed event: the newest one stored (events carry the full record, and a newer event
 /// overwrites the entity's row), superseded if it is not newer than what was already synced. Arrival order plays no
 /// part, so events may come out of order, over any partitions. An event that can't be read or mapped is
@@ -27,7 +26,7 @@ namespace SalesforceSync.Sync;
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
 /// every claimed entity is held (the write's outcome is unknown) or retried. An entity whose row a newer event
-/// overwrote meanwhile gets no outcome: its row stays pending and the entity due.</item>
+/// overwrote meanwhile gets no outcome: its row stays pending and due.</item>
 /// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="PreparedBatch"/> and the
 /// ones in <c>Sync/Upsert</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
@@ -79,7 +78,7 @@ public sealed class SalesforceBatchUpsertService(
         }
 
         // 2. Per entity: drop its event if it isn't newer than what is synced, else map it to records
-        var batch = PreparedBatch.Prepare(strategy, claim.Events, claim.SyncedTimes);
+        var batch = PreparedBatch.Prepare(strategy, claim.Events);
 
         // 3. Salesforce (outside any transaction): read, decide, send, interpret. Not inside one on purpose: Salesforce
         // can't take part in a Postgres transaction (a rollback can't undo a saved write), the execution strategy
