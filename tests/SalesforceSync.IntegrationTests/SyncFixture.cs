@@ -447,11 +447,16 @@ public class SyncFixture : IAsyncLifetime
         return (long)(time - BaseTime).TotalMilliseconds;
     }
 
-    /// <summary>Stores account events directly, in one statement, so a single claim is sure to see them together.</summary>
+    /// <summary>Stores account events directly, in one transaction, so a single claim is sure to see them together.</summary>
     public async Task InsertIntoInboxAsync(string entityId, params JsonObject[] events)
     {
         await using var conn = await Db.OpenConnectionAsync();
-        await conn.StoreAsync(InboxTable(), Accounts, [.. events.Select(_ => entityId)], [.. events.Select(e => e.ToJsonString())]);
+        await using var tx = await conn.BeginTransactionAsync();
+        foreach (var e in events)
+        {
+            await conn.StoreAsync(InboxTable(), Accounts, entityId, e.ToJsonString(), tx);
+        }
+        await tx.CommitAsync();
     }
 
     public async Task ExecuteSqlAsync(string sql)
