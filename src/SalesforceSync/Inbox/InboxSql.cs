@@ -6,11 +6,11 @@ namespace SalesforceSync.Inbox;
 /// <summary>
 /// The statements for one inbox table (one per synced object type, all the same shape; see SyncDbContext) and its
 /// entities' rows in sf_sync_state. No statement reads inside the payload: an event's entity is its entity_id column,
-/// its time its event_time column (both set by the consumer), and which event of an entity is the newest is decided in C#. An entity is claimed by locking and leasing its state
-/// row (lock_token, locked_until), so two workers can never hold one entity: they would lock the same row. Every
-/// statement is safe to run again after an unknown commit (see PostgresRetryStrategy): outcomes apply only while the
-/// claim's token holds the entity's state row. Outcome statements take arrays, so recording a batch costs a fixed
-/// number of round trips, not two per entity.
+/// its time its event_time column (both set by the consumer), and which event of an entity is the newest is decided in
+/// C#. An entity is claimed by locking and leasing its state row (lock_token, locked_until), so two workers can never
+/// hold one entity: they would lock the same row. Every statement is safe to run again after an unknown commit (see
+/// PostgresRetryStrategy): outcomes apply only while the claim's token holds the entity's state row. Outcome statements
+/// take arrays, so recording a batch costs a fixed number of round trips, not two per entity.
 /// <para>
 /// Every lookup is by key: a primary key (= ANY of an array, never a join the planner could turn into a scan), the
 /// pending index per entity (LATERAL ... LIMIT), or the front of the ready index. With statistics as wrong as a queue's
