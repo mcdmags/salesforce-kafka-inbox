@@ -68,20 +68,23 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
     {
         // The base is only shared code: without this, EF would make it an entity and map the rows as one hierarchy
         modelBuilder.Ignore<InboxRow>();
-        ConfigureInbox(modelBuilder.Entity<AccountInboxRow>(), "sf_account_inbox", AccountSync.Type);
-        ConfigureInbox(modelBuilder.Entity<AccountRelationshipInboxRow>(), "sf_account_relationship_inbox", AccountRelationshipSync.Type);
-        ConfigureInbox(modelBuilder.Entity<ContactInboxRow>(), "sf_contact_inbox", ContactSync.Type);
+        modelBuilder.Entity<AccountInboxRow>(entity => ConfigureInbox(entity, "sf_account_inbox", AccountSync.Type));
+        modelBuilder.Entity<AccountRelationshipInboxRow>(entity =>
+            ConfigureInbox(entity, "sf_account_relationship_inbox", AccountRelationshipSync.Type));
+        modelBuilder.Entity<ContactInboxRow>(entity => ConfigureInbox(entity, "sf_contact_inbox", ContactSync.Type));
 
         // Every synced entity's sync state, one row per (entity type, entity id) for all object types. Claiming an
         // entity is locking and leasing its row here; the inboxes hold the events only.
-        var state = modelBuilder.Entity<SyncState>();
-        state.ToTable("sf_sync_state");
-        VacuumOften(state);
-        state.HasKey(s => new { s.EntityType, s.EntityId }).HasName("sf_sync_state_pkey");
-        // The claim (InboxSql.ClaimEntities): an entity type's due entities, the longest-waiting first. Idle entities
-        // (null) are not in the index.
-        state.HasIndex(s => new { s.EntityType, s.NextAttemptAt }).HasDatabaseName("sf_sync_state_ready")
-            .HasFilter("next_attempt_at is not null");
+        modelBuilder.Entity<SyncState>(entity =>
+        {
+            entity.ToTable("sf_sync_state");
+            VacuumOften(entity);
+            entity.HasKey(s => new { s.EntityType, s.EntityId }).HasName("sf_sync_state_pkey");
+            // The claim (InboxSql.ClaimEntities): an entity type's due entities, the longest-waiting first. Idle
+            // entities (null) are not in the index.
+            entity.HasIndex(s => new { s.EntityType, s.NextAttemptAt }).HasDatabaseName("sf_sync_state_ready")
+                .HasFilter("next_attempt_at is not null");
+        });
 
         // Every column is its property's name in snake_case (EntityId -> entity_id)
         foreach (var property in modelBuilder.Model.GetEntityTypes().SelectMany(e => e.GetProperties()))
@@ -99,20 +102,20 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
     /// default are left out of an insert while they hold the CLR default, so a new row gets the database's clock and
     /// 'pending'.
     /// </summary>
-    private static void ConfigureInbox<TRow>(EntityTypeBuilder<TRow> e, string table, string entityType) where TRow : InboxRow
+    private static void ConfigureInbox<TRow>(EntityTypeBuilder<TRow> entity, string table, string entityType) where TRow : InboxRow
     {
-        e.ToTable(table).HasAnnotation(EntityTypeAnnotation, entityType);
-        VacuumOften(e);
-        e.HasKey(r => r.Id).HasName($"{table}_pkey");
-        e.Property(r => r.Id).UseSerialColumn();
-        e.Property(r => r.Payload).HasColumnType("jsonb");
-        e.Property(r => r.Status).HasDefaultValueSql("'pending'");
-        e.Property(r => r.AttemptCount).HasDefaultValue(0);
-        e.Property(r => r.ReceivedAt).HasDefaultValueSql("now()");
-        e.Property(r => r.LastUpdated).HasDefaultValueSql("now()");
+        entity.ToTable(table).HasAnnotation(EntityTypeAnnotation, entityType);
+        VacuumOften(entity);
+        entity.HasKey(r => r.Id).HasName($"{table}_pkey");
+        entity.Property(r => r.Id).UseSerialColumn();
+        entity.Property(r => r.Payload).HasColumnType("jsonb");
+        entity.Property(r => r.Status).HasDefaultValueSql("'pending'");
+        entity.Property(r => r.AttemptCount).HasDefaultValue(0);
+        entity.Property(r => r.ReceivedAt).HasDefaultValueSql("now()");
+        entity.Property(r => r.LastUpdated).HasDefaultValueSql("now()");
         // An entity's pending events in arrival order: the events a claim takes (InboxSql.ClaimEvents), and whether any
         // are left when its lease ends
-        e.HasIndex(r => new { r.EntityId, r.Id }).HasDatabaseName($"{table}_pending").HasFilter("status = 'pending'");
+        entity.HasIndex(r => new { r.EntityId, r.Id }).HasDatabaseName($"{table}_pending").HasFilter("status = 'pending'");
     }
 
     /// <summary>
