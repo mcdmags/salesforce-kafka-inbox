@@ -58,7 +58,6 @@ public sealed class SalesforceBatchUpsertService(
     private readonly SyncOptions _opt = options.Value;
     private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
     private readonly WriteResultInterpreter _interpreter = new(errors);
-    private readonly SalesforceErrors _errors = errors;
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do).</returns>
@@ -161,7 +160,7 @@ public sealed class SalesforceBatchUpsertService(
 
         // 2. Normalize (and set each record's RecordTypeId); a unit Salesforce would reject fails on its own without
         // reaching the query
-        var (normalized, rejected) = RecordNormalizer.Normalize(units, schemas, _errors);
+        var (normalized, rejected) = RecordNormalizer.Normalize(units, schemas, errors);
         results.AddRange(rejected);
         if (normalized.Count == 0)
         {
