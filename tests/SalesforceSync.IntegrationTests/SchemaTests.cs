@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql;
 using SalesforceSync.Data;
 using SalesforceSync.Data.Migrations;
+using SalesforceSync.Inbox;
 
 namespace SalesforceSync.IntegrationTests;
 
@@ -71,7 +72,7 @@ public sealed class SchemaTests(SyncFixture app)
         var account = await Columns(SyncFixture.InboxTable());
         account.Select(c => c.Split(' ')[0]).Should().Equal(
             "id", "entity_id", "payload", "status", "attempt_count", "last_error", "last_error_code", "last_updated",
-            "event_time", "next_attempt_at", "locked_until", "lock_token", "synced_time");
+            "event_time", "next_attempt_at", "lock_token");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await Columns(SyncFixture.InboxTable(SyncFixture.Contacts))).Should().Equal(account);
         (await conn.ExecuteScalarAsync<long>("select count(*) from pg_proc where proname like 'sf\\_event\\_%'"))
@@ -143,7 +144,7 @@ public sealed class SchemaTests(SyncFixture app)
             .. InboxTables.Select(t => $"{t}_ready"), "__EFMigrationsHistory", "PK___EFMigrationsHistory"
         ]);
         (await conn.QuerySingleAsync<long>($"select (extract(epoch from event_time) * 1000000)::bigint from {SyncFixture.InboxTable()}"))
-            .Should().Be(SyncFixture.SyncedTime(1), "the row is kept, and InboxEventTime filled its event_time");
+            .Should().Be(SyncFixture.Micros(1), "the row is kept, and InboxEventTime filled its event_time");
         await conn.ExecuteAsync($"drop schema {schema} cascade");
     }
 
@@ -180,7 +181,7 @@ public sealed class SchemaTests(SyncFixture app)
         // Null: the row got its received_at
         var stored = await conn.QueryAsync<long?>(
             $"select case when event_time <> received_at then (extract(epoch from event_time) * 1000000)::bigint end from {table} order by id");
-        // What the engine compares with the watermark: the time as .NET reads it, cut to the microsecond (for .1234567 a
+        // The time as .NET reads it, cut to the microsecond as the consumer stores it (for .1234567 a
         // plain ::timestamptz would round up to .123457). An event the engine can't read is dead-lettered when claimed.
         var expected = times.Select(t => (long?)((DateTimeOffset.Parse(t, CultureInfo.InvariantCulture) - DateTimeOffset.UnixEpoch).Ticks / 10));
         stored.Should().Equal([.. expected, .. unreadable.Select(_ => (long?)null)]);
@@ -218,15 +219,15 @@ public sealed class SchemaTests(SyncFixture app)
             }
         }
 
-        await SyncSchema.MigrateAsync(contexts);
+        await MigrateToAsync(contexts, typeof(InboxOneRowPerRecord));
 
         foreach (var table in InboxTables)
         {
             var kept = await conn.QueryAsync<(string Entity, long Time, string Status)>(
                 $"select entity_id, (extract(epoch from event_time) * 1000000)::bigint, status from {table} order by entity_id");
             kept.Should().Equal([
-                    ("ACC-1", SyncFixture.SyncedTime(3), "pending"), ("ACC-2", SyncFixture.SyncedTime(5), "superseded"),
-                    ("ACC-3", SyncFixture.SyncedTime(2), "dead"), ("ACC-4", SyncFixture.SyncedTime(7), "pending")],
+                    ("ACC-1", SyncFixture.Micros(3), "pending"), ("ACC-2", SyncFixture.Micros(5), "superseded"),
+                    ("ACC-3", SyncFixture.Micros(2), "dead"), ("ACC-4", SyncFixture.Micros(7), "pending")],
                 "{0} keeps each entity's newest event (of two as new, the one stored last), with its status", table);
             var duplicate = () => conn.ExecuteAsync($"insert into {table} (entity_id, payload, event_time) values ('ACC-4', '{{}}', now())");
             (await duplicate.Should().ThrowAsync<PostgresException>()).Which.SqlState.Should().Be(PostgresErrorCodes.UniqueViolation);
@@ -269,7 +270,7 @@ public sealed class SchemaTests(SyncFixture app)
                 """, new { type, at, n, lease });
         }
 
-        await SyncSchema.MigrateAsync(contexts);
+        await MigrateToAsync(contexts, typeof(StateInInboxRow));
 
         for (var n = 0; n < inboxes.Length; n++)
         {
@@ -294,6 +295,102 @@ public sealed class SchemaTests(SyncFixture app)
         (await conn.ExecuteScalarAsync<long>(
                 "select count(*) from information_schema.columns where table_schema = current_schema() and column_name = 'synced_time'"))
             .Should().Be(1, "only sf_sync_state has the state again");
+        await conn.ExecuteAsync($"drop schema {schema} cascade");
+    }
+
+    [Fact]
+    public async Task LeaseInNextAttemptAt_ends_a_live_lease_at_next_attempt_at_leaves_an_expired_one_due_and_Down_moves_it_back()
+    {
+        const string schema = "lease_in_next_attempt_at_test";
+        await using var db = await app.CreateSchemaAsync(schema);
+        var contexts = SyncDbContext.CreateFactory(db);
+        await MigrateToAsync(contexts, typeof(DropReceivedAt));
+
+        // ACC-1 leased (live), ACC-2 leased (expired: its worker died), ACC-3 due, ACC-4 idle; all but ACC-4 due long ago
+        var at = SyncFixture.BaseTime.UtcDateTime;
+        await using var conn = await db.OpenConnectionAsync();
+        var leaseEnds = new Dictionary<string, DateTime>();
+        foreach (var table in InboxTables)
+        {
+            await conn.ExecuteAsync($$"""
+                insert into {{table}} (entity_id, payload, event_time, next_attempt_at, locked_until, lock_token, status) values
+                  ('ACC-1', '{}', @at, @at, now() + interval '1 hour', gen_random_uuid(), 'pending'),
+                  ('ACC-2', '{}', @at, @at, @at + interval '1 second', gen_random_uuid(), 'pending'),
+                  ('ACC-3', '{}', @at, @at, null, null, 'pending'),
+                  ('ACC-4', '{}', @at, null, null, null, 'done')
+                """, new { at });
+            leaseEnds[table] = await conn.QuerySingleAsync<DateTime>($"select locked_until from {table} where entity_id = 'ACC-1'");
+        }
+
+        await MigrateToAsync(contexts, typeof(LeaseInNextAttemptAt));
+
+        foreach (var table in InboxTables)
+        {
+            (await conn.QueryAsync<(string Entity, DateTime? Next)>($"select entity_id, next_attempt_at from {table} order by entity_id"))
+                .Should().Equal([("ACC-1", leaseEnds[table]), ("ACC-2", at), ("ACC-3", at), ("ACC-4", null)],
+                    "{0}: a live lease ends at next_attempt_at, every other row keeps its due time", table);
+            var claimed = await conn.QueryAsync<InboxEvent>(InboxSql.For(table).Claim,
+                new { token = Guid.NewGuid(), lease = TimeSpan.FromMinutes(1), batchSize = 75 });
+            claimed.Select(e => e.EntityId).Should().BeEquivalentTo(["ACC-2", "ACC-3"], "{0}: the expired lease is taken over, the live one isn't", table);
+        }
+
+        // Down: locked_until again, the end of every lease (ACC-1's, and the claim's on ACC-2 and ACC-3), and those rows
+        // due no later than now, as the old claim left them
+        await MigrateToAsync(contexts, typeof(DropReceivedAt));
+        foreach (var table in InboxTables)
+        {
+            var rows = await conn.QueryAsync<(string Entity, bool? Due, bool? Leased)>(
+                $"select entity_id, next_attempt_at <= now(), locked_until > now() from {table} order by entity_id");
+            rows.Should().Equal([("ACC-1", true, true), ("ACC-2", true, true), ("ACC-3", true, true), ("ACC-4", null, null)], table);
+        }
+        await conn.ExecuteAsync($"drop schema {schema} cascade");
+    }
+
+    [Fact]
+    public async Task DropSyncedTime_finishes_a_pending_row_its_watermark_already_covers_and_Down_sets_the_watermark_of_done_rows()
+    {
+        const string schema = "drop_synced_time_test";
+        await using var db = await app.CreateSchemaAsync(schema);
+        var contexts = SyncDbContext.CreateFactory(db);
+        await MigrateToAsync(contexts, typeof(LeaseInNextAttemptAt));
+
+        // Each row's event is version 2. ACC-1 a redelivery over a done row, not claimed yet (watermark = its time), and
+        // ACC-2 the same while leased; ACC-3 newer than its watermark; ACC-4 superseded; ACC-5 dead; ACC-6 done
+        await using var conn = await db.OpenConnectionAsync();
+        foreach (var table in InboxTables)
+        {
+            await conn.ExecuteAsync($$"""
+                insert into {{table}} (entity_id, payload, event_time, status, next_attempt_at, lock_token, last_error_code, synced_time) values
+                  ('ACC-1', '{}', @time, 'pending', now(), null, null, @v2),
+                  ('ACC-2', '{}', @time, 'pending', now() + interval '1 hour', gen_random_uuid(), null, @v2),
+                  ('ACC-3', '{}', @time, 'pending', now(), null, 'SOME_CODE', @v1),
+                  ('ACC-4', '{}', @time, 'superseded', null, null, null, @v2),
+                  ('ACC-5', '{}', @time, 'dead', null, null, 'SOME_CODE', @v2),
+                  ('ACC-6', '{}', @time, 'done', null, null, null, @v2)
+                """, new { time = SyncFixture.BaseTime.AddMilliseconds(2).UtcDateTime, v1 = SyncFixture.Micros(1), v2 = SyncFixture.Micros(2) });
+        }
+
+        await MigrateToAsync(contexts, typeof(DropSyncedTime));
+
+        foreach (var table in InboxTables)
+        {
+            (await conn.QueryAsync<(string Entity, string Status, bool Idle, string? Code)>(
+                    $"select entity_id, status, next_attempt_at is null and lock_token is null, last_error_code from {table} order by entity_id"))
+                .Should().Equal([
+                        ("ACC-1", "done", true, null), ("ACC-2", "done", true, null), ("ACC-3", "pending", false, "SOME_CODE"),
+                        ("ACC-4", "done", true, null), ("ACC-5", "dead", true, "SOME_CODE"), ("ACC-6", "done", true, null)],
+                    "{0}: what the claim would have superseded is done, the rest as it was", table);
+        }
+
+        // Down: the watermark of every done row is its event's time
+        await MigrateToAsync(contexts, typeof(LeaseInNextAttemptAt));
+        foreach (var table in InboxTables)
+        {
+            (await conn.QueryAsync<(string Entity, long? Synced)>($"select entity_id, synced_time from {table} order by entity_id"))
+                .Should().Equal([
+                        ("ACC-1", SyncFixture.Micros(2)), ("ACC-2", SyncFixture.Micros(2)), ("ACC-3", null), ("ACC-4", SyncFixture.Micros(2)),
+                        ("ACC-5", null), ("ACC-6", SyncFixture.Micros(2))], table);
+        }
         await conn.ExecuteAsync($"drop schema {schema} cascade");
     }
 

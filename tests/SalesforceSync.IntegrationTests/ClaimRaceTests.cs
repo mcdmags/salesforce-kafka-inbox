@@ -106,7 +106,6 @@ public sealed class ClaimRaceTests(SyncFixture app)
     [InlineData("done")]
     [InlineData("failed")]
     [InlineData("dead")]
-    [InlineData("superseded")]
     [InlineData("released")]
     [InlineData("failed all")]
     [InlineData("held")]
@@ -128,11 +127,11 @@ public sealed class ClaimRaceTests(SyncFixture app)
         }
 
         (await race.RowAsync()).Should().Be((race.TimeOf(2), "pending", 0, null), "nothing of v1's outcome lands on v2");
-        var state = await race.StateAsync();
-        state.LockToken.Should().BeNull("the lease ended");
-        state.LockedUntil.Should().BeNull();
-        state.NextAttemptAt.Should().NotBeNull("v2 is pending, so it must be due, or it would never be claimed");
-        state.SyncedTime.Should().BeNull("the watermark doesn't move to v2, which was never written");
+        var (nextAttemptAt, lockToken) = await race.StateAsync();
+        lockToken.Should().BeNull("the lease ended");
+        nextAttemptAt.Should().NotBeNull("v2 is pending, so it must be due, or it would never be claimed");
+        (await race.DueAsync()).Should().Be(outcome != "held",
+            "v2 is due when the outcome transaction ends (held: when the hold ends), not when v1's lease would have");
     }
 
     /// <summary>
@@ -174,10 +173,10 @@ public sealed class ClaimRaceTests(SyncFixture app)
         }
 
         (await race.RowAsync()).Should().Be((race.TimeOf(3), "pending", 0, null));
-        var state = await race.StateAsync();
-        state.LockToken.Should().BeNull();
-        state.NextAttemptAt.Should().NotBeNull("v3 is pending, so it must be due, or it would never be claimed");
-        state.SyncedTime.Should().Be(overwrittenDuringTheLease ? null : SyncFixture.SyncedTime(1), "the watermark is v1's, if v1 was recorded done");
+        var (nextAttemptAt, lockToken) = await race.StateAsync();
+        lockToken.Should().BeNull();
+        nextAttemptAt.Should().NotBeNull("v3 is pending, so it must be due, or it would never be claimed");
+        (await race.DueAsync()).Should().BeTrue("v3 is due now, not when v1's lease would have ended");
     }
 
     private static Task Record(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
@@ -187,11 +186,10 @@ public sealed class ClaimRaceTests(SyncFixture app)
         var none = CancellationToken.None;
         return outcome switch
         {
-            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], [], [], []), none),
-            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [], [failure]), none),
-            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [], [failure], []), none),
-            "superseded" => inbox.RecordAsync(claim, new BatchOutcomes([], [row], [], [], []), none),
-            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [row], [], []), none),
+            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], []), none),
+            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
+            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
+            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
             "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
             "held" => inbox.HoldAsync(claim, "lost", none),
             _ => throw new ArgumentOutOfRangeException(nameof(outcome))
@@ -252,10 +250,16 @@ public sealed class ClaimRaceTests(SyncFixture app)
             return worker.QueryAsync<InboxEvent>(Sql.Claim, new { token, lease = TimeSpan.FromMinutes(1), batchSize = 75 }, tx);
         }
 
-        public Task<SyncStateRow> StateAsync()
+        public Task<(DateTime? NextAttemptAt, Guid? LockToken)> StateAsync()
         {
-            return observer.QuerySingleAsync<SyncStateRow>(
-                $"select next_attempt_at, locked_until, lock_token, synced_time from {Table} where entity_id = @Entity", new { Entity });
+            return observer.QuerySingleAsync<(DateTime?, Guid?)>(
+                $"select next_attempt_at, lock_token from {Table} where entity_id = @Entity", new { Entity });
+        }
+
+        /// <summary>Whether the entity is due now (null: idle).</summary>
+        public Task<bool?> DueAsync()
+        {
+            return observer.QuerySingleAsync<bool?>($"select next_attempt_at <= now() from {Table} where entity_id = @Entity", new { Entity });
         }
 
         /// <summary>Waits until <paramref name="statement"/> is blocked on a lock that <paramref name="holder"/>'s transaction holds.</summary>

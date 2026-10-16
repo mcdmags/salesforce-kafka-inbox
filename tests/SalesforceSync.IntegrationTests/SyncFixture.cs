@@ -315,8 +315,8 @@ public class SyncFixture : IAsyncLifetime
         return DateTimeOffset.Parse((string)e["meta"]!["time"]!, CultureInfo.InvariantCulture);
     }
 
-    /// <summary>The synced_time of version N: its meta.time in microseconds since the epoch, as the worker stores it.</summary>
-    public static long SyncedTime(long version)
+    /// <summary>Version N's meta.time in microseconds since the epoch, as its event_time holds it.</summary>
+    public static long Micros(long version)
     {
         return (BaseTime.AddMilliseconds(version) - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
     }
@@ -427,25 +427,15 @@ public class SyncFixture : IAsyncLifetime
     {
         await using var conn = await Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<StoredRow>(
-            $"select id, payload::text, status, attempt_count, last_error_code, next_attempt_at, locked_until, lock_token from {InboxTable(entityType)} where entity_id = @key",
+            $"select id, payload::text, status, attempt_count, last_error_code, next_attempt_at, lock_token from {InboxTable(entityType)} where entity_id = @key",
             new { key });
-        return rows.Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockedUntil,
-                r.LockToken))
+        return rows.Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockToken))
             .SingleOrDefault();
     }
 
     /// <summary>An inbox row as read, its payload as stored.</summary>
     private sealed record StoredRow(long Id, string Payload, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
-        DateTime? LockedUntil, Guid? LockToken);
-
-    /// <summary>The sync state of the entity's inbox row, if it has one.</summary>
-    public async Task<SyncStateRow?> GetSyncStateAsync(string key, string entityType = Accounts)
-    {
-        await using var conn = await Db.OpenConnectionAsync();
-        return (await conn.QueryAsync<SyncStateRow>(
-            $"select next_attempt_at, locked_until, lock_token, synced_time from {InboxTable(entityType)} where entity_id = @key",
-            new { key })).SingleOrDefault();
-    }
+        Guid? LockToken);
 
     private static long VersionOf(string payload)
     {
@@ -526,10 +516,7 @@ public class SyncFixture : IAsyncLifetime
 
 /// <summary>An inbox row as the tests see it; <paramref name="Version"/> comes from the payload's meta.time.</summary>
 public sealed record InboxRow(long Id, long Version, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
-    DateTime? LockedUntil, Guid? LockToken);
-
-/// <summary>The sync state of an entity's inbox row as the tests see it.</summary>
-public sealed record SyncStateRow(DateTime? NextAttemptAt, DateTime? LockedUntil, Guid? LockToken, long? SyncedTime);
+    Guid? LockToken);
 
 [CollectionDefinition(Name)]
 public sealed class SyncCollection : ICollectionFixture<SyncFixture>
