@@ -67,12 +67,6 @@ public abstract class DrainBenchmarkBase
     /// <summary>Simulated Salesforce round trip.</summary>
     public abstract int LatencyMs { get; set; }
 
-    /// <summary>
-    /// <see cref="SyncOptions.CoalesceDelay"/>. Only events stored while the pods drain get it: preloaded entities are
-    /// due at once.
-    /// </summary>
-    public abstract int CoalesceDelayMs { get; set; }
-
     /// <summary>False: the whole inbox is loaded before draining. True: events keep arriving while pods drain.</summary>
     protected abstract bool StreamIngest { get; }
 
@@ -200,8 +194,7 @@ public abstract class DrainBenchmarkBase
             {
                 entityId = e.EntityId,
                 eventTime = e.EventTime,
-                payload = e.Payload,
-                coalesceDelay = TimeSpan.FromMilliseconds(CoalesceDelayMs)
+                payload = e.Payload
             });
         }
     }
@@ -262,7 +255,6 @@ public abstract class DrainBenchmarkBase
             o.MaxConcurrentRequests = Workers * Pods; // global cap across all pods
             o.BatchSize = StreamIngest ? 10 : 75;     // streaming: small batches, so entities are claimed again and again
             o.Lease = TimeSpan.FromMinutes(5);
-            o.CoalesceDelay = TimeSpan.FromMilliseconds(CoalesceDelayMs);
             // A relationship can be claimed before its Accounts are in the org (DEPENDENCY_NOT_SYNCED): retry it
             // within milliseconds rather than the production 30 s, so the benchmark measures the pipeline
             o.RetryBaseDelay = TimeSpan.FromMilliseconds(10);
@@ -478,7 +470,7 @@ public abstract class DrainBenchmarkBase
 
         var stats = _store.GetStats();
         Console.WriteLine(
-            $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms coalesceDelay={CoalesceDelayMs}ms] " +
+            $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms] " +
             $"events={Events} relationshipEvents={relationshipEvents} {stats} entities={rows} " +
             $"coalescing={(double)Events / Math.Max(1, claims):F2} events/entity claim " +
             $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} stale={stale} wrong={wrong.Count} regressions={regressions}");
@@ -543,7 +535,6 @@ public class InboxDrainBenchmarks : DrainBenchmarkBase
     [Params(5_000)] public override int Events { get; set; }
     [ParamsSource(nameof(AccountCounts))] public override int Accounts { get; set; }
     [ParamsSource(nameof(Latencies))] public override int LatencyMs { get; set; }
-    public override int CoalesceDelayMs { get; set; } // preloaded: no event is stored while draining
     protected override bool StreamIngest => false;
 
     public static int[] WorkerCounts => BenchmarkRun.IsQuick ? [1, 4] : [1, 4, 8];
@@ -570,12 +561,10 @@ public class StreamingIngestBenchmarks : DrainBenchmarkBase
     [Params(5_000)] public override int Events { get; set; }
     [Params(50)] public override int Accounts { get; set; }
     [Params(5)] public override int LatencyMs { get; set; }
-    [ParamsSource(nameof(CoalesceDelays))] public override int CoalesceDelayMs { get; set; }
     protected override bool StreamIngest => true;
 
     public static int[] WorkerCounts => BenchmarkRun.IsQuick ? [4] : [4, 8];
     public static int[] PodCounts => BenchmarkRun.IsQuick ? [1] : [1, 3];
-    public static int[] CoalesceDelays => [(int)new SyncOptions().CoalesceDelay.TotalMilliseconds];
 
     [Benchmark(Description = "Drain while ingesting")]
     public Task DrainWhileIngesting()
