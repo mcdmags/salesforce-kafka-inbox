@@ -8,8 +8,10 @@ These numbers come from the claim and outcome tuning merged in PR #13 and re-mea
 (PR #12). Later changes (PR #14 formatting, PR #15 simplification of the write path) do not touch the inbox SQL;
 they can change the API call counts of the drain benchmarks, so re-run them before comparing call counts.
 
-[Latest run](#latest-run-main-at-7a145b0-after-the-simplification) re-measures everything on `main` at 7a145b0, after
-the record types, the shared Describe cache and the simplification into fewer files (PR #20 to #24).
+[Latest run](#latest-run-main-at-2d20c16) re-measures everything on `main` at 2d20c16, with the `sf_sync_state`
+claim, the rate limiter in C# and `Sync:CoalesceDelay` (PR #35 to #46). The
+[run before it](#latest-run-main-at-7a145b0-after-the-simplification) measured `main` at 7a145b0, after the record
+types, the shared Describe cache and the simplification into fewer files (PR #20 to #24).
 
 **Since then the claim has changed.** Entities are now claimed by locking and leasing their row in one
 `sf_sync_state` table (`FOR UPDATE SKIP LOCKED`), and the inboxes hold only events (see the
@@ -305,6 +307,78 @@ median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest sing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. Lower
 `Sync:MaxEventsPerEntity` to make those claims cheaper, at the price of more Salesforce calls per event. A
 claim-wide row budget was not added: it would split deep backlogs into more, smaller writes.
+
+## Latest run: main at 2d20c16
+
+All 37 benchmarks (`--run full`) on `main` at 2d20c16 (PR #46), on 2026-10-16. It is the first full run since the
+claim moved to `sf_sync_state` (PR #35), and it includes the rate limiter in C# (PR #37, #38), the query URL limits
+(PR #39) and `Sync:CoalesceDelay` 50 ms (PR #41, #42). The environment is the same as above. The load average was
+4.8 at the start and 7 to 10 during the run. The run took 14 minutes.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures: 0 overlapping claims, 0 accounts not at their newest
+version, 0 wrong values, 0 write-history regressions, 0 failed records.
+
+**Same work**: every event still ends in one of 878 (100 accounts) or 1,618 (1,000 accounts) entity syncs, with
+coalescing 5.69 and 3.09. With one worker the run is still deterministic, but the counts differ from the
+[7a145b0 run](#latest-run-main-at-7a145b0-after-the-simplification) because the claim changed:
+
+| Accounts | API calls | Write req | Claims | Retries |
+|--:|--:|--:|--:|--:|
+| 100 | 30 (was 26) | 15 (13) | 938 (928) | 60 (50) |
+| 1,000 | 60 (58) | 29 (29) | 2,256 (2,114) | 638 (496) |
+
+Preloaded drain, 5,000 events. The medians are BenchmarkDotNet's. API calls, write requests, claims and retries
+are the medians of the iterations without a Describe, at 0 ms latency:
+
+| W | P | Accounts | Median 0 ms | Median 25 ms | Allocated | API calls | Write req | Claims | Retries | 7a145b0 mean 0 ms |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 689.9 ms | 1,371.4 ms | 47.7 MB | 30 | 15 | 938 | 60 | 704.5 ms |
+| 1 | 1 | 1,000 | 971.2 ms | 3,107.0 ms | 93.1 MB | 60 | 29 | 2,256 | 638 | 1,668.1 ms |
+| 1 | 3 | 100 | 351.5 ms | 579.2 ms | 51.6 MB | 33 | 16 | 953 | 75 | 490.9 ms |
+| 1 | 3 | 1,000 | 580.0 ms | 1,038.1 ms | 95.4 MB | 60 | 30 | 2,249 | 631 | 969.0 ms |
+| 4 | 1 | 100 | 235.3 ms | 548.1 ms | 54.8 MB | 35 | 17 | 1,026 | 148 | 557.2 ms |
+| 4 | 1 | 1,000 | 535.8 ms | 900.5 ms | 95.4 MB | 60 | 30 | 2,250 | 632 | 782.3 ms |
+| 4 | 3 | 100 | 464.7 ms | 709.6 ms | 85.7 MB | 44 | 18 | 1,632 | 754 | 847.6 ms |
+| 4 | 3 | 1,000 | 482.8 ms | 744.2 ms | 98.5 MB | 57 | 27 | 1,989 | 371 | 823.7 ms |
+| 8 | 1 | 100 | 397.2 ms | 665.6 ms | 70.0 MB | 39 | 17 | 1,327 | 449 | 648.2 ms |
+| 8 | 1 | 1,000 | 544.5 ms | 920.8 ms | 97.3 MB | 57 | 27 | 2,184 | 566 | 830.7 ms |
+| 8 | 3 | 100 | 705.9 ms | 891.9 ms | 112.3 MB | 47 | 18 | 1,661 | 783 | 1,255.3 ms |
+| 8 | 3 | 1,000 | 893.5 ms | 923.8 ms | 138.0 MB | 75 | 34 | 2,605 | 987 | 1,115.3 ms |
+
+Streaming (50 accounts, 5 ms latency, `CoalesceDelay` 50 ms):
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries | 7a145b0 mean / API calls |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.139 s | 104.1 MB | 216 | 107 | 4.75 | 1,073 | 22 | 1.249 s / 201 |
+| 4 | 3 | 1.587 s | 152.3 MB | 310 | 154 | 4.05 | 1,262 | 26 | 1.302 s / 292 |
+| 8 | 1 | 1.812 s | 148.6 MB | 332 | 165 | 3.62 | 1,409 | 26 | 1.188 s / 272 |
+| 8 | 3 | 1.951 s | 168.5 MB | 307 | 150 | 5.05 | 1,054 | 54 | 1.808 s / 328 |
+
+- **4 workers x 3 pods, 100 accounts, 0 ms**: median 464.7 ms (mean 473.8 ms), against about 410 to 420 ms before
+  the rate limiter moved to C# (PR #37). That matches the 457 to 474 ms of the [sweep](#coalescedelay-sweep)'s quick
+  drains and is within the noise of this machine, so the slowdown measured after PR #37 is gone with PR #38.
+- **Memory**: about half of the [EF Core run](#current-ef-core-before-and-after-the-sql-changes) with 100 accounts
+  (48 to 112 MB, against 106 to 177 MB) and about a quarter with 1,000 accounts (93 to 138 MB, against 434 to
+  519 MB). Much of the drop is the fake org's JSON (PR #33), which allocates in the benchmark process.
+- **Streaming**: 4 x 1 made 216 calls (coalescing 4.75), close to the sweep's 205. 8 x 1 made more calls than at
+  7a145b0 (332 against 272) with lower coalescing (3.62 against 3.86). Eight loops on one pod each claim small
+  batches of the 50 accounts as they arrive. The 3-pod cases are about the same.
+- Times are lower than at 7a145b0 in every preloaded case. Some of that is the code (1 x 1 with 1,000 accounts:
+  971 ms against 1,668 ms, with 2 more calls) and some is the machine, so compare work counts first.
+
+Micro benchmarks:
+
+| Method | Mean | Allocated |
+|---|--:|--:|
+| ParseLimitHeader | 860.08 ns | 2832 B |
+| CoalesceTenEvents | 27.56 ns | - |
+| PrepareTenEvents | 21,000.02 ns | 20664 B |
+| ReadAndValidateEvent | 1,523.39 ns | 1616 B |
+| MapAccountEvent | 2,557.03 ns | 4000 B |
+| MapPayloadToSObject | 31.72 ns | 200 B |
+| MapSObjectToRecord | 377.69 ns | 1000 B |
+| DiffNumber | 150.14 ns | 32 B |
+| DiffDateTime | 343.87 ns | 192 B |
 
 ## Latest run: main at 7a145b0, after the simplification
 
