@@ -991,7 +991,8 @@ src/
                                   write history, Sforce-Limit-Info): FakeSalesforceStore
                                   is the org's surface and lock; FakeRecords, FakeSoql, FakeCollectionWriter,
                                   CompositeReferences, FakeFaults and FakeCounters are its parts
-  SalesforceSync.FakeSalesforce.Server/  The in-memory org as an HTTP service (+ /__fake inspection API)
+  SalesforceSync.FakeSalesforce.Server/  The in-memory org as an HTTP service (+ /__fake inspection API); the worker
+                                  never references the fake: it reaches it, like a real org, at Salesforce:InstanceUrl
   SalesforceSync.LoadGenerator/   Produces account change (with bursts), relationship and contact events to Kafka
   SalesforceSync.AppHost/         Aspire: Postgres + pgAdmin, Kafka + Kafka UI, mock Salesforce, worker, generator, benchmarks
 tests/
@@ -1002,7 +1003,7 @@ tests/
   SalesforceSync.IntegrationTests/  End-to-end tests: Postgres + Kafka in Testcontainers, worker pods and the mock org
                                   in-process; Kafka in, assertions on the mock org + inbox
 benchmarks/
-  SalesforceSync.Benchmarks/      BenchmarkDotNet: real Postgres inbox, fake Salesforce HTTP
+  SalesforceSync.Benchmarks/      BenchmarkDotNet: real Postgres inbox, the in-memory org as the HTTP handler
 sql/
   claim-audit.sql                 Test/benchmark-only trigger that records every entity claim
 ```
@@ -1257,8 +1258,8 @@ Lightning shows the org at an address like `https://acme--dev.sandbox.lightning.
 | `https://acme.lightning.force.com` (production) | `https://acme.my.salesforce.com` |
 
 **Setup → My Domain** shows the exact address. Use it, not `login.salesforce.com` or `test.salesforce.com`: the
-client credentials flow only works on the org's own domain. The token URL is the same address plus
-`/services/oauth2/token`.
+client credentials flow only works on the org's own domain. The token URL defaults to the same address plus
+`/services/oauth2/token`; set `Salesforce:TokenUrl` only if your org issues tokens at another address.
 
 ### 2. Create the user the sync runs as
 
@@ -1465,8 +1466,9 @@ Salesforce.
 
 ### 5. Run against the sandbox
 
-Store the values from steps 1 and 3 in the AppHost's user secrets. When they are set, the AppHost skips the mock org,
-points the worker at the sandbox, and makes the load generator send a small run (200 events over 20 accounts) instead
+Store the values from steps 1 and 3 in the AppHost's user secrets. Nothing else changes: the worker talks to the mock
+org and to a real one the same way, and only `Salesforce:InstanceUrl` (with the real credentials) tells them apart.
+When they are set, the AppHost skips the mock org, points the worker at the sandbox, and makes the load generator send a small run (200 events over 20 accounts) instead
 of 20,000.
 
 ```bash
@@ -1494,10 +1496,10 @@ end `done` or `superseded`. A `dead` row's `last_error` says what Salesforce rej
 afterwards: `ACC-…`, `PRF-…`, `REL-…` and `CON-…`.
 
 To run the worker without Aspire (a server or Kubernetes), give it the same settings as environment variables
-(`Salesforce__InstanceUrl`, `Salesforce__TokenUrl`, `Salesforce__ClientId`, `Salesforce__ClientSecret`), plus
-`ConnectionStrings__inboxdb` and `ConnectionStrings__kafka`, and `ConnectionStrings__redis` so the replicas share their
-Describe results (optional: without it each process describes on its own; see [The Describe cache](#the-describe-cache)).
-With Aspire, Redis needs no setup: the AppHost starts it and passes the connection string.
+(`Salesforce__InstanceUrl`, `Salesforce__ClientId`, `Salesforce__ClientSecret`), plus `ConnectionStrings__inboxdb`
+and `ConnectionStrings__kafka`, and `ConnectionStrings__redis` so the replicas share their Describe results (optional:
+without it each process describes on its own; see [The Describe cache](#the-describe-cache)). With Aspire, Redis needs no
+setup: the AppHost starts it and passes the connection string.
 
 ### 6. Tune and check
 

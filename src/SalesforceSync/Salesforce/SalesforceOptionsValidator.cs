@@ -15,6 +15,11 @@ public sealed class SalesforceOptionsValidator(IOptions<SyncOptions> sync) : IVa
             errors.Add($"{SalesforceOptions.Section}:InstanceUrl must be an absolute URL");
         }
 
+        if (!string.IsNullOrWhiteSpace(o.TokenUrl) && !Uri.IsWellFormedUriString(o.TokenUrl, UriKind.Absolute))
+        {
+            errors.Add($"{SalesforceOptions.Section}:TokenUrl must be an absolute URL (or empty: the instance's own)");
+        }
+
         if (o.RequestTimeout <= TimeSpan.Zero || o.RequestTimeout > SalesforceOptions.MaxApiTimeout)
         {
             errors.Add($"{SalesforceOptions.Section}:RequestTimeout ({o.RequestTimeout}) must be > 0 and at most " +

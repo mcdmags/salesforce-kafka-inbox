@@ -3,7 +3,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using SalesforceSync.Data;
-using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
@@ -20,9 +19,10 @@ public static class SyncServiceCollectionExtensions
 {
     /// <summary>
     /// The worker: options (validated at startup), the Postgres data source (<c>ConnectionStrings:inboxdb</c>), the
-    /// database schema (migrated at startup), the Salesforce client (real OAuth endpoint, or the in-memory org with
-    /// <c>Salesforce:UseFake</c>) with its Describe cache shared through Redis (when <c>ConnectionStrings:redis</c> is
-    /// set), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the worker loops.
+    /// database schema (migrated at startup), the Salesforce client (OAuth and REST over HTTP to
+    /// <c>Salesforce:InstanceUrl</c>, a real org or the mock one) with its Describe cache shared through Redis (when
+    /// <c>ConnectionStrings:redis</c> is set), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the
+    /// worker loops.
     /// </summary>
     public static IHostApplicationBuilder AddSalesforceSyncWorker(this IHostApplicationBuilder builder)
     {
@@ -43,15 +43,7 @@ public static class SyncServiceCollectionExtensions
         }
 
         // Salesforce client. Handler order: gzip -> auth.
-        var salesforce = services.AddSalesforceClient();
-        if (config.GetValue<bool>("Salesforce:UseFake"))
-        {
-            UseInMemoryOrg(salesforce);
-        }
-        else
-        {
-            UseSalesforceOrg(salesforce);
-        }
+        UseSalesforceOrg(services.AddSalesforceClient());
 
         // Kafka -> inbox (only when a Kafka connection string is configured)
         if (!string.IsNullOrWhiteSpace(config.GetConnectionString("kafka")))
@@ -69,8 +61,15 @@ public static class SyncServiceCollectionExtensions
     private static void AddWorkerOptions(IServiceCollection services, IConfiguration config)
     {
         AddValidatedOptions<SalesforceOptions, SalesforceOptionsValidator>(services, config.GetSection(SalesforceOptions.Section));
+        // Salesforce:TokenUrl defaults to the instance's own token endpoint
+        services.PostConfigure<SalesforceOptions>(o =>
+        {
+            if (string.IsNullOrWhiteSpace(o.TokenUrl))
+            {
+                o.TokenUrl = $"{o.InstanceUrl.TrimEnd('/')}/services/oauth2/token";
+            }
+        });
         AddValidatedOptions<SyncOptions, SyncOptionsValidator>(services, config.GetSection(SyncOptions.Section));
-        services.Configure<FakeSalesforceOptions>(config.GetSection(FakeSalesforceOptions.Section));
         services.Configure<PostgresRetryOptions>(config.GetSection(PostgresRetryOptions.Section));
     }
 
@@ -83,36 +82,7 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton<IValidateOptions<TOptions>, TValidator>();
     }
 
-    /// <summary>In-memory org: the real client and inbox are exercised; only the HTTP endpoint is fake.</summary>
-    private static void UseInMemoryOrg(IHttpClientBuilder salesforce)
-    {
-        var services = salesforce.Services;
-        services.AddSingleton(sp => new FakeSalesforceStore(sp.GetRequiredService<IOptions<FakeSalesforceOptions>>().Value));
-        salesforce.ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
-        services.AddHostedService<FakeStatsReporter>();
-    }
-
-    /// <summary>When running against the fake org, logs its counters periodically (visible in the Aspire dashboard).</summary>
-    private sealed class FakeStatsReporter(FakeSalesforceStore store, ILogger<FakeStatsReporter> log) : BackgroundService
-    {
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-        {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
-            try
-            {
-                while (await timer.WaitForNextTickAsync(stoppingToken))
-                {
-                    log.LogInformation("Fake Salesforce: {Stats}", store.GetStats());
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // shutting down
-            }
-        }
-    }
-
-    /// <summary>A real org: OAuth, and one long-lived connection pool.</summary>
+    /// <summary>The org at <c>Salesforce:InstanceUrl</c>: OAuth, and one long-lived connection pool.</summary>
     private static void UseSalesforceOrg(IHttpClientBuilder salesforce)
     {
         var services = salesforce.Services;

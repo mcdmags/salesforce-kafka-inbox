@@ -23,10 +23,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\SalesforceSync.FakeSalesforce\SalesforceSync.FakeSalesforce.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
     <InternalsVisibleTo Include="SalesforceSync.Benchmarks" />
     <InternalsVisibleTo Include="SalesforceSync.Tests" />
   </ItemGroup>
