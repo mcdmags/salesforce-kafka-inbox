@@ -17,7 +17,7 @@ public sealed class SharedDescribeCacheTests(MultiPodFixture app)
     {
         var acct = SyncFixture.NewAccountId();
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Shared ") }, new JsonObject { ["tier"] = "Gold" });
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((1L, "done"));
+        (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
 
         var services = app.RunningPods[0].Services;
         var redis = services.GetRequiredService<IDistributedCache>();

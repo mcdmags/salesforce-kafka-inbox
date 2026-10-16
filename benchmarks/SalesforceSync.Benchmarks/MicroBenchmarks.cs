@@ -9,8 +9,8 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// CPU-only hot paths: header parsing, reading and coalescing events, the typed mapping (event JSON -> payload -> sObject ->
-/// record), type-aware normalize + compare.
+/// CPU-only hot paths: header parsing, reading events, the typed mapping (event JSON -> payload -> sObject -> record),
+/// type-aware normalize + compare.
 /// </summary>
 [MemoryDiagnoser]
 public class MicroBenchmarks
@@ -22,7 +22,6 @@ public class MicroBenchmarks
     private static readonly Dictionary<string, long> NothingSynced = [];
 
     private List<InboxEvent> _tenEvents = default!;
-    private List<(InboxEvent Row, ReadEvent<AccountEvent> Read)> _tenRead = default!;
     private AccountPayload _payload = default!;
     private AccountSObject _sobject = default!;
     private JsonElement _number;
@@ -33,16 +32,16 @@ public class MicroBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        // Full records, as the source sends them; ids are deliberately not in version order
+        // Full records, as the source sends them: a claim's rows, one per entity
         _tenEvents = [.. Enumerable.Range(1, 10).Select(v => new InboxEvent(
-            RowId: 11 - v,
-            EntityId: "ACC-000001",
+            RowId: v,
+            EntityId: $"ACC-{v:D6}",
             Payload: new JsonObject
             {
                 ["meta"] = new JsonObject { ["time"] = $"2026-10-14T01:02:03.{v:D3}Z", ["type"] = v == 1 ? "inserted" : "updated" },
                 ["account"] = new JsonObject
                 {
-                    ["externalId"] = "ACC-000001",
+                    ["externalId"] = $"ACC-{v:D6}",
                     ["name"] = "Acme",
                     ["rating"] = "Hot",
                     ["industry"] = "Technology",
@@ -67,9 +66,9 @@ public class MicroBenchmarks
                     }
                 }
             }.ToJsonString(),
-            AttemptCount: 1))];
+            AttemptCount: 1,
+            EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero)))];
 
-        _tenRead = [.. _tenEvents.Select(row => (row, Accounts.TryRead(row.Payload, out var read, out _) ? read : null!))];
         _payload = JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchUpsertService.EventJson)!.Account!;
         _sobject = AccountSync.ToAccount(_payload);
 
@@ -83,16 +82,9 @@ public class MicroBenchmarks
         return SalesforceLimitInfo.Parse(LimitHeader);
     }
 
-    /// <summary>Ten claimed events of one entity, already read -> the one to write (the newest by event time).</summary>
+    /// <summary>What the engine does with the rows of a claim of ten entities: read each one's event and map it.</summary>
     [Benchmark]
-    public long CoalesceTenEvents()
-    {
-        return PreparedBatch.Coalesce(_tenRead).Row.RowId;
-    }
-
-    /// <summary>What the engine does with a claimed entity: read its ten events, keep the newest, map it.</summary>
-    [Benchmark]
-    public int PrepareTenEvents()
+    public int PrepareTenEntities()
     {
         return PreparedBatch.Prepare(Accounts, _tenEvents, NothingSynced).Work.Count;
     }

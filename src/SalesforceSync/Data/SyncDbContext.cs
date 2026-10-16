@@ -65,7 +65,7 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         modelBuilder.Entity<ContactInboxRow>(entity => ConfigureInbox(entity, "sf_contact_inbox"));
 
         // Every synced entity's sync state, one row per (entity type, entity id) for all object types. Claiming an
-        // entity is locking and leasing its row here; the inboxes hold the events only.
+        // entity is locking and leasing its row here; the inboxes hold the entities' newest events only.
         modelBuilder.Entity<SyncState>(entity =>
         {
             entity.ToTable("sf_sync_state");
@@ -106,9 +106,9 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
     private static partial Regex WordStart();
 
     /// <summary>
-    /// An inbox table: one row per Kafka event and what became of it; the id is a bigserial. Columns with a database
-    /// default are left out of an insert while they hold the CLR default, so a new row gets the database's clock and
-    /// 'pending'.
+    /// An inbox table: one row per entity, holding its newest Kafka event and what became of it; the id is a
+    /// bigserial. Columns with a database default are left out of an insert while they hold the CLR default, so a new
+    /// row gets the database's clock and 'pending'.
     /// </summary>
     private static void ConfigureInbox<TRow>(EntityTypeBuilder<TRow> entity, string table) where TRow : InboxRow
     {
@@ -123,16 +123,16 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         entity.Property(r => r.AttemptCount).HasDefaultValue(0);
         entity.Property(r => r.ReceivedAt).HasDefaultValueSql("now()");
         entity.Property(r => r.LastUpdated).HasDefaultValueSql("now()");
-        // An entity's pending events in arrival order: the events a claim takes (InboxSql.ClaimEvents), and whether any
-        // are left when its lease ends
-        entity.HasIndex(r => new { r.EntityId, r.Id }).HasDatabaseName($"{table}_pending").HasFilter("status = 'pending'");
+        // One row per entity, which a newer event overwrites (InboxSql.Store's on conflict). Also how a claim finds the
+        // entities' rows (InboxSql.ClaimEvents) and its lease's end whether the row is still pending (InboxSql.EndLease).
+        entity.HasIndex(r => r.EntityId).IsUnique().HasDatabaseName($"{table}_entity_id");
     }
 
     /// <summary>
     /// For the hot tables (the inboxes, sf_sync_state): vacuum after 2% (plus 1,000 rows) of the table is dead instead
-    /// of the default 20%. Every event is updated at least twice (claimed, then finished), every stored event, claim and
-    /// outcome updates its entity's state row, and the claims read the front of the pending and ready indexes, where the
-    /// dead index entries those updates leave behind collect. The default lets that grow with the table.
+    /// of the default 20%. Every event rewrites its entity's inbox row and every claim and outcome updates it again,
+    /// every stored event, claim and outcome updates its entity's state row, and the claims read the front of the ready
+    /// index, where the dead index entries those updates leave behind collect. The default lets that grow with the table.
     /// </summary>
     private static void VacuumOften(EntityTypeBuilder entity)
     {

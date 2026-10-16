@@ -413,15 +413,15 @@ public class SyncFixture : IAsyncLifetime
     public IRepository<AccountInboxRow> AccountInbox => new InboxRepository<AccountInboxRow>(Contexts,
         Options.Create(new SyncOptions { CoalesceDelay = TimeSpan.Zero }));
 
-    /// <summary>(version, status) of every inbox row for the entity, by version then arrival (version N = meta.time BaseTime + N ms).</summary>
+    /// <summary>(version, status) of the entity's inbox row, if it has one (version N = meta.time BaseTime + N ms).</summary>
     public async Task<IReadOnlyList<(long Version, string Status)>> GetInboxAsync(string key, string entityType = Accounts)
     {
         return [.. (await GetInboxRowsAsync(key, entityType)).Select(r => (r.Version, r.Status))];
     }
 
     /// <summary>
-    /// The entity's inbox rows, each with its entity's lease (from sf_sync_state). The version is read here from the
-    /// stored payload, like the worker does (in C#, not in SQL).
+    /// The entity's inbox row (none or one: a newer event overwrites it), with its entity's lease (from sf_sync_state).
+    /// The version is read here from the stored payload, like the worker does (in C#, not in SQL).
     /// </summary>
     public async Task<IReadOnlyList<InboxRow>> GetInboxRowsAsync(string key, string entityType = Accounts)
     {
@@ -453,7 +453,10 @@ public class SyncFixture : IAsyncLifetime
         return (long)(time - BaseTime).TotalMilliseconds;
     }
 
-    /// <summary>Stores account events directly, in one transaction, so a single claim is sure to see them together.</summary>
+    /// <summary>
+    /// Stores account events directly, in this order, in one transaction (as the consumer would one after the other):
+    /// the entity's row ends with the newest of them, and no claim sees the ones in between.
+    /// </summary>
     public async Task InsertIntoInboxAsync(string entityId, params JsonObject[] events)
     {
         await using var conn = await Db.OpenConnectionAsync();
@@ -485,14 +488,14 @@ public class SyncFixture : IAsyncLifetime
         }.ConnectionString);
     }
 
-    /// <summary>Polls until every expected inbox row exists and none is pending, then returns them (by version, then arrival).</summary>
-    public Task<IReadOnlyList<(long Version, string Status)>> WaitForInboxSettledAsync(string key, int expectedRows,
-        string entityType = Accounts)
+    /// <summary>Polls until the entity's inbox row holds <paramref name="version"/> and is not pending, then returns it.</summary>
+    public async Task<(long Version, string Status)> WaitForInboxSettledAsync(string key, long version, string entityType = Accounts)
     {
-        return Eventually.ValueAsync(
+        var rows = await Eventually.ValueAsync(
                 () => GetInboxAsync(key, entityType),
-                rows => rows.Count == expectedRows && rows.All(r => r.Status != "pending"),
-                $"inbox rows for {entityType} {key} to settle");
+                rows => rows.Count == 1 && rows[0].Version == version && rows[0].Status != "pending",
+                $"the inbox row of {entityType} {key} to settle at v{version}");
+        return rows[0];
     }
 
     /// <summary>librdkafka wants host:port; Testcontainers reports a URI (PLAINTEXT://host:port/).</summary>

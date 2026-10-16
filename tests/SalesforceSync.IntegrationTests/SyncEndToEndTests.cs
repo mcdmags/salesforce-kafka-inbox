@@ -23,8 +23,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
             new JsonObject { ["name"] = name, ["rating"] = "Hot" },
             new JsonObject { ["tier"] = "Gold", ["score"] = score });
 
-        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
-        inbox.Should().Equal((1L, "done"));
+        (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
 
         var account = await app.GetRecordAsync("Account", acct);
         account.Should().NotBeNull();
@@ -56,14 +55,13 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishAsync(acct, 1,
             new JsonObject { ["name"] = name, ["rating"] = "Hot", ["description"] = description },
             new JsonObject { ["tier"] = "Silver" });
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
 
         // The next event is the full record again; only the rating is different
         await app.PublishAsync(acct, 2,
             new JsonObject { ["name"] = name, ["rating"] = "Warm", ["description"] = description },
             new JsonObject { ["tier"] = "Silver" });
-        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
-        inbox.Should().OnlyContain(r => r.Status == "done");
+        (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
 
         var account = await app.GetRecordAsync("Account", acct);
         account.Should().NotBeNull();
@@ -91,14 +89,13 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishAsync(acct, 1,
             new JsonObject { ["name"] = name, ["rating"] = "Hot", ["description"] = "to be cleared", ["isActive"] = true },
             new JsonObject { ["tier"] = "Gold", ["score"] = 7 });
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
 
         // rating is null, description and isActive are absent; the profile no longer has a tier
         await app.PublishAsync(acct, 2,
             new JsonObject { ["name"] = name, ["rating"] = null },
             new JsonObject { ["score"] = 7 });
-        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
-        inbox.Should().OnlyContain(r => r.Status == "done");
+        (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
 
         var account = await app.GetRecordAsync("Account", acct);
         account.Should().NotBeNull();
@@ -125,12 +122,12 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         var name = Any.String("Tyrell ");
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = name, ["rating"] = "Hot" }, new JsonObject { ["tier"] = "Gold" });
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
 
         var withoutProfile = SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = name, ["rating"] = "Cold" }, []);
         withoutProfile["account"]!.AsObject().Remove("profile");
         await app.PublishRawAsync(acct, withoutProfile.ToJsonString());
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
+        await app.WaitForInboxSettledAsync(acct, version: 2);
 
         ((string?)(await app.GetRecordAsync("Account", acct))!["Rating"]).Should().Be("Cold");
         var profile = await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct));
@@ -145,7 +142,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         var account = new JsonObject { ["name"] = Any.String("Wayne "), ["rating"] = "Hot", ["description"] = "synced" };
 
         await app.PublishAsync(acct, 1, account, new JsonObject { ["tier"] = "Gold" });
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
 
         // Someone edits the record directly in Salesforce
         using (var edit = await app.Salesforce.PatchAsJsonAsync($"/__fake/records/Account/{acct}",
@@ -156,7 +153,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         // The next event carries the same account data as v1; Salesforce differs in two fields, so both are written back
         await app.PublishAsync(acct, 2, (JsonObject)account.DeepClone(), new JsonObject { ["tier"] = "Gold" });
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
+        await app.WaitForInboxSettledAsync(acct, version: 2);
 
         var stored = await app.GetRecordAsync("Account", acct);
         stored.Should().NotBeNull();
@@ -181,10 +178,8 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishAsync(acct, 4, new JsonObject { ["name"] = name, ["rating"] = "Cold", ["description"] = "from v4" }, new JsonObject { ["tier"] = "Gold" });
         await app.PublishAsync(acct, 5, new JsonObject { ["name"] = name, ["rating"] = "Cold", ["description"] = "from v5" }, new JsonObject { ["tier"] = "Gold", ["score"] = 99 });
 
-        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 5);
-        inbox.Should().OnlyContain(r => r.Status == "done" || r.Status == "superseded",
-            "an event claimed together with a newer one of its account is superseded, the rest are written");
-        inbox[^1].Should().Be((5L, "done"));
+        (await app.WaitForInboxSettledAsync(acct, version: 5)).Should().Be((5L, "done"),
+            "each event overwrote the row unless a claim took the one before it first: whatever was claimed was written, v5 last");
 
         // Exactly the v5 record, however the five events were batched: nothing of an older event survives
         var account = await app.GetRecordAsync("Account", acct);
@@ -202,21 +197,21 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Stale_event_is_superseded_and_does_not_overwrite_newer_data()
+    public async Task Stale_event_changes_nothing_and_does_not_overwrite_newer_data()
     {
         var acct = SyncFixture.NewAccountId();
 
         var name = Any.String("Umbrella ");
         await app.PublishAsync(acct, 5, new JsonObject { ["name"] = name, ["rating"] = "Hot" }, new JsonObject { ["tier"] = "Platinum" });
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 5);
 
         // An older version arrives late (replay / out-of-order producer)
         await app.PublishAsync(acct, 3, new JsonObject { ["name"] = name, ["rating"] = "Cold" }, new JsonObject { ["tier"] = "Bronze" });
-        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
-        inbox.Should().Equal((3L, "superseded"), (5L, "done"));
+        await WaitUntilConsumedAsync(acct);
+        (await app.GetInboxAsync(acct)).Should().Equal([(5L, "done")], "an older event doesn't overwrite the row");
         (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(SyncFixture.SyncedTime(5), "the watermark is the event written to Salesforce");
 
-        // v5 already set the account's watermark, so v3 never reached Salesforce
+        // v3 never reached Salesforce
         var account = await app.GetRecordAsync("Account", acct);
         account.Should().NotBeNull();
         ((string?)account!["Rating"]).Should().Be("Hot");
@@ -241,7 +236,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         await app.PublishAsync(acct, 4, new JsonObject { ["name"] = "v4" }, []);
 
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((4L, "superseded"));
+        (await app.WaitForInboxSettledAsync(acct, version: 4)).Should().Be((4L, "superseded"));
         (await app.GetRecordAsync("Account", acct)).Should().BeNull("v4 is not newer than v5, the watermark, so it is not written");
         (await app.GetSyncStateAsync(acct)).Should().Be(new SyncStateRow(null, null, null, SyncFixture.SyncedTime(5)),
             "the entity is idle again, its watermark unchanged");
@@ -260,48 +255,46 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         var micros = (SyncFixture.BaseTime - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
 
         await app.PublishRawAsync(acct, v1.ToJsonString());
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
         (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(micros + 1_000, "Done moves the watermark to the row's event_time");
+        await using var conn = await app.Db.OpenConnectionAsync();
+        var storedTime = $"select (extract(epoch from event_time) * 1000000)::bigint from {SyncFixture.InboxTable()} where entity_id = @acct";
+        (await conn.QuerySingleAsync<long>(storedTime, new { acct }))
+            .Should().Be(micros + 1_000, "the consumer stores meta.time, cut to the microsecond as the engine cuts it");
 
         await app.PublishRawAsync(acct, v2.ToJsonString());
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().Equal((1L, "done"), (1L, "done"));
-        (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(micros + 1_001);
+        await Eventually.ValueAsync(() => app.GetSyncStateAsync(acct), s => s?.SyncedTime == micros + 1_001, "v2 to be synced");
+        (await app.GetInboxAsync(acct)).Should().Equal([(1L, "done")]);
         ((string?)(await app.GetRecordAsync("Account", acct))!["Name"]).Should().Be("v2");
-
-        await using var conn = await app.Db.OpenConnectionAsync();
-        (await conn.QueryAsync<long>(
-                $"select (extract(epoch from event_time) * 1000000)::bigint from {SyncFixture.InboxTable()} where entity_id = @acct order by id",
-                new { acct }))
-            .Should().Equal([micros + 1_000, micros + 1_001], "the consumer stores meta.time, cut to the microsecond as the engine cuts it");
+        (await conn.QuerySingleAsync<long>(storedTime, new { acct })).Should().Be(micros + 1_001);
     }
 
     [Fact]
-    public async Task Redelivered_event_is_stored_again_and_changes_nothing()
+    public async Task Redelivered_event_makes_its_row_pending_again_and_ends_superseded_without_a_write()
     {
         var acct = SyncFixture.NewAccountId();
         var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme "), ["rating"] = "Hot" }, []);
 
         await app.PublishRawAsync(acct, v1.ToJsonString());
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
         await app.PublishRawAsync(acct, v1.ToJsonString());            // Kafka redelivery, after the first was synced
-        await app.PublishRawAsync(acct, v1.ToJsonString());            // and again
 
-        // Nothing makes a row unique, so each delivery is a row; none is newer than what was synced
-        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 3);
-        inbox.Should().Equal((1L, "done"), (1L, "superseded"), (1L, "superseded"));
+        // As new as the row: it overwrites it (pending again), and its claim finds it not newer than the watermark
+        await Eventually.ValueAsync(() => app.GetInboxAsync(acct), rows => rows.SequenceEqual([(1L, "superseded")]),
+            "the redelivery to be superseded");
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("a redelivery must not write to Salesforce");
+        (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(SyncFixture.SyncedTime(1));
     }
 
     [Fact]
-    public async Task Redelivery_claimed_together_with_the_original_is_written_once()
+    public async Task Redelivery_stored_before_the_original_is_claimed_is_written_once()
     {
         var acct = SyncFixture.NewAccountId();
         var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, []);
 
         await app.InsertIntoInboxAsync(acct, v1, v1);
 
-        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
-        inbox.Select(r => r.Status).Should().BeEquivalentTo(["done", "superseded"]);
+        (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle();
     }
 
@@ -327,7 +320,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishRawAsync(acct, WithType(valid, "deleted").ToJsonString());  // deletes are not synced
         await app.PublishRawAsync(acct, valid.ToJsonString());
 
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 1)).Should().Equal((2L, "done"));
+        (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
         (await app.GetInboxAsync(acct, SyncFixture.Relationships)).Should().BeEmpty("a topic's events are read as that topic's type only");
         ((string?)(await app.GetRecordAsync("Account", acct))!["Name"]).Should().Be(name);
     }
@@ -348,9 +341,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishRawAsync(acct, Version(4).ToJsonString());
         await app.PublishRawAsync(null, Version(3).ToJsonString());
 
-        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 5);
-        inbox.Should().OnlyContain(r => r.Status == "done" || r.Status == "superseded");
-        inbox[^1].Should().Be((5L, "done"), "the newest meta.time is the one that must be written");
+        (await app.WaitForInboxSettledAsync(acct, version: 5)).Should().Be((5L, "done"), "the newest meta.time is the one that must be written");
 
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v5");
         var written = (await app.GetHistoryAsync("Account", acct)).Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
@@ -359,17 +350,17 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Older_event_claimed_together_with_a_newer_one_is_superseded_in_the_same_claim()
+    public async Task Older_event_stored_after_a_newer_one_leaves_the_row_at_the_newer()
     {
         var acct = SyncFixture.NewAccountId();
         var newer = SyncFixture.AccountEvent(acct, 9, new JsonObject { ["name"] = "newer" }, []);
         var older = SyncFixture.AccountEvent(acct, 4, new JsonObject { ["name"] = "older" }, []);
 
-        // The newer event is stored first, the older one after it; one claim takes both
+        // The newer event is stored first, the older one after it, before any claim
         await app.InsertIntoInboxAsync(acct, newer, older);
 
-        (await app.WaitForInboxSettledAsync(acct, expectedRows: 2)).Should().Equal((4L, "superseded"), (9L, "done"));
-        (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("only the newest event of a claim is written")
+        (await app.WaitForInboxSettledAsync(acct, version: 9)).Should().Be((9L, "done"));
+        (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("only the newest event is written")
             .Which["Name"]!.GetValue<string>().Should().Be("newer");
     }
 
@@ -384,9 +375,8 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishAsync(acct, 2, b, []);
         await app.PublishAsync(acct, 3, (JsonObject)a.DeepClone(), []); // the same content as the first event
 
-        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 3);
-        inbox.Should().OnlyContain(r => r.Status == "done" || r.Status == "superseded", "the third event must not be dropped as a duplicate of the first");
-        inbox[^1].Should().Be((3L, "done"));
+        (await app.WaitForInboxSettledAsync(acct, version: 3)).Should().Be((3L, "done"),
+            "the third event must not be dropped as a duplicate of the first");
         var account = await app.GetRecordAsync("Account", acct);
         ((string?)account!["Name"], (string?)account["Rating"]).Should().Be(("A", "Hot"));
     }
@@ -399,12 +389,11 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         var profile = new JsonObject { ["tier"] = "Gold", ["score"] = Any.Create<int>() };
 
         await app.PublishAsync(acct, 1, account, profile);
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
 
         // Same data, newer version: every field matches Salesforce, so nothing is written
         await app.PublishAsync(acct, 2, (JsonObject)account.DeepClone(), (JsonObject)profile.DeepClone());
-        var inbox = await app.WaitForInboxSettledAsync(acct, expectedRows: 2);
-        inbox.Should().OnlyContain(r => r.Status == "done");
+        (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
 
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("an unchanged event must not write the Account");
         (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().ContainSingle("an unchanged event must not write the Profile");
@@ -416,13 +405,13 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         // Warm-up: the first batch after start also describes Account and Profile__c (then cached for 15 minutes)
         var warm = SyncFixture.NewAccountId();
         await app.PublishAsync(warm, 1, new JsonObject { ["name"] = Any.String("Warm ") }, []);
-        await app.WaitForInboxSettledAsync(warm, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(warm, version: 1);
 
         var acct = SyncFixture.NewAccountId();
         var before = await app.GetStatsAsync();
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Stark ") }, new JsonObject { ["tier"] = "Gold" });
-        await app.WaitForInboxSettledAsync(acct, expectedRows: 1);
+        await app.WaitForInboxSettledAsync(acct, version: 1);
 
         var after = await app.GetStatsAsync();
         long Delta(string counter)
@@ -441,6 +430,17 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         var transport = await app.Salesforce.GetFromJsonAsync<JsonObject>("/__fake/transport");
         ((long)transport!["acceptGzip"]!).Should().BePositive("the worker accepts compressed responses");
+    }
+
+    /// <summary>
+    /// Waits until the consumer has handled what was published under <paramref name="key"/> so far: an event of a fresh
+    /// account under the same key goes to the same partition, after them, and the sync doesn't use the key.
+    /// </summary>
+    private async Task WaitUntilConsumedAsync(string key)
+    {
+        var marker = SyncFixture.NewAccountId();
+        await app.PublishRawAsync(key, SyncFixture.AccountEvent(marker, 1, new JsonObject { ["name"] = "marker" }, []).ToJsonString());
+        await app.WaitForInboxSettledAsync(marker, version: 1);
     }
 
     /// <summary>A copy of the event with another meta.type (null = none).</summary>

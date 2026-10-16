@@ -221,9 +221,9 @@ namespace SalesforceSync.Data.Migrations
                     b.HasKey("Id")
                         .HasName("sf_account_inbox_pkey");
 
-                    b.HasIndex("EntityId", "Id")
-                        .HasDatabaseName("sf_account_inbox_pending")
-                        .HasFilter("status = 'pending'");
+                    b.HasIndex("EntityId")
+                        .IsUnique()
+                        .HasDatabaseName("sf_account_inbox_entity_id");
 
                     b.ToTable("sf_account_inbox", (string)null);
 
@@ -291,9 +291,9 @@ namespace SalesforceSync.Data.Migrations
                     b.HasKey("Id")
                         .HasName("sf_account_relationship_inbox_pkey");
 
-                    b.HasIndex("EntityId", "Id")
-                        .HasDatabaseName("sf_account_relationship_inbox_pending")
-                        .HasFilter("status = 'pending'");
+                    b.HasIndex("EntityId")
+                        .IsUnique()
+                        .HasDatabaseName("sf_account_relationship_inbox_entity_id");
 
                     b.ToTable("sf_account_relationship_inbox", (string)null);
 
@@ -361,9 +361,9 @@ namespace SalesforceSync.Data.Migrations
                     b.HasKey("Id")
                         .HasName("sf_contact_inbox_pkey");
 
-                    b.HasIndex("EntityId", "Id")
-                        .HasDatabaseName("sf_contact_inbox_pending")
-                        .HasFilter("status = 'pending'");
+                    b.HasIndex("EntityId")
+                        .IsUnique()
+                        .HasDatabaseName("sf_contact_inbox_entity_id");
 
                     b.ToTable("sf_contact_inbox", (string)null);
 

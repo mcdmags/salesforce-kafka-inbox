@@ -10,17 +10,17 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// The one sync engine for every Salesforce object. <see cref="UpsertBatchAsync{TEvent, TRow}"/>
-/// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds the events, and the
-/// strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
+/// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds each entity's newest
+/// event, and the strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
 /// <item>Takes a global concurrency slot and respects a shared pause (rate limits, all pods).</item>
 /// <item>Claims up to <see cref="SyncOptions.BatchSize"/> due entities: each one's sf_sync_state row is locked with
 /// FOR UPDATE SKIP LOCKED and leased, so no two workers in any pod ever process the same entity at once, and its
-/// oldest pending events are read from the inbox table.</item>
-/// <item>Per entity, reads the claimed events and keeps the one with the newest event time (events carry the full
-/// record); the others are superseded, and so is the newest if it is not newer than what was already synced. Arrival
-/// order plays no part, so events may come out of order, over any partitions. An event that can't be read or
-/// mapped is dead-lettered on its own.</item>
+/// pending inbox row is read.</item>
+/// <item>Per entity, reads the claimed event: the newest one stored (events carry the full record, and a newer event
+/// overwrites the entity's row), superseded if it is not newer than what was already synced. Arrival order plays no
+/// part, so events may come out of order, over any partitions. An event that can't be read or mapped is
+/// dead-lettered on its own.</item>
 /// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
 /// one Composite request reads the current records (more only when very long ids need more than 5 queries), then
 /// what differs is written with sObject Collections upserts, one per level and object: one upsert call when the
@@ -28,7 +28,8 @@ namespace SalesforceSync.Sync;
 /// call), whatever the objects.</item>
 /// <item>Records each entity's outcome in one transaction: done (and the watermark advanced), released for the
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
-/// every claimed event is held (the write's outcome is unknown), deferred (rate limited) or retried.</item>
+/// every claimed entity is held (the write's outcome is unknown), deferred (rate limited) or retried. An entity whose
+/// row a newer event overwrote meanwhile gets no outcome: its row stays pending and the entity due.</item>
 /// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="PreparedBatch"/> and the
 /// ones in <c>Sync/Upsert</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
@@ -78,15 +79,15 @@ public sealed class SalesforceBatchUpsertService(
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
 
-        // 1. Claim events from the inbox table (short transaction; the lease, not a transaction, protects the rows
-        // until step 4)
+        // 1. Claim entities and their rows from the inbox table (short transaction; the lease, not a transaction,
+        // protects the entities until step 4)
         var claim = await inbox.ClaimAsync(ct);
         if (claim.Events.Count == 0)
         {
             return 0;
         }
 
-        // 2. Per entity: keep the newest event, drop it if it isn't newer than what is synced, map it to records
+        // 2. Per entity: drop its event if it isn't newer than what is synced, else map it to records
         var batch = PreparedBatch.Prepare(strategy, claim.Events, claim.SyncedTimes);
 
         // 3. Salesforce (outside any transaction): read, decide, send, interpret. Not inside one on purpose: Salesforce

@@ -55,25 +55,25 @@ public sealed class EngineFlowTests
     }
 
     [Fact]
-    public async Task The_newest_event_is_written_and_every_row_gets_its_outcome_in_one_recording()
+    public async Task Each_entitys_event_is_written_and_every_row_gets_its_outcome_in_one_recording()
     {
         _inbox.Rows.AddRange(
         [
-            Row(1, "ACC-1", "2026-10-14T01:00:00Z", "old"),
             Row(2, "ACC-1", "2026-10-14T02:00:00Z", "new"),
-            new InboxEvent(3, "ACC-2", "not json", 1),
+            Invalid(3, "ACC-2"),
             Row(4, "ACC-3", "2026-10-14T01:00:00Z"),
         ]);
+        _inbox.Synced["ACC-1"] = PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
         _inbox.Synced["ACC-3"] = PreparedBatch.ToMicroseconds(DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
 
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(4);
+        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(3);
 
         ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("new");
         _inbox.Calls.Should().Equal("claim", "record");
         var outcomes = _inbox.Recorded!;
         outcomes.Synced.Should().ContainSingle().Which.Should().Be(
             new SyncedEntity("ACC-1", 2), "its row's event_time becomes the watermark");
-        outcomes.Superseded.Should().BeEquivalentTo([1L, 4L], "an older event, and one that is not newer than the watermark");
+        outcomes.Superseded.Should().Equal([4L], "its event is not newer than the watermark");
         outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.RowId == 3 && f.Code == SalesforceErrors.InvalidEvent);
         outcomes.Released.Should().BeEmpty();
         outcomes.Failed.Should().BeEmpty();
@@ -83,7 +83,7 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task A_write_whose_answer_is_lost_holds_every_claimed_row()
     {
-        _inbox.Rows.AddRange([Row(1, "ACC-1", "2026-10-14T01:00:00Z"), Row(2, "ACC-1", "2026-10-14T02:00:00Z")]);
+        _inbox.Rows.AddRange([Row(1, "ACC-1", "2026-10-14T01:00:00Z"), Row(2, "ACC-2", "2026-10-14T02:00:00Z")]);
         _org.LoseResponsesFor("Account", "ACC-1", 1);
 
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
@@ -116,7 +116,7 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task Rows_with_nothing_to_write_are_recorded_without_calling_Salesforce()
     {
-        _inbox.Rows.Add(new InboxEvent(1, "ACC-1", "not json", 1));
+        _inbox.Rows.Add(Invalid(1, "ACC-1"));
         _http.Throw = new InvalidOperationException("Salesforce must not be called");
 
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
@@ -168,7 +168,8 @@ public sealed class EngineFlowTests
     private static InboxEvent Contact(long id, string contact, string account)
     {
         return new(id, contact,
-        $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""", 1);
+        $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""", 1,
+            DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
     }
 
     // ---------- A batch written in more than one call ----------
@@ -383,13 +384,21 @@ public sealed class EngineFlowTests
     private static InboxEvent AccountRow(long id, string account, string time, string name, string tier)
     {
         return new(id, account,
-        $$"""{ "meta": { "time": "{{time}}", "type": "updated" }, "account": { "externalId": "{{account}}", "name": "{{name}}", "profile": { "tier": "{{tier}}" } } }""", 1);
+        $$"""{ "meta": { "time": "{{time}}", "type": "updated" }, "account": { "externalId": "{{account}}", "name": "{{name}}", "profile": { "tier": "{{tier}}" } } }""", 1,
+            DateTimeOffset.Parse(time));
     }
 
     private static InboxEvent Row(long id, string account, string time, string name = "Acme")
     {
         return new(id, account,
-        $$"""{ "meta": { "time": "{{time}}", "type": "inserted" }, "account": { "externalId": "{{account}}", "name": "{{name}}" } }""", 1);
+        $$"""{ "meta": { "time": "{{time}}", "type": "inserted" }, "account": { "externalId": "{{account}}", "name": "{{name}}" } }""", 1,
+            DateTimeOffset.Parse(time));
+    }
+
+    /// <summary>A row whose payload can't be read.</summary>
+    private static InboxEvent Invalid(long id, string account)
+    {
+        return new(id, account, "not json", 1, DateTimeOffset.UnixEpoch);
     }
 
     /// <summary>Lets requests through to the org, or fails all of them, the read, or the Nth write.</summary>

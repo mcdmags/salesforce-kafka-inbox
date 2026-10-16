@@ -45,15 +45,15 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         try
         {
             statuses = await Eventually.ValueAsync(
-                () => InboxStatusesAsync(ids),
-                s => s.Values.Sum() == Accounts * Versions && !s.ContainsKey("pending"),
+                () => InboxStatusesAsync(ids, Versions),
+                s => s.Values.Sum() == Accounts && !s.ContainsKey("pending"),
                 "all concurrent events to be processed",
                 TimeSpan.FromMinutes(2));
         }
         catch (TimeoutException ex)
         {
             output.WriteLine(ex.Message);
-            statuses = await InboxStatusesAsync(ids);
+            statuses = await InboxStatusesAsync(ids, Versions);
         }
 
         // 1. Direct check of mutual exclusion: no two claims on the same account ever overlapped in time
@@ -98,11 +98,10 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         regressions.Should().BeEmpty("no account may receive an older version after a newer one, e.g. {0}",
             string.Join(" | ", regressions.Take(3)));
 
-        // 3. Everything processed: every event was written, or superseded because a newer event of its account was
-        //    claimed along with it. Every claim released, and real contention happened
-        statuses.Keys.Should().BeSubsetOf(["done", "superseded"], "nothing may be left pending or dead-lettered");
-        statuses.Values.Sum().Should().Be(Accounts * Versions);
-        statuses["done"].Should().BeGreaterThanOrEqualTo(Accounts, "each account's newest event is written");
+        // 3. Everything processed: every account's row holds its newest event, written. Every claim released, and real
+        //    contention happened
+        statuses.Should().Equal(new Dictionary<string, long> { ["done"] = Accounts },
+            "each account's newest event is written: nothing may be left pending, dead-lettered or overwritten by an older one");
         Unreleased.Should().Be(0, "every claim must be released");
         ReclaimedAccounts.Should().BeGreaterThan(Accounts / 2,
             "most of the {0} accounts should be claimed repeatedly (real contention)", Accounts);
@@ -154,10 +153,10 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             await Task.Delay(50);
         }
 
-        var statuses = await Eventually.ValueAsync(() => InboxStatusesAsync(ids),
-            s => s.Values.Sum() == accounts * versions && !s.ContainsKey("pending"),
+        var statuses = await Eventually.ValueAsync(() => InboxStatusesAsync(ids, versions),
+            s => s.Values.Sum() == accounts && !s.ContainsKey("pending"),
             "all shuffled events to be processed", TimeSpan.FromMinutes(2));
-        statuses.Keys.Should().BeSubsetOf(["done", "superseded"]);
+        statuses.Should().Equal(new Dictionary<string, long> { ["done"] = accounts }, "the newest meta.time is in every row, written");
 
         await using var conn = await app.Db.OpenConnectionAsync();
         (await conn.ExecuteScalarAsync<long>("select count(*) from sf_claim_overlaps where entity_id = any(@ids)", new { ids }))
@@ -217,8 +216,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
                 await Task.Delay(300);
             }
 
-            await Eventually.ValueAsync(() => InboxStatusesAsync(ids),
-                s => s.Values.Sum() == ids.Length * versions && !s.ContainsKey("pending"),
+            await Eventually.ValueAsync(() => InboxStatusesAsync(ids, versions),
+                s => s.Values.Sum() == ids.Length && !s.ContainsKey("pending"),
                 "all events to be processed despite dropped connections", TimeSpan.FromMinutes(3));
         }
         finally
@@ -229,9 +228,10 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
 
         output.WriteLine($"terminated {killed} worker connections");
         killed.Should().BePositive("the chaos loop should have dropped connections");
-        var statuses = await InboxStatusesAsync(ids);
+        // Superseded only if a store was retried after a dropped connection had cut off its commit: the same event again
+        var statuses = await InboxStatusesAsync(ids, versions);
         statuses.Keys.Should().BeSubsetOf(["done", "superseded"], "no event may be lost or dead-lettered");
-        statuses.Values.Sum().Should().Be(ids.Length * versions);
+        statuses.Values.Sum().Should().Be(ids.Length, "every account's row holds its newest event");
 
         await using var db = await app.Db.OpenConnectionAsync();
         (await db.ExecuteScalarAsync<long>("select count(*) from sf_claim_overlaps where entity_id = any(@ids)", new { ids }))
@@ -247,11 +247,13 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         }
     }
 
-    private async Task<Dictionary<string, long>> InboxStatusesAsync(string[] ids)
+    /// <summary>Status -> how many of the accounts' rows have it, of the rows that hold <paramref name="newest"/> (by its time).</summary>
+    private async Task<Dictionary<string, long>> InboxStatusesAsync(string[] ids, int newest)
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<(string Status, long Count)>(
-            "select status, count(*) from sf_account_inbox where entity_id = any(@ids) group by status", new { ids });
+            "select status, count(*) from sf_account_inbox where entity_id = any(@ids) and event_time = @time group by status",
+            new { ids, time = SyncFixture.BaseTime.AddMilliseconds(newest).UtcDateTime });
         return rows.ToDictionary(r => r.Status, r => r.Count);
     }
 }
