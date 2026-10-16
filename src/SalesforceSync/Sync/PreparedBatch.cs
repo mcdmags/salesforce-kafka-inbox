@@ -24,11 +24,9 @@ internal sealed record PreparedBatch(List<long> SupersededRowIds, List<Work> Wor
     /// row says) is invalid. One whose time is not after the entity's watermark (a replay or a redelivery) is
     /// superseded. Otherwise it is mapped to the unit to write; if it can't be mapped, it is invalid.
     /// </summary>
-    /// <param name="synced">Entity id -> the time (microseconds since the epoch) of its newest synced event.</param>
     /// <param name="strategy">Reads, keys and maps the object's events.</param>
-    /// <param name="rows">The claimed rows, one per entity.</param>
-    public static PreparedBatch Prepare<TEvent>(UpsertStrategy<TEvent> strategy, IReadOnlyList<InboxEvent> rows,
-        IReadOnlyDictionary<string, long> synced)
+    /// <param name="rows">The claimed rows, one per entity, each with its entity's watermark.</param>
+    public static PreparedBatch Prepare<TEvent>(UpsertStrategy<TEvent> strategy, IReadOnlyList<InboxEvent> rows)
     {
         var batch = new PreparedBatch([], [], []);
 
@@ -47,7 +45,7 @@ internal sealed record PreparedBatch(List<long> SupersededRowIds, List<Work> Wor
                 continue;
             }
 
-            if (synced.TryGetValue(entityId, out var syncedTime) && ToMicroseconds(read.Time) <= syncedTime)
+            if (row.SyncedTime is { } syncedTime && ToMicroseconds(read.Time) <= syncedTime)
             {
                 batch.SupersededRowIds.Add(row.RowId);
                 continue;

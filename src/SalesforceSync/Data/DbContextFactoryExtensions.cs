@@ -71,7 +71,7 @@ public static class DbContextFactoryExtensions
 
 /// <summary>
 /// The statements EF can't express, run as written: named parameters (<c>@name</c>) in the text, bound from the
-/// properties of an object (<c>new { entityType, token }</c>), one <see cref="NpgsqlParameter"/> each. They join the
+/// properties of an object (<c>new { ids, token }</c>), one <see cref="NpgsqlParameter"/> each. They join the
 /// context's current transaction, if any.
 /// </summary>
 public static class SqlCommands

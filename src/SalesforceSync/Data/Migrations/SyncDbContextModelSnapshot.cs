@@ -22,46 +22,6 @@ namespace SalesforceSync.Data.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
-            modelBuilder.Entity("SalesforceSync.Inbox.SyncState", b =>
-                {
-                    b.Property<string>("EntityType")
-                        .HasColumnType("text")
-                        .HasColumnName("entity_type");
-
-                    b.Property<string>("EntityId")
-                        .HasColumnType("text")
-                        .HasColumnName("entity_id");
-
-                    b.Property<Guid?>("LockToken")
-                        .HasColumnType("uuid")
-                        .HasColumnName("lock_token");
-
-                    b.Property<DateTimeOffset?>("LockedUntil")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("locked_until");
-
-                    b.Property<DateTimeOffset?>("NextAttemptAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("next_attempt_at");
-
-                    b.Property<long?>("SyncedTime")
-                        .HasColumnType("bigint")
-                        .HasColumnName("synced_time");
-
-                    b.HasKey("EntityType", "EntityId")
-                        .HasName("sf_sync_state_pkey");
-
-                    b.HasIndex("EntityType", "NextAttemptAt")
-                        .HasDatabaseName("sf_sync_state_ready")
-                        .HasFilter("next_attempt_at is not null");
-
-                    b.ToTable("sf_sync_state", (string)null);
-
-                    b
-                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
-                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
-                });
-
             modelBuilder.Entity("SalesforceSync.RateLimiting.ApiUsageBucket", b =>
                 {
                     b.Property<DateTimeOffset>("Bucket")
@@ -200,6 +160,18 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("last_updated")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<Guid?>("LockToken")
+                        .HasColumnType("uuid")
+                        .HasColumnName("lock_token");
+
+                    b.Property<DateTimeOffset?>("LockedUntil")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("locked_until");
+
+                    b.Property<DateTimeOffset?>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("next_attempt_at");
+
                     b.Property<string>("Payload")
                         .IsRequired()
                         .HasColumnType("jsonb")
@@ -218,12 +190,20 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("status")
                         .HasDefaultValueSql("'pending'");
 
+                    b.Property<long?>("SyncedTime")
+                        .HasColumnType("bigint")
+                        .HasColumnName("synced_time");
+
                     b.HasKey("Id")
                         .HasName("sf_account_inbox_pkey");
 
                     b.HasIndex("EntityId")
                         .IsUnique()
                         .HasDatabaseName("sf_account_inbox_entity_id");
+
+                    b.HasIndex("NextAttemptAt")
+                        .HasDatabaseName("sf_account_inbox_ready")
+                        .HasFilter("next_attempt_at is not null");
 
                     b.ToTable("sf_account_inbox", (string)null);
 
@@ -270,6 +250,18 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("last_updated")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<Guid?>("LockToken")
+                        .HasColumnType("uuid")
+                        .HasColumnName("lock_token");
+
+                    b.Property<DateTimeOffset?>("LockedUntil")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("locked_until");
+
+                    b.Property<DateTimeOffset?>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("next_attempt_at");
+
                     b.Property<string>("Payload")
                         .IsRequired()
                         .HasColumnType("jsonb")
@@ -288,12 +280,20 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("status")
                         .HasDefaultValueSql("'pending'");
 
+                    b.Property<long?>("SyncedTime")
+                        .HasColumnType("bigint")
+                        .HasColumnName("synced_time");
+
                     b.HasKey("Id")
                         .HasName("sf_account_relationship_inbox_pkey");
 
                     b.HasIndex("EntityId")
                         .IsUnique()
                         .HasDatabaseName("sf_account_relationship_inbox_entity_id");
+
+                    b.HasIndex("NextAttemptAt")
+                        .HasDatabaseName("sf_account_relationship_inbox_ready")
+                        .HasFilter("next_attempt_at is not null");
 
                     b.ToTable("sf_account_relationship_inbox", (string)null);
 
@@ -340,6 +340,18 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("last_updated")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<Guid?>("LockToken")
+                        .HasColumnType("uuid")
+                        .HasColumnName("lock_token");
+
+                    b.Property<DateTimeOffset?>("LockedUntil")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("locked_until");
+
+                    b.Property<DateTimeOffset?>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("next_attempt_at");
+
                     b.Property<string>("Payload")
                         .IsRequired()
                         .HasColumnType("jsonb")
@@ -358,12 +370,20 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("status")
                         .HasDefaultValueSql("'pending'");
 
+                    b.Property<long?>("SyncedTime")
+                        .HasColumnType("bigint")
+                        .HasColumnName("synced_time");
+
                     b.HasKey("Id")
                         .HasName("sf_contact_inbox_pkey");
 
                     b.HasIndex("EntityId")
                         .IsUnique()
                         .HasDatabaseName("sf_contact_inbox_entity_id");
+
+                    b.HasIndex("NextAttemptAt")
+                        .HasDatabaseName("sf_contact_inbox_ready")
+                        .HasFilter("next_attempt_at is not null");
 
                     b.ToTable("sf_contact_inbox", (string)null);
 

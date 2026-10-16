@@ -43,14 +43,8 @@ public sealed class DeadLetterTests(FewRetriesFixture app)
         await app.WaitForInboxSettledAsync(parent, 1);
         await app.WaitForInboxSettledAsync(child, 1);
         await app.ExecuteSqlAsync("""
-            with requeued as (
-              update sf_account_relationship_inbox set status = 'pending', attempt_count = 0
-              where status = 'dead' and last_error_code = 'DEPENDENCY_NOT_SYNCED'
-              returning entity_id
-            )
-            insert into sf_sync_state as s (entity_type, entity_id, next_attempt_at)
-            select 'accountRelationship', entity_id, now() from requeued
-            on conflict (entity_type, entity_id) do update set next_attempt_at = coalesce(s.next_attempt_at, now())
+            update sf_account_relationship_inbox set status = 'pending', attempt_count = 0, next_attempt_at = now()
+            where status = 'dead' and last_error_code = 'DEPENDENCY_NOT_SYNCED'
             """);
 
         (await app.WaitForInboxSettledAsync(rel, version: 1, SyncFixture.Relationships)).Should().Be((1L, "done"));

@@ -69,9 +69,7 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
         await using var conn = await app.Db.OpenConnectionAsync();
         var rows = (await conn.QueryAsync<(string Status, int AttemptCount, DateTime? NextAttempt)>(
             """
-            select i.status, i.attempt_count, s.next_attempt_at
-            from sf_account_inbox i join sf_sync_state s on s.entity_type = 'account' and s.entity_id = i.entity_id
-            where i.entity_id = any(@ids)
+            select status, attempt_count, next_attempt_at from sf_account_inbox where entity_id = any(@ids)
             """,
             new { ids })).ToList();
         var pending = rows.Where(r => r.Status == "pending").ToList();

@@ -3,8 +3,8 @@ namespace SalesforceSync.Inbox;
 /// <summary>
 /// An inbox table as the sync engine uses it: store an event, claim a batch of entities, then record what became of
 /// them. The row type selects the table (see <see cref="Data.SyncDbContext"/>), so one implementation serves every object.
-/// Every recording is conditional on the claim's lease token (on the entities' sf_sync_state rows), so a worker whose
-/// lease expired records nothing.
+/// Every recording is conditional on the claim's lease token (on the entities' rows), so a worker whose lease expired
+/// records nothing.
 /// </summary>
 public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
 {
@@ -36,16 +36,10 @@ public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
     Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct);
 }
 
-/// <summary>A batch of entities leased to this worker: their claimed rows, and what was already synced for them.</summary>
+/// <summary>A batch of entities leased to this worker: their claimed rows.</summary>
 /// <param name="Token">Identifies the lease; every outcome statement is conditional on it.</param>
-/// <param name="SyncedTimes">
-/// Entity id -> the time (microseconds since the epoch) of its newest synced event: its sf_sync_state.synced_time.
-/// </param>
 /// <param name="Events">The claimed row of every leased entity: one per entity.</param>
-public sealed record InboxClaim(
-    Guid Token,
-    IReadOnlyList<InboxEvent> Events,
-    IReadOnlyDictionary<string, long> SyncedTimes)
+public sealed record InboxClaim(Guid Token, IReadOnlyList<InboxEvent> Events)
 {
     /// <summary>The inbox row ids of the claimed rows.</summary>
     public long[] RowIds => [.. Events.Select(e => e.RowId)];
@@ -53,18 +47,26 @@ public sealed record InboxClaim(
     /// <summary>The event_time of each claimed row as the claim read it, in <see cref="RowIds"/> order.</summary>
     public DateTimeOffset[] EventTimes => [.. Events.Select(e => e.EventTime)];
 
-    public string[] EntityIds => [.. Events.Select(e => e.EntityId)];
+    /// <summary>The event_time the claim read for each of <paramref name="rowIds"/>, in their order.</summary>
+    public DateTimeOffset[] TimesOf(IEnumerable<long> rowIds)
+    {
+        var times = Events.ToDictionary(e => e.RowId, e => e.EventTime);
+        return [.. rowIds.Select(id => times[id])];
+    }
 }
 
-/// <summary>A pending inbox row as claimed: the entity it belongs to and the raw event.</summary>
+/// <summary>A pending inbox row as claimed: the entity it belongs to, the raw event and the entity's watermark.</summary>
 /// <param name="RowId">The inbox row's primary key (its id column; one row per entity). Not the entity id.</param>
 /// <param name="EntityId">The entity the event is about: the Kafka message key.</param>
 /// <param name="Payload">The event as received, JSON.</param>
 /// <param name="EventTime">
 /// The row's event_time as the claim read it: every outcome is recorded only while the row still has it (a newer event
-/// stored meanwhile has overwritten the row; see <see cref="InboxSql.Template.Unchanged"/>).
+/// stored meanwhile has overwritten the row; see <see cref="InboxSql.Template.Held"/>).
 /// </param>
-public sealed record InboxEvent(long RowId, string EntityId, string Payload, DateTimeOffset EventTime);
+/// <param name="SyncedTime">
+/// The entity's watermark: the time (microseconds since the epoch) of its newest synced event, if any (synced_time).
+/// </param>
+public sealed record InboxEvent(long RowId, string EntityId, string Payload, DateTimeOffset EventTime, long? SyncedTime);
 
 /// <summary>An inbox row with the error to store on it.</summary>
 /// <param name="RowId">The inbox row id (not the entity id).</param>
@@ -73,7 +75,7 @@ public sealed record InboxEvent(long RowId, string EntityId, string Payload, Dat
 public sealed record FailedEvent(long RowId, string Error, string? Code);
 
 /// <summary>What to record for the rows of a claim, by kind of outcome: inbox row ids (not entity ids).</summary>
-/// <param name="Synced">In Salesforce: done, and the row's event_time is its entity's watermark (sf_sync_state.synced_time).</param>
+/// <param name="Synced">In Salesforce: done, and the row's event_time is its entity's watermark (synced_time).</param>
 /// <param name="Superseded">Not written: an event as new was already synced.</param>
 /// <param name="Released">Back to the inbox for the next claim, no attempt spent.</param>
 /// <param name="Dead">Dead-lettered at once.</param>
