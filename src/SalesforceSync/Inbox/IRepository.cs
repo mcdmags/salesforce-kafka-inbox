@@ -47,26 +47,33 @@ public sealed record InboxClaim(
     IReadOnlyList<InboxEvent> Events,
     IReadOnlyDictionary<string, long> SyncedTimes)
 {
-    public long[] EventIds => [.. Events.Select(e => e.Id)];
+    /// <summary>The inbox row ids of the claimed events.</summary>
+    public long[] RowIds => [.. Events.Select(e => e.RowId)];
 
     public string[] EntityIds => [.. Events.Select(e => e.EntityId).Distinct(StringComparer.Ordinal)];
 }
 
 /// <summary>A pending inbox row as claimed: the entity it belongs to and the raw event.</summary>
 /// <param name="AttemptCount">Times the event was claimed, this claim included.</param>
-/// <param name="Id">The inbox row's primary key (one row per event).</param>
+/// <param name="RowId">The inbox row's primary key (its id column; one row per event). Not the entity id.</param>
 /// <param name="EntityId">The entity the event is about: the Kafka message key.</param>
 /// <param name="Payload">The event as received, JSON.</param>
-public sealed record InboxEvent(long Id, string EntityId, string Payload, int AttemptCount);
+public sealed record InboxEvent(long RowId, string EntityId, string Payload, int AttemptCount);
 
 /// <summary>
-/// An entity whose newest event (row <paramref name="EventId"/>) is in Salesforce: the row ends done, and
+/// An entity whose newest event (row <paramref name="RowId"/>) is in Salesforce: the row ends done, and
 /// <paramref name="EventTime"/> is the entity's watermark (sf_sync_state.synced_time).
 /// </summary>
-public sealed record SyncedEntity(string EntityId, long EventTime, long EventId);
+/// <param name="EntityId">The entity: the Kafka message key.</param>
+/// <param name="EventTime">The newest event's time, microseconds since the epoch.</param>
+/// <param name="RowId">The inbox row id of the newest event (not the entity id).</param>
+public sealed record SyncedEntity(string EntityId, long EventTime, long RowId);
 
 /// <summary>An inbox row with the error to store on it.</summary>
-public sealed record FailedEvent(long EventId, string Error, string? Code);
+/// <param name="RowId">The inbox row id (not the entity id).</param>
+/// <param name="Error">The error to store.</param>
+/// <param name="Code">The Salesforce (or sync) error code, if any.</param>
+public sealed record FailedEvent(long RowId, string Error, string? Code);
 
 /// <summary>What to record for the rows of a claim, by kind of outcome.</summary>
 /// <param name="Synced">Done; the entity's watermark advances.</param>

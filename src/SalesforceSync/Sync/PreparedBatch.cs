@@ -3,14 +3,21 @@ using SalesforceSync.Salesforce;
 
 namespace SalesforceSync.Sync;
 
-/// <summary>An entity to write: the unit mapped from its newest event (row <paramref name="EventId"/>) and that event's time.</summary>
-internal sealed record Work(string EntityId, UpsertUnit Unit, long Time, long EventId);
+/// <summary>An entity to write: the unit mapped from its newest event and that event's time.</summary>
+/// <param name="EntityId">The entity: the Kafka message key.</param>
+/// <param name="Unit">The records to upsert for it.</param>
+/// <param name="Time">The newest event's time, microseconds since the epoch.</param>
+/// <param name="RowId">The inbox row id of the newest event.</param>
+internal sealed record Work(string EntityId, UpsertUnit Unit, long Time, long RowId);
 
 /// <summary>
 /// What to do with a claim's rows: superseded ones, entities to write, and rows that are invalid on their own. Decided
 /// (<see cref="Prepare{TEvent}"/>) before Salesforce is involved. No I/O.
 /// </summary>
-internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, List<(long Id, string Error)> Invalid)
+/// <param name="SupersededRowIds">Inbox row ids (not entity ids) of the events that are not written.</param>
+/// <param name="Work">The entities to write, one per entity.</param>
+/// <param name="Invalid">Inbox row ids of the events that are invalid on their own, with why.</param>
+internal sealed record PreparedBatch(List<long> SupersededRowIds, List<Work> Work, List<(long RowId, string Error)> Invalid)
 {
     /// <summary>
     /// Decides, per claimed entity, what to do with its rows. Rows that can't be read (or whose event is about another
@@ -35,24 +42,26 @@ internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, 
                 continue;
             }
 
-            var (Row, Read) = Coalesce(events);
-            batch.SupersededIds.AddRange(events.Where(e => e.Row.Id != Row.Id).Select(e => e.Row.Id));
+            var (newestRow, newestRead) = Coalesce(events);
 
-            var time = ToMicroseconds(Read.Time);
+            // Every event of the entity except the newest is superseded (these are inbox row ids, not entity ids).
+            batch.SupersededRowIds.AddRange(events.Where(e => e.Row.RowId != newestRow.RowId).Select(e => e.Row.RowId));
+
+            var time = ToMicroseconds(newestRead.Time);
             if (synced.TryGetValue(entity.Key, out var syncedTime) && time <= syncedTime)
             {
-                batch.SupersededIds.Add(Row.Id);
+                batch.SupersededRowIds.Add(newestRow.RowId);
                 continue;
             }
 
             try
             {
-                var unit = strategy.Map(entity.Key, Read.Event);
-                batch.Work.Add(new Work(entity.Key, unit, time, Row.Id));
+                var unit = strategy.Map(entity.Key, newestRead.Event);
+                batch.Work.Add(new Work(entity.Key, unit, time, newestRow.RowId));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                batch.Invalid.Add((Row.Id, $"{strategy.EntityType} {entity.Key}: {ex.Message}"));
+                batch.Invalid.Add((newestRow.RowId, $"{strategy.EntityType} {entity.Key}: {ex.Message}"));
             }
         }
         return batch;
@@ -60,19 +69,19 @@ internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, 
 
     /// <summary>The entity's rows that are valid events about that entity; the others go to <paramref name="invalid"/>.</summary>
     private static List<(InboxEvent Row, ReadEvent<TEvent> Read)> ReadEvents<TEvent>(UpsertStrategy<TEvent> strategy,
-        string entityId, IEnumerable<InboxEvent> rows, List<(long Id, string Error)> invalid)
+        string entityId, IEnumerable<InboxEvent> rows, List<(long RowId, string Error)> invalid)
     {
         var events = new List<(InboxEvent Row, ReadEvent<TEvent> Read)>();
         foreach (var row in rows)
         {
             if (!strategy.TryRead(row.Payload, out var read, out var problem))
             {
-                invalid.Add((row.Id, $"{strategy.EntityType} {entityId}: {problem}"));
+                invalid.Add((row.RowId, $"{strategy.EntityType} {entityId}: {problem}"));
             }
             else if (!string.Equals(read.EntityId, entityId, StringComparison.Ordinal))
             {
                 // The lease is on the row's entity; writing another entity under it would bypass that entity's own
-                invalid.Add((row.Id, $"{strategy.EntityType} {entityId}: the event is about '{read.EntityId}', but the row's entity_id is '{entityId}'"));
+                invalid.Add((row.RowId, $"{strategy.EntityType} {entityId}: the event is about '{read.EntityId}', but the row's entity_id is '{entityId}'"));
             }
             else
             {
@@ -94,7 +103,7 @@ internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, 
         for (var i = 1; i < events.Count; i++)
         {
             var e = events[i];
-            if (e.Read.Time > newest.Read.Time || (e.Read.Time == newest.Read.Time && e.Row.Id > newest.Row.Id))
+            if (e.Read.Time > newest.Read.Time || (e.Read.Time == newest.Read.Time && e.Row.RowId > newest.Row.RowId))
             {
                 newest = e;
             }
@@ -120,7 +129,7 @@ internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, 
     {
         var synced = new List<SyncedEntity>();
         var released = new List<long>();
-        var dead = Invalid.Select(i => new FailedEvent(i.Id, i.Error, SalesforceErrors.InvalidEvent)).ToList();
+        var dead = Invalid.Select(i => new FailedEvent(i.RowId, i.Error, SalesforceErrors.InvalidEvent)).ToList();
         var failed = new List<FailedEvent>();
 
         foreach (var work in Work)
@@ -128,17 +137,17 @@ internal sealed record PreparedBatch(List<long> SupersededIds, List<Work> Work, 
             var result = results[work.EntityId];
             switch (result.Outcome)
             {
-                case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(new SyncedEntity(work.EntityId, work.Time, work.EventId)); break;
-                case SyncOutcome.NotAttempted: released.Add(work.EventId); break;
+                case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(new SyncedEntity(work.EntityId, work.Time, work.RowId)); break;
+                case SyncOutcome.NotAttempted: released.Add(work.RowId); break;
                 case SyncOutcome.PermanentFailure: dead.Add(Failure(work, result)); break;
                 default: failed.Add(Failure(work, result)); break;
             }
         }
-        return new BatchOutcomes(synced, SupersededIds, released, dead, failed);
+        return new BatchOutcomes(synced, SupersededRowIds, released, dead, failed);
     }
 
     private static FailedEvent Failure(Work work, UpsertResult result)
     {
-        return new(work.EventId, string.Join("; ", result.Errors), result.PrimaryError?.Code);
+        return new(work.RowId, string.Join("; ", result.Errors), result.PrimaryError?.Code);
     }
 }

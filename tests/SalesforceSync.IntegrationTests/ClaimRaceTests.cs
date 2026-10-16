@@ -43,7 +43,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         (await race.ClaimAsync(race.WorkerA, tx, Guid.NewGuid())).Should().Equal(race.Entity);
         var events = await race.ClaimEventsAsync(race.WorkerA, tx);
         await tx.CommitAsync();
-        events.Should().HaveCount(2).And.BeInAscendingOrder(e => e.Id);
+        events.Should().HaveCount(2).And.BeInAscendingOrder(e => e.RowId);
     }
 
     [Fact]
@@ -107,7 +107,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await using (var tx = await race.WorkerA.BeginTransactionAsync())
         {
             (await race.ClaimAsync(race.WorkerA, tx, token)).Should().Equal(race.Entity);
-            claimed = [.. (await race.ClaimEventsAsync(race.WorkerA, tx)).Select(e => e.Id)];
+            claimed = [.. (await race.ClaimEventsAsync(race.WorkerA, tx)).Select(e => e.RowId)];
             await tx.CommitAsync();
         }
 
