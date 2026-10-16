@@ -93,11 +93,9 @@ public sealed partial class InboxSql
         /// see <see cref="StillClaimed"/>). An event as new as the row's (a Kafka redelivery) overwrites it too, unless
         /// the row is done: then that time is in Salesforce already, and the redelivery changes nothing, without a
         /// claim or a Salesforce call. An older event changes nothing. A new or idle entity (next_attempt_at null) is
-        /// due after @coalesceDelay (<see cref="SyncOptions.CoalesceDelay"/>), so the rest of a burst of its events
-        /// overwrites the row before it is claimed and only the newest is written. An entity that is already due,
-        /// backing off, deferred or held keeps its time, and so does a leased one: its next_attempt_at is the lease's
-        /// end, so a worker that holds the entity keeps it, and the outcome transaction makes it due
-        /// (<see cref="EndLease"/>).
+        /// due at once. An entity that is already due, backing off, deferred or held keeps its time, and so does a
+        /// leased one: its next_attempt_at is the lease's end, so a worker that holds the entity keeps it, and the
+        /// outcome transaction makes it due (<see cref="EndLease"/>).
         /// <para>
         /// Under READ COMMITTED the conflicting row is locked, and if another transaction is updating it (a claim or an
         /// outcome), the store waits for that transaction and then applies to the row as it left it, its WHERE checked
@@ -106,7 +104,7 @@ public sealed partial class InboxSql
         /// </summary>
         public const string Store = """
             insert into {inbox} as i (entity_id, event_time, payload, next_attempt_at)
-            values (@entityId, @eventTime, @payload::jsonb, now() + @coalesceDelay)
+            values (@entityId, @eventTime, @payload::jsonb, now())
             on conflict (entity_id) do update
             set payload = excluded.payload, event_time = excluded.event_time, status = 'pending', attempt_count = 0,
                 last_error = null, last_error_code = null, last_updated = now(),
@@ -151,7 +149,7 @@ public sealed partial class InboxSql
         /// doesn't match. One that has the row locked makes the outcome statement wait; under READ COMMITTED the
         /// statement then checks this WHERE again on the row the store left (EvalPlanQual), whose event_time differs.
         /// One that comes later waits for the outcome's transaction and then overwrites the finished row: pending again,
-        /// and due (next_attempt_at, null once finished, becomes now + @coalesceDelay).
+        /// and due (next_attempt_at, null once finished, becomes now).
         /// </para>
         /// </summary>
         public const string StillClaimed = """
@@ -208,10 +206,8 @@ public sealed partial class InboxSql
         /// <see cref="StillClaimed"/>), whatever was recorded for the others; a claim rate limited as a whole is
         /// deferred with this statement alone.
         /// They are pending, and due now (held or deferred: when the hold or deferral ends) instead of at the lease's
-        /// end, which the store kept as an overwritten row's next_attempt_at. Such a row gets no coalesce delay
-        /// (<see cref="Store"/>): its event has already waited as long as the batch's Salesforce calls took, and newer
-        /// events that arrive before the next claim overwrite it anyway. Ending a lease needs no check of the claimed
-        /// event: the row is due again either way. A retried claim ends the leases of the attempt it lost the same way.
+        /// end, which the store kept as an overwritten row's next_attempt_at. Ending a lease needs no check of the
+        /// claimed event: the row is due again either way. A retried claim ends the leases of the attempt it lost the same way.
         /// </summary>
         public const string EndLease = """
             update {inbox} i

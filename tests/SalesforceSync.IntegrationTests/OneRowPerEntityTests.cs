@@ -184,11 +184,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     /// <summary>The worker's repository; a hold short enough to see it end.</summary>
     private static InboxRepository<AccountInboxRow> Inbox()
     {
-        return new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions
-        {
-            CoalesceDelay = TimeSpan.Zero,
-            UnknownOutcomeHold = TimeSpan.FromMilliseconds(200)
-        }));
+        return new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions { UnknownOutcomeHold = TimeSpan.FromMilliseconds(200) }));
     }
 
     private static async Task<Row> RowAsync(NpgsqlDataSource db, string entity)

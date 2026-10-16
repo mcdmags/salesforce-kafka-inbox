@@ -30,7 +30,8 @@ describe that design. The drain benchmarks now preload each entity's newest even
 plus relationships) and print `entities` (inbox rows) and the coalescing as events per entity claim. Since then the
 lease is the row's `next_attempt_at` (migration `LeaseInNextAttemptAt`, no `locked_until`), and there is no
 watermark and no `superseded` status (migration `DropSyncedTime`): an event not newer than a synced one is never
-stored, so every row of a drained inbox ends `done`.
+stored, so every row of a drained inbox ends `done`. And `Sync:CoalesceDelay` is gone: a stored event makes its entity
+due at once (see the [realistic-ingest sweep](#realistic-ingest-sweep-2026-10-16-main-at-85d1de7)).
 
 [Sequential, limiter-only vs full](#sequential-limiter-only-vs-full) compares this version with one that has no parallel
 processing or race-condition handling, measured on `main` at 01b53b3.
@@ -661,6 +662,26 @@ the same work, as expected (the whole inbox is due 50 ms later, then drains as b
 | 50 ms, run 2 | 30 | 34 | 33 | 44 | 5.69 | 731 / 347 / 288 / 457 ms |
 
 Allocated 48 to 84 MB in all four runs; 0 overlapping claims, not done, wrong or regressions.
+
+### Realistic-ingest sweep (2026-10-16, main at 85d1de7)
+
+Streaming, 4 workers x 1 pod, the events stored one at a time like the Kafka consumer, every delay run in two passes
+(pass 1 ascending, pass 2 descending). API calls per pass and averaged, and the claims averaged; every iteration
+passed every check. Pass 2 ran at a load average of about 16, so its times are noise.
+
+| Delay | api, pass 1 | api, pass 2 | api, average | claims, average |
+|---|---|---|---|---|
+| 0 | 1,303 | 1,403 | 1,353 | 3,549 |
+| 25 ms | 1,420 | 1,447 | 1,434 | 3,245 |
+| 50 ms | 1,289 | 1,406 | 1,347 | 2,951 |
+| 100 ms | 1,252 | 1,356 | 1,304 | 2,452 |
+| 250 ms | 1,254 | 1,496 | 1,375 | 2,044 |
+| 500 ms | 1,112 | 1,191 | 1,151 | 1,538 |
+
+The run-to-run spread is about ±4%. A longer delay means fewer claims, but a call is per batch, and with small
+batches fewer claims barely means fewer calls: up to 250 ms no delay saves calls beyond the spread, and only 500 ms
+saved about 15%, at half a second of added sync latency. **Decision: `Sync:CoalesceDelay` removed**; a stored event
+makes its entity due at once.
 
 ## Micro benchmarks
 
