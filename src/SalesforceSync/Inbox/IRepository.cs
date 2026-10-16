@@ -57,7 +57,6 @@ public sealed record InboxClaim(
 }
 
 /// <summary>A pending inbox row as claimed: the entity it belongs to and the raw event.</summary>
-/// <param name="AttemptCount">Times the row was claimed since its event was stored, this claim included.</param>
 /// <param name="RowId">The inbox row's primary key (its id column; one row per entity). Not the entity id.</param>
 /// <param name="EntityId">The entity the event is about: the Kafka message key.</param>
 /// <param name="Payload">The event as received, JSON.</param>
@@ -65,15 +64,7 @@ public sealed record InboxClaim(
 /// The row's event_time as the claim read it: every outcome is recorded only while the row still has it (a newer event
 /// stored meanwhile has overwritten the row; see <see cref="InboxSql.Template.Unchanged"/>).
 /// </param>
-public sealed record InboxEvent(long RowId, string EntityId, string Payload, int AttemptCount, DateTimeOffset EventTime);
-
-/// <summary>
-/// An entity whose event (row <paramref name="RowId"/>) is in Salesforce: the row ends done, and its event_time is the
-/// entity's watermark (sf_sync_state.synced_time).
-/// </summary>
-/// <param name="EntityId">The entity: the Kafka message key.</param>
-/// <param name="RowId">The entity's inbox row id (not the entity id).</param>
-public sealed record SyncedEntity(string EntityId, long RowId);
+public sealed record InboxEvent(long RowId, string EntityId, string Payload, DateTimeOffset EventTime);
 
 /// <summary>An inbox row with the error to store on it.</summary>
 /// <param name="RowId">The inbox row id (not the entity id).</param>
@@ -81,14 +72,14 @@ public sealed record SyncedEntity(string EntityId, long RowId);
 /// <param name="Code">The Salesforce (or sync) error code, if any.</param>
 public sealed record FailedEvent(long RowId, string Error, string? Code);
 
-/// <summary>What to record for the rows of a claim, by kind of outcome.</summary>
-/// <param name="Synced">Done; the entity's watermark advances.</param>
+/// <summary>What to record for the rows of a claim, by kind of outcome: inbox row ids (not entity ids).</summary>
+/// <param name="Synced">In Salesforce: done, and the row's event_time is its entity's watermark (sf_sync_state.synced_time).</param>
 /// <param name="Superseded">Not written: an event as new was already synced.</param>
 /// <param name="Released">Back to the inbox for the next claim, no attempt spent.</param>
 /// <param name="Dead">Dead-lettered at once.</param>
 /// <param name="Failed">Retried with backoff, dead-lettered after <see cref="SyncOptions.MaxRetries"/>.</param>
 public sealed record BatchOutcomes(
-    IReadOnlyList<SyncedEntity> Synced,
+    IReadOnlyList<long> Synced,
     IReadOnlyList<long> Superseded,
     IReadOnlyList<long> Released,
     IReadOnlyList<FailedEvent> Dead,

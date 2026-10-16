@@ -8,8 +8,8 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The raw event format: how an envelope (camelCase JSON, full record) maps to Salesforce records, how an entity's
-/// pending events are coalesced, and what the Kafka consumer admits into the inbox.
+/// The raw event format: how an envelope (camelCase JSON, full record) maps to Salesforce records, how a claimed
+/// row is written, superseded or found invalid, and what the Kafka consumer admits into the inbox.
 /// </summary>
 public sealed class InboxEventTests
 {
@@ -243,7 +243,7 @@ public sealed class InboxEventTests
     {
         var batch = PreparedBatch.Prepare(Relationships,
         [
-            new InboxEvent(2, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""", 1,
+            new InboxEvent(2, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""",
                 DateTimeOffset.Parse("2026-10-14T02:00:00Z", System.Globalization.CultureInfo.InvariantCulture))
         ], new Dictionary<string, long>());
 
@@ -403,7 +403,7 @@ public sealed class InboxEventTests
     /// <summary>A claimed row of <paramref name="entityId"/>, with the time its payload has (or none, if it can't be read).</summary>
     private static InboxEvent Row(long id, string entityId, string payload)
     {
-        return new(id, entityId, payload, 1, Accounts.TryRead(payload, out var read, out _) ? read.Time : DateTimeOffset.UnixEpoch);
+        return new(id, entityId, payload, Accounts.TryRead(payload, out var read, out _) ? read.Time : DateTimeOffset.UnixEpoch);
     }
 
     private static TEvent Read<TEvent>(string json)

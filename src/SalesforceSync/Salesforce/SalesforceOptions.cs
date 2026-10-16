@@ -33,7 +33,7 @@ public sealed class SalesforceOptions
     public int CompressRequestsLargerThan { get; set; } = 1024;
 
     /// <summary>
-    /// Salesforce error codes that won't succeed on retry; the entity's events are dead-lettered immediately.
+    /// Salesforce error codes that won't succeed on retry; the entity's event is dead-lettered immediately.
     /// Unset = <see cref="SalesforceErrors.DefaultPermanentCodes"/>; setting it replaces the list.
     /// Codes not listed (and not <see cref="SalesforceErrors.ProcessingHalted"/>) are treated as transient and retried with backoff.
     /// </summary>

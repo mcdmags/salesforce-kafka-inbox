@@ -143,7 +143,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
     private static BatchOutcomes Synced(InboxClaim claim)
     {
-        return new BatchOutcomes([.. claim.Events.Select(e => new SyncedEntity(e.EntityId, e.RowId))], [], [], [], []);
+        return new BatchOutcomes(claim.RowIds, [], [], [], []);
     }
 
     private static JsonObject Event(string entity, long version)

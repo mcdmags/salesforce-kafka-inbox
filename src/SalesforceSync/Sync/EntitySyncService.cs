@@ -21,8 +21,8 @@ public interface ISalesforceEntitySync
     bool TryReadEvent(string json, out string? entityId, out DateTimeOffset eventTime, out string? problem);
 
     /// <summary>
-    /// Stores an event that passed <see cref="TryReadEvent"/> as a new row of this type's inbox, unchanged, with the
-    /// time it read.
+    /// Stores an event that passed <see cref="TryReadEvent"/> in its entity's row of this type's inbox, unchanged, with
+    /// the time it read, unless the row holds a newer event.
     /// </summary>
     Task StoreEventAsync(string entityId, DateTimeOffset eventTime, string json, CancellationToken ct);
 
