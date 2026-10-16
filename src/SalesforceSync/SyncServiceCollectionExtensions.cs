@@ -198,7 +198,7 @@ public static class SyncServiceCollectionExtensions
     }
 
     private static void AddEntitySync<TEvent, TRow>(IServiceCollection services, UpsertStrategy<TEvent> strategy, string defaultTopic)
-        where TRow : InboxRow, new()
+        where TRow : InboxRow, IInboxRow, new()
     {
         services.AddTransient<ISalesforceEntitySync>(sp => new EntitySyncService<TEvent, TRow>(
             sp.GetRequiredService<SalesforceBatchUpsertService>(), sp.GetRequiredService<IRepository<TRow>>(), strategy, defaultTopic));

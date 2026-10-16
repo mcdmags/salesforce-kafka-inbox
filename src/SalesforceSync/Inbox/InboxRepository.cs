@@ -13,12 +13,12 @@ namespace SalesforceSync.Inbox;
 /// <summary>
 /// <see cref="IRepository{TEntity}"/> on Postgres, for any inbox row type: the store, claim, done and failure statements
 /// and the end of a lease are the <see cref="InboxSql"/> texts of the row type's table, run through EF's raw SQL; the
-/// outcomes that are a plain conditional UPDATE are LINQ (<c>ExecuteUpdate</c>). The row type's entity type (its
-/// entities' key in sf_sync_state) comes from the EF model, like its table. Each unit of work runs through EF's
-/// execution strategy (<see cref="PostgresRetryStrategy"/>).
+/// outcomes that are a plain conditional UPDATE are LINQ (<c>ExecuteUpdate</c>). The table comes from the EF model,
+/// the entity type (its entities' key in sf_sync_state) from the row type itself (<see cref="IInboxRow"/>). Each unit
+/// of work runs through EF's execution strategy (<see cref="PostgresRetryStrategy"/>).
 /// </summary>
 public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TEntity>
-    where TEntity : InboxRow, new()
+    where TEntity : InboxRow, IInboxRow, new()
 {
     private readonly SyncOptions _opt = options.Value;
 
@@ -34,7 +34,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     {
         var time = PreparedBatch.ToWholeMicroseconds(eventTime);
         return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).Store, t,
-                Param("entityType", db.EntityTypeOf<TEntity>()), Param("entityId", entityId), Param("eventTime", time),
+                Param("entityType", TEntity.EntityType), Param("entityId", entityId), Param("eventTime", time),
                 Param("payload", payload), Param("coalesceDelay", _opt.CoalesceDelay)), ct);
     }
 
@@ -52,7 +52,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
             var sql = InboxSql.For(db.TableOf<TEntity>());
-            var type = db.EntityTypeOf<TEntity>();
+            var type = TEntity.EntityType;
 
             if (attemptedEntityIds.Count > 0)
             {
@@ -183,7 +183,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     {
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
-            var type = db.EntityTypeOf<TEntity>();
+            var type = TEntity.EntityType;
             var held = await db.Database.QueryAsync<string>(InboxSql.LockHeld, t, Param("entityType", type),
                 Param("entityIds", claim.EntityIds), Param("token", claim.Token));
             if (held.Count > 0)
@@ -232,7 +232,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// </summary>
     private static Task<int> EndLeaseAsync(SyncDbContext db, InboxSql sql, string[] entityIds, Guid token, TimeSpan delay, CancellationToken ct)
     {
-        return db.Database.ExecuteAsync(sql.EndLease, ct, Param("entityType", db.EntityTypeOf<TEntity>()),
+        return db.Database.ExecuteAsync(sql.EndLease, ct, Param("entityType", TEntity.EntityType),
             Param("entityIds", entityIds), Param("token", token), Param("delay", delay));
     }
 

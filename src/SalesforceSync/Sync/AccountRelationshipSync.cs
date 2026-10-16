@@ -95,4 +95,7 @@ public sealed class AccountRelationshipSObject
 }
 
 /// <summary>A row of <c>sf_account_relationship_inbox</c>: events of the account relationship type.</summary>
-public sealed class AccountRelationshipInboxRow : InboxRow;
+public sealed class AccountRelationshipInboxRow : InboxRow, IInboxRow
+{
+    public static string EntityType => AccountRelationshipSync.Type;
+}
