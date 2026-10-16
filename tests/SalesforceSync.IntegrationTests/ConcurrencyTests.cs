@@ -14,9 +14,14 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
     private const int Accounts = 60;
     private const int Versions = 25;
 
-    [Fact]
-    public async Task Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version()
+    /// <summary>Sync:CoalesceDelay in ms: as the other tests run (0), and the production default (appsettings.json).</summary>
+    public static TheoryData<int> CoalesceDelays => [0, 50];
+
+    [Theory]
+    [MemberData(nameof(CoalesceDelays))]
+    public async Task Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version(int coalesceDelayMs)
     {
+        await app.UseCoalesceDelayAsync(TimeSpan.FromMilliseconds(coalesceDelayMs));
         var ids = Enumerable.Range(0, Accounts).Select(_ => SyncFixture.NewAccountId()).ToArray();
 
         // Waves of updates to every account, so accounts get new events while workers are already processing them.
@@ -124,9 +129,11 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         clients.Should().HaveCount(MultiPodFixture.PodCount, "every pod should have written to Salesforce");
     }
 
-    [Fact]
-    public async Task Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time()
+    [Theory]
+    [MemberData(nameof(CoalesceDelays))]
+    public async Task Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time(int coalesceDelayMs)
     {
+        await app.UseCoalesceDelayAsync(TimeSpan.FromMilliseconds(coalesceDelayMs));
         const int accounts = 30, versions = 12;
         var ids = Enumerable.Range(0, accounts).Select(_ => SyncFixture.NewAccountId()).ToArray();
         var random = new Random(7);
