@@ -39,9 +39,6 @@ public abstract class InboxRow
     /// <summary>E.g. FIELD_CUSTOM_VALIDATION_EXCEPTION, to query dead letters by cause.</summary>
     public string? LastErrorCode { get; set; }
 
-    /// <summary>When this event was stored.</summary>
-    public DateTimeOffset ReceivedAt { get; set; }
-
     public DateTimeOffset LastUpdated { get; set; }
 
     /// <summary>

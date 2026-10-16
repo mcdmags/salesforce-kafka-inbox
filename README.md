@@ -275,7 +275,6 @@ create table sf_account_inbox (                 -- and sf_account_relationship_i
   attempt_count   int         not null default 0,          -- times this event was claimed (a newer event starts at 0)
   last_error      text,
   last_error_code text,
-  received_at     timestamptz not null default now(),      -- when this event was stored
   last_updated    timestamptz not null default now(),
   event_time      timestamptz not null,                    -- the event's meta.time, read by the consumer
   next_attempt_at timestamptz,            -- null: nothing to do (not pending); else claimable from then on (backoff included)
@@ -591,6 +590,7 @@ The migrations, in order:
 | `InboxEventTime` | Adds `event_time` to every inbox, filled from each row's `meta.time` |
 | `InboxOneRowPerRecord` | Keeps each entity's newest row and makes `entity_id` unique |
 | `StateInInboxRow` | Moves every entity's state from `sf_sync_state` into its inbox row (`next_attempt_at` only for a pending row; a state row without an inbox row, which only a row deleted by hand leaves, is dropped), adds each inbox's ready index and drops `sf_sync_state` |
+| `DropReceivedAt` | Drops `received_at` from the inboxes: the sync orders events by `event_time`, and `last_updated` shows when a row last changed |
 
 At startup `SyncSchemaInitializer` (registered before the workers) runs `SyncSchema.MigrateAsync`: under a
 session-level advisory lock (`0x5346_5348`), so pods that start together migrate one at a time and each finds the work
