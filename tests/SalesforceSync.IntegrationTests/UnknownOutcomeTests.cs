@@ -25,8 +25,8 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "v1", ["description"] = "v1" }, new JsonObject { ["score"] = 1 });
 
         // The org applied v1, but the worker never heard back: the row is held, not retried and not failed
-        var held = (await Eventually.ValueAsync(() => app.GetInboxRowsAsync(acct),
-            rows => rows.Count == 1 && rows[0].ErrorCode == "UNKNOWN_OUTCOME", "the write's outcome to be recorded as unknown"))[0];
+        var held = (await Eventually.ValueAsync(() => app.GetInboxRowAsync(acct),
+            row => row?.ErrorCode == "UNKNOWN_OUTCOME", "the write's outcome to be recorded as unknown"))!;
         var heldAt = DateTime.UtcNow;
         held.Status.Should().Be("pending");
         held.AttemptCount.Should().Be(0, "an unknown outcome doesn't spend an attempt");
@@ -36,9 +36,9 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
 
         // A newer event arrives during the hold, overwrites the row and has to wait, although nobody is working on the account
         await app.PublishAsync(acct, 2, new JsonObject { ["name"] = "v2", ["description"] = "v2" }, new JsonObject { ["score"] = 2 });
-        await Eventually.ValueAsync(() => app.GetInboxRowsAsync(acct), rows => rows.Count == 1 && rows[0].Version == 2, "v2 to be stored");
+        await Eventually.ValueAsync(() => app.GetInboxRowAsync(acct), row => row?.Version == 2, "v2 to be stored");
         await Task.Delay(TimeSpan.FromSeconds(1.5));
-        var during = (await app.GetInboxRowsAsync(acct)).Should().ContainSingle().Subject;
+        var during = (await app.GetInboxRowAsync(acct))!;
         DateTime.UtcNow.Should().BeBefore(held.LockedUntil!.Value, "the check must fall inside the hold");
         during.Should().Match<InboxRow>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0,
             "nothing of a held entity may be claimed");
@@ -69,10 +69,10 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
 
         // Held, then picked up again: Salesforce already has the Account, so the diff writes only the Profile (whose call
         // never went out after the Account's answer was lost)
-        await Eventually.ValueAsync(() => app.GetInboxRowsAsync(acct),
-            rows => rows.Count == 1 && rows[0].ErrorCode == "UNKNOWN_OUTCOME", "the hold");
+        await Eventually.ValueAsync(() => app.GetInboxRowAsync(acct),
+            row => row?.ErrorCode == "UNKNOWN_OUTCOME", "the hold");
         (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
-        (await app.GetInboxRowsAsync(acct))[0].ErrorCode.Should().BeNull("the error is cleared once the event is done");
+        (await app.GetInboxRowAsync(acct))!.ErrorCode.Should().BeNull("the error is cleared once the event is done");
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("the lost write had landed; nothing is written twice");
         (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().ContainSingle();
     }

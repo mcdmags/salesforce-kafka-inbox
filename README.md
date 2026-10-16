@@ -361,8 +361,10 @@ watermarks). An event that can't be read is dead-lettered on its own (`INVALID_E
 set-based and conditional on the `lock_token` of the entity's state row; the last one ends the lease and leaves the
 entity due again if its row is pending (now, or when its backoff ends), idle otherwise.
 
-**Overwritten while claimed.** The lease keeps other workers away from an entity, not the consumer: a newer event can
-overwrite the row while the worker writes the event it claimed. So every outcome transaction, right after locking
+**Overwritten while claimed** (explained step by step in
+[A newer event while an entity is being synced](#a-newer-event-while-an-entity-is-being-synced)). The lease keeps other
+workers away from an entity, not the consumer: a newer event can overwrite the row while the worker writes the event it
+claimed. So every outcome transaction, right after locking
 the entity's state rows (`LockHeld`), reads which claimed rows still hold the `event_time` the claim read
 (`Unchanged`: the claim's row ids and times, `unnest(@ids, @times)`, each row looked up by primary key and compared
 timestamptz to timestamptz, exactly: the times are the microseconds read back from the column) and records outcomes
@@ -385,6 +387,53 @@ select * from sf_sync_state where entity_type = 'account' and entity_id = 'ACC-0
 ```
 
 (Queries like these, for people, may look inside the payload; the worker's own SQL never does.)
+
+### A newer event while an entity is being synced
+
+`sf_account_inbox` has one row per account: for ACC-1 it always holds ACC-1's latest event. A newer event for ACC-1
+replaces that row's payload and `event_time` and sets it back to `pending`.
+
+Syncing ACC-1 takes three steps, and they are not instant:
+
+1. **Claim.** A worker reads ACC-1's row and leases ACC-1: no other worker can sync ACC-1 meanwhile.
+2. **Write to Salesforce.** The worker sends what it read: a read call, then a write call, tens to hundreds of
+   milliseconds.
+3. **Record the result.** The worker marks the row `done` (or retried, or `dead`) and moves ACC-1's watermark
+   (`synced_time`) to the time of the event it wrote.
+
+The lease stops other *workers*, not the *Kafka consumer*: new events keep arriving and are stored at once. So between
+steps 1 and 3 this can happen:
+
+```
+10:00:00.000  row ACC-1 = { name "A", event_time 09:59, pending }
+10:00:00.010  worker claims ACC-1, reads name "A"
+10:00:00.020  worker sends name "A" to Salesforce ...
+10:00:00.050  consumer stores a new event: row ACC-1 = { name "B", event_time 10:00, pending }
+10:00:00.200  ... Salesforce confirms name "A" is saved
+10:00:00.210  worker records the result for row ACC-1
+```
+
+At 10:00:00.210 the row no longer holds the event the worker wrote: it holds "B", which Salesforce has never seen. If
+the worker simply marked the row `done`, the row would say `done` with "B" in it, so "B" would never be claimed; the
+watermark would move to 10:00, so even a redelivery of "B" would count as synced; and Salesforce would keep "A" for
+good. The newest update would be lost, with no error anywhere.
+
+**The guard.** In step 3, before recording anything, the worker checks that the row still has the `event_time` it
+claimed (09:59):
+
+- **yes**: nothing arrived during the write, so it records `done` and moves the watermark as usual;
+- **no** (it is now 10:00): a newer event arrived, so it records **nothing** on the row. The row stays `pending` with
+  "B", the watermark stays where it was, and when the lease ends ACC-1 is due again: the next claim writes "B".
+
+Every result the worker can record (done, superseded, released, retried, dead, held) goes through the same check, since
+each would otherwise overwrite the newer event's status.
+
+**The check and the consumer can't interleave.** The consumer locks ACC-1's `sf_sync_state` row before it writes the
+inbox row, and the worker locks the same row before it checks. Either the consumer's write came first and the check
+sees 10:00, or it waits until the worker has recorded its result and then replaces the row with "B", `pending`. Either
+way "B" is synced next. Tests: `OneRowPerEntityTests.An_outcome_for_a_claimed_event_is_not_recorded_on_the_newer_event_that_overwrote_it`
+(every kind of result) and `LeaseTests.A_newer_event_stored_while_the_claimed_one_is_written_is_written_next_whatever_the_claimed_ones_outcome`
+(end to end, Salesforce ends at "B").
 
 ### How a lease works
 

@@ -55,10 +55,10 @@ public sealed class RelationshipTests(SyncFixture app)
 
         // Retried (not dead-lettered) while the accounts aren't in Salesforce
         var waiting = await Eventually.ValueAsync(
-            () => app.GetInboxRowsAsync(rel, SyncFixture.Relationships),
-            rows => rows.Count == 1 && rows[0].ErrorCode == "DEPENDENCY_NOT_SYNCED",
+            () => app.GetInboxRowAsync(rel, SyncFixture.Relationships),
+            row => row?.ErrorCode == "DEPENDENCY_NOT_SYNCED",
             "the relationship to wait for its accounts");
-        waiting[0].Status.Should().Be("pending", "a missing dependency is retried, not dead-lettered");
+        waiting!.Status.Should().Be("pending", "a missing dependency is retried, not dead-lettered");
         (await app.GetRecordAsync("Account_Relationship__c", rel)).Should().BeNull();
         (await app.GetWriteRequestsAsync(rel)).Should().BeEmpty("the read found no Account: nothing is sent");
 
@@ -66,10 +66,10 @@ public sealed class RelationshipTests(SyncFixture app)
         await app.PublishAsync(child, 1, new JsonObject { ["name"] = Any.String("Late child ") }, []);
 
         var settled = await Eventually.ValueAsync(
-            () => app.GetInboxRowsAsync(rel, SyncFixture.Relationships),
-            rows => rows.Count == 1 && rows[0].Status != "pending",
+            () => app.GetInboxRowAsync(rel, SyncFixture.Relationships),
+            row => row is { Status: not "pending" },
             "the relationship to sync once its accounts exist");
-        settled[0].Status.Should().Be("done");
+        settled!.Status.Should().Be("done");
         var record = await app.GetRecordAsync("Account_Relationship__c", rel);
         record.Should().NotBeNull();
         ((string?)record!["RelatedAccountId__c"]).Should().Be(child);
@@ -83,7 +83,7 @@ public sealed class RelationshipTests(SyncFixture app)
         await app.PublishRelationshipAsync(rel, 1, SyncFixture.NewAccountId(), "", []);
 
         (await app.WaitForInboxSettledAsync(rel, 1, SyncFixture.Relationships)).Should().Be((1L, "dead"));
-        (await app.GetInboxRowsAsync(rel, SyncFixture.Relationships))[0].ErrorCode.Should().Be("INVALID_EVENT");
-        (await app.GetInboxAsync(rel)).Should().BeEmpty("it is stored in the relationship inbox, not the account one");
+        (await app.GetInboxRowAsync(rel, SyncFixture.Relationships))!.ErrorCode.Should().Be("INVALID_EVENT");
+        (await app.GetInboxAsync(rel)).Should().BeNull("it is stored in the relationship inbox, not the account one");
     }
 }

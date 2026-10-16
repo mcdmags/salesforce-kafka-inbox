@@ -208,7 +208,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         // An older version arrives late (replay / out-of-order producer)
         await app.PublishAsync(acct, 3, new JsonObject { ["name"] = name, ["rating"] = "Cold" }, new JsonObject { ["tier"] = "Bronze" });
         await WaitUntilConsumedAsync(acct);
-        (await app.GetInboxAsync(acct)).Should().Equal([(5L, "done")], "an older event doesn't overwrite the row");
+        (await app.GetInboxAsync(acct)).Should().Be((5L, "done"), "an older event doesn't overwrite the row");
         (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(SyncFixture.SyncedTime(5), "the watermark is the event written to Salesforce");
 
         // v3 never reached Salesforce
@@ -264,7 +264,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         await app.PublishRawAsync(acct, v2.ToJsonString());
         await Eventually.ValueAsync(() => app.GetSyncStateAsync(acct), s => s?.SyncedTime == micros + 1_001, "v2 to be synced");
-        (await app.GetInboxAsync(acct)).Should().Equal([(1L, "done")]);
+        (await app.GetInboxAsync(acct)).Should().Be((1L, "done"));
         ((string?)(await app.GetRecordAsync("Account", acct))!["Name"]).Should().Be("v2");
         (await conn.QuerySingleAsync<long>(storedTime, new { acct })).Should().Be(micros + 1_001);
     }
@@ -280,7 +280,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishRawAsync(acct, v1.ToJsonString());            // Kafka redelivery, after the first was synced
 
         // As new as the row: it overwrites it (pending again), and its claim finds it not newer than the watermark
-        await Eventually.ValueAsync(() => app.GetInboxAsync(acct), rows => rows.SequenceEqual([(1L, "superseded")]),
+        await Eventually.ValueAsync(() => app.GetInboxAsync(acct), row => row == (1L, "superseded"),
             "the redelivery to be superseded");
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("a redelivery must not write to Salesforce");
         (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(SyncFixture.SyncedTime(1));
@@ -321,7 +321,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishRawAsync(acct, valid.ToJsonString());
 
         (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
-        (await app.GetInboxAsync(acct, SyncFixture.Relationships)).Should().BeEmpty("a topic's events are read as that topic's type only");
+        (await app.GetInboxAsync(acct, SyncFixture.Relationships)).Should().BeNull("a topic's events are read as that topic's type only");
         ((string?)(await app.GetRecordAsync("Account", acct))!["Name"]).Should().Be(name);
     }
 

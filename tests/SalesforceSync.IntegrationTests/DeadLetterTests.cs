@@ -32,7 +32,7 @@ public sealed class DeadLetterTests(FewRetriesFixture app)
         await app.PublishRelationshipAsync(rel, 1, parent, child, new JsonObject { ["type"] = "Subsidiary" });
 
         (await app.WaitForInboxSettledAsync(rel, version: 1, SyncFixture.Relationships)).Should().Be((1L, "dead"));
-        var dead = (await app.GetInboxRowsAsync(rel, SyncFixture.Relationships))[0];
+        var dead = (await app.GetInboxRowAsync(rel, SyncFixture.Relationships))!;
         dead.ErrorCode.Should().Be("DEPENDENCY_NOT_SYNCED", "the cause stays on the dead letter");
         dead.AttemptCount.Should().Be(FewRetriesFixture.MaxRetries);
         (await app.GetRecordAsync("Account_Relationship__c", rel)).Should().BeNull();

@@ -57,8 +57,7 @@ public sealed class EngineFlowTests
         ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("new");
         _inbox.Calls.Should().Equal("claim", "record");
         var outcomes = _inbox.Recorded!;
-        outcomes.Synced.Should().ContainSingle().Which.Should().Be(
-            new SyncedEntity("ACC-1", 2), "its row's event_time becomes the watermark");
+        outcomes.Synced.Should().Equal([2L], "ACC-1's row's event_time becomes the watermark");
         outcomes.Superseded.Should().Equal([4L], "its event is not newer than the watermark");
         outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.RowId == 3 && f.Code == SalesforceErrors.InvalidEvent);
         outcomes.Released.Should().BeEmpty();
@@ -122,7 +121,7 @@ public sealed class EngineFlowTests
         (await Engine().UpsertBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
 
         _inbox.Calls.Should().Equal("claim", "record");
-        _inbox.Recorded!.Synced.Should().ContainSingle().Which.EntityId.Should().Be("C-1");
+        _inbox.Recorded!.Synced.Should().Equal([1L], "C-1's row");
         _inbox.Recorded.Dead.Should().ContainSingle().Which.Code.Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION");
         _http.Writes.Should().Be(1, "both contacts in one upsert call");
         (_org.GetStats().UpsertRequests - before.UpsertRequests).Should().Be(1, "a new Contact on an existing Account needs no reference");
@@ -153,7 +152,7 @@ public sealed class EngineFlowTests
     private static InboxEvent Contact(long id, string contact, string account)
     {
         return new(id, contact,
-        $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""", 1,
+        $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""",
             DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
     }
 
@@ -184,7 +183,7 @@ public sealed class EngineFlowTests
         (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(3);
 
         _http.Writes.Should().Be(1, "NEW is unchanged now: only OLD's and KIDS's changes are written, in one Composite request");
-        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().BeEquivalentTo(["NEW", "OLD", "KIDS"]);
+        _inbox.Recorded!.Synced.Should().BeEquivalentTo([1L, 2L, 3L], "NEW's, OLD's and KIDS's rows");
         _org.History("Account", "NEW").Should().ContainSingle("NEW was written once, not twice");
     }
 
@@ -233,7 +232,7 @@ public sealed class EngineFlowTests
         (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
 
         _http.Writes.Should().Be(0, "the read finds both writes applied, the lost one included");
-        _inbox.Recorded!.Synced.Select(s => s.EntityId).Should().BeEquivalentTo(["ACC-1", "ACC-2"]);
+        _inbox.Recorded!.Synced.Should().BeEquivalentTo([3L, 4L], "ACC-1's and ACC-2's rows");
     }
 
     // ---------- Failures of the read ----------
@@ -295,7 +294,7 @@ public sealed class EngineFlowTests
             ["E"] = new("E", SyncOutcome.TransientFailure, error)
         });
 
-        outcomes.Synced.Should().Equal(new SyncedEntity("A", 1), new SyncedEntity("B", 2));
+        outcomes.Synced.Should().Equal(1L, 2L);
         outcomes.Superseded.Should().Equal(9L);
         outcomes.Released.Should().Equal(3L);
         outcomes.Dead.Should().Equal(new FailedEvent(8, "bad", SalesforceErrors.InvalidEvent),
@@ -369,21 +368,21 @@ public sealed class EngineFlowTests
     private static InboxEvent AccountRow(long id, string account, string time, string name, string tier)
     {
         return new(id, account,
-        $$"""{ "meta": { "time": "{{time}}", "type": "updated" }, "account": { "externalId": "{{account}}", "name": "{{name}}", "profile": { "tier": "{{tier}}" } } }""", 1,
+        $$"""{ "meta": { "time": "{{time}}", "type": "updated" }, "account": { "externalId": "{{account}}", "name": "{{name}}", "profile": { "tier": "{{tier}}" } } }""",
             DateTimeOffset.Parse(time));
     }
 
     private static InboxEvent Row(long id, string account, string time, string name = "Acme")
     {
         return new(id, account,
-        $$"""{ "meta": { "time": "{{time}}", "type": "inserted" }, "account": { "externalId": "{{account}}", "name": "{{name}}" } }""", 1,
+        $$"""{ "meta": { "time": "{{time}}", "type": "inserted" }, "account": { "externalId": "{{account}}", "name": "{{name}}" } }""",
             DateTimeOffset.Parse(time));
     }
 
     /// <summary>A row whose payload can't be read.</summary>
     private static InboxEvent Invalid(long id, string account)
     {
-        return new(id, account, "not json", 1, DateTimeOffset.UnixEpoch);
+        return new(id, account, "not json", DateTimeOffset.UnixEpoch);
     }
 
     /// <summary>Lets requests through to the org, or fails all of them, the read, or the Nth write.</summary>

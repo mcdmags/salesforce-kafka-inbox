@@ -413,17 +413,17 @@ public class SyncFixture : IAsyncLifetime
     public IRepository<AccountInboxRow> AccountInbox => new InboxRepository<AccountInboxRow>(Contexts,
         Options.Create(new SyncOptions { CoalesceDelay = TimeSpan.Zero }));
 
-    /// <summary>(version, status) of the entity's inbox row, if it has one (version N = meta.time BaseTime + N ms).</summary>
-    public async Task<IReadOnlyList<(long Version, string Status)>> GetInboxAsync(string key, string entityType = Accounts)
+    /// <summary>(version, status) of the entity's inbox row, or null if it has none (version N = meta.time BaseTime + N ms).</summary>
+    public async Task<(long Version, string Status)?> GetInboxAsync(string key, string entityType = Accounts)
     {
-        return [.. (await GetInboxRowsAsync(key, entityType)).Select(r => (r.Version, r.Status))];
+        return await GetInboxRowAsync(key, entityType) is { } row ? (row.Version, row.Status) : null;
     }
 
     /// <summary>
-    /// The entity's inbox row (none or one: a newer event overwrites it), with its entity's lease (from sf_sync_state).
-    /// The version is read here from the stored payload, like the worker does (in C#, not in SQL).
+    /// The entity's inbox row (it has one at most: a newer event overwrites it), with its entity's lease (from
+    /// sf_sync_state), or null. The version is read here from the stored payload, like the worker does (in C#, not in SQL).
     /// </summary>
-    public async Task<IReadOnlyList<InboxRow>> GetInboxRowsAsync(string key, string entityType = Accounts)
+    public async Task<InboxRow?> GetInboxRowAsync(string key, string entityType = Accounts)
     {
         await using var conn = await Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<(long Id, string Payload, string Status, int AttemptCount, string? ErrorCode, DateTime? LockedUntil, Guid? LockToken)>(
@@ -431,11 +431,10 @@ public class SyncFixture : IAsyncLifetime
             select i.id, i.payload::text, i.status, i.attempt_count, i.last_error_code, s.locked_until, s.lock_token
             from {InboxTable(entityType)} i
             left join sf_sync_state s on s.entity_type = @entityType and s.entity_id = i.entity_id
-            where i.entity_id = @key order by i.id
+            where i.entity_id = @key
             """, new { key, entityType });
-        return [.. rows
-            .Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.LockedUntil, r.LockToken))
-            .OrderBy(r => r.Version).ThenBy(r => r.Id)];
+        return rows.Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.LockedUntil, r.LockToken))
+            .SingleOrDefault();
     }
 
     /// <summary>The entity's sf_sync_state row, if it has one.</summary>
@@ -491,11 +490,11 @@ public class SyncFixture : IAsyncLifetime
     /// <summary>Polls until the entity's inbox row holds <paramref name="version"/> and is not pending, then returns it.</summary>
     public async Task<(long Version, string Status)> WaitForInboxSettledAsync(string key, long version, string entityType = Accounts)
     {
-        var rows = await Eventually.ValueAsync(
+        var row = await Eventually.ValueAsync(
                 () => GetInboxAsync(key, entityType),
-                rows => rows.Count == 1 && rows[0].Version == version && rows[0].Status != "pending",
+                row => row is { } r && r.Version == version && r.Status != "pending",
                 $"the inbox row of {entityType} {key} to settle at v{version}");
-        return rows[0];
+        return row!.Value;
     }
 
     /// <summary>librdkafka wants host:port; Testcontainers reports a URI (PLAINTEXT://host:port/).</summary>

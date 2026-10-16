@@ -52,19 +52,19 @@ public sealed class ContactTests(SyncFixture app)
 
         // The read finds no Account with that external id: retried, not dead-lettered
         var waiting = await Eventually.ValueAsync(
-            () => app.GetInboxRowsAsync(contact, SyncFixture.Contacts),
-            rows => rows.Count == 1 && rows[0].ErrorCode == "DEPENDENCY_NOT_SYNCED",
+            () => app.GetInboxRowAsync(contact, SyncFixture.Contacts),
+            row => row?.ErrorCode == "DEPENDENCY_NOT_SYNCED",
             "the contact to wait for its account");
-        waiting[0].Status.Should().Be("pending", "a missing parent is retried, not dead-lettered");
+        waiting!.Status.Should().Be("pending", "a missing parent is retried, not dead-lettered");
         (await app.GetRecordAsync("Contact", contact)).Should().BeNull();
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Late ") }, []);
 
         var settled = await Eventually.ValueAsync(
-            () => app.GetInboxRowsAsync(contact, SyncFixture.Contacts),
-            rows => rows.Count == 1 && rows[0].Status != "pending",
+            () => app.GetInboxRowAsync(contact, SyncFixture.Contacts),
+            row => row is { Status: not "pending" },
             "the contact to sync once its account exists");
-        settled[0].Status.Should().Be("done");
+        settled!.Status.Should().Be("done");
         ((string?)(await app.GetRecordAsync("Contact", contact))!["AccountId__c"]).Should().Be(acct);
     }
 
@@ -81,9 +81,9 @@ public sealed class ContactTests(SyncFixture app)
         await app.PublishContactAsync(good, 1, acct, new JsonObject { ["lastName"] = "Good" });
 
         (await app.WaitForInboxSettledAsync(noName, version: 1, SyncFixture.Contacts)).Should().Be((1L, "dead"));
-        (await app.GetInboxRowsAsync(noName, SyncFixture.Contacts))[0].ErrorCode.Should().Be("REQUIRED_FIELD_MISSING");
+        (await app.GetInboxRowAsync(noName, SyncFixture.Contacts))!.ErrorCode.Should().Be("REQUIRED_FIELD_MISSING");
         (await app.WaitForInboxSettledAsync(noAccount, version: 1, SyncFixture.Contacts)).Should().Be((1L, "dead"));
-        (await app.GetInboxRowsAsync(noAccount, SyncFixture.Contacts))[0].ErrorCode.Should().Be("INVALID_EVENT");
+        (await app.GetInboxRowAsync(noAccount, SyncFixture.Contacts))!.ErrorCode.Should().Be("INVALID_EVENT");
         (await app.WaitForInboxSettledAsync(good, version: 1, SyncFixture.Contacts)).Should().Be((1L, "done"));
         (await app.GetWriteRequestsAsync(noName, noAccount)).Should().BeEmpty("both failed before any call");
     }
@@ -101,8 +101,8 @@ public sealed class ContactTests(SyncFixture app)
         }
 
         await app.PublishContactAsync(contact, 1, acct, new JsonObject { ["lastName"] = "v1" });
-        var held = (await Eventually.ValueAsync(() => app.GetInboxRowsAsync(contact, SyncFixture.Contacts),
-            rows => rows.Count == 1 && rows[0].ErrorCode == "UNKNOWN_OUTCOME", "the upsert's outcome to be recorded as unknown"))[0];
+        var held = (await Eventually.ValueAsync(() => app.GetInboxRowAsync(contact, SyncFixture.Contacts),
+            row => row?.ErrorCode == "UNKNOWN_OUTCOME", "the upsert's outcome to be recorded as unknown"))!;
         held.Status.Should().Be("pending");
         held.AttemptCount.Should().Be(0, "an unknown outcome doesn't spend an attempt");
 

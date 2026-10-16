@@ -102,7 +102,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         var token = claim.Token;
         return InLeaseAsync(claim, async (db, sql, type, unchanged, t) =>
         {
-            var synced = Only(outcomes.Synced.Select(s => s.RowId), unchanged);
+            var synced = Only(outcomes.Synced, unchanged);
             if (synced.Length > 0)
             {
                 await db.Database.ExecuteAsync(sql.Done, t, new { entityType = type, ids = synced, token });
@@ -145,7 +145,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         var entityIds = claim.EntityIds;
         return InLeaseAsync(claim, async (db, _, type, unchanged, t) =>
         {
-            await Held(db, type, Only(claim.RowIds, unchanged), token).ExecuteUpdateAsync(u => u
+            await Held(db, type, [.. unchanged], token).ExecuteUpdateAsync(u => u
                 .SetProperty(r => r.LastUpdated, _ => DateTimeOffset.UtcNow)
                 .SetProperty(r => r.AttemptCount, r => Math.Max(r.AttemptCount - 1, 0))
                 .SetProperty(r => r.LastError, error)
@@ -161,10 +161,9 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
     {
-        var all = claim.Events.Select(e => new FailedEvent(e.RowId, error, code)).ToList();
         return InLeaseAsync(claim, async (db, sql, type, unchanged, t) =>
         {
-            await FailAsync(db, sql, type, Only(all, unchanged), claim.Token, t);
+            await FailAsync(db, sql, type, [.. unchanged.Select(id => new FailedEvent(id, error, code))], claim.Token, t);
             await EndLeaseAsync(db, sql, claim.EntityIds, claim.Token, t);
         }, ct);
     }

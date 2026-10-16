@@ -1,7 +1,7 @@
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// A row of sf_sync_state: one synced entity of any type, whether and when it has events to process, the lease of the
+/// A row of sf_sync_state: one synced entity of any type, whether and when its event is to be processed, the lease of the
 /// worker processing it, and its watermark.
 /// </summary>
 public sealed class SyncState
@@ -11,7 +11,7 @@ public sealed class SyncState
 
     public string EntityId { get; set; } = "";
 
-    /// <summary>Null: no pending events. Else claimable from then on (backoff or hold included).</summary>
+    /// <summary>Null: its inbox row is not pending. Else claimable from then on (backoff or hold included).</summary>
     public DateTimeOffset? NextAttemptAt { get; set; }
 
     /// <summary>Lease while a worker processes the entity.</summary>
