@@ -54,17 +54,6 @@ public sealed class OptionsValidationTests
         new SyncOptionsValidator().Validate(null, new SyncOptions()).Succeeded.Should().BeTrue();
     }
 
-    [Fact]
-    public void Coalesce_delay_must_be_at_least_zero_and_less_than_the_lease()
-    {
-        var validator = new SyncOptionsValidator();
-        validator.Validate(null, new SyncOptions { CoalesceDelay = TimeSpan.FromMilliseconds(-1) })
-            .FailureMessage.Should().Contain("CoalesceDelay");
-        validator.Validate(null, new SyncOptions { CoalesceDelay = new SyncOptions().Lease })
-            .FailureMessage.Should().Contain("CoalesceDelay");
-        validator.Validate(null, new SyncOptions { CoalesceDelay = TimeSpan.Zero }).Succeeded.Should().BeTrue();
-    }
-
     // ---------- Row type limits ----------
 
     [Fact]

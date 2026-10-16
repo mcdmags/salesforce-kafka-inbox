@@ -113,7 +113,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
     {
         await using var race = await StartAsync();
         await race.StoreAsync(race.Consumer1, 1);
-        var inbox = new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions { CoalesceDelay = TimeSpan.Zero }));
+        var inbox = new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions()));
         var claim = await inbox.ClaimAsync(CancellationToken.None);
         claim.Events.Should().ContainSingle();
 

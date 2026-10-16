@@ -95,9 +95,6 @@ public class SyncFixture : IAsyncLifetime
         ["Sync:RetryBaseDelay"] = "00:00:01",
         // Seconds instead of the production 10 minutes, so the unknown-outcome test can watch a hold end
         ["Sync:UnknownOutcomeHold"] = "00:00:04",
-        // A stored event is claimable at once, so the tests that wait for a sync or count claims don't depend on the
-        // delay (CoalesceDelayTests covers it)
-        ["Sync:CoalesceDelay"] = "00:00:00",
         ["Logging:LogLevel:Default"] = "Warning"
     };
 
@@ -152,47 +149,24 @@ public class SyncFixture : IAsyncLifetime
         ConnectionString = inbox;
         _db = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(inbox) { ApplicationName = TestsApplicationName }.ConnectionString);
 
-        WorkerSettings["ConnectionStrings:inboxdb"] = inbox;
-        WorkerSettings["ConnectionStrings:kafka"] = kafka;
-        WorkerSettings["Salesforce:InstanceUrl"] = _org.Url.GetLeftPart(UriPartial.Authority);
-        WorkerSettings["ConnectionStrings:redis"] = _redis?.GetConnectionString();
-        await StartPodsAsync(ct);
-        await OnStartedAsync();
-    }
-
-    private async Task StartPodsAsync(CancellationToken ct)
-    {
+        var instanceUrl = _org.Url.GetLeftPart(UriPartial.Authority);
         for (var i = 0; i < Pods; i++)
         {
             var name = $"pod-{i}";
             var settings = new Dictionary<string, string?>(WorkerSettings)
             {
+                ["ConnectionStrings:inboxdb"] = inbox,
+                ["ConnectionStrings:kafka"] = kafka,
+                ["Salesforce:InstanceUrl"] = instanceUrl,
                 // Pods share a process here, so name them apart (the mock org counts requests per User-Agent)
-                ["Salesforce:UserAgentInstance"] = name
+                ["Salesforce:UserAgentInstance"] = name,
+                ["ConnectionStrings:redis"] = _redis?.GetConnectionString()
             };
             // Started one at a time: StartAsync returns once the schema is applied, so later pods find it in place
             _pods.Add(await WorkerPod.StartAsync(name, settings, ct));
         }
-    }
 
-    /// <summary>
-    /// Runs the pods with this Sync:CoalesceDelay from now on: if theirs differs, they are replaced by new pods (same
-    /// containers, org and consumer group), like a rollout of a changed setting. It stays in effect for the
-    /// collection's later tests, so only tests that don't depend on the delay may skip calling this.
-    /// </summary>
-    public async Task UseCoalesceDelayAsync(TimeSpan delay)
-    {
-        var value = delay.ToString("c", CultureInfo.InvariantCulture);
-        if (WorkerSettings["Sync:CoalesceDelay"] == value)
-        {
-            return;
-        }
-
-        await Task.WhenAll(_pods.Select(p => p.DisposeAsync().AsTask()));
-        _pods.Clear();
-        WorkerSettings["Sync:CoalesceDelay"] = value;
-        using var cts = new CancellationTokenSource(StartupTimeout);
-        await StartPodsAsync(cts.Token);
+        await OnStartedAsync();
     }
 
     public async Task DisposeAsync()
@@ -410,8 +384,7 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>The account inbox through the worker's own repository, to play a worker by hand.</summary>
-    public IRepository<AccountInboxRow> AccountInbox => new InboxRepository<AccountInboxRow>(Contexts,
-        Options.Create(new SyncOptions { CoalesceDelay = TimeSpan.Zero }));
+    public IRepository<AccountInboxRow> AccountInbox => new InboxRepository<AccountInboxRow>(Contexts, Options.Create(new SyncOptions()));
 
     /// <summary>(version, status) of the entity's inbox row, or null if it has none (version N = meta.time BaseTime + N ms).</summary>
     public async Task<(long Version, string Status)?> GetInboxAsync(string key, string entityType = Accounts)

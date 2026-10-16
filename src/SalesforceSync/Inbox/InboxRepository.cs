@@ -29,7 +29,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     {
         var time = InboxRow.ToWholeMicroseconds(eventTime);
         return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).Store, t,
-                new { entityId, eventTime = time, payload, coalesceDelay = _opt.CoalesceDelay }), ct);
+                new { entityId, eventTime = time, payload }), ct);
     }
 
     /// <summary>

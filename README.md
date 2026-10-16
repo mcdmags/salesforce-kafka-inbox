@@ -34,7 +34,7 @@ each contact as a **Contact** of its Account, which may not be synced yet either
 |---|---|
 | Durable, replayable intake | Kafka consumer writes each event's **raw JSON**, unchanged, to that object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, and marks the entity due on that row in the same statement, before storing its offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. An inbox keeps **one row per entity**, holding its newest event: a newer event overwrites it, an older one changes nothing, and neither does a redelivery of an event that is synced already. A message that isn't a valid event of its topic's type (see below) is logged with its offset and skipped, rather than blocking its partition. |
 | Ordering across parallel batches | Workers claim **entities, not events**: every entity has one inbox row, which holds its sync state too (due time, lease), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due rows, which it then leases (`lock_token`, and `next_attempt_at` moved to the lease's end, so a leased row is not due until then) and reads, in one statement. Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
-| Bursts of updates to one entity | Pending events for an entity are **coalesced** in the inbox: every event carries the full record, so an event with a newer `meta.time` (or the same, stored later) overwrites the entity's row, and what a claim writes is the newest event stored before it. Five updates in five seconds become one Salesforce write with the newest data. An idle entity is due `Sync:CoalesceDelay` (50 ms) after its first new event, so the rest of a burst overwrites the row before it is claimed: fewer calls, for a sync up to that much later. An event that overwrites a row while a worker writes the event it claimed is not lost: that worker's outcome is recorded only on rows that still hold the event time it claimed, and the newer event is claimed next. |
+| Bursts of updates to one entity | Pending events for an entity are **coalesced** in the inbox: every event carries the full record, so an event with a newer `meta.time` (or the same, stored later) overwrites the entity's row, and what a claim writes is the newest event stored before it. Five updates in five seconds become one Salesforce write with the newest data. An event that overwrites a row while a worker writes the event it claimed is not lost: that worker's outcome is recorded only on rows that still hold the event time it claimed, and the newer event is claimed next. |
 | Late or replayed older events | **Never stored**: the entity's row is overwritten only by an event newer than the one it holds, or as new while that one is not `done` yet (`InboxSql.Store`, by `event_time`). An older event, or a redelivery of an event already in Salesforce, changes nothing and is never claimed, so it can't be written. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement is conditional on its `lock_token` on the entity's row. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
@@ -307,23 +307,10 @@ event, never by how a time is rounded on its way in.
 
 **Store** (`InboxSql.Store`, one statement): insert the event into the entity's row (`on conflict (entity_id) do
 update ... where event_time < excluded.event_time or (event_time = excluded.event_time and status <> 'done')`),
-keeping any lease on it. A new entity, or an idle one (`next_attempt_at` null), becomes due after
-`Sync:CoalesceDelay`, and one that is already due, backing off, held or leased keeps its time (a leased row's is the
-lease's end). The delay is what lets a burst coalesce: the events of an entity that arrive within it overwrite its
-row one after the other, and only the last is claimed and written, so a longer delay means fewer Salesforce calls,
-and each entity synced up to that much later. A row overwritten during a lease gets no
-delay when the lease ends: its event arrived during the batch's Salesforce calls, so it has already waited, and more
-of the burst that arrive before the next claim overwrite it anyway. The lock the store takes on the existing row is
-what orders it against a claim or an outcome of the same entity.
-
-| Setting (`Sync:`) | Default | Meaning |
-|---|---|---|
-| `CoalesceDelay` | `00:00:00.050` | How long an idle entity waits after a new event before it is due. Zero: due at once. Must be >= 0 and less than `Lease`, or startup fails |
-
-The trade-off is fewer Salesforce calls against a sync up to `CoalesceDelay` later. The default is the smallest delay
-that got most of the reduction in the streaming benchmark (about 11% fewer calls with 4 workers x 1 pod, the same as
-100 ms; [measured](docs/benchmarks/README.md#coalescedelay-sweep)); raise it if your bursts are spread wider and
-some latency is acceptable, or set 0 for no added delay.
+keeping any lease on it. A new entity, or an idle one (`next_attempt_at` null), becomes due at once, and one that
+is already due, backing off, held or leased keeps its time (a leased row's is the lease's end). The events of an
+entity that arrive before it is claimed overwrite its row one after the other, and only the last is written. The lock
+the store takes on the existing row is what orders it against a claim or an outcome of the same entity.
 
 **Claim** (`InboxSql.Claim`, the same statement for every type), in a transaction of its own, so the rows are read
 before the commit is sent: lock up to `Sync:BatchSize` of the inbox's rows that are due (`next_attempt_at <= now()`),
@@ -1381,8 +1368,7 @@ counters (`api`, `writeRequests`, `recordsOk`, ...), `entities` (inbox rows), th
 - `StreamingIngestBenchmarks`: events keep arriving (`InboxSql.Store`) while the pods drain (batches of 10
   accounts), so the same account is claimed, released and re-claimed by different workers in different pods, and its
   row is overwritten while a worker writes the event it claimed. Params: `Pods`
-  (1/3), `Workers` (4/8), 50 accounts, 5000 events, 5 ms latency, `CoalesceDelayMs` (the `Sync:CoalesceDelay`
-  default, 50 ms).
+  (1/3), `Workers` (4/8), 50 accounts, 5000 events, 5 ms latency.
 
 ```bash
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*StreamingIngest*'
