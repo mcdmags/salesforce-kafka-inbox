@@ -189,7 +189,6 @@ public sealed class InboxEventTests
 
         var work = batch.Work.Should().ContainSingle().Subject;
         work.RowId.Should().Be(7);
-        work.Time.Should().Be(Micros("2026-10-14T03:00:00Z"));
         work.Unit.Records[0].Fields.Should().Contain("Name", "newest, but stored first");
         batch.SupersededRowIds.Should().BeEquivalentTo([8L, 9L]);
         batch.Invalid.Should().BeEmpty();
@@ -305,6 +304,21 @@ public sealed class InboxEventTests
     }
 
     [Theory]
+    [InlineData("2026-10-14T01:02:03.1234567Z", "2026-10-14T01:02:03.123456Z")]
+    [InlineData("2026-10-14T03:02:03.4569999+02:00", "2026-10-14T01:02:03.456999Z")]
+    [InlineData("2026-10-14T01:02:03.123456951Z", "2026-10-14T01:02:03.123457Z")]
+    public void An_event_time_is_stored_cut_to_the_microsecond_in_UTC_as_the_watermark_counts_it(string time, string stored)
+    {
+        var read = DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture);
+
+        var cut = PreparedBatch.ToWholeMicroseconds(read);
+
+        cut.Should().Be(DateTimeOffset.Parse(stored, System.Globalization.CultureInfo.InvariantCulture), "not rounded up as Postgres would");
+        cut.Offset.Should().Be(TimeSpan.Zero, "Npgsql writes only UTC times to timestamptz");
+        PreparedBatch.ToMicroseconds(cut).Should().Be(PreparedBatch.ToMicroseconds(read));
+    }
+
+    [Theory]
     [InlineData("inserted")]
     [InlineData("updated")]
     [InlineData("Inserted")]
@@ -389,7 +403,7 @@ public sealed class InboxEventTests
     public void No_inbox_statement_reads_inside_the_payload()
     {
         var sql = InboxSql.For("sf_account_inbox");
-        string[] claimAndOutcomes = [sql.Store, InboxSql.ClaimEntities, sql.ClaimEvents, InboxSql.LockHeld, sql.EndLease];
+        string[] claimAndOutcomes = [sql.Store, InboxSql.ClaimEntities, sql.ClaimEvents, InboxSql.LockHeld, sql.Done, sql.EndLease];
 
         claimAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
     }

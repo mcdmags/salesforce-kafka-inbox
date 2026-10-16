@@ -309,6 +309,12 @@ public class SyncFixture : IAsyncLifetime
         };
     }
 
+    /// <summary>An event's meta.time, read as the consumer reads it: the event_time it is stored with.</summary>
+    public static DateTimeOffset TimeOf(JsonObject e)
+    {
+        return DateTimeOffset.Parse((string)e["meta"]!["time"]!, CultureInfo.InvariantCulture);
+    }
+
     /// <summary>The synced_time of version N: its meta.time in microseconds since the epoch, as the worker stores it.</summary>
     public static long SyncedTime(long version)
     {
@@ -414,8 +420,8 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// The entity's inbox rows, each with its entity's lease (from sf_sync_state). The table has no event columns, so
-    /// the version is read here from the stored payload, like the worker does (in C#, not in SQL).
+    /// The entity's inbox rows, each with its entity's lease (from sf_sync_state). The version is read here from the
+    /// stored payload, like the worker does (in C#, not in SQL).
     /// </summary>
     public async Task<IReadOnlyList<InboxRow>> GetInboxRowsAsync(string key, string entityType = Accounts)
     {
@@ -454,7 +460,7 @@ public class SyncFixture : IAsyncLifetime
         await using var tx = await conn.BeginTransactionAsync();
         foreach (var e in events)
         {
-            await conn.StoreAsync(InboxTable(), Accounts, entityId, e.ToJsonString(), tx);
+            await conn.StoreAsync(InboxTable(), Accounts, entityId, TimeOf(e), e.ToJsonString(), tx);
         }
         await tx.CommitAsync();
     }

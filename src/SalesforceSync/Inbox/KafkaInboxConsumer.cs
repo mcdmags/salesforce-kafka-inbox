@@ -103,7 +103,7 @@ public sealed class KafkaInboxConsumer(
     /// <summary>Stores a valid event in its type's inbox, then its offset; skips a message that can never be synced.</summary>
     private async Task IngestAsync(ConsumeResult<string, string> message, ISalesforceEntitySync sync, CancellationToken ct)
     {
-        if (!sync.TryReadEvent(message.Message.Value, out var entityId, out var problem))
+        if (!sync.TryReadEvent(message.Message.Value, out var entityId, out var eventTime, out var problem))
         {
             // Retrying can't fix it, and retrying would block every later event on the partition: log where
             // it is (to fix or replay at the source) and move on.
@@ -114,7 +114,7 @@ public sealed class KafkaInboxConsumer(
 
         try
         {
-            await sync.StoreEventAsync(entityId!, message.Message.Value, ct);
+            await sync.StoreEventAsync(entityId!, eventTime, message.Message.Value, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

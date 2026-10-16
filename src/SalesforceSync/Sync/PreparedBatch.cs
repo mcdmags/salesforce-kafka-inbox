@@ -3,12 +3,11 @@ using SalesforceSync.Salesforce;
 
 namespace SalesforceSync.Sync;
 
-/// <summary>An entity to write: the unit mapped from its newest event and that event's time.</summary>
+/// <summary>An entity to write: the unit mapped from its newest event.</summary>
 /// <param name="EntityId">The entity: the Kafka message key.</param>
 /// <param name="Unit">The records to upsert for it.</param>
-/// <param name="Time">The newest event's time, microseconds since the epoch.</param>
 /// <param name="RowId">The inbox row id of the newest event.</param>
-internal sealed record Work(string EntityId, UpsertUnit Unit, long Time, long RowId);
+internal sealed record Work(string EntityId, UpsertUnit Unit, long RowId);
 
 /// <summary>
 /// What to do with a claim's rows: superseded ones, entities to write, and rows that are invalid on their own. Decided
@@ -57,7 +56,7 @@ internal sealed record PreparedBatch(List<long> SupersededRowIds, List<Work> Wor
             try
             {
                 var unit = strategy.Map(entity.Key, newestRead.Event);
-                batch.Work.Add(new Work(entity.Key, unit, time, newestRow.RowId));
+                batch.Work.Add(new Work(entity.Key, unit, newestRow.RowId));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -117,6 +116,17 @@ internal sealed record PreparedBatch(List<long> SupersededRowIds, List<Work> Wor
         return (time - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
     }
 
+    /// <summary>
+    /// An event time cut to whole microseconds the way <see cref="ToMicroseconds"/> cuts it, in UTC: how the inbox stores
+    /// it (event_time). Postgres keeps microseconds and would round finer input, so a time with sub-microsecond ticks
+    /// (meta.time may have up to 9 fraction digits) could be stored 1 µs after the time the engine compares with the
+    /// watermark; an event as new as the watermark is superseded.
+    /// </summary>
+    public static DateTimeOffset ToWholeMicroseconds(DateTimeOffset time)
+    {
+        return DateTimeOffset.UnixEpoch.AddTicks(ToMicroseconds(time) * TimeSpan.TicksPerMicrosecond);
+    }
+
     /// <summary>The units to write, keyed by entity id, as the Salesforce step takes them.</summary>
     public List<(string Key, UpsertUnit Unit)> Units => [.. Work.Select(w => (w.EntityId, w.Unit))];
 
@@ -137,7 +147,7 @@ internal sealed record PreparedBatch(List<long> SupersededRowIds, List<Work> Wor
             var result = results[work.EntityId];
             switch (result.Outcome)
             {
-                case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(new SyncedEntity(work.EntityId, work.Time, work.RowId)); break;
+                case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(new SyncedEntity(work.EntityId, work.RowId)); break;
                 case SyncOutcome.NotAttempted: released.Add(work.RowId); break;
                 case SyncOutcome.PermanentFailure: dead.Add(Failure(work, result)); break;
                 default: failed.Add(Failure(work, result)); break;

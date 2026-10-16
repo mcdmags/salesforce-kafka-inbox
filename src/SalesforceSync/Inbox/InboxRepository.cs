@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Salesforce;
+using SalesforceSync.Sync;
 using SalesforceSync.Sync.Upsert;
 using static SalesforceSync.Data.SqlCommands;
 
@@ -25,12 +26,15 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// One event, and its entity made due (<see cref="InboxSql.Template.Store"/>, one statement). Nothing makes a row
     /// unique: a Kafka redelivery is stored again and ends superseded (its time is not newer than what was synced),
     /// which is harmless; a uniqueness rule on the payload would wrongly drop the last event of A -> B -> A. Safe to
-    /// retry for the same reason.
+    /// retry for the same reason. The time is stored cut to the microsecond as the engine cuts it
+    /// (<see cref="PreparedBatch.ToWholeMicroseconds"/>), so the watermark InboxSql.Done takes from it is the time the
+    /// engine compares the entity's later events with.
     /// </summary>
-    public Task AddAsync(string entityId, string payload, CancellationToken ct)
+    public Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct)
     {
+        var time = PreparedBatch.ToWholeMicroseconds(eventTime);
         return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).Store, t,
-                Param("entityType", db.EntityTypeOf<TEntity>()), Param("entityId", entityId),
+                Param("entityType", db.EntityTypeOf<TEntity>()), Param("entityId", entityId), Param("eventTime", time),
                 Param("payload", payload), Param("coalesceDelay", _opt.CoalesceDelay)), ct);
     }
 
@@ -100,8 +104,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             if (outcomes.Synced.Count > 0)
             {
                 await db.Database.ExecuteAsync(sql.Done, t, Param("entityType", type),
-                    Param("ids", outcomes.Synced.Select(s => s.RowId).ToArray()), Param("times", TimesJson(outcomes.Synced)),
-                    Param("token", token));
+                    Param("ids", outcomes.Synced.Select(s => s.RowId).ToArray()), Param("token", token));
             }
             if (outcomes.Superseded.Count > 0)
             {
@@ -236,12 +239,6 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     private static long[] Ids(IReadOnlyList<FailedEvent> rows)
     {
         return [.. rows.Select(r => r.RowId)];
-    }
-
-    /// <summary>{ "row id": event time }, as InboxSql.Done takes the times.</summary>
-    private static string TimesJson(IReadOnlyList<SyncedEntity> synced)
-    {
-        return JsonSerializer.Serialize(synced.ToDictionary(s => s.RowId.ToString(CultureInfo.InvariantCulture), s => s.EventTime));
     }
 
     /// <summary>{ "row id": [error, code] }, as InboxSql.Fail / Dead take the errors.</summary>

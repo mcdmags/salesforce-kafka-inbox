@@ -9,10 +9,10 @@ namespace SalesforceSync.Inbox;
 public interface IRepository<TEntity> where TEntity : InboxRow, new()
 {
     /// <summary>
-    /// Stores one event as a new pending row and makes its entity due. Nothing makes a row unique: see
-    /// <see cref="InboxRepository{TEntity}.AddAsync"/>.
+    /// Stores one event as a new pending row, with its time (meta.time), and makes its entity due. Nothing makes a row
+    /// unique: see <see cref="InboxRepository{TEntity}.AddAsync"/>.
     /// </summary>
-    Task AddAsync(string entityId, string payload, CancellationToken ct);
+    Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct);
 
     /// <summary>Leases up to <see cref="SyncOptions.BatchSize"/> entities of the table; no events = nothing to do.</summary>
     Task<InboxClaim> ClaimAsync(CancellationToken ct);
@@ -61,13 +61,12 @@ public sealed record InboxClaim(
 public sealed record InboxEvent(long RowId, string EntityId, string Payload, int AttemptCount);
 
 /// <summary>
-/// An entity whose newest event (row <paramref name="RowId"/>) is in Salesforce: the row ends done, and
-/// <paramref name="EventTime"/> is the entity's watermark (sf_sync_state.synced_time).
+/// An entity whose newest event (row <paramref name="RowId"/>) is in Salesforce: the row ends done, and its event_time
+/// is the entity's watermark (sf_sync_state.synced_time).
 /// </summary>
 /// <param name="EntityId">The entity: the Kafka message key.</param>
-/// <param name="EventTime">The newest event's time, microseconds since the epoch.</param>
 /// <param name="RowId">The inbox row id of the newest event (not the entity id).</param>
-public sealed record SyncedEntity(string EntityId, long EventTime, long RowId);
+public sealed record SyncedEntity(string EntityId, long RowId);
 
 /// <summary>An inbox row with the error to store on it.</summary>
 /// <param name="RowId">The inbox row id (not the entity id).</param>

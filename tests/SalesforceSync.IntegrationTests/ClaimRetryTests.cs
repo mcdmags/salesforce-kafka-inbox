@@ -29,7 +29,7 @@ public sealed class ClaimRetryTests(SyncFixture app)
         {
             for (var i = 0; i < 3; i++)
             {
-                await conn.StoreAsync(SyncFixture.InboxTable(), SyncFixture.Accounts, entity, "{}");
+                await conn.StoreAsync(SyncFixture.InboxTable(), SyncFixture.Accounts, entity, SyncFixture.BaseTime, "{}");
             }
         }
 

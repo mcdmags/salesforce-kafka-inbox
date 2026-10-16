@@ -23,8 +23,8 @@ public sealed class CoalesceDelayTests(SyncFixture app)
         var inbox = Inbox(db, TimeSpan.FromSeconds(2));
         var entity = SyncFixture.NewAccountId();
 
-        await inbox.AddAsync(entity, "{}", CancellationToken.None);
-        await inbox.AddAsync(entity, "{}", CancellationToken.None);
+        await inbox.AddAsync(entity, SyncFixture.BaseTime, "{}", CancellationToken.None);
+        await inbox.AddAsync(entity, SyncFixture.BaseTime, "{}", CancellationToken.None);
 
         (await inbox.ClaimAsync(CancellationToken.None)).Events.Should().BeEmpty("the entity is due only after the delay");
         var claim = await Eventually.ValueAsync(() => inbox.ClaimAsync(CancellationToken.None), c => c.Events.Count > 0,
@@ -39,9 +39,9 @@ public sealed class CoalesceDelayTests(SyncFixture app)
         await using var db = await SchemaAsync();
         var entity = SyncFixture.NewAccountId();
 
-        await Inbox(db, TimeSpan.Zero).AddAsync(entity, "{}", CancellationToken.None);
+        await Inbox(db, TimeSpan.Zero).AddAsync(entity, SyncFixture.BaseTime, "{}", CancellationToken.None);
         var inbox = Inbox(db, TimeSpan.FromMinutes(1));
-        await inbox.AddAsync(entity, "{}", CancellationToken.None);
+        await inbox.AddAsync(entity, SyncFixture.BaseTime, "{}", CancellationToken.None);
 
         (await inbox.ClaimAsync(CancellationToken.None)).Events.Should().HaveCount(2, "the first event made it due at once");
         await DropAsync(db);
@@ -53,7 +53,7 @@ public sealed class CoalesceDelayTests(SyncFixture app)
         await using var db = await SchemaAsync();
         var inbox = Inbox(db, TimeSpan.Zero);
 
-        await inbox.AddAsync(SyncFixture.NewAccountId(), "{}", CancellationToken.None);
+        await inbox.AddAsync(SyncFixture.NewAccountId(), SyncFixture.BaseTime, "{}", CancellationToken.None);
 
         (await inbox.ClaimAsync(CancellationToken.None)).Events.Should().HaveCount(1);
         await DropAsync(db);

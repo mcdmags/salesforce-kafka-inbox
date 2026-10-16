@@ -127,6 +127,8 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         entity.HasKey(r => r.Id).HasName($"{table}_pkey");
         entity.Property(r => r.Id).UseSerialColumn();
         entity.Property(r => r.Payload).HasColumnType("jsonb");
+        // No default: every insert sets it from the event (InboxSql.Store)
+        entity.Property(r => r.EventTime).IsRequired();
         entity.Property(r => r.Status).HasDefaultValueSql("'pending'");
         entity.Property(r => r.AttemptCount).HasDefaultValue(0);
         entity.Property(r => r.ReceivedAt).HasDefaultValueSql("now()");

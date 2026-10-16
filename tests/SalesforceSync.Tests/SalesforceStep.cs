@@ -43,7 +43,7 @@ internal static class SalesforceStep
             throw NotUsed();
         }
 
-        public Task AddAsync(string entityId, string payload, CancellationToken ct)
+        public Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct)
         {
             throw NotUsed();
         }

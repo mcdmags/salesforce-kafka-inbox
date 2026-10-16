@@ -41,14 +41,14 @@ public static class PgSql
     }
 
     /// <summary>
-    /// One event into an inbox table as the consumer stores it, its entity made due (InboxSql.Store) with no coalesce
-    /// delay: an idle entity is claimable at once.
+    /// One event into an inbox table as the consumer stores it, with its time, its entity made due (InboxSql.Store) with
+    /// no coalesce delay: an idle entity is claimable at once.
     /// </summary>
-    public static Task<int> StoreAsync(this NpgsqlConnection conn, string table, string entityType, string entityId, string payload,
-        NpgsqlTransaction? transaction = null)
+    public static Task<int> StoreAsync(this NpgsqlConnection conn, string table, string entityType, string entityId,
+        DateTimeOffset eventTime, string payload, NpgsqlTransaction? transaction = null)
     {
         return conn.ExecuteAsync(Inbox.InboxSql.For(table).Store,
-            new { entityType, entityId, payload, coalesceDelay = TimeSpan.Zero }, transaction);
+            new { entityType, entityId, eventTime = eventTime.ToUniversalTime(), payload, coalesceDelay = TimeSpan.Zero }, transaction);
     }
 
     private static NpgsqlCommand Command(NpgsqlConnection conn, string sql, object? args, NpgsqlTransaction? transaction)
