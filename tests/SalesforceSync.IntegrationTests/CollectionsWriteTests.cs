@@ -56,7 +56,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         (await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().BeNull();
 
         (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
-        (await app.GetInboxRowsAsync(acct))[0].AttemptCount.Should().BePositive();
+        (await app.GetInboxRowAsync(acct))!.AttemptCount.Should().BePositive();
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("the retries had nothing left to write on the Account");
         ((string?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["AccountId__c"]).Should().Be(acct);
         (await app.GetSyncStateAsync(acct))!.SyncedTime.Should().Be(SyncFixture.SyncedTime(1));
@@ -72,7 +72,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         await app.PublishAsync(good, 1, new JsonObject { ["name"] = Any.String("Good ") }, new JsonObject { ["tier"] = "Silver" });
 
         (await app.WaitForInboxSettledAsync(bad, version: 1)).Should().Be((1L, "dead"));
-        (await app.GetInboxRowsAsync(bad))[0].ErrorCode.Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION",
+        (await app.GetInboxRowAsync(bad))!.ErrorCode.Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION",
             "the Account's own error, not the Profile's missing parent");
         (await app.GetRecordAsync("Account", bad)).Should().BeNull();
         (await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(bad))).Should().BeNull();

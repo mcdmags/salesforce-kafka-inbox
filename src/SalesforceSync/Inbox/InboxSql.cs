@@ -165,8 +165,7 @@ public sealed partial class InboxSql
             update {inbox} i
             set attempt_count = i.attempt_count + 1, last_updated = now()
             where i.entity_id = any(@entityIds) and i.status = 'pending'
-            returning i.id as RowId, i.entity_id as EntityId, i.payload::text as Payload, i.attempt_count as AttemptCount,
-                      i.event_time as EventTime
+            returning i.id as RowId, i.entity_id as EntityId, i.payload::text as Payload, i.event_time as EventTime
             """;
 
         /// <summary>

@@ -92,7 +92,7 @@ internal sealed record PreparedBatch(List<long> SupersededRowIds, List<Work> Wor
     /// <param name="results">The outcome of every entity in <see cref="Work"/>, by entity id.</param>
     public BatchOutcomes Outcomes(IReadOnlyDictionary<string, UpsertResult> results)
     {
-        var synced = new List<SyncedEntity>();
+        var synced = new List<long>();
         var released = new List<long>();
         var dead = Invalid.Select(i => new FailedEvent(i.RowId, i.Error, SalesforceErrors.InvalidEvent)).ToList();
         var failed = new List<FailedEvent>();
@@ -102,7 +102,7 @@ internal sealed record PreparedBatch(List<long> SupersededRowIds, List<Work> Wor
             var result = results[work.EntityId];
             switch (result.Outcome)
             {
-                case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(new SyncedEntity(work.EntityId, work.RowId)); break;
+                case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(work.RowId); break;
                 case SyncOutcome.NotAttempted: released.Add(work.RowId); break;
                 case SyncOutcome.PermanentFailure: dead.Add(Failure(work, result)); break;
                 default: failed.Add(Failure(work, result)); break;

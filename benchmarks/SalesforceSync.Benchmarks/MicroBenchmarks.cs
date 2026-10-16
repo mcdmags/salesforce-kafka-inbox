@@ -66,7 +66,6 @@ public class MicroBenchmarks
                     }
                 }
             }.ToJsonString(),
-            AttemptCount: 1,
             EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero)))];
 
         _payload = JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchUpsertService.EventJson)!.Account!;
