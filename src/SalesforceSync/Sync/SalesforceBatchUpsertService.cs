@@ -200,7 +200,18 @@ public sealed class SalesforceBatchUpsertService(
         foreach (var request in plan.Requests)
         {
             var collections = request.BuildRequests();
-            results.AddRange(_interpreter.Interpret(request, await WriteAsync(() => salesforce.UpsertAsync(collections, ct))));
+            IReadOnlyList<CollectionResult> answers;
+            try
+            {
+                answers = await salesforce.UpsertAsync(collections, ct);
+            }
+            catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
+            {
+                // Everything before the first write only read from Salesforce, so its failures are safe to retry. From
+                // here on Salesforce may have the write, and may still apply it after we stop waiting.
+                throw new UnknownOutcomeException(ex);
+            }
+            results.AddRange(_interpreter.Interpret(request, answers));
         }
 
         await InvalidateRecordTypesAsync(units, results, ct);
@@ -276,20 +287,6 @@ public sealed class SalesforceBatchUpsertService(
             }
 
             throw;
-        }
-    }
-
-    private static async Task<T> WriteAsync<T>(Func<Task<T>> write)
-    {
-        try
-        {
-            return await write();
-        }
-        catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
-        {
-            // Everything before this point only read from Salesforce, so its failures are safe to retry. From here
-            // on Salesforce may have the write, and may still apply it after we stop waiting.
-            throw new UnknownOutcomeException(ex);
         }
     }
 
