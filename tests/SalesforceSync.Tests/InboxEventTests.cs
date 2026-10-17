@@ -14,9 +14,9 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class InboxEventTests
 {
-    private static readonly UpsertStrategy<AccountEvent> Accounts = AccountSync.Strategy;
+    private static readonly SyncStrategy<AccountEvent> Accounts = AccountSync.Strategy;
 
-    private static readonly UpsertStrategy<AccountRelationshipEvent> Relationships = AccountRelationshipSync.Strategy;
+    private static readonly SyncStrategy<AccountRelationshipEvent> Relationships = AccountRelationshipSync.Strategy;
 
     // ---------- Mapping ----------
 
@@ -259,7 +259,9 @@ public sealed class InboxEventTests
     [InlineData("updated")]
     [InlineData("Inserted")]
     [InlineData("UPDATED")]
-    public void Event_type_is_inserted_or_updated_in_any_case(string type)
+    [InlineData("deleted")]
+    [InlineData("Deleted")]
+    public void Event_type_is_inserted_updated_or_deleted_in_any_case(string type)
     {
         var json = $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "{{type}}" }, "account": { "externalId": "ACC-1" } }""";
 
@@ -284,7 +286,6 @@ public sealed class InboxEventTests
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": 1791939723456, "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "Not a valid account event")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": "ACC-1" } }""", "event type")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": null }, "account": { "externalId": "ACC-1" } }""", "event type")]
-    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "deleted" }, "account": { "externalId": "ACC-1" } }""", "event type")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "upsert" }, "account": { "externalId": "ACC-1" } }""", "event type")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": 1 }, "account": { "externalId": "ACC-1" } }""", "Not a valid account event")]
     public void Invalid_event_is_rejected_with_the_reason(string json, string reason)
@@ -373,11 +374,11 @@ public sealed class InboxEventTests
 
     private static TEvent Read<TEvent>(string json)
     {
-        return JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchUpsertService.EventJson)!;
+        return JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchSyncService.EventJson)!;
     }
 
     private static TEvent Read<TEvent>(JsonObject json)
     {
-        return json.Deserialize<TEvent>(SalesforceBatchUpsertService.EventJson)!;
+        return json.Deserialize<TEvent>(SalesforceBatchSyncService.EventJson)!;
     }
 }

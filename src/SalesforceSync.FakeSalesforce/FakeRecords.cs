@@ -3,13 +3,15 @@ using System.Text.Json.Nodes;
 namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
-/// The mock org's data: records by object and Id, and per record the stored values of every committed write, oldest
-/// first. Not thread-safe; <see cref="FakeSalesforceStore"/> holds its lock around every use.
+/// The mock org's data: records by object and Id, per record the stored values of every committed write, oldest
+/// first, and the Ids of deleted records. Not thread-safe; <see cref="FakeSalesforceStore"/> holds its lock around
+/// every use.
 /// </summary>
 internal sealed class FakeRecords
 {
     private readonly Dictionary<string, Dictionary<string, JsonObject>> _tables = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, List<JsonObject>> _history = new(StringComparer.Ordinal); // record Id -> writes
+    private readonly HashSet<string> _deleted = new(StringComparer.Ordinal); // the Recycle Bin, by record Id
     private long _idCounter;
 
     public int Count => _tables.Values.Sum(t => t.Count);
@@ -79,10 +81,39 @@ internal sealed class FakeRecords
         _history[id].Add(storedValues);
     }
 
+    /// <summary>The object and the record with this Id, or null if there is none (deleted ones included).</summary>
+    public (string SObject, JsonObject Record)? FindById(string id)
+    {
+        foreach (var (sobject, table) in _tables)
+        {
+            if (table.TryGetValue(id, out var record))
+            {
+                return (sobject, record);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Moves the record to the Recycle Bin: queries and upserts no longer see it, and its Id is known as deleted.</summary>
+    public void Delete(string sobject, string id)
+    {
+        Table(sobject).Remove(id);
+        _history.Remove(id);
+        _deleted.Add(id);
+    }
+
+    /// <summary>Whether the record with this Id was deleted (is in the Recycle Bin).</summary>
+    public bool IsDeleted(string id)
+    {
+        return _deleted.Contains(id);
+    }
+
     public void Clear()
     {
         _tables.Clear();
         _history.Clear();
+        _deleted.Clear();
         _idCounter = 0;
     }
 }

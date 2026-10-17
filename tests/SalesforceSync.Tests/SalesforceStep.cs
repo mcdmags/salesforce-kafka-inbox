@@ -10,7 +10,7 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The engine wired for its Salesforce step alone (<see cref="SalesforceBatchUpsertService.WriteToSalesforceAsync"/>:
+/// The engine wired for its Salesforce step alone (<see cref="SalesforceBatchSyncService.WriteToSalesforceAsync"/>:
 /// describe, read, decide, send, interpret): a real client on the given HTTP stack, its own caches, and no database.
 /// </summary>
 internal static class SalesforceStep
@@ -20,12 +20,12 @@ internal static class SalesforceStep
     /// <param name="http">The HTTP stack to the org (see <see cref="Http"/>).</param>
     /// <param name="options">The Salesforce options of the engine and its error classification.</param>
     /// <param name="gate">The concurrency gate, for tests that run whole batches; the Salesforce step needs none.</param>
-    public static SalesforceBatchUpsertService Service(HttpClient http, IOptions<SalesforceOptions> options,
+    public static SalesforceBatchSyncService Service(HttpClient http, IOptions<SalesforceOptions> options,
         ISalesforceBatchGate? gate = null)
     {
         return new(gate ?? new NoDatabase(), new SalesforceRestClient(http), SchemaCache(),
                 new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
-                NullLogger<SalesforceBatchUpsertService>.Instance);
+                NullLogger<SalesforceBatchSyncService>.Instance);
     }
 
     /// <summary>A Describe cache of its own; with <paramref name="shared"/>, a pod sharing that cache with others.</summary>

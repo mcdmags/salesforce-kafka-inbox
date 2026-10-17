@@ -16,25 +16,25 @@ namespace SalesforceSync.Tests;
 /// foreign keys), and by test-only objects with a real lookup (<see cref="LookupStrategies"/>), against the in-memory org.
 /// Events are written as the source sends them (camelCase payload names, full records); assertions read Salesforce names.
 /// </summary>
-public sealed class SalesforceBatchUpsertServiceTests
+public sealed class SalesforceBatchSyncServiceTests
 {
-    private static readonly UpsertStrategy<AccountEvent> AccountStrategy = AccountSync.Strategy;
+    private static readonly SyncStrategy<AccountEvent> AccountStrategy = AccountSync.Strategy;
 
-    private static readonly UpsertStrategy<AccountRelationshipEvent> RelationshipStrategy = AccountRelationshipSync.Strategy;
+    private static readonly SyncStrategy<AccountRelationshipEvent> RelationshipStrategy = AccountRelationshipSync.Strategy;
 
-    private static readonly UpsertStrategy<ContactEvent> ContactStrategy = ContactSync.Strategy;
+    private static readonly SyncStrategy<ContactEvent> ContactStrategy = ContactSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly Fixture _any = new();
-    private readonly SalesforceBatchUpsertService _upserter;
+    private readonly SalesforceBatchSyncService _engine;
 
-    public SalesforceBatchUpsertServiceTests()
+    public SalesforceBatchSyncServiceTests()
     {
-        _upserter = Upserter();
+        _engine = Engine();
     }
 
-    /// <summary>An upserter on the same org, with its own caches.</summary>
-    private SalesforceBatchUpsertService Upserter(SalesforceOptions? salesforceOptions = null)
+    /// <summary>An engine on the same org, with its own caches.</summary>
+    private SalesforceBatchSyncService Engine(SalesforceOptions? salesforceOptions = null)
     {
         var options = Options.Create(salesforceOptions ?? new SalesforceOptions());
         var http = SalesforceStep.Http(new GzipRequestHandler(options) { InnerHandler = new FakeSalesforceHandler(_org) });
@@ -166,7 +166,7 @@ public sealed class SalesforceBatchUpsertServiceTests
 
     /// <summary>
     /// Records built directly, not through a mapper: the typed layers can't even express an unknown or read-only
-    /// field, but the generic upserter must still reject one for whatever builds its records.
+    /// field, but the generic engine must still reject one for whatever builds its records.
     /// </summary>
     [Theory]
     [InlineData("No_Such_Field__c", "x", "INVALID_FIELD")]
@@ -178,12 +178,12 @@ public sealed class SalesforceBatchUpsertServiceTests
         await Account("WARM", new() { ["name"] = "Warm" }, []);
         var before = _org.GetStats();
 
-        var units = new List<(string Key, UpsertUnit Unit)>
+        var units = new List<(string Key, SyncUnit Unit)>
         {
             ("BAD", RawAccount("BAD", new() { ["Name"] = "Bad", [field] = value })),
             ("GOOD", RawAccount("GOOD", new() { ["Name"] = "Good" }))
         };
-        var results = await _upserter.WriteToSalesforceAsync(units,
+        var results = await _engine.WriteToSalesforceAsync(units,
             [.. AccountSync.Queries([.. units.Select(u => u.Unit)])],
             AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
 
@@ -251,7 +251,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         var lost = await Account("A1", new() { ["name"] = "Ours" }, []);
         lost.Outcome.Should().Be(SyncOutcome.TransientFailure);
         (lost.PrimaryError?.Code).Should().Be("DUPLICATE_VALUE");
-        await Upserter().WriteToSalesforceAsync([("A1", RawAccount("A1", new() { ["Name"] = "Theirs" }))],
+        await Engine().WriteToSalesforceAsync([("A1", RawAccount("A1", new() { ["Name"] = "Theirs" }))],
             [new SoqlQuery("Account", "ExternalId__c", ["A1"])],
             AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
 
@@ -376,7 +376,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         // Account + Contact (a lookup) + Profile (a foreign key) per unit: a new unit needs the Account, Contact_ref (its
         // Account is new) and level-1 Profile upserts, an existing one a level-1 Contact upsert instead of Contact_ref,
         // and one without its Account level-0 Contact and Profile upserts: 6 in all
-        UpsertUnit Unit(string key, string name, bool withAccount = true)
+        SyncUnit Unit(string key, string name, bool withAccount = true)
         {
             var account = new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = name });
             return new(
@@ -389,9 +389,9 @@ public sealed class SalesforceBatchUpsertServiceTests
             ]);
         }
 
-        Task<List<UpsertResult>> Send(params (string Key, UpsertUnit Unit)[] units)
+        Task<List<SyncResult>> Send(params (string Key, SyncUnit Unit)[] units)
         {
-            return _upserter.WriteToSalesforceAsync(units,
+            return _engine.WriteToSalesforceAsync(units,
             [
                 new SoqlQuery("Account", "ExternalId__c", [.. units.Select(u => u.Key)]),
                 new SoqlQuery("Contact", "ExternalId__c", [.. units.Select(u => $"C-{u.Key}")]),
@@ -582,7 +582,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         (await LookupContact("C1", "A1")).Outcome.Should().Be(SyncOutcome.Saved);
     }
 
-    private async Task<UpsertResult> LookupContact(string key, string account)
+    private async Task<SyncResult> LookupContact(string key, string account)
     {
         var contact = new JsonObject { ["externalId"] = key, ["accountExternalId"] = account, ["lastName"] = "Doe" };
         return (await Upsert(LookupStrategies.Contact, (key, Read<ContactEvent>(new JsonObject { ["contact"] = contact })))).Single();
@@ -636,8 +636,8 @@ public sealed class SalesforceBatchUpsertServiceTests
         await Account("A1", new() { ["name"] = "Acme" }, []);  // warms the describe cache
         var before = _org.GetStats();
 
-        var result = (await _upserter.WriteToSalesforceAsync(
-            [("X1", new UpsertUnit([SObjectRecord.From("acct", new UnknownRecordTypeAccount { ExternalId = "X1" })]))],
+        var result = (await _engine.WriteToSalesforceAsync(
+            [("X1", new SyncUnit([SObjectRecord.From("acct", new UnknownRecordTypeAccount { ExternalId = "X1" })]))],
             [new SoqlQuery("Account", "ExternalId__c", ["X1"])],
             AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None)).Single();
 
@@ -658,7 +658,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     {
         var unknownId = "012FAKE00000099";   // deactivated or unassigned after the describe, say
 
-        var result = (await _upserter.WriteToSalesforceAsync(
+        var result = (await _engine.WriteToSalesforceAsync(
             [("A1", RawAccount("A1", new() { ["Name"] = "Acme", ["RecordTypeId"] = unknownId }))],
             [new SoqlQuery("Account", "ExternalId__c", ["A1"])],
             AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None)).Single();
@@ -826,13 +826,13 @@ public sealed class SalesforceBatchUpsertServiceTests
     public async Task Relationship_the_org_rejects_for_a_missing_Account_waits_if_its_message_is_configured(bool configured,
         SyncOutcome outcome, string code)
     {
-        var upserter = Upserter(new SalesforceOptions { ParentMissingMessages = configured ? [FakeSchema.ParentMissingMessage] : [] });
+        var engine = Engine(new SalesforceOptions { ParentMissingMessages = configured ? [FakeSchema.ParentMissingMessage] : [] });
         await Accounts(("A1", Event(new() { ["name"] = "Parent" }, [])), ("A2", Event(new() { ["name"] = "Child" }, [])));
         _org.InjectFault("Account_Relationship__c", "R1", FakeSchema.ParentMissingCode, $"{FakeSchema.ParentMissingMessage}: Account A2", 1);
 
         var rel = new JsonObject { ["externalId"] = "R1", ["accountExternalId"] = "A1", ["relatedAccountExternalId"] = "A2" };
         var unit = RelationshipStrategy.Map("R1", Read<AccountRelationshipEvent>(new JsonObject { ["accountRelationship"] = rel }));
-        var rejected = (await upserter.WriteToSalesforceAsync([("R1", unit)], [.. RelationshipStrategy.Queries([unit])],
+        var rejected = (await engine.WriteToSalesforceAsync([("R1", unit)], [.. RelationshipStrategy.Queries([unit])],
             AccountRelationshipInboxRow.MaxValuesPerQuery, AccountRelationshipInboxRow.MaxRecordsPerWrite, CancellationToken.None)).Single();
 
         (rejected.Outcome, rejected.PrimaryError?.Code).Should().Be((outcome, code));
@@ -1033,15 +1033,118 @@ public sealed class SalesforceBatchUpsertServiceTests
         (_org.GetStats().Describes - before.Describes).Should().BeGreaterThan(0, "the cached describe was invalidated");
     }
 
+    // ---------- Deletes: the same engine, records the read found deleted by Id ----------
+
+    [Fact]
+    public async Task A_contact_to_delete_is_read_by_its_key_then_deleted_by_its_Id_in_one_call()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contacts(("C1", "A1", new() { ["lastName"] = "One" }), ("C2", "A1", new() { ["lastName"] = "Two" }));
+        var ids = new[] { IdOf("Contact", "C1"), IdOf("Contact", "C2") };
+        var before = _org.GetStats();
+
+        (await DeleteContacts("C1", "C2")).Should().OnlyContain(r => r.Outcome == SyncOutcome.Saved);
+
+        _org.FindByExternalId("Contact", "C1").Should().BeNull();
+        _org.FindByExternalId("Contact", "C2").Should().BeNull();
+        var after = _org.GetStats();
+        (after.ApiCalls - before.ApiCalls).Should().Be(2, "one read, one delete for the batch");
+        (after.DeleteRequests - before.DeleteRequests, after.Deletes - before.Deletes).Should().Be((1L, 2L));
+        var delete = _org.WriteRequests[^1];
+        ((string?)delete["method"], (string?)delete["url"]).Should().Be(("DELETE",
+            $"/services/data/v62.0/composite/sobjects?ids={ids[0]},{ids[1]}&allOrNone=false"));
+    }
+
+    [Fact]
+    public async Task A_record_to_delete_that_Salesforce_does_not_have_costs_only_the_read()
+    {
+        var before = _org.GetStats();
+
+        (await DeleteContacts("NEVER-SYNCED")).Single().Outcome.Should().Be(SyncOutcome.Unchanged, "nothing to delete: done");
+
+        var after = _org.GetStats();
+        (after.ApiCalls - after.Describes - (before.ApiCalls - before.Describes)).Should().Be(1, "the read only (and a first describe)");
+        after.WriteRequests.Should().Be(before.WriteRequests);
+    }
+
+    [Fact]
+    public async Task Upserts_and_a_delete_of_one_batch_are_one_Composite_call_with_the_delete_last()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contact("OLD", "A1", new() { ["lastName"] = "Old" });
+        var before = _org.GetStats();
+
+        var newContact = ContactStrategy.Map("NEW", Read<ContactEvent>(new JsonObject
+        {
+            ["contact"] = new JsonObject { ["externalId"] = "NEW", ["accountExternalId"] = "A1", ["lastName"] = "New" }
+        }));
+        var results = await Write(ContactStrategy, [("NEW", newContact), ("OLD", new SyncUnit([SObjectRecord.Deleting<ContactSObject>("contact", "OLD")]))]);
+
+        results.Should().OnlyContain(r => r.Outcome == SyncOutcome.Saved);
+        (_org.GetStats().ApiCalls - before.ApiCalls).Should().Be(2, "one read, one Composite write");
+        var write = _org.WriteRequests[^1];
+        ((string?)Sub(write, 0)["method"], (string?)Sub(write, 1)["method"]).Should().Be(("PATCH", "DELETE"));
+        Sub(write, 1).ContainsKey("body").Should().BeFalse("a delete's Ids are in its URL");
+        _org.FindByExternalId("Contact", "OLD").Should().BeNull();
+        _org.FindByExternalId("Contact", "NEW").Should().NotBeNull();
+    }
+
+    [Theory]
+    [InlineData("INSUFFICIENT_ACCESS_OR_READONLY", SyncOutcome.PermanentFailure)]
+    [InlineData("UNABLE_TO_LOCK_ROW", SyncOutcome.TransientFailure)]
+    public async Task A_delete_the_org_refuses_is_permanent_or_transient_by_its_code_and_the_record_stays(string code, SyncOutcome outcome)
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contact("C1", "A1", new() { ["lastName"] = "Kept" });
+        _org.InjectFault("Contact", "C1", code, "refused", 1);
+
+        var result = (await DeleteContacts("C1")).Single();
+
+        (result.Outcome, result.PrimaryError?.Code).Should().Be((outcome, code));
+        _org.FindByExternalId("Contact", "C1").Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task A_delete_whose_answer_is_lost_has_an_unknown_outcome()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contact("C1", "A1", new() { ["lastName"] = "Gone" });
+        _org.LoseResponsesFor("Contact", "C1", 1);
+
+        var delete = () => DeleteContacts("C1");
+
+        await delete.Should().ThrowAsync<UnknownOutcomeException>("the caller holds the entities, as for a lost upsert");
+        _org.FindByExternalId("Contact", "C1").Should().BeNull("the org did delete it");
+    }
+
+    [Fact]
+    public async Task An_Account_delete_refused_while_its_contacts_exist_waits_for_their_deletes_then_deletes_its_Profile_and_itself()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" });
+        await Contact("C1", "A1", new() { ["lastName"] = "Child" });
+        var account = new SyncUnit([SObjectRecord.Deleting<ProfileSObject>("prof", "P-A1"), SObjectRecord.Deleting<AccountSObject>("acct", "A1")]);
+
+        var early = (await Write(AccountStrategy, [("A1", account)])).Single();
+
+        (early.Outcome, early.PrimaryError?.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced),
+            "the contact's own delete, from its own inbox, goes first; the account retries meanwhile");
+        _org.FindByExternalId("Account", "A1").Should().NotBeNull();
+        _org.FindByExternalId("Profile__c", "P-A1").Should().BeNull("the Profile, first in the unit, was deleted: the retry won't send it again");
+
+        (await DeleteContacts("C1")).Single().Outcome.Should().Be(SyncOutcome.Saved);
+        (await Write(AccountStrategy, [("A1", account)])).Single().Outcome.Should().Be(SyncOutcome.Saved);
+        _org.FindByExternalId("Account", "A1").Should().BeNull();
+    }
+
     // ---------- Helpers ----------
 
-    private async Task<UpsertResult> Account(string key, Dictionary<string, object?> account, Dictionary<string, object?> profile)
+    private async Task<SyncResult> Account(string key, Dictionary<string, object?> account, Dictionary<string, object?> profile)
     {
         return (await Accounts((key, Event(account, profile)))).Single();
     }
 
     /// <summary>Profiles are keyed "P-{account}" unless the event says otherwise.</summary>
-    private Task<List<UpsertResult>> Accounts(params (string Key, JsonObject Event)[] items)
+    private Task<List<SyncResult>> Accounts(params (string Key, JsonObject Event)[] items)
     {
         return Upsert(AccountStrategy, [.. items.Select(i =>
             {
@@ -1052,7 +1155,7 @@ public sealed class SalesforceBatchUpsertServiceTests
             })]);
     }
 
-    private async Task<UpsertResult> Relationship(string key, string account, string related, Dictionary<string, object?> fields)
+    private async Task<SyncResult> Relationship(string key, string account, string related, Dictionary<string, object?> fields)
     {
         var rel = Body(fields);
         rel["externalId"] = key;
@@ -1062,12 +1165,12 @@ public sealed class SalesforceBatchUpsertServiceTests
             (key, Read<AccountRelationshipEvent>(new JsonObject { ["accountRelationship"] = rel })))).Single();
     }
 
-    private async Task<UpsertResult> Contact(string key, string account, Dictionary<string, object?> fields)
+    private async Task<SyncResult> Contact(string key, string account, Dictionary<string, object?> fields)
     {
         return (await Contacts((key, account, fields))).Single();
     }
 
-    private Task<List<UpsertResult>> Contacts(params (string Key, string Account, Dictionary<string, object?> Fields)[] items)
+    private Task<List<SyncResult>> Contacts(params (string Key, string Account, Dictionary<string, object?> Fields)[] items)
     {
         return Upsert(ContactStrategy, [.. items.Select(i =>
         {
@@ -1078,11 +1181,24 @@ public sealed class SalesforceBatchUpsertServiceTests
         })]);
     }
 
+    /// <summary>Deletes of contacts by key, as the contact strategy maps them, through the engine minus the inbox.</summary>
+    private Task<List<SyncResult>> DeleteContacts(params string[] keys)
+    {
+        return Write(ContactStrategy, [.. keys.Select(k => (k, new SyncUnit([SObjectRecord.Deleting<ContactSObject>("contact", k)])))]);
+    }
+
+    /// <summary>Units of a strategy through the engine minus the inbox: query, then write and delete.</summary>
+    private Task<List<SyncResult>> Write<TEvent>(SyncStrategy<TEvent> strategy, List<(string Key, SyncUnit Unit)> units)
+    {
+        return _engine.WriteToSalesforceAsync(units, [.. strategy.Queries([.. units.Select(u => u.Unit)])],
+            ContactInboxRow.MaxValuesPerQuery, ContactInboxRow.MaxRecordsPerWrite, CancellationToken.None);
+    }
+
     /// <summary>What the engine does with a strategy, minus the inbox: map, then query and upsert.</summary>
-    private Task<List<UpsertResult>> Upsert<TEvent>(UpsertStrategy<TEvent> strategy, params (string Key, TEvent Event)[] items)
+    private Task<List<SyncResult>> Upsert<TEvent>(SyncStrategy<TEvent> strategy, params (string Key, TEvent Event)[] items)
     {
         var units = items.Select(i => (i.Key, strategy.Map(i.Key, i.Event))).ToList();
-        return _upserter.WriteToSalesforceAsync(units, [.. strategy.Queries([.. units.Select(u => u.Item2)])],
+        return _engine.WriteToSalesforceAsync(units, [.. strategy.Queries([.. units.Select(u => u.Item2)])],
             AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
     }
 
@@ -1115,7 +1231,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     private static async Task<IReadOnlyList<RecordResult>> Upsert(SalesforceRestClient client, string sobject, string externalIdField,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> records, CancellationToken ct)
     {
-        return (await client.UpsertAsync([new CollectionRequest(sobject, sobject, externalIdField, records)], ct)).Single().Records!;
+        return (await client.WriteAsync([new CollectionUpsert(sobject, sobject, externalIdField, records)], ct)).Single().Records!;
     }
 
     /// <summary>The i-th subrequest of a recorded composite write.</summary>
@@ -1142,7 +1258,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         return new JsonObject { ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z", ["type"] = "updated" }, ["account"] = body };
     }
 
-    private static UpsertUnit RawAccount(string key, Dictionary<string, object?> fields)
+    private static SyncUnit RawAccount(string key, Dictionary<string, object?> fields)
     {
         return new([new SObjectRecord("acct", "Account", "ExternalId__c", key, fields)]);
     }
@@ -1155,7 +1271,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     /// <summary>The event as the engine reads it from the inbox.</summary>
     private static TEvent Read<TEvent>(JsonObject json)
     {
-        return json.Deserialize<TEvent>(SalesforceBatchUpsertService.EventJson)!;
+        return json.Deserialize<TEvent>(SalesforceBatchSyncService.EventJson)!;
     }
 
     private string? IdOf(string sobject, string externalId)

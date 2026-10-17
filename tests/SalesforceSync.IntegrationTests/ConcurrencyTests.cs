@@ -137,8 +137,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             foreach (var (id, v) in wave)
             {
                 await app.PublishRawAsync(random.Next(3) == 0 ? null : Any.String("k-"),
-                    SyncFixture.AccountEvent(id, v, new JsonObject { ["name"] = $"Shuffled {id}", ["description"] = $"v{v}" },
-                        new JsonObject { ["score"] = v }).ToJsonString());
+                    SyncFixture.AsAggregate(SyncFixture.AccountEvent(id, v, new JsonObject { ["name"] = $"Shuffled {id}", ["description"] = $"v{v}" },
+                        new JsonObject { ["score"] = v })).ToJsonString());
             }
 
             await Task.Delay(50);

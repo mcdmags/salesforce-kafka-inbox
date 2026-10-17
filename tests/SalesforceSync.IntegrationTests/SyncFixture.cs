@@ -28,9 +28,8 @@ namespace SalesforceSync.IntegrationTests;
 /// </summary>
 public class SyncFixture : IAsyncLifetime
 {
+    /// <summary>The one topic: account aggregates (the Account with its relationships and contacts, before and after).</summary>
     public const string Topic = "account-changes";
-    public const string RelationshipTopic = "account-relationship-changes";
-    public const string ContactTopic = "contact-changes";
     public const string Accounts = "account";
     public const string Relationships = "accountRelationship";
     public const string Contacts = "contact";
@@ -197,10 +196,53 @@ public class SyncFixture : IAsyncLifetime
             _redis?.DisposeAsync().AsTask() ?? Task.CompletedTask);
     }
 
-    /// <summary>Publishes an account change event, keyed by account like the real upstream.</summary>
+    /// <summary>
+    /// Publishes an account change, keyed by account like the real upstream: an aggregate without a before, so the
+    /// Account is stored whatever it was (<see cref="AsAggregate"/>).
+    /// </summary>
     public async Task PublishAsync(string accountExtId, long version, JsonObject account, JsonObject profile)
     {
         await _producer!.ProduceAsync(Topic, Event(accountExtId, version, account, profile));
+    }
+
+    /// <summary>Publishes an account aggregate, keyed by account: version N's meta, and the two snapshots (null: none).</summary>
+    public async Task PublishAggregateAsync(string accountExtId, long version, JsonObject? before, JsonObject? after, string? type = null)
+    {
+        var aggregate = new JsonObject { ["meta"] = Meta(version, type), ["before"] = before?.DeepClone(), ["after"] = after?.DeepClone() };
+        await _producer!.ProduceAsync(Topic, new Message<string, string> { Key = accountExtId, Value = aggregate.ToJsonString() });
+    }
+
+    /// <summary>
+    /// An aggregate's snapshot: <c>{ "externalId", ...account, "accountRelationships": [...], "contacts": [...] }</c>.
+    /// The children name their Account through the aggregate; a relationship names its other Account by
+    /// <c>relatedAccountExternalId</c>. The caller's objects are copied.
+    /// </summary>
+    public static JsonObject Snapshot(string accountExtId, JsonObject account, JsonObject[]? relationships = null, JsonObject[]? contacts = null)
+    {
+        var snapshot = Body(accountExtId, account);
+        snapshot["accountRelationships"] = new JsonArray([.. (relationships ?? []).Select(r => r.DeepClone())]);
+        snapshot["contacts"] = new JsonArray([.. (contacts ?? []).Select(c => c.DeepClone())]);
+        return snapshot;
+    }
+
+    /// <summary>A child of a snapshot: its external id and fields.</summary>
+    public static JsonObject Child(string externalId, JsonObject fields)
+    {
+        return Body(externalId, fields);
+    }
+
+    /// <summary>
+    /// A per-entity account event (<see cref="AccountEvent"/>) as the aggregate that carries it: its meta, no before, and
+    /// its account as after. Every part of after is stored.
+    /// </summary>
+    public static JsonObject AsAggregate(JsonObject accountEvent)
+    {
+        return new JsonObject
+        {
+            ["meta"] = accountEvent["meta"]?.DeepClone(),
+            ["before"] = null,
+            ["after"] = accountEvent["account"]?.DeepClone()
+        };
     }
 
     /// <summary>
@@ -237,12 +279,12 @@ public class SyncFixture : IAsyncLifetime
         return new()
         {
             Key = accountExtId,
-            Value = AccountEvent(accountExtId, version, account, profile).ToJsonString()
+            Value = AsAggregate(AccountEvent(accountExtId, version, account, profile)).ToJsonString()
         };
     }
 
     /// <summary>
-    /// The envelope of an account event: <c>{ "meta": { "time" }, "account": { "externalId", ...account, "profile":
+    /// The envelope of an account event as its inbox stores it: <c>{ "meta": { "time" }, "account": { "externalId", ...account, "profile":
     /// { "externalId", ...profile } } }</c>, with the payload's camelCase names (<c>name</c>, <c>rating</c>, <c>tier</c>,
     /// ...). An event is the full record: what isn't given is empty. The caller's objects are copied, so they can be
     /// published again.
@@ -255,30 +297,34 @@ public class SyncFixture : IAsyncLifetime
         return new JsonObject { ["meta"] = Meta(version), ["account"] = body };
     }
 
-    /// <summary>Publishes an account-to-account relationship event, keyed by relationship id.</summary>
+    /// <summary>
+    /// Publishes a change of one account-to-account relationship: an aggregate of its first Account that only adds it (the
+    /// Account itself is the same in before and after, so only the relationship is stored, at version N's time).
+    /// </summary>
     public async Task PublishRelationshipAsync(string relationshipKey, long version, string accountExtId,
         string relatedAccountExtId, JsonObject fields)
     {
-        var body = Body(relationshipKey, fields);
-        body["accountExternalId"] = accountExtId;
-        body["relatedAccountExternalId"] = relatedAccountExtId;
-        await _producer!.ProduceAsync(RelationshipTopic, new Message<string, string>
-        {
-            Key = relationshipKey,
-            Value = new JsonObject { ["meta"] = Meta(version), ["accountRelationship"] = body }.ToJsonString()
-        });
+        var relationship = Child(relationshipKey, fields);
+        relationship["relatedAccountExternalId"] = relatedAccountExtId;
+        await PublishAggregateAsync(accountExtId, version, Snapshot(accountExtId, []), Snapshot(accountExtId, [], relationships: [relationship]));
     }
 
-    /// <summary>Publishes a contact event, keyed by contact id.</summary>
+    /// <summary>Publishes a change of one contact: an aggregate of its Account that only adds it (see <see cref="PublishRelationshipAsync"/>).</summary>
     public async Task PublishContactAsync(string contactKey, long version, string accountExtId, JsonObject fields)
     {
-        var body = Body(contactKey, fields);
-        body["accountExternalId"] = accountExtId;
-        await _producer!.ProduceAsync(ContactTopic, new Message<string, string>
-        {
-            Key = contactKey,
-            Value = new JsonObject { ["meta"] = Meta(version), ["contact"] = body }.ToJsonString()
-        });
+        await PublishAggregateAsync(accountExtId, version, Snapshot(accountExtId, []),
+            Snapshot(accountExtId, [], contacts: [Child(contactKey, fields)]));
+    }
+
+    /// <summary>
+    /// Waits until the consumer has handled what was published under <paramref name="key"/> so far: a marker account's
+    /// event published under the same key (one partition, consumed in order) is stored and synced.
+    /// </summary>
+    public async Task WaitUntilConsumedAsync(string key)
+    {
+        var marker = NewAccountId();
+        await PublishRawAsync(key, AsAggregate(AccountEvent(marker, 1, new JsonObject { ["name"] = "marker" }, [])).ToJsonString());
+        await WaitForInboxSettledAsync(marker, version: 1);
     }
 
     /// <summary>meta of version N: its time, and by default "inserted" for version 1 and "updated" for every later one.</summary>
@@ -549,14 +595,13 @@ public class SyncFixture : IAsyncLifetime
         return Uri.TryCreate(address, UriKind.Absolute, out var uri) ? $"{uri.Host}:{uri.Port}" : address;
     }
 
-    /// <summary>Creates every topic up front (6 partitions, like production), so pods never race to auto-create them.</summary>
+    /// <summary>Creates the topic up front (6 partitions, like production), so pods never race to auto-create it.</summary>
     private static async Task EnsureTopicsAsync(string bootstrap)
     {
         using var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = bootstrap }).Build();
         try
         {
-            string[] topics = [Topic, RelationshipTopic, ContactTopic];
-            await admin.CreateTopicsAsync(topics.Select(t => new TopicSpecification { Name = t, NumPartitions = 6, ReplicationFactor = 1 }));
+            await admin.CreateTopicsAsync([new TopicSpecification { Name = Topic, NumPartitions = 6, ReplicationFactor = 1 }]);
         }
         catch (CreateTopicsException ex) when (ex.Results.All(r => r.Error.Code is ErrorCode.TopicAlreadyExists or ErrorCode.NoError))
         {

@@ -5,14 +5,17 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// Kafka -> Postgres inbox. Each topic carries one entity type (<see cref="ISalesforceEntitySync.Topic"/>, or
-/// <c>Kafka:Topics:&lt;EntityType&gt;</c>). A message is read with that type's typed event, and its value is stored
-/// unchanged in the type's inbox table together with the entity's id taken from the event, in the entity's one row
-/// unless that holds a newer event. The Kafka message key and the order of arrival are not used: an entity's events
-/// are ordered by their own time, so they may come over any partition, in any order. The offset is stored for commit
-/// only after the event is in the inbox; a redelivery (or a retried store) changes nothing once the event is synced,
-/// and before that just stores the event over itself again. A message that can never be synced (not a valid event of its topic's type) is logged with
-/// its offset and skipped.
+/// Kafka -> Postgres inboxes. One topic (<c>Kafka:Topic</c>, <see cref="AccountAggregate.DefaultTopic"/>) carries
+/// account aggregates: an Account with its children, before and after a change. Each message is split
+/// (<see cref="AccountAggregate.TrySplit"/>) into the events of the entities that changed (the Account, relationships,
+/// contacts; deletes included), and each is read with its type's typed event and stored in that type's inbox table
+/// together with the entity's id, in the entity's one row unless that holds a newer event. The Kafka message key and
+/// the order of arrival are not used: an entity's events are ordered by their own time (the aggregate's), so they may
+/// come over any partition, in any order. The offset is stored for commit only after every event of the message is in
+/// its inbox. A store is idempotent, so a crash halfway through a message is safe: the redelivery stores the events
+/// already stored over themselves (or changes nothing once they are synced) and the rest for the first time. A message
+/// that can never be synced (no valid aggregate) is logged with its offset and skipped, and so is an entity event in
+/// it that is invalid on its own, the others being stored.
 /// </summary>
 public sealed class KafkaInboxConsumer(
     IConsumer<string, string> consumer,
@@ -28,39 +31,16 @@ public sealed class KafkaInboxConsumer(
         return Task.Run(() => RunAsync(stoppingToken), stoppingToken);
     }
 
-    /// <summary>
-    /// Topic -> the entity type whose events it carries. Two types can't share a topic: a message says nothing but its
-    /// topic about its type.
-    /// </summary>
-    private static IReadOnlyDictionary<string, ISalesforceEntitySync> TopicsOf(IEnumerable<ISalesforceEntitySync> syncs, IConfiguration config)
-    {
-        var byTopic = new Dictionary<string, ISalesforceEntitySync>(StringComparer.Ordinal);
-        foreach (var sync in syncs)
-        {
-            var topic = config[$"Kafka:Topics:{sync.EntityType}"] is { Length: > 0 } configured ? configured : sync.Topic;
-            if (!byTopic.TryAdd(topic, sync))
-            {
-                throw new InvalidOperationException(
-                    $"Topic '{topic}' is configured for both '{byTopic[topic].EntityType}' and '{sync.EntityType}'; " +
-                    "each entity type needs its own topic.");
-            }
-        }
-        return byTopic;
-    }
-
     private async Task RunAsync(CancellationToken ct)
     {
-        // The syncs are only asked to read events here; the scope lives as long as the consumer uses them
+        // The syncs are only asked to read and store events here; the scope lives as long as the consumer uses them
         using var scope = scopes.CreateScope();
-        var byTopic = TopicsOf(scope.ServiceProvider.GetServices<ISalesforceEntitySync>(), config);
+        var byType = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().ToDictionary(s => s.EntityType, StringComparer.Ordinal);
+        var topic = config["Kafka:Topic"] is { Length: > 0 } configured ? configured : AccountAggregate.DefaultTopic;
 
-        foreach (var topic in byTopic.Keys)
-        {
-            await EnsureTopicAsync(topic);
-        }
-
-        consumer.Subscribe(byTopic.Keys);
-        log.LogInformation("Consuming {Topics}", string.Join(", ", byTopic.Select(t => $"{t.Key} -> {t.Value.EntityType}")));
+        await EnsureTopicAsync(topic);
+        consumer.Subscribe(topic);
+        log.LogInformation("Consuming {Topic} -> {Types}", topic, string.Join(", ", byType.Keys));
 
         try
         {
@@ -76,7 +56,7 @@ public sealed class KafkaInboxConsumer(
                     continue;
                 }
 
-                await IngestAsync(message, byTopic[message.Topic], ct);
+                await IngestAsync(message, byType, ct);
             }
         }
         finally
@@ -105,21 +85,37 @@ public sealed class KafkaInboxConsumer(
         }
     }
 
-    /// <summary>Stores a valid event in its type's inbox, then its offset; skips a message that can never be synced.</summary>
-    private async Task IngestAsync(ConsumeResult<string, string> message, ISalesforceEntitySync sync, CancellationToken ct)
+    /// <summary>
+    /// Stores the valid entity events of an aggregate in their types' inboxes, then its offset; skips what can never be
+    /// synced.
+    /// </summary>
+    private async Task IngestAsync(ConsumeResult<string, string> message, IReadOnlyDictionary<string, ISalesforceEntitySync> byType,
+        CancellationToken ct)
     {
-        if (!sync.TryReadEvent(message.Message.Value, out var entityId, out var eventTime, out var problem))
+        // Retrying can't fix an invalid event, and retrying would block every later event on the partition: log where
+        // it is (to fix or replay at the source) and move on
+        if (!AccountAggregate.TrySplit(message.Message.Value, out var events, out var problem))
         {
-            // Retrying can't fix it, and retrying would block every later event on the partition: log where
-            // it is (to fix or replay at the source) and move on.
-            log.LogError("Skipping malformed {Type} event at {Offset}: {Problem}", sync.EntityType, message.TopicPartitionOffset, problem);
+            log.LogError("Skipping malformed account aggregate at {Offset}: {Problem}", message.TopicPartitionOffset, problem);
             StoreOffset(message);
             return;
         }
 
         try
         {
-            await sync.StoreEventAsync(entityId!, eventTime, message.Message.Value, ct);
+            foreach (var e in events)
+            {
+                var sync = byType[e.EntityType];
+                if (sync.TryReadEvent(e.Json, out var entityId, out var eventTime, out var invalid))
+                {
+                    await sync.StoreEventAsync(entityId!, eventTime, e.Json, ct);
+                }
+                else
+                {
+                    log.LogError("Skipping malformed {Type} event of the aggregate at {Offset}: {Problem}", e.EntityType,
+                        message.TopicPartitionOffset, invalid);
+                }
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

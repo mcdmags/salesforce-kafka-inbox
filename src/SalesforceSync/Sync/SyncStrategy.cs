@@ -7,32 +7,36 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// What varies per synced object: how to read an event's entity id and meta (time and type), how an
-/// event becomes Salesforce records, and what to read from Salesforce to diff them, resolve their lookups and find
-/// their parents.
-/// Everything else (claiming, ordering, coalescing, rate limits, batching, retries, dead-lettering) is
-/// <see cref="SalesforceBatchUpsertService"/>'s. The engine, the Kafka consumer and the SQL never name an event
-/// field: they go through <paramref name="EntityId"/> and <paramref name="Meta"/>.
+/// What varies per synced object: how to read an event's entity id and meta (time and type), what an event asks of
+/// Salesforce (the records to upsert, or to delete), and what to read from Salesforce to diff them, resolve their
+/// lookups and find their parents.
+/// Everything else (claiming, ordering, coalescing, rate limits, batching, the read, the writes and deletes, retries,
+/// dead-lettering) is <see cref="SalesforceBatchSyncService"/>'s. The engine, the Kafka consumer and the SQL never name
+/// an event field: they go through <paramref name="EntityId"/> and <paramref name="Meta"/>.
 /// </summary>
 /// <typeparam name="TEvent">The inbox payload (the whole event envelope).</typeparam>
-/// <param name="EntityType">The strategy's name, e.g. "account": the key of its topic setting, and how logs name it.</param>
+/// <param name="EntityType">The strategy's name, e.g. "account": the object name of its events, and how logs name it.</param>
 /// <param name="EntityId">The id of the entity an event is about (e.g. account.externalId), or null if it has none.</param>
 /// <param name="Meta">The event's meta, or null if it has none: when the event happened (meta.time, which must have an
-/// explicit offset) and what the source says happened (meta.type: inserted or updated). The type is only checked at
-/// ingest, so a delete is never synced; whether a record is created or updated is decided by what Salesforce has.</param>
-/// <param name="Map">Inbox event (with its entity id) -> the records to upsert together.</param>
+/// explicit offset) and what happened (meta.type: inserted, updated or deleted).</param>
+/// <param name="Map">
+/// The action delegate: inbox event (with its entity id) -> what to do with the entity's records. An inserted or
+/// updated event upserts them (whether a record is created or updated is decided by what Salesforce has), a deleted
+/// one deletes them (<see cref="SObjectRecord.Deleting{TSObject}"/>, by the entity's id alone). The engine only runs
+/// what it is given.
+/// </param>
 /// <param name="Queries">The batch's units -> the reads (at most 5 after chunking) the diff and lookups need.</param>
-public sealed record UpsertStrategy<TEvent>(
+public sealed record SyncStrategy<TEvent>(
     string EntityType,
     Func<TEvent, string?> EntityId,
     Func<TEvent, EventMeta?> Meta,
-    Func<string, TEvent, UpsertUnit> Map,
-    Func<IReadOnlyCollection<UpsertUnit>, IEnumerable<SoqlQuery>> Queries)
+    Func<string, TEvent, SyncUnit> Map,
+    Func<IReadOnlyCollection<SyncUnit>, IEnumerable<SoqlQuery>> Queries)
 {
     /// <summary>
     /// Reads and validates a raw event: valid JSON for <typeparamref name="TEvent"/>, an entity with a non-empty id,
-    /// a time with an explicit offset, and a type of inserted or updated. The Kafka consumer admits only events that
-    /// pass (anything else can never be synced), and the engine reads claimed rows the same way.
+    /// a time with an explicit offset, and a type of inserted, updated or deleted. The Kafka consumer stores only events
+    /// that pass (anything else can never be synced), and the engine reads claimed rows the same way.
     /// </summary>
     /// <returns>False with <paramref name="problem"/> saying why the event can never be synced.</returns>
     public bool TryRead(string json, [NotNullWhen(true)] out ReadEvent<TEvent>? read, [NotNullWhen(false)] out string? problem)
@@ -41,7 +45,7 @@ public sealed record UpsertStrategy<TEvent>(
         TEvent? e;
         try
         {
-            e = JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchUpsertService.EventJson);
+            e = JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchSyncService.EventJson);
         }
         catch (JsonException ex)
         {
@@ -61,9 +65,9 @@ public sealed record UpsertStrategy<TEvent>(
         {
             problem = "The event time must be an ISO-8601 time with an offset or Z, e.g. 2026-10-14T01:02:03.456Z";
         }
-        else if (Meta(e)?.IsInsertOrUpdate() is not true)
+        else if (Meta(e) is { } meta && !meta.IsInsertOrUpdate() && !meta.IsDelete())
         {
-            problem = "The event type must be \"inserted\" or \"updated\" (deletes are not synced)";
+            problem = "The event type must be \"inserted\", \"updated\" or \"deleted\"";
         }
         else
         {
@@ -75,14 +79,14 @@ public sealed record UpsertStrategy<TEvent>(
     }
 }
 
-/// <summary>An inbox event that passed <see cref="UpsertStrategy{TEvent}.TryRead"/>: the typed event, whose it is and when.</summary>
+/// <summary>An inbox event that passed <see cref="SyncStrategy{TEvent}.TryRead"/>: the typed event, whose it is and when.</summary>
 public sealed record ReadEvent<TEvent>(TEvent Event, string EntityId, DateTimeOffset Time);
 
 /// <summary>Records of one sObject to read from Salesforce, by a field (normally a unique external id).</summary>
 public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyCollection<string> Values)
 {
     /// <summary>Reads the units' records of <typeparamref name="TSObject"/> by external id (to diff them).</summary>
-    public static SoqlQuery RecordsOf<TSObject>(IEnumerable<UpsertUnit> units) where TSObject : class
+    public static SoqlQuery RecordsOf<TSObject>(IEnumerable<SyncUnit> units) where TSObject : class
     {
         var meta = SObjectMetadata<TSObject>.Instance;
         return new SoqlQuery(meta.SObject, meta.ExternalIdField, ExternalIdsOf(units, meta.SObject));
@@ -92,14 +96,14 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
     /// Reads the <typeparamref name="TSObject"/> records the units' lookups and foreign keys point at: for a lookup's
     /// Id, and to know that a parent exists before its child is sent.
     /// </summary>
-    public static SoqlQuery LookupTargetsOf<TSObject>(IEnumerable<UpsertUnit> units) where TSObject : class
+    public static SoqlQuery LookupTargetsOf<TSObject>(IEnumerable<SyncUnit> units) where TSObject : class
     {
         var meta = SObjectMetadata<TSObject>.Instance;
         return new SoqlQuery(meta.SObject, meta.ExternalIdField, LookupIdsOf(units, meta.SObject));
     }
 
     /// <summary>The external ids of every record of <paramref name="sobject"/> in the units.</summary>
-    public static IReadOnlyCollection<string> ExternalIdsOf(IEnumerable<UpsertUnit> units, string sobject)
+    public static IReadOnlyCollection<string> ExternalIdsOf(IEnumerable<SyncUnit> units, string sobject)
     {
         return [.. units.SelectMany(u => u.Records)
                 .Where(r => r.SObject.Equals(sobject, StringComparison.OrdinalIgnoreCase))
@@ -108,7 +112,7 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
     }
 
     /// <summary>The external ids every lookup and foreign key of the units points at in <paramref name="sobject"/>.</summary>
-    public static IReadOnlyCollection<string> LookupIdsOf(IEnumerable<UpsertUnit> units, string sobject)
+    public static IReadOnlyCollection<string> LookupIdsOf(IEnumerable<SyncUnit> units, string sobject)
     {
         return [.. units.SelectMany(u => u.Records)
                 .SelectMany(r => r.Parents)
@@ -121,9 +125,9 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
 /// <summary>
 /// The <c>meta</c> object every event carries next to its entity:
 /// <c>{ "time": "2026-10-14T01:02:03.456Z", "type": "inserted" }</c>.
-/// The time is the event's place in its entity's history: the newest time wins, whatever order events arrive in.
-/// The type must be inserted or updated (deletes are not synced); whether a record is created or updated is decided
-/// by what Salesforce has.
+/// The time is the event's place in its entity's history: the newest time wins, whatever order events arrive in, a
+/// delete like any other. The type is inserted or updated (the same to the sync: whether a record is created or
+/// updated is decided by what Salesforce has), or deleted.
 /// </summary>
 public sealed partial class EventMeta
 {
@@ -137,17 +141,26 @@ public sealed partial class EventMeta
     [GeneratedRegex(@"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$", RegexOptions.CultureInvariant)]
     private static partial Regex IsoTimeWithOffset();
 
-    /// <summary>"inserted" or "updated", in any case. Kept as text so anything else is rejected by name rather than as bad JSON.</summary>
+    /// <summary>
+    /// "inserted", "updated" or "deleted", in any case. Kept as text so anything else is rejected by name rather than
+    /// as bad JSON.
+    /// </summary>
     public string? Type { get; set; }
 
     /// <summary>
-    /// Whether <see cref="Type"/> is one the sync takes: inserted or updated. Missing or anything else (e.g. "deleted")
-    /// is not; which of the two it is decides nothing, since Salesforce's state decides create or update.
+    /// Whether <see cref="Type"/> is inserted or updated; which of the two decides nothing, since Salesforce's state
+    /// decides create or update.
     /// </summary>
     public bool IsInsertOrUpdate()
     {
         return "inserted".Equals(Type, StringComparison.OrdinalIgnoreCase)
                || "updated".Equals(Type, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Whether <see cref="Type"/> is deleted: the event's entity is to be deleted.</summary>
+    public bool IsDelete()
+    {
+        return "deleted".Equals(Type, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary><see cref="Time"/> as an instant, or null if it is missing or not an ISO-8601 time with an offset.</summary>

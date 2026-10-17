@@ -12,22 +12,28 @@ namespace SalesforceSync.Sync;
 public static class ContactSync
 {
     public const string Type = "contact";
-    public const string DefaultTopic = "contact-changes";
 
-    /// <summary>The strategy the engine runs (the contact's key is in the event itself, so Map doesn't take it).</summary>
-    public static readonly UpsertStrategy<ContactEvent> Strategy =
-        new(Type, e => e.Contact?.ExternalId, e => e.Meta, (_, e) => Map(e), Queries);
+    /// <summary>The strategy the engine runs.</summary>
+    public static readonly SyncStrategy<ContactEvent> Strategy = new(Type, e => e.Contact?.ExternalId, e => e.Meta, Map, Queries);
 
-    public static UpsertUnit Map(ContactEvent e)
+    /// <summary>
+    /// A deleted event deletes the contact, by its key alone; any other upserts it, which needs its Account's key.
+    /// </summary>
+    public static SyncUnit Map(string contactKey, ContactEvent e)
     {
+        if (e.Meta?.IsDelete() == true)
+        {
+            return new SyncUnit([SObjectRecord.Deleting<ContactSObject>("contact", contactKey)]);
+        }
+
         var payload = e.Contact;
         return string.IsNullOrWhiteSpace(payload?.AccountExternalId)
             ? throw new ArgumentException("accountExternalId is required")
-            : new UpsertUnit([SObjectRecord.From("contact", ToContact(payload))]);
+            : new SyncUnit([SObjectRecord.From("contact", ToContact(payload))]);
     }
 
     // What to read: the contacts themselves (to diff) and the Accounts they point at (to know they exist)
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<ContactSObject>(units), SoqlQuery.LookupTargetsOf<AccountSObject>(units)];
     }
@@ -48,11 +54,13 @@ public static class ContactSync
 }
 
 /// <summary>
-/// Inbox event for a contact (entity type "contact", key = contact.externalId), as the source system sends it
-/// (camelCase JSON, full record).
+/// Inbox event for a contact (entity type "contact", key = contact.externalId), as <see cref="AccountAggregate"/> splits
+/// it out of its account's aggregate: the contact as the source system sends it (camelCase JSON, full record), named
+/// by its Account, or a delete of it, which carries its key only.
 /// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "inserted" },
 ///   "contact": { "externalId": "CON-1", "accountExternalId": "ACC-1", "firstName": "Ada", "lastName": "Lovelace",
-///                "email": "ada@example.com", "phone": "+1 555 0101" } }</code>
+///                "email": "ada@example.com", "phone": "+1 555 0101" } }
+/// { "meta": { "time": "2026-10-15T01:02:03.456Z", "type": "deleted" }, "contact": { "externalId": "CON-1" } }</code>
 /// </summary>
 public sealed record ContactEvent(EventMeta? Meta, ContactPayload? Contact);
 

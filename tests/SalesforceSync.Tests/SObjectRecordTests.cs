@@ -102,7 +102,7 @@ public sealed class SObjectRecordTests
     [Theory, TypedAutoData]
     public void Queries_are_derived_from_the_sObject_classes(AccountRelationshipSObject relationship)
     {
-        UpsertUnit[] units = [new([SObjectRecord.From("rel", relationship)])];
+        SyncUnit[] units = [new([SObjectRecord.From("rel", relationship)])];
 
         SoqlQuery.RecordsOf<AccountRelationshipSObject>(units).Should().BeEquivalentTo(
             new SoqlQuery("Account_Relationship__c", "ExternalId__c", [relationship.ExternalId!]));

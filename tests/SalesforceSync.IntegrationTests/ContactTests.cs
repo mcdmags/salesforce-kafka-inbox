@@ -71,20 +71,17 @@ public sealed class ContactTests(SyncFixture app)
     public async Task Contacts_Salesforce_would_reject_are_dead_lettered_alone()
     {
         var acct = SyncFixture.NewAccountId();
-        var (noName, noAccount, good) = (SyncFixture.NewContactId(), SyncFixture.NewContactId(), SyncFixture.NewContactId());
+        var (noName, good) = (SyncFixture.NewContactId(), SyncFixture.NewContactId());
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, []);
         await app.WaitForInboxSettledAsync(acct, 1);
 
         await app.PublishContactAsync(noName, 1, acct, new JsonObject { ["firstName"] = "Nameless" });
-        await app.PublishContactAsync(noAccount, 1, "", new JsonObject { ["lastName"] = "Orphan" });
         await app.PublishContactAsync(good, 1, acct, new JsonObject { ["lastName"] = "Good" });
 
         (await app.WaitForInboxSettledAsync(noName, version: 1, SyncFixture.Contacts)).Should().Be((1L, "dead"));
         (await app.GetInboxRowAsync(noName, SyncFixture.Contacts))!.ErrorCode.Should().Be("REQUIRED_FIELD_MISSING");
-        (await app.WaitForInboxSettledAsync(noAccount, version: 1, SyncFixture.Contacts)).Should().Be((1L, "dead"));
-        (await app.GetInboxRowAsync(noAccount, SyncFixture.Contacts))!.ErrorCode.Should().Be("INVALID_EVENT");
         (await app.WaitForInboxSettledAsync(good, version: 1, SyncFixture.Contacts)).Should().Be((1L, "done"));
-        (await app.GetWriteRequestsAsync(noName, noAccount)).Should().BeEmpty("both failed before any call");
+        (await app.GetWriteRequestsAsync(noName)).Should().BeEmpty("it failed before any call");
     }
 
     [Fact]

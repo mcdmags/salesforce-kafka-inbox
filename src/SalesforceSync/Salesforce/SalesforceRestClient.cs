@@ -8,7 +8,7 @@ namespace SalesforceSync.Salesforce;
 /// <summary>
 /// Salesforce REST transport, and the only class that talks to Salesforce. Every method is exactly one API call: it
 /// takes requests and returns the raw results per subrequest and per record. It decides nothing (what to write, what
-/// a result means); that is <see cref="Sync.SalesforceBatchUpsertService"/>'s.
+/// a result means); that is <see cref="Sync.SalesforceBatchSyncService"/>'s.
 /// </summary>
 public sealed class SalesforceRestClient(HttpClient http)
 {
@@ -132,49 +132,66 @@ public sealed class SalesforceRestClient(HttpClient http)
     }
 
     /// <summary>
-    /// Sends sObject Collections upserts in one API call: a single one as a call of its own
-    /// (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>), 2 to 5 as the subrequests of one Composite
+    /// Sends sObject Collections upserts and deletes in one API call: a single one as a call of its own (an upsert
+    /// <c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>, a delete
+    /// <c>DELETE /composite/sobjects?ids=...&amp;allOrNone=false</c>), 2 to 5 as the subrequests of one Composite
     /// request, in the given order, where a later one may refer to an earlier one's results
-    /// (<c>@{referenceId[i].id}</c>). Each record is created or updated by its external id. <c>allOrNone: false</c> is
-    /// sent on the Composite request and on every upsert: every record succeeds or fails on its own.
+    /// (<c>@{referenceId[i].id}</c>). An upserted record is created or updated by its external id, a deleted one is
+    /// deleted by its Id. <c>allOrNone: false</c> is sent on the Composite request and on every collection: every
+    /// record succeeds or fails on its own.
     /// </summary>
     /// <returns>
-    /// One result per upsert Salesforce answered (HTTP 200 does not mean any record was saved), each record's with
-    /// <c>created</c> set. A single upsert that fails as a whole throws; a Composite subrequest that does answers with
-    /// its errors instead of per-record results.
+    /// One result per collection Salesforce answered (HTTP 200 does not mean any record was saved or deleted), each
+    /// upserted record's with <c>created</c> set. A single collection that fails as a whole throws; a Composite
+    /// subrequest that does answers with its errors instead of per-record results.
     /// </returns>
-    public async Task<IReadOnlyList<CollectionResult>> UpsertAsync(IReadOnlyList<CollectionRequest> collections, CancellationToken ct)
+    /// <exception cref="ArgumentException">Too many collections or records, or a URL longer than <see cref="MaxUrlBytes"/>.</exception>
+    public async Task<IReadOnlyList<CollectionResult>> WriteAsync(IReadOnlyList<CollectionRequest> collections, CancellationToken ct)
     {
         if (collections.Count is 0 or > MaxCompositeCollections)
         {
             throw new ArgumentOutOfRangeException(nameof(collections), $"1 to {MaxCompositeCollections} collections per request");
         }
 
-        if (collections.FirstOrDefault(c => c.Records.Count is 0 or > MaxCollectionRecords) is { } tooLarge)
+        if (collections.FirstOrDefault(c => c.Count is 0 or > MaxCollectionRecords) is { } tooLarge)
         {
             throw new ArgumentOutOfRangeException(nameof(collections),
-                $"{tooLarge.ReferenceId}: {tooLarge.Records.Count} records; a collection takes 1 to {MaxCollectionRecords}");
+                $"{tooLarge.ReferenceId}: {tooLarge.Count} records; a collection takes 1 to {MaxCollectionRecords}");
         }
 
+        var urls = collections.Select(c => EnsureFits(c.Url)).ToList(); // checked before anything is sent
         if (collections is [var single])
         {
-            using var res = await http.PatchAsJsonAsync(single.Url, new { allOrNone = false, records = single.Records }, Json, ct);
+            using var request = new HttpRequestMessage(single.Method, urls[0])
+            {
+                Content = single.Body is { } content ? JsonContent.Create(content, options: Json) : null
+            };
+            using var res = await http.SendAsync(request, ct);
             await EnsureSuccessAsync(res, ct);
             var body = await res.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
             return body.ValueKind == JsonValueKind.Array
                 ? [new CollectionResult(single.ReferenceId, [.. body.EnumerateArray().Select(ParseRecordResult)], [])]
-                : throw new InvalidOperationException($"Upsert of {single.SObject} answered without per-record results");
+                : throw new InvalidOperationException($"{single.ReferenceId} answered without per-record results");
         }
 
         var payload = new
         {
             allOrNone = false,
-            compositeRequest = collections.Select(c => new
+            compositeRequest = collections.Select((c, i) =>
             {
-                method = "PATCH",
-                url = c.Url,
-                referenceId = c.ReferenceId,
-                body = new { allOrNone = false, records = c.Records }
+                // A delete has no body: its ids are in its URL
+                var subrequest = new Dictionary<string, object?>
+                {
+                    ["method"] = c.Method.Method,
+                    ["url"] = urls[i],
+                    ["referenceId"] = c.ReferenceId
+                };
+                if (c.Body is { } content)
+                {
+                    subrequest["body"] = content;
+                }
+
+                return subrequest;
             })
         };
 
@@ -294,15 +311,49 @@ public sealed class SalesforceRestClient(HttpClient http)
 public sealed record CompositeQuery(string ReferenceId, string Soql);
 
 /// <summary>
+/// One sObject Collections operation of a write request (<see cref="SalesforceRestClient.WriteAsync"/>): a call of its
+/// own, or a Composite subrequest named <paramref name="ReferenceId"/>.
+/// </summary>
+public abstract record CollectionRequest(string ReferenceId)
+{
+    public abstract HttpMethod Method { get; }
+    public abstract string Url { get; }
+
+    /// <summary>Its records: 1 to 200.</summary>
+    public abstract int Count { get; }
+
+    /// <summary>The JSON body, or null when it has none.</summary>
+    public abstract object? Body { get; }
+}
+
+/// <summary>
 /// An sObject Collections upsert: up to 200 records of <paramref name="SObject"/>, each
 /// <c>{ "attributes": { "type": ... }, externalIdField: ..., field: value, ... }</c>, created or updated by
 /// <paramref name="ExternalIdField"/>. A lookup can be set by the parent's external id through the field's
 /// relationship, <c>"Account": { "ExternalId__c": "A1" }</c>.
 /// </summary>
-public sealed record CollectionRequest(string ReferenceId, string SObject, string ExternalIdField,
-    IReadOnlyList<IReadOnlyDictionary<string, object?>> Records)
+public sealed record CollectionUpsert(string ReferenceId, string SObject, string ExternalIdField,
+    IReadOnlyList<IReadOnlyDictionary<string, object?>> Records) : CollectionRequest(ReferenceId)
 {
-    public string Url => $"{SalesforceRestClient.DataPath}/composite/sobjects/{SObject}/{ExternalIdField}";
+    public override HttpMethod Method => HttpMethod.Patch;
+    public override string Url => $"{SalesforceRestClient.DataPath}/composite/sobjects/{SObject}/{ExternalIdField}";
+    public override int Count => Records.Count;
+    public override object Body => new { allOrNone = false, records = Records };
+}
+
+/// <summary>
+/// An sObject Collections delete: up to 200 records, of any objects, by their Salesforce Ids (it takes no external
+/// ids), in the URL: <c>DELETE /composite/sobjects?ids=001...,003...&amp;allOrNone=false</c>. Deleted records go to the
+/// Recycle Bin. 200 Ids of 18 characters make a URL of under 4 KB, well within <see cref="SalesforceRestClient.MaxUrlBytes"/>.
+/// </summary>
+public sealed record CollectionDelete(string ReferenceId, IReadOnlyList<string> Ids) : CollectionRequest(ReferenceId)
+{
+    public override HttpMethod Method => HttpMethod.Delete;
+
+    // Ids are letters and digits: nothing to escape
+    public override string Url => $"{SalesforceRestClient.DataPath}/composite/sobjects?ids={string.Join(",", Ids)}&allOrNone=false";
+    public override int Count => Ids.Count;
+    public override object? Body => null;
 }
 
 /// <summary>One record's result within a collection, in request order.</summary>

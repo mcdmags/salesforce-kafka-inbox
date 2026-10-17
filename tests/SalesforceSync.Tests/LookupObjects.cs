@@ -27,9 +27,9 @@ internal static class LookupStrategies
     /// An Account and its Contact "C-{key}" (named after the account) that looks it up: a new pair goes in one
     /// Composite request, the Contact pointing at <c>@{Account[i].id}</c>.
     /// </summary>
-    public static readonly UpsertStrategy<AccountEvent> AccountWithContact = new("accountWithContact", e => e.Account?.ExternalId,
+    public static readonly SyncStrategy<AccountEvent> AccountWithContact = new("accountWithContact", e => e.Account?.ExternalId,
         e => e.Meta,
-        (key, e) => new UpsertUnit(
+        (key, e) => new SyncUnit(
         [
             SObjectRecord.From("acct", AccountSync.ToAccount(e.Account!)),
             SObjectRecord.From("contact", new LookupContactSObject { ExternalId = $"C-{key}", AccountExternalId = key, LastName = e.Account!.Name })
@@ -37,8 +37,8 @@ internal static class LookupStrategies
         units => [SoqlQuery.RecordsOf<AccountSObject>(units), SoqlQuery.RecordsOf<LookupContactSObject>(units)]);
 
     /// <summary>A Contact alone, looking up an Account of another inbox: the read finds the Account's Id.</summary>
-    public static readonly UpsertStrategy<ContactEvent> Contact = new("lookupContact", e => e.Contact?.ExternalId, e => e.Meta,
-        (_, e) => new UpsertUnit([SObjectRecord.From("contact", new LookupContactSObject
+    public static readonly SyncStrategy<ContactEvent> Contact = new("lookupContact", e => e.Contact?.ExternalId, e => e.Meta,
+        (_, e) => new SyncUnit([SObjectRecord.From("contact", new LookupContactSObject
         {
             ExternalId = e.Contact!.ExternalId,
             AccountExternalId = e.Contact.AccountExternalId,
