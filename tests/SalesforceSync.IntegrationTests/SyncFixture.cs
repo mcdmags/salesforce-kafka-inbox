@@ -152,18 +152,17 @@ public class SyncFixture : IAsyncLifetime
         var instanceUrl = _org.Url.GetLeftPart(UriPartial.Authority);
         for (var i = 0; i < Pods; i++)
         {
-            var name = $"pod-{i}";
             var settings = new Dictionary<string, string?>(WorkerSettings)
             {
                 ["ConnectionStrings:inboxdb"] = inbox,
                 ["ConnectionStrings:kafka"] = kafka,
                 ["Salesforce:InstanceUrl"] = instanceUrl,
                 // Pods share a process here, so name them apart (the mock org counts requests per User-Agent)
-                ["Salesforce:UserAgentInstance"] = name,
+                ["Salesforce:UserAgentInstance"] = $"pod-{i}",
                 ["ConnectionStrings:redis"] = _redis?.GetConnectionString()
             };
             // Started one at a time: StartAsync returns once the schema is applied, so later pods find it in place
-            _pods.Add(await WorkerPod.StartAsync(name, settings, ct));
+            _pods.Add(await WorkerPod.StartAsync(settings, ct));
         }
 
         await OnStartedAsync();
