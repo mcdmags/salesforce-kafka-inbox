@@ -98,10 +98,8 @@ public sealed class SalesforceBatchUpsertService(
         Dictionary<string, UpsertResult> results;
         try
         {
-            results = batch.Work.Count == 0
-                ? []
-                : (await WriteToSalesforceAsync(batch.Units, [.. strategy.Queries([.. batch.Work.Select(w => w.Unit)])],
-                    TRow.MaxValuesPerQuery, TRow.MaxRecordsPerWrite, leaseCts.Token)).ToDictionary(r => r.Key);
+            results = (await WriteToSalesforceAsync(batch.Units, [.. strategy.Queries([.. batch.Work.Select(w => w.Unit)])],
+                TRow.MaxValuesPerQuery, TRow.MaxRecordsPerWrite, leaseCts.Token)).ToDictionary(r => r.Key);
         }
         catch (UnknownOutcomeException ex)
         {
