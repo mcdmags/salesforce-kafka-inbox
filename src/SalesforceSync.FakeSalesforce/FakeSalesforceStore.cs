@@ -338,6 +338,12 @@ public sealed partial class FakeSalesforceStore
         return lost ? throw new FakeResponseLostException() : results;
     }
 
+    /// <summary>The SOQL of a query call or subrequest (its <c>q</c> parameter).</summary>
+    internal static string QueryOf(Uri url)
+    {
+        return HttpUtility.ParseQueryString(url.Query)["q"] ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q");
+    }
+
     /// <summary>The object and external id field of an upsert's path (<c>.../composite/sobjects/{SObject}/{ExternalIdField}</c>), or null.</summary>
     public static (string SObject, string ExternalIdField)? UpsertTarget(string path)
     {
@@ -391,8 +397,7 @@ public sealed partial class FakeSalesforceStore
 
             if (method == "GET" && IsQuery(sub))
             {
-                return (200, Query(HttpUtility.ParseQueryString(url.Query)["q"]
-                                   ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q")));
+                return (200, Query(QueryOf(url)));
             }
 
             if (method == "PATCH" && UpsertTarget(url.AbsolutePath) is (var sobject, var externalIdField))
