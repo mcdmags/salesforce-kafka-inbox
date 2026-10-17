@@ -173,11 +173,6 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// <summary>{ "row id": [error, code] }, as InboxSql.Fail takes the errors.</summary>
     private static string ErrorsJson(IReadOnlyList<FailedEvent> rows)
     {
-        var errors = new Dictionary<string, string?[]>(StringComparer.Ordinal);
-        foreach (var row in rows)
-        {
-            errors[row.RowId.ToString(CultureInfo.InvariantCulture)] = [row.Error, row.Code];
-        }
-        return JsonSerializer.Serialize(errors);
+        return JsonSerializer.Serialize(rows.ToDictionary(r => r.RowId.ToString(CultureInfo.InvariantCulture), r => new[] { r.Error, r.Code }));
     }
 }
