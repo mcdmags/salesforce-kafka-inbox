@@ -227,7 +227,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         v1["meta"]!["time"] = "2026-01-01T02:00:00.0010007+02:00";
         var v2 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v2" }, []);
         v2["meta"]!["time"] = "2026-01-01T00:00:00.0010011Z";
-        var micros = (SyncFixture.BaseTime - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
+        var micros = SyncFixture.Micros(0);
 
         await app.PublishRawAsync(acct, v1.ToJsonString());
         await app.WaitForInboxSettledAsync(acct, version: 1);
@@ -316,7 +316,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         (await app.WaitForInboxSettledAsync(acct, version: 5)).Should().Be((5L, "done"), "the newest meta.time is the one that must be written");
 
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v5");
-        var written = (await app.GetHistoryAsync("Account", acct)).Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+        var written = await app.GetWrittenVersionsAsync(acct);
         written.Should().BeInAscendingOrder().And.OnlyHaveUniqueItems("an older event must never be written after a newer one");
         ((decimal?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Score__c"]).Should().Be(5m);
     }

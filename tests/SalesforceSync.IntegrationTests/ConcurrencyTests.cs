@@ -79,9 +79,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         var regressions = new List<string>();
         foreach (var id in ids)
         {
-            var accountVersions = (await app.GetHistoryAsync("Account", id))
-                .Where(w => w.ContainsKey("Description"))
-                .Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+            var accountVersions = await app.GetWrittenVersionsAsync(id);
             var profileVersions = (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(id)))
                 .Where(w => w.ContainsKey("Score__c"))
                 .Select(w => (long)w["Score__c"]!).ToList();
@@ -158,7 +156,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         {
             ((string?)(await app.GetRecordAsync("Account", id))!["Description"]).Should().Be($"v{versions}", "the newest meta.time wins");
             ((decimal?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(id)))!["Score__c"]).Should().Be(versions);
-            var written = (await app.GetHistoryAsync("Account", id)).Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+            var written = await app.GetWrittenVersionsAsync(id);
             written.Should().BeInAscendingOrder().And.OnlyHaveUniqueItems("{0} must never receive an older record after a newer one", id);
         }
     }
@@ -232,8 +230,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         {
             var account = await app.GetRecordAsync("Account", id);
             ((string?)account?["Description"]).Should().Be($"v{versions}");
-            var written = (await app.GetHistoryAsync("Account", id))
-                .Where(w => w.ContainsKey("Description")).Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+            var written = await app.GetWrittenVersionsAsync(id);
             written.Should().BeInAscendingOrder().And.OnlyHaveUniqueItems(
                 "{0} must never receive an older version after a newer one", id);
         }

@@ -30,7 +30,7 @@ public sealed class LeaseTests(SyncFixture app)
         // The pods poll every second or faster; none of them may touch the account while it is leased
         await Task.Delay(TimeSpan.FromSeconds(2.5));
         var during = (await app.GetInboxRowAsync(acct))!;
-        during.Should().Match<InboxRow>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0,
+        during.Should().Match<InboxRowState>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0,
             "v2 must wait while another worker holds its account");
         during.LockToken.Should().Be(token, "the account is still leased to the first worker");
         (await app.GetRecordAsync("Account", acct)).Should().BeNull("nobody has written the account yet");
@@ -64,7 +64,7 @@ public sealed class LeaseTests(SyncFixture app)
             var v2 = SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = "v2" }, []);
             await conn.StoreAsync(Sql.Table, acct, SyncFixture.TimeOf(v2), v2.ToJsonString());
         }
-        (await app.GetInboxRowAsync(acct)).Should().Match<InboxRow>(r => r.Id == row && r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0);
+        (await app.GetInboxRowAsync(acct)).Should().Match<InboxRowState>(r => r.Id == row && r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0);
         var failure = new FailedEvent(row, "failed", "SOME_CODE");
         await app.AccountInbox.RecordAsync(claim, outcome switch
         {
@@ -141,7 +141,7 @@ public sealed class LeaseTests(SyncFixture app)
         await app.AccountInbox.RecordAsync(claim, Synced(claimed[0]), CancellationToken.None);
         await app.AccountInbox.RecordAsync(claim, Synced(claimed[0]), CancellationToken.None);
 
-        (await app.GetInboxRowAsync(acct)).Should().Match<InboxRow>(r => r.Status == "done" && r.LockToken == null && r.NextAttemptAt == null,
+        (await app.GetInboxRowAsync(acct)).Should().Match<InboxRowState>(r => r.Status == "done" && r.LockToken == null && r.NextAttemptAt == null,
             "recorded again (after a commit whose outcome was unknown), it finds the lease already ended and nothing is left to do");
     }
 
