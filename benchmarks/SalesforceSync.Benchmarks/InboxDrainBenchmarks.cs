@@ -1,5 +1,3 @@
-using System.Globalization;
-using System.Text.Json.Nodes;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Engines;
@@ -18,18 +16,21 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// End-to-end: put N events (Account changes, and Account_Relationship__c changes between those accounts) into the
-/// real Postgres inbox and drain it with P "pods" x W parallel worker loops. A pod is wired exactly like the worker
+/// End-to-end: put N account aggregates (<see cref="AggregateWorkload"/>: Account changes, relationships and contacts
+/// added, changed, removed and re-added, a few whole accounts deleted), split by <see cref="AccountAggregate.TrySplit"/>
+/// into the per-entity events the consumer stores, into the real Postgres inboxes and drain them with P "pods" x W
+/// parallel worker loops. A pod is wired exactly like the worker
 /// (<see cref="SyncServiceCollectionExtensions"/>, rate limiter included) and its loops run the worker's own pass
 /// (<see cref="InboxWorkerService.SyncOnceAsync"/>) over every registered entity type. Only the Salesforce HTTP
 /// endpoint is fake. A pod is an independent service provider (own connection pool, rate limiter, HTTP client), like a separate
 /// process; all pods share the Postgres inbox and one Salesforce org.
 /// <para>
 /// Each iteration also verifies correctness. Nothing in the org rejects an out-of-order write, so a race would
-/// land: every account must end at its newest version, the org's write history must show each account's
-/// versions only moving forward, every relationship must end at its newest version linked to the right two
-/// Accounts, the claim audit (sql/claim-audit.sql) must show no two overlapping claims on the same entity, and
-/// every entity's one inbox row must hold its newest event and end done.
+/// land: every account, relationship and contact the aggregates end with must be in the org at its newest version
+/// (a relationship or contact naming the right Accounts), every one they removed or deleted must be absent, the
+/// org's write history must show each record's versions only moving forward, the claim audit
+/// (sql/claim-audit.sql) must show no two overlapping claims on the same entity, and every entity's one inbox row
+/// must hold its newest event and end done.
 /// </para>
 /// </summary>
 [Config(typeof(DrainConfig))]
@@ -56,6 +57,7 @@ public abstract class DrainBenchmarkBase
     /// <summary>Independent worker processes sharing the inbox (Kubernetes replicas).</summary>
     public abstract int Pods { get; set; }
 
+    /// <summary>Account aggregates (Kafka messages); each is split into one or more entity events.</summary>
     public abstract int Events { get; set; }
 
     /// <summary>
@@ -70,22 +72,23 @@ public abstract class DrainBenchmarkBase
     /// <summary>False: the whole inbox is loaded before draining. True: events keep arriving while pods drain.</summary>
     protected abstract bool StreamIngest { get; }
 
-    /// <summary>Share of events that change a relationship between two already-seen accounts (like the load generator).</summary>
-    private const double RelationshipShare = 0.15;
-
     private NpgsqlDataSource _db = default!;
     private IDbContextFactory<SyncDbContext> _contexts = default!;
     private FakeSalesforceStore _store = default!;
     private List<ServiceProvider> _pods = [];
+    private Dictionary<string, ISalesforceEntitySync> _syncs = [];
     private List<IngestRow> _events = [];
-    private Dictionary<(string Type, string Key), long> _expected = [];
-    private Dictionary<string, (string Account, string Related)> _relationships = [];
+    private AggregateWorkload _workload = default!;
+    private Dictionary<string, DateTimeOffset> _newest = [];
 
     // The tables as the EF model names them (only the model is read: nothing connects to this address)
-    private static readonly string AccountTable = FromModel(model => model.TableOf<AccountInboxRow>());
-    private static readonly string RelationshipTable = FromModel(model => model.TableOf<AccountRelationshipInboxRow>());
-    // Every inbox of the model, not only the two the events go to: AddInboxSync runs a worker per synced object, and
-    // each one claims from its own table (the others stay empty)
+    private static readonly Dictionary<string, string> InboxOf = FromModel(model => new Dictionary<string, string>
+    {
+        [AccountSync.Type] = model.TableOf<AccountInboxRow>(),
+        [AccountRelationshipSync.Type] = model.TableOf<AccountRelationshipInboxRow>(),
+        [ContactSync.Type] = model.TableOf<ContactInboxRow>()
+    });
+    // Every inbox of the model: AddInboxSync runs a worker per synced object, and each one claims from its own table
     private static readonly string[] InboxTables = FromModel(model => model.InboxTables.ToArray());
 
     private static T FromModel<T>(Func<SyncDbContext, T> read)
@@ -95,30 +98,10 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// An event as the consumer stores it: the inbox table of its type, the entity's id, the event's time (its meta.time)
-    /// and the raw payload.
+    /// An entity event as the consumer stores it: its entity type and that type's inbox table, the entity's id, the
+    /// event's time (the aggregate's meta.time) and the payload.
     /// </summary>
-    private sealed record IngestRow(string Table, string EntityId, DateTimeOffset EventTime, string Payload);
-
-    /// <summary>
-    /// meta of version N of an entity: time = base time + N ms, so per-entity time order = version order; the first
-    /// version is the entity's insert, the later ones updates.
-    /// </summary>
-    private static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
-
-    private static DateTimeOffset Time(long version)
-    {
-        return BaseTime.AddMilliseconds(version);
-    }
-
-    private static JsonObject Meta(long version)
-    {
-        return new()
-        {
-            ["time"] = Time(version).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
-            ["type"] = version == 1 ? "inserted" : "updated"
-        };
-    }
+    private sealed record IngestRow(string EntityType, string Table, string EntityId, DateTimeOffset EventTime, string Payload);
 
     [GlobalSetup]
     public void GlobalSetup()
@@ -141,6 +124,8 @@ public abstract class DrainBenchmarkBase
         });
 
         _pods = [.. Enumerable.Range(0, Pods).Select(_ => BuildPod())];
+        // What the consumer reads and stores an entity event with, by entity type
+        _syncs = _pods[0].GetServices<ISalesforceEntitySync>().ToDictionary(s => s.EntityType);
     }
 
     [GlobalCleanup]
@@ -175,18 +160,15 @@ public abstract class DrainBenchmarkBase
         await Task.WhenAll(loops.Append(ingest));
     }
 
-    /// <summary>Stores the events one at a time, in per-account version order, as fast as possible (like the Kafka consumer).</summary>
+    /// <summary>
+    /// Stores the entity events one at a time, aggregate after aggregate, as fast as possible, the way the Kafka
+    /// consumer does (<see cref="ISalesforceEntitySync.StoreEventAsync"/>).
+    /// </summary>
     private async Task IngestAsync(CancellationToken ct)
     {
-        await using var db = await _contexts.CreateDbContextAsync(ct);
         foreach (var e in _events)
         {
-            await db.Database.ExecuteAsync(InboxSql.For(e.Table).Store, ct, new
-            {
-                entityId = e.EntityId,
-                eventTime = e.EventTime,
-                payload = e.Payload
-            });
+            await _syncs[e.EntityType].StoreEventAsync(e.EntityId, e.EventTime, e.Payload, ct);
         }
     }
 
@@ -197,7 +179,7 @@ public abstract class DrainBenchmarkBase
         {
             ct.ThrowIfCancellationRequested();
 
-            // The worker's own pass: one batch of every registered entity type (accounts, relationships)
+            // The worker's own pass: one batch of every registered entity type (accounts, relationships, contacts)
             var processed = await InboxWorkerService.SyncOnceAsync(scopes, loop + iteration, ct);
 
             if (processed > 0)
@@ -282,7 +264,9 @@ public abstract class DrainBenchmarkBase
             WHERE name = 'salesforce'
             """, default);
 
-        (_events, _expected) = Generate();
+        (_workload, _events) = Generate(Events, Accounts, _syncs);
+        // Per entity, its newest event: what its one inbox row must end with
+        _newest = _events.GroupBy(e => e.EntityId).ToDictionary(g => g.Key, g => g.Max(e => e.EventTime), StringComparer.Ordinal);
         if (!StreamIngest)
         {
             await PreloadAsync((NpgsqlConnection)db.Database.GetDbConnection());
@@ -290,77 +274,34 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// Random account per event with occasional bursts, versions increasing per entity. About 15% of events change
-    /// a relationship between two accounts that already have an event (as in Kafka, the account event comes first,
-    /// but a worker may still claim the relationship before the account has synced).
+    /// The workload's aggregates turned into the entity events the consumer stores, in publish order: split by
+    /// <see cref="AccountAggregate.TrySplit"/> and read by their type's sync (entity id, time), exactly as it does. A
+    /// relationship or contact may be claimed before its Account is in the org (DEPENDENCY_NOT_SYNCED, retried).
     /// </summary>
-    private (List<IngestRow> Events, Dictionary<(string, string), long> Newest) Generate()
+    private static (AggregateWorkload Workload, List<IngestRow> Events) Generate(int aggregates, int accounts,
+        Dictionary<string, ISalesforceEntitySync> syncs)
     {
-        var random = new Random(42);
-        var versions = new Dictionary<(string, string), long>();
-        var seen = new List<string>();
-        var events = new List<IngestRow>(Events);
-        _relationships = new Dictionary<string, (string, string)>(StringComparer.Ordinal);
-
-        while (events.Count < Events)
+        var workload = AggregateWorkload.Generate(aggregates, accounts);
+        var events = new List<IngestRow>();
+        foreach (var aggregate in workload.Aggregates)
         {
-            if (seen.Count > 1 && random.NextDouble() < RelationshipShare)
+            if (!AccountAggregate.TrySplit(aggregate, out var split, out var problem))
             {
-                var a = seen[random.Next(seen.Count)];
-                var b = seen[random.Next(seen.Count)];
-                if (a == b)
-                {
-                    continue;
-                }
-
-                var relKey = $"REL-{a[4..]}-{b[4..]}";
-                _relationships[relKey] = (a, b);
-                var relVersion = versions[(AccountRelationshipSync.Type, relKey)] =
-                    versions.GetValueOrDefault((AccountRelationshipSync.Type, relKey)) + 1;
-                var relPayload = new JsonObject
-                {
-                    ["meta"] = Meta(relVersion),
-                    [AccountRelationshipSync.Type] = new JsonObject
-                    {
-                        ["externalId"] = relKey,
-                        ["accountExternalId"] = a,
-                        ["relatedAccountExternalId"] = b,
-                        ["name"] = $"v{relVersion}",
-                        ["type"] = "Partner",
-                        ["isActive"] = true
-                    }
-                };
-                events.Add(new IngestRow(RelationshipTable, relKey, Time(relVersion), relPayload.ToJsonString()));
-                continue;
+                throw new InvalidOperationException($"The workload made an invalid aggregate: {problem}");
             }
 
-            var key = $"ACC-{random.Next(Accounts):D6}";
-            var burst = random.NextDouble() < 0.1 ? random.Next(2, 6) : 1;
-
-            for (var i = 0; i < burst && events.Count < Events; i++)
+            foreach (var e in split)
             {
-                var version = versions[(AccountSync.Type, key)] = versions.GetValueOrDefault((AccountSync.Type, key)) + 1;
-                if (version == 1)
+                if (!syncs[e.EntityType].TryReadEvent(e.Json, out var entityId, out var time, out problem))
                 {
-                    seen.Add(key);
+                    throw new InvalidOperationException($"The split made an invalid {e.EntityType} event: {problem}");
                 }
-                // No profile.externalId: the Profile__c takes the account's
-                var payload = new JsonObject
-                {
-                    ["meta"] = Meta(version),
-                    [AccountSync.Type] = new JsonObject
-                    {
-                        ["externalId"] = key,
-                        ["name"] = $"Account {key}",
-                        ["description"] = $"v{version}",
-                        ["profile"] = new JsonObject { ["score"] = version }
-                    }
-                };
-                events.Add(new IngestRow(AccountTable, key, Time(version), payload.ToJsonString()));
+
+                events.Add(new IngestRow(e.EntityType, InboxOf[e.EntityType], entityId!, time, e.Json));
             }
         }
 
-        return (events, versions);
+        return (workload, events);
     }
 
     /// <summary>
@@ -402,38 +343,7 @@ public abstract class DrainBenchmarkBase
 
     private async Task VerifyAsync()
     {
-        var wrong = new List<string>();
-        var regressions = 0;
-        foreach (var ((type, acct), expected) in _expected)
-        {
-            if (type == AccountRelationshipSync.Type)
-            {
-                if (!VerifyRelationship(acct, expected, ref regressions, out var problem))
-                {
-                    wrong.Add(problem);
-                }
-
-                continue;
-            }
-
-            // Versions in the order the org received them: Description "vN" on the Account, Score__c = N on the Profile
-            var accountVersions = (_store.History("Account", acct) ?? [])
-                .Where(w => w.ContainsKey("Description"))
-                .Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
-            var profileVersions = (_store.History("Profile__c", acct) ?? [])
-                .Where(w => w.ContainsKey("Score__c"))
-                .Select(w => Number(w["Score__c"])).ToList();
-
-            if (!IsIncreasing(accountVersions) || !IsIncreasing(profileVersions))
-            {
-                regressions++;
-            }
-
-            if (accountVersions.LastOrDefault() != expected || profileVersions.LastOrDefault() != expected)
-            {
-                wrong.Add($"{acct}: expected v{expected}, account v{accountVersions.LastOrDefault()}, profile v{profileVersions.LastOrDefault()}");
-            }
-        }
+        var (wrong, regressions) = _workload.Check(_store);
 
         await using var db = await _contexts.CreateDbContextAsync();
         async Task<long> Count(string sql)
@@ -444,33 +354,37 @@ public abstract class DrainBenchmarkBase
         var inbox = string.Join(" UNION ALL ", InboxTables.Select(t => $"SELECT entity_id, event_time, status, attempt_count FROM {t}"));
         var rows = await Count($"SELECT count(*) FROM ({inbox}) i");
         var notDone = await Count($"SELECT count(*) FROM ({inbox}) i WHERE status <> 'done'");
-        // Every entity's row holds its newest event (the entity ids of the two types never collide: ACC- and REL-)
-        var newest = _expected.ToDictionary(e => e.Key.Key, e => Time(e.Value), StringComparer.Ordinal);
+        // Every entity's row holds its newest event (the entity ids of the types never collide: ACC-, REL- and CON-)
         var stale = (await db.Database.QueryAsync<StoredEvent>($"SELECT entity_id AS EntityId, event_time AS EventTime FROM ({inbox}) i", default))
-            .Count(r => newest.GetValueOrDefault(r.EntityId) != r.EventTime);
-        // An entity claim takes the entity's row once its newest events have overwritten it, so events per claim is the
-        // coalescing (claims also count retries and deferrals). Counting records written instead would mix in that an
-        // account event writes two records (Account, Profile).
+            .Count(r => _newest.GetValueOrDefault(r.EntityId) != r.EventTime);
+        // An entity claim takes the entity's row once its newest events have overwritten it, so entity events per claim
+        // is the coalescing (claims also count retries and deferrals). Counting records written instead would mix in
+        // that an account event writes two records (Account, Profile).
         var claims = await Count("SELECT count(*) FROM sf_claim_audit");
         var overlaps = await Count("SELECT count(*) FROM sf_claim_overlaps");
         // attempt_count counts the failures of the row's event, so retries = attempt_count (of the last event
         // only: a newer event starts again at 0). Mostly relationships claimed before their Accounts were in the org
         // (DEPENDENCY_NOT_SYNCED).
         var retries = await Count($"SELECT coalesce(sum(attempt_count), 0) FROM ({inbox}) i");
-        var relationshipEvents = _events.Count(e => e.Table == RelationshipTable);
+        var relationshipEvents = _events.Count(e => e.EntityType == AccountRelationshipSync.Type);
+        var contactEvents = _events.Count(e => e.EntityType == ContactSync.Type);
+        // A delete is the split's event with meta.type deleted (no payload field is named type with that value)
+        var deleteEvents = _events.Count(e => e.Payload.Contains("\"type\":\"deleted\"", StringComparison.Ordinal));
+        var deleted = _workload.Final.Values.Count(e => !e.Present);
 
         var stats = _store.GetStats();
         Console.WriteLine(
             $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms] " +
-            $"events={Events} relationshipEvents={relationshipEvents} {stats} entities={rows} " +
-            $"coalescing={(double)Events / Math.Max(1, claims):F2} events/entity claim " +
+            $"events={Events} entityEvents={_events.Count} relationshipEvents={relationshipEvents} contactEvents={contactEvents} " +
+            $"deleteEvents={deleteEvents} deletedEntities={deleted} {stats} entities={rows} " +
+            $"coalescing={(double)_events.Count / Math.Max(1, claims):F2} events/entity claim " +
             $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} stale={stale} " +
             $"wrong={wrong.Count} regressions={regressions}");
 
-        if (wrong.Count > 0 || rows != _expected.Count || stale > 0 || notDone > 0 || overlaps > 0 || regressions > 0)
+        if (wrong.Count > 0 || rows != _newest.Count || stale > 0 || notDone > 0 || overlaps > 0 || regressions > 0)
         {
             throw new InvalidOperationException(
-                $"Correctness check failed: {wrong.Count} entities not at newest version, {rows} inbox rows for {_expected.Count} " +
+                $"Correctness check failed: {wrong.Count} entities not at newest version or not deleted, {rows} inbox rows for {_newest.Count} " +
                 $"entities, {stale} not at the newest event, {notDone} not done, {overlaps} overlapping claims, {regressions} " +
                 "entities received an older version after a newer one. " + string.Join("; ", wrong.Take(5)));
         }
@@ -478,45 +392,6 @@ public abstract class DrainBenchmarkBase
 
     /// <summary>An inbox row's entity and event time, as the verification reads them.</summary>
     private sealed record StoredEvent(string EntityId, DateTimeOffset EventTime);
-
-    private const string RelationshipObject = "Account_Relationship__c";
-
-    /// <summary>Newest version (Name "vN"), only moving forward, and linked to the right two Accounts.</summary>
-    private bool VerifyRelationship(string key, long expected, ref int regressions, out string problem)
-    {
-        problem = "";
-        var versions = (_store.History(RelationshipObject, key) ?? [])
-            .Where(w => w.ContainsKey("Name"))
-            .Select(w => long.Parse(((string)w["Name"]!)[1..])).ToList();
-        if (!IsIncreasing(versions))
-        {
-            regressions++;
-        }
-
-        var (account, related) = _relationships[key];
-        // Linked by the Accounts' external ids (Text foreign keys), both of which exist
-        var record = _store.FindByExternalId(RelationshipObject, key);
-        if (versions.LastOrDefault() == expected && record is not null &&
-            _store.FindByExternalId("Account", account) is not null && _store.FindByExternalId("Account", related) is not null &&
-            (string?)record["AccountId__c"] == account && (string?)record["RelatedAccountId__c"] == related)
-        {
-            return true;
-        }
-
-        problem = $"{key}: expected v{expected} linking {account}->{related}, got v{versions.LastOrDefault()} " +
-                  $"linking {record?["AccountId__c"]}->{record?["RelatedAccountId__c"]}";
-        return false;
-    }
-
-    private static bool IsIncreasing(List<long> versions)
-    {
-        return versions.Zip(versions.Skip(1)).All(p => p.First < p.Second);
-    }
-
-    private static long Number(JsonNode? node)
-    {
-        return (long)decimal.Parse(node!.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
-    }
 }
 
 /// <summary>Whole inbox loaded up front, then drained.</summary>
@@ -541,10 +416,10 @@ public class InboxDrainBenchmarks : DrainBenchmarkBase
 }
 
 /// <summary>
-/// Events keep arriving (in per-account version order, like Kafka, through InboxSql.Store) while the pods drain, so
-/// the same account is claimed, released and claimed again many times by different workers in different pods, and its
-/// row is overwritten while a worker writes the event it claimed: the races the lease and the outcomes' check of the
-/// claimed event time must handle.
+/// Aggregates keep arriving (in publish order, like Kafka, each split and stored the way the consumer does) while the
+/// pods drain, so the same entity is claimed, released and claimed again many times by different workers in different
+/// pods, and its row is overwritten while a worker writes the event it claimed, a delete over an upsert and an upsert
+/// over a delete included: the races the lease and the outcomes' check of the claimed event time must handle.
 /// </summary>
 public class StreamingIngestBenchmarks : DrainBenchmarkBase
 {

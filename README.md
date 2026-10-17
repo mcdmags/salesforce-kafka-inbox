@@ -1523,7 +1523,10 @@ opt-in refusal, a delete as a Composite subrequest; upsert records sharing an ex
 update without an `id`, an upsert with `allOrNone` true writing nothing; reference ids of other than letters,
 digits and underscores, and a Composite `allOrNone` true, refused; query pages of 2,000 followed by the client
 through `nextRecordsUrl`; a call without the current token answered 401 `INVALID_SESSION_ID`, and the client
-getting a new token after the session expired.
+getting a new token after the session expired. The benchmarks' workload (`AggregateWorkloadTests`, the file
+compiled in from `benchmarks/`): its expected end state is what its split aggregates lead to, it removes, re-adds
+and deletes, and its check passes an org that got every event in order and catches a stale record and a missed
+delete.
 
 ### Concurrency: many threads, many pods, same accounts
 
@@ -1579,20 +1582,32 @@ payload → sObjects → records; `MapPayloadToSObject` and `MapSObjectToRecord`
 diff.
 
 Both drain benchmarks run P **pods** (independent service providers: own connection pool, rate limiter and
-HTTP client, like separate processes) x W worker loops against one Postgres inbox and one org. Each iteration
-**fails** if any account doesn't end at its newest version, any record's write history shows an older version
-after a newer one, any entity's inbox row doesn't hold its newest event or isn't `done`, or the
-claim audit shows two overlapping claims on the same entity. Each iteration prints a `//` line with the mock org's
-counters (`api`, `writeRequests`, `recordsOk`, ...), `entities` (inbox rows), the coalescing
-(events per entity claim), claims, retries, overlaps, stale rows and regressions.
+HTTP client, like separate processes) x W worker loops against one Postgres inbox and one org. The input is what
+the upstream publishes: `Events` **account aggregates** (`AggregateWorkload`, before and after) over `Accounts`
+accounts, each split by `AccountAggregate.TrySplit` into the entity events the consumer stores. Every aggregate
+changes its Account and Profile; some also add, change or remove one of the account's relationships or contacts (a
+removed one may come back later, as a new record), and a tenth of the accounts may be deleted with all their
+children, so the drain syncs upserts and deletes of all three objects. Each iteration **fails** if any entity the
+aggregates end with isn't in the org at its newest version (a relationship or contact naming the right Accounts),
+any removed or deleted one is still there, any record's write history shows an older version after a newer one, any
+entity's inbox row doesn't hold its newest event or isn't `done`, or the claim audit shows two overlapping claims
+on the same entity. Each iteration prints a `//` line with the mock org's counters (`api`, `writeRequests`,
+`recordsOk`, ..., `deletes=N (requests=M)`), the entity events (`entityEvents`, `relationshipEvents`,
+`contactEvents`, `deleteEvents`, `deletedEntities`), `entities` (inbox rows), the coalescing (entity events per
+entity claim), claims, retries, overlaps, stale rows and regressions.
 
-- `InboxDrainBenchmarks`: the events are loaded as storing them in order would leave the inbox (each entity's newest,
-  through a temporary table), then drained. Params: `Pods` (1/3), `Workers` (1/4/8),
-  `Accounts` (100/1000), `LatencyMs` (0/25), `Events` (5000).
-- `StreamingIngestBenchmarks`: events keep arriving (`InboxSql.Store`) while the pods drain (batches of 10
-  accounts), so the same account is claimed, released and re-claimed by different workers in different pods, and its
-  row is overwritten while a worker writes the event it claimed. Params: `Pods`
-  (1/3), `Workers` (4/8), 50 accounts, 5000 events, 5 ms latency.
+- `InboxDrainBenchmarks`: the entity events are loaded as storing them in order would leave the inboxes (each
+  entity's newest, through a temporary table), then drained. Params: `Pods` (1/3), `Workers` (1/4/8),
+  `Accounts` (100/1000), `LatencyMs` (0/25), `Events` (5000 aggregates).
+- `StreamingIngestBenchmarks`: aggregates keep arriving, split and stored the way the consumer does
+  (`ISalesforceEntitySync.StoreEventAsync`), while the pods drain (batches of 10 entities), so the same entity is
+  claimed, released and re-claimed by different workers in different pods, and its row is overwritten while a worker
+  writes the event it claimed, a delete over an upsert or the other way round. Params: `Pods`
+  (1/3), `Workers` (4/8), 50 accounts, 5000 aggregates, 5 ms latency.
+
+The workload's expected end state and the check are unit-tested (`AggregateWorkloadTests`) without running the
+benchmarks. Results on this workload are pending; [docs/benchmarks/README.md](docs/benchmarks/README.md#the-drain-workload)
+has the workload's counts and the results of the earlier one.
 
 ```bash
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*StreamingIngest*'
