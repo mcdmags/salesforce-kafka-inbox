@@ -100,7 +100,7 @@ public sealed class SalesforceSchemaCacheTests
         return pod.GetAsync("Account", Refresh, (since, _) =>
         {
             _describes.Add(since);
-            return Task.FromResult(new DescribeResult(_answer));
+            return Task.FromResult(_answer);
         }, CancellationToken.None);
     }
 

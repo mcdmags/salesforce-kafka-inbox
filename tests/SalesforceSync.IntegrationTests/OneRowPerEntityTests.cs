@@ -33,7 +33,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var inbox = Inbox();
         var entity = SyncFixture.NewAccountId();
         await StoreAsync(inbox, entity, 1);
-        await ExecuteAsync(db, $"update {Table} set status = @status, attempt_count = 3, last_error = 'failed', last_error_code = 'SOME_CODE'",
+        await ExecuteAsync(db, $"UPDATE {Table} SET status = @status, attempt_count = 3, last_error = 'failed', last_error_code = 'SOME_CODE'",
             new { status });
         var before = await RowAsync(db, entity);
 
@@ -52,7 +52,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var inbox = Inbox();
         var entity = SyncFixture.NewAccountId();
         await StoreAsync(inbox, entity, 2);
-        await ExecuteAsync(db, $"update {Table} set status = 'done'");
+        await ExecuteAsync(db, $"UPDATE {Table} SET status = 'done'");
         var before = await RowAsync(db, entity);
 
         await StoreAsync(inbox, entity, 1);
@@ -86,7 +86,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var inbox = Inbox();
         var entity = SyncFixture.NewAccountId();
         await StoreAsync(inbox, entity, 1);
-        await ExecuteAsync(db, $"update {Table} set status = @status, attempt_count = 3, last_error = 'failed', next_attempt_at = null", new { status });
+        await ExecuteAsync(db, $"UPDATE {Table} SET status = @status, attempt_count = 3, last_error = 'failed', next_attempt_at = NULL", new { status });
 
         await StoreAsync(inbox, entity, 1);
 
@@ -175,7 +175,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
             await SyncSchema.MigrateAsync(_contexts);
             _db = db;
         }
-        await ExecuteAsync(_db, $"truncate {Table}");
+        await ExecuteAsync(_db, $"TRUNCATE {Table}");
         return _db;
     }
 
@@ -189,7 +189,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     {
         await using var conn = await db.OpenConnectionAsync();
         var row = await conn.QuerySingleAsync<StoredRow>(
-            $"select id, payload::text, status, attempt_count, last_error, last_error_code, event_time, last_updated from {Table} where entity_id = @entity",
+            $"SELECT id, payload::text, status, attempt_count, last_error, last_error_code, event_time, last_updated FROM {Table} WHERE entity_id = @entity",
             new { entity });
         var version = (long)(SyncFixture.TimeOf(JsonNode.Parse(row.Payload)!.AsObject()) - SyncFixture.BaseTime).TotalMilliseconds;
         return new Row(row.Id, version, row.Status, row.AttemptCount, row.Error, row.ErrorCode, row.EventTime, row.LastUpdated);
@@ -199,7 +199,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     {
         await using var conn = await db.OpenConnectionAsync();
         return await conn.QuerySingleAsync<(DateTime?, Guid?)>(
-            $"select next_attempt_at, lock_token from {Table} where entity_id = @entity", new { entity });
+            $"SELECT next_attempt_at, lock_token FROM {Table} WHERE entity_id = @entity", new { entity });
     }
 
     private static async Task ExecuteAsync(NpgsqlDataSource db, string sql, object? args = null)

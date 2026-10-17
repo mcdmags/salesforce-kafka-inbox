@@ -14,7 +14,7 @@ public sealed class InboxWorkerService(
 {
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var loops = Enumerable.Range(0, Math.Max(1, options.Value.Workers))
+        var loops = Enumerable.Range(0, options.Value.Workers)
             .Select(i => RunLoopAsync(i, stoppingToken));
         return Task.WhenAll(loops);
     }

@@ -43,7 +43,7 @@ public sealed class SchemaTests(SyncFixture app)
         await using var conn = await app.Db.OpenConnectionAsync();
 
         var indexes = (await conn.QueryAsync<(string Name, string Definition)>(
-                "select indexname::text, indexdef from pg_indexes where schemaname = current_schema()"))
+                "SELECT indexname::text, indexdef FROM pg_indexes WHERE schemaname = current_schema()"))
             .ToDictionary(i => i.Name, i => i.Definition);
         foreach (var table in InboxTables)
         {
@@ -53,7 +53,7 @@ public sealed class SchemaTests(SyncFixture app)
 
         foreach (var table in InboxTables)
         {
-            (await conn.QuerySingleAsync<string>("select array_to_string(reloptions, ', ') from pg_class where oid = @table::regclass", new { table }))
+            (await conn.QuerySingleAsync<string>("SELECT array_to_string(reloptions, ', ') FROM pg_class WHERE oid = @table::regclass", new { table }))
                 .Should().Be("autovacuum_vacuum_scale_factor=0.02, autovacuum_vacuum_threshold=1000", table);
         }
     }
@@ -65,7 +65,7 @@ public sealed class SchemaTests(SyncFixture app)
         async Task<List<string>> Columns(string table)
         {
             return [.. await conn.QueryAsync<string>(
-            "select column_name::text || ' ' || data_type from information_schema.columns where table_schema = current_schema() and table_name = @table order by ordinal_position",
+            "SELECT column_name::text || ' ' || data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = @table ORDER BY ordinal_position",
             new { table })];
         }
 
@@ -75,7 +75,7 @@ public sealed class SchemaTests(SyncFixture app)
             "event_time", "next_attempt_at", "lock_token");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await Columns(SyncFixture.InboxTable(SyncFixture.Contacts))).Should().Equal(account);
-        (await conn.ExecuteScalarAsync<long>("select count(*) from pg_proc where proname like 'sf\\_event\\_%'"))
+        (await conn.ExecuteScalarAsync<long>("SELECT count(*) FROM pg_proc WHERE proname LIKE 'sf\\_event\\_%'"))
             .Should().Be(0, "no SQL function reads inside an event");
     }
 
@@ -96,7 +96,7 @@ public sealed class SchemaTests(SyncFixture app)
             mappedByTable[table] = mapped;
 
             var actual = await conn.QueryAsync<(string Name, string Type, string Nullable)>(
-                "select column_name::text, data_type::text, is_nullable::text from information_schema.columns where table_schema = current_schema() and table_name = @table",
+                "SELECT column_name::text, data_type::text, is_nullable::text FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = @table",
                 new { table });
             actual.Should().NotBeEmpty($"{table} is created by the migrations");
             mapped.Select(c => c.Name).Should().BeEquivalentTo(actual.Select(c => c.Name),
@@ -125,8 +125,8 @@ public sealed class SchemaTests(SyncFixture app)
         await MigrateToAsync(contexts, typeof(InitialSchema));
         await using var conn = await db.OpenConnectionAsync();
         var payload = SyncFixture.AccountEvent("ACC-1", 1, [], []).ToJsonString();
-        await conn.ExecuteAsync($"insert into {SyncFixture.InboxTable()} (entity_id, payload) values ('ACC-1', @payload::jsonb)", new { payload });
-        await conn.ExecuteAsync("""drop table "__EFMigrationsHistory" """);
+        await conn.ExecuteAsync($"INSERT INTO {SyncFixture.InboxTable()} (entity_id, payload) VALUES ('ACC-1', @payload::jsonb)", new { payload });
+        await conn.ExecuteAsync("""DROP TABLE "__EFMigrationsHistory" """);
         var before = await TablesAndIndexesAsync(conn);
 
         // Running InitialSchema again would fail on the tables that exist; the later migrations apply as usual
@@ -143,9 +143,9 @@ public sealed class SchemaTests(SyncFixture app)
             .. before.Except(state).Select(r => r.Replace("_pending", "_entity_id", StringComparison.Ordinal)),
             .. InboxTables.Select(t => $"{t}_ready"), "__EFMigrationsHistory", "PK___EFMigrationsHistory"
         ]);
-        (await conn.QuerySingleAsync<long>($"select (extract(epoch from event_time) * 1000000)::bigint from {SyncFixture.InboxTable()}"))
+        (await conn.QuerySingleAsync<long>($"SELECT (extract(epoch FROM event_time) * 1000000)::bigint FROM {SyncFixture.InboxTable()}"))
             .Should().Be(SyncFixture.Micros(1), "the row is kept, and InboxEventTime filled its event_time");
-        await conn.ExecuteAsync($"drop schema {schema} cascade");
+        await conn.ExecuteAsync($"DROP SCHEMA {schema} CASCADE");
     }
 
     [Fact]
@@ -172,7 +172,7 @@ public sealed class SchemaTests(SyncFixture app)
         foreach (var payload in times.Select(t => $$"""{ "meta": { "time": "{{t}}" } }""").Concat(unreadable))
         {
             // An entity each: InboxOneRowPerRecord, applied after, would keep one row per entity
-            await conn.ExecuteAsync($"insert into {table} (entity_id, payload) values (@id, @payload::jsonb)", new { id = $"ACC-{++entity}", payload });
+            await conn.ExecuteAsync($"INSERT INTO {table} (entity_id, payload) VALUES (@id, @payload::jsonb)", new { id = $"ACC-{++entity}", payload });
         }
 
         // Up to InboxEventTime only: a later migration drops received_at, which the fill uses for unreadable rows
@@ -180,16 +180,16 @@ public sealed class SchemaTests(SyncFixture app)
 
         // Null: the row got its received_at
         var stored = await conn.QueryAsync<long?>(
-            $"select case when event_time <> received_at then (extract(epoch from event_time) * 1000000)::bigint end from {table} order by id");
+            $"SELECT CASE WHEN event_time <> received_at THEN (extract(epoch FROM event_time) * 1000000)::bigint END FROM {table} ORDER BY id");
         // The time as .NET reads it, cut to the microsecond as the consumer stores it (for .1234567 a
         // plain ::timestamptz would round up to .123457). An event the engine can't read is dead-lettered when claimed.
         var expected = times.Select(t => (long?)((DateTimeOffset.Parse(t, CultureInfo.InvariantCulture) - DateTimeOffset.UnixEpoch).Ticks / 10));
         stored.Should().Equal([.. expected, .. unreadable.Select(_ => (long?)null)]);
         (await conn.QuerySingleAsync<string>(
-                "select is_nullable::text from information_schema.columns where table_schema = current_schema() and table_name = @table and column_name = 'event_time'",
+                "SELECT is_nullable::text FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = @table AND column_name = 'event_time'",
                 new { table }))
             .Should().Be("NO");
-        await conn.ExecuteAsync($"drop schema {schema} cascade");
+        await conn.ExecuteAsync($"DROP SCHEMA {schema} CASCADE");
     }
 
     [Fact]
@@ -214,7 +214,7 @@ public sealed class SchemaTests(SyncFixture app)
             foreach (var (entity, version, status) in stored)
             {
                 var e = SyncFixture.AccountEvent(entity, version, [], []);
-                await conn.ExecuteAsync($"insert into {table} (entity_id, payload, event_time, status) values (@entity, @payload::jsonb, @time, @status)",
+                await conn.ExecuteAsync($"INSERT INTO {table} (entity_id, payload, event_time, status) VALUES (@entity, @payload::jsonb, @time, @status)",
                     new { entity, payload = e.ToJsonString(), time = SyncFixture.TimeOf(e).UtcDateTime, status });
             }
         }
@@ -224,15 +224,15 @@ public sealed class SchemaTests(SyncFixture app)
         foreach (var table in InboxTables)
         {
             var kept = await conn.QueryAsync<(string Entity, long Time, string Status)>(
-                $"select entity_id, (extract(epoch from event_time) * 1000000)::bigint, status from {table} order by entity_id");
+                $"SELECT entity_id, (extract(epoch FROM event_time) * 1000000)::bigint, status FROM {table} ORDER BY entity_id");
             kept.Should().Equal([
                     ("ACC-1", SyncFixture.Micros(3), "pending"), ("ACC-2", SyncFixture.Micros(5), "superseded"),
                     ("ACC-3", SyncFixture.Micros(2), "dead"), ("ACC-4", SyncFixture.Micros(7), "pending")],
                 "{0} keeps each entity's newest event (of two as new, the one stored last), with its status", table);
-            var duplicate = () => conn.ExecuteAsync($"insert into {table} (entity_id, payload, event_time) values ('ACC-4', '{{}}', now())");
+            var duplicate = () => conn.ExecuteAsync($"INSERT INTO {table} (entity_id, payload, event_time) VALUES ('ACC-4', '{{}}', now())");
             (await duplicate.Should().ThrowAsync<PostgresException>()).Which.SqlState.Should().Be(PostgresErrorCodes.UniqueViolation);
         }
-        await conn.ExecuteAsync($"drop schema {schema} cascade");
+        await conn.ExecuteAsync($"DROP SCHEMA {schema} CASCADE");
     }
 
     [Fact]
@@ -257,16 +257,16 @@ public sealed class SchemaTests(SyncFixture app)
             foreach (var (entity, status) in new[] { ("ACC-1", "pending"), ("ACC-2", "done"), ("ACC-3", "pending"), ("ACC-4", "pending"), ("ACC-5", "dead") })
             {
                 var e = SyncFixture.AccountEvent(entity, 1, [], []);
-                await conn.ExecuteAsync($"insert into {table} (entity_id, payload, event_time, status) values (@entity, @payload::jsonb, @time, @status)",
+                await conn.ExecuteAsync($"INSERT INTO {table} (entity_id, payload, event_time, status) VALUES (@entity, @payload::jsonb, @time, @status)",
                     new { entity, payload = e.ToJsonString(), time = SyncFixture.TimeOf(e).UtcDateTime, status });
             }
             await conn.ExecuteAsync("""
-                insert into sf_sync_state (entity_type, entity_id, next_attempt_at, locked_until, lock_token, synced_time) values
-                  (@type, 'ACC-1', @at + make_interval(secs => @n), null, null, @n + 100),
-                  (@type, 'ACC-2', null, null, null, @n + 200),
-                  (@type, 'ACC-3', @at, @at + make_interval(secs => @n + 300), @lease, null),
-                  (@type, 'ACC-5', @at, null, null, null),
-                  (@type, 'ACC-9', @at, null, null, @n + 900)
+                INSERT INTO sf_sync_state (entity_type, entity_id, next_attempt_at, locked_until, lock_token, synced_time) VALUES
+                  (@type, 'ACC-1', @at + make_interval(secs => @n), NULL, NULL, @n + 100),
+                  (@type, 'ACC-2', NULL, NULL, NULL, @n + 200),
+                  (@type, 'ACC-3', @at, @at + make_interval(secs => @n + 300), @lease, NULL),
+                  (@type, 'ACC-5', @at, NULL, NULL, NULL),
+                  (@type, 'ACC-9', @at, NULL, NULL, @n + 900)
                 """, new { type, at, n, lease });
         }
 
@@ -276,7 +276,7 @@ public sealed class SchemaTests(SyncFixture app)
         {
             var table = inboxes[n].Table;
             var rows = await conn.QueryAsync<(string Entity, DateTime? Next, DateTime? LockedUntil, Guid? Token, long? Synced)>(
-                $"select entity_id, next_attempt_at, locked_until, lock_token, synced_time from {table} order by entity_id");
+                $"SELECT entity_id, next_attempt_at, locked_until, lock_token, synced_time FROM {table} ORDER BY entity_id");
             rows.Select(r => r.Entity).Should().Equal(["ACC-1", "ACC-2", "ACC-3", "ACC-4", "ACC-5"], "{0}: no row is added (ACC-9's state is dropped) or lost", table);
             rows[0].Should().Be(("ACC-1", at.AddSeconds(n), null, null, n + 100), "{0}: due and synced as it was", table);
             rows[1].Should().Be(("ACC-2", null, null, null, n + 200), "{0}: idle, the watermark kept", table);
@@ -289,13 +289,13 @@ public sealed class SchemaTests(SyncFixture app)
         // Down: sf_sync_state again, a state row per inbox row, and the inbox columns gone
         await MigrateToAsync(contexts, typeof(InboxOneRowPerRecord));
         (await conn.QueryAsync<(string Type, string Entity, long? Synced)>(
-                "select entity_type, entity_id, synced_time from sf_sync_state where entity_id in ('ACC-1', 'ACC-2')"))
+                "SELECT entity_type, entity_id, synced_time FROM sf_sync_state WHERE entity_id IN ('ACC-1', 'ACC-2')"))
             .Should().BeEquivalentTo(inboxes.SelectMany((inbox, n) => new[] { (inbox.Type, "ACC-1", n + 100), (inbox.Type, "ACC-2", (long?)(n + 200)) }));
-        (await conn.ExecuteScalarAsync<long>("select count(*) from sf_sync_state")).Should().Be(5 * inboxes.Length);
+        (await conn.ExecuteScalarAsync<long>("SELECT count(*) FROM sf_sync_state")).Should().Be(5 * inboxes.Length);
         (await conn.ExecuteScalarAsync<long>(
-                "select count(*) from information_schema.columns where table_schema = current_schema() and column_name = 'synced_time'"))
+                "SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND column_name = 'synced_time'"))
             .Should().Be(1, "only sf_sync_state has the state again");
-        await conn.ExecuteAsync($"drop schema {schema} cascade");
+        await conn.ExecuteAsync($"DROP SCHEMA {schema} CASCADE");
     }
 
     [Fact]
@@ -313,20 +313,20 @@ public sealed class SchemaTests(SyncFixture app)
         foreach (var table in InboxTables)
         {
             await conn.ExecuteAsync($$"""
-                insert into {{table}} (entity_id, payload, event_time, next_attempt_at, locked_until, lock_token, status) values
+                INSERT INTO {{table}} (entity_id, payload, event_time, next_attempt_at, locked_until, lock_token, status) VALUES
                   ('ACC-1', '{}', @at, @at, now() + interval '1 hour', gen_random_uuid(), 'pending'),
                   ('ACC-2', '{}', @at, @at, @at + interval '1 second', gen_random_uuid(), 'pending'),
-                  ('ACC-3', '{}', @at, @at, null, null, 'pending'),
-                  ('ACC-4', '{}', @at, null, null, null, 'done')
+                  ('ACC-3', '{}', @at, @at, NULL, NULL, 'pending'),
+                  ('ACC-4', '{}', @at, NULL, NULL, NULL, 'done')
                 """, new { at });
-            leaseEnds[table] = await conn.QuerySingleAsync<DateTime>($"select locked_until from {table} where entity_id = 'ACC-1'");
+            leaseEnds[table] = await conn.QuerySingleAsync<DateTime>($"SELECT locked_until FROM {table} WHERE entity_id = 'ACC-1'");
         }
 
         await MigrateToAsync(contexts, typeof(LeaseInNextAttemptAt));
 
         foreach (var table in InboxTables)
         {
-            (await conn.QueryAsync<(string Entity, DateTime? Next)>($"select entity_id, next_attempt_at from {table} order by entity_id"))
+            (await conn.QueryAsync<(string Entity, DateTime? Next)>($"SELECT entity_id, next_attempt_at FROM {table} ORDER BY entity_id"))
                 .Should().Equal([("ACC-1", leaseEnds[table]), ("ACC-2", at), ("ACC-3", at), ("ACC-4", null)],
                     "{0}: a live lease ends at next_attempt_at, every other row keeps its due time", table);
             var claimed = await conn.QueryAsync<InboxEvent>(InboxSql.For(table).Claim,
@@ -340,10 +340,10 @@ public sealed class SchemaTests(SyncFixture app)
         foreach (var table in InboxTables)
         {
             var rows = await conn.QueryAsync<(string Entity, bool? Due, bool? Leased)>(
-                $"select entity_id, next_attempt_at <= now(), locked_until > now() from {table} order by entity_id");
+                $"SELECT entity_id, next_attempt_at <= now(), locked_until > now() FROM {table} ORDER BY entity_id");
             rows.Should().Equal([("ACC-1", true, true), ("ACC-2", true, true), ("ACC-3", true, true), ("ACC-4", null, null)], table);
         }
-        await conn.ExecuteAsync($"drop schema {schema} cascade");
+        await conn.ExecuteAsync($"DROP SCHEMA {schema} CASCADE");
     }
 
     [Fact]
@@ -360,13 +360,13 @@ public sealed class SchemaTests(SyncFixture app)
         foreach (var table in InboxTables)
         {
             await conn.ExecuteAsync($$"""
-                insert into {{table}} (entity_id, payload, event_time, status, next_attempt_at, lock_token, last_error_code, synced_time) values
-                  ('ACC-1', '{}', @time, 'pending', now(), null, null, @v2),
-                  ('ACC-2', '{}', @time, 'pending', now() + interval '1 hour', gen_random_uuid(), null, @v2),
-                  ('ACC-3', '{}', @time, 'pending', now(), null, 'SOME_CODE', @v1),
-                  ('ACC-4', '{}', @time, 'superseded', null, null, null, @v2),
-                  ('ACC-5', '{}', @time, 'dead', null, null, 'SOME_CODE', @v2),
-                  ('ACC-6', '{}', @time, 'done', null, null, null, @v2)
+                INSERT INTO {{table}} (entity_id, payload, event_time, status, next_attempt_at, lock_token, last_error_code, synced_time) VALUES
+                  ('ACC-1', '{}', @time, 'pending', now(), NULL, NULL, @v2),
+                  ('ACC-2', '{}', @time, 'pending', now() + interval '1 hour', gen_random_uuid(), NULL, @v2),
+                  ('ACC-3', '{}', @time, 'pending', now(), NULL, 'SOME_CODE', @v1),
+                  ('ACC-4', '{}', @time, 'superseded', NULL, NULL, NULL, @v2),
+                  ('ACC-5', '{}', @time, 'dead', NULL, NULL, 'SOME_CODE', @v2),
+                  ('ACC-6', '{}', @time, 'done', NULL, NULL, NULL, @v2)
                 """, new { time = SyncFixture.BaseTime.AddMilliseconds(2).UtcDateTime, v1 = SyncFixture.Micros(1), v2 = SyncFixture.Micros(2) });
         }
 
@@ -375,7 +375,7 @@ public sealed class SchemaTests(SyncFixture app)
         foreach (var table in InboxTables)
         {
             (await conn.QueryAsync<(string Entity, string Status, bool Idle, string? Code)>(
-                    $"select entity_id, status, next_attempt_at is null and lock_token is null, last_error_code from {table} order by entity_id"))
+                    $"SELECT entity_id, status, next_attempt_at IS NULL AND lock_token IS NULL, last_error_code FROM {table} ORDER BY entity_id"))
                 .Should().Equal([
                         ("ACC-1", "done", true, null), ("ACC-2", "done", true, null), ("ACC-3", "pending", false, "SOME_CODE"),
                         ("ACC-4", "done", true, null), ("ACC-5", "dead", true, "SOME_CODE"), ("ACC-6", "done", true, null)],
@@ -386,21 +386,21 @@ public sealed class SchemaTests(SyncFixture app)
         await MigrateToAsync(contexts, typeof(LeaseInNextAttemptAt));
         foreach (var table in InboxTables)
         {
-            (await conn.QueryAsync<(string Entity, long? Synced)>($"select entity_id, synced_time from {table} order by entity_id"))
+            (await conn.QueryAsync<(string Entity, long? Synced)>($"SELECT entity_id, synced_time FROM {table} ORDER BY entity_id"))
                 .Should().Equal([
                         ("ACC-1", SyncFixture.Micros(2)), ("ACC-2", SyncFixture.Micros(2)), ("ACC-3", null), ("ACC-4", SyncFixture.Micros(2)),
                         ("ACC-5", null), ("ACC-6", SyncFixture.Micros(2))], table);
         }
-        await conn.ExecuteAsync($"drop schema {schema} cascade");
+        await conn.ExecuteAsync($"DROP SCHEMA {schema} CASCADE");
     }
 
     [Theory]
-    [InlineData("create table sf_inbox (id bigserial primary key, payload jsonb not null)")]
-    [InlineData("create table sf_sync_state (entity_type text, entity_key text, synced_version bigint, primary key (entity_type, entity_key))")]
+    [InlineData("CREATE TABLE sf_inbox (id bigserial PRIMARY KEY, payload jsonb NOT NULL)")]
+    [InlineData("CREATE TABLE sf_sync_state (entity_type text, entity_key text, synced_version bigint, PRIMARY KEY (entity_type, entity_key))")]
     [InlineData("""
-        create table sf_account_inbox (id bigserial primary key, entity_id text not null, payload jsonb not null, retry_count int not null,
+        CREATE TABLE sf_account_inbox (id bigserial PRIMARY KEY, entity_id text NOT NULL, payload jsonb NOT NULL, retry_count int NOT NULL,
           next_attempt_at timestamptz, locked_until timestamptz, lock_token uuid, synced_time bigint);
-        create table sf_sync_state (entity_type text, entity_id text, synced_time bigint, primary key (entity_type, entity_id))
+        CREATE TABLE sf_sync_state (entity_type text, entity_id text, synced_time bigint, PRIMARY KEY (entity_type, entity_id))
         """)]
     public async Task A_database_with_tables_older_than_that_stops_startup_untouched(string olderTables)
     {
@@ -414,7 +414,7 @@ public sealed class SchemaTests(SyncFixture app)
 
         await migrate.Should().ThrowAsync<InvalidOperationException>().WithMessage("*no longer upgraded*fresh database*");
         (await TablesAndIndexesAsync(conn)).Should().Equal(before);
-        await conn.ExecuteAsync($"drop schema {schema} cascade");
+        await conn.ExecuteAsync($"DROP SCHEMA {schema} CASCADE");
     }
 
     /// <summary>Applies the migrations up to and including <paramref name="migration"/>, as a database of that time has them.</summary>
@@ -433,6 +433,6 @@ public sealed class SchemaTests(SyncFixture app)
     private static async Task<List<string>> TablesAndIndexesAsync(NpgsqlConnection conn)
     {
         return [.. await conn.QueryAsync<string>(
-                "select c.relname::text from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = current_schema() and c.relkind in ('r', 'i') order by 1")];
+                "SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'i') ORDER BY 1")];
     }
 }

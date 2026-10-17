@@ -96,16 +96,16 @@ What changed, and why:
   re-check, in ClaimEntities and in ReleaseLostClaims let the planner pick the ready/pending partial index and
   re-read it per entity (ClaimEntities went quadratic with stale statistics). Written as `CASE`, the condition is
   only a filter.
-- **Fail and Dead** bind the error list once (`(select @errors::jsonb)`, an InitPlan) instead of a CTE the
+- **Fail and Dead** bind the error list once (`(SELECT @errors::jsonb)`, an InitPlan) instead of a CTE the
   planner copied per row.
-- **ReleaseLostClaims** finds the claim's rows by `entity_id = any(@entityIds)` on the leased index instead of
+- **ReleaseLostClaims** finds the claim's rows by `entity_id = ANY(@entityIds)` on the leased index instead of
   scanning the ready index.
-- **MarkSynced** probes one lease per entity (`order by l.entity_id, l.locked_until limit 1`).
+- **MarkSynced** probes one lease per entity (`ORDER BY l.entity_id, l.locked_until LIMIT 1`).
 - **Watermark in the inbox** (after these measurements). The shared `sf_sync_state` table is gone, so every table
   holds one type of event. `InboxSql.Done` completes the synced rows and sets their `synced_time` in one statement,
   found by primary key under the lease token like Fail and Dead (it replaces MarkSynced and the done Complete);
   `SyncedTimes` reads each claimed entity's watermark, its newest `synced_time`, with one backward probe of the
-  partial index `(entity_id, synced_time) where status = 'done'`. The MarkSynced, Complete and SyncedTimes rows
+  partial index `(entity_id, synced_time) WHERE status = 'done'`. The MarkSynced, Complete and SyncedTimes rows
   below were measured before this change and have not been re-measured.
 - **Autovacuum** on the inbox tables: `autovacuum_vacuum_scale_factor` 0.02, threshold 1000. On 200,000 rows the
   first claim after 150,000 rows finished took 187 ms before vacuum, 5 to 7 ms once vacuum ran (2 ms fully

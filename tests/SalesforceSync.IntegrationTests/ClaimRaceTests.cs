@@ -164,7 +164,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         {
             var args = new { ids = claimed.Select(e => e.RowId).ToArray(), times = claimed.Select(e => e.EventTime).ToArray(), token };
             (await race.WorkerA.ExecuteAsync(Sql.Done, args, record)).Should().Be(overwrittenDuringTheLease ? 0 : 1);
-            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.ids, token, delay = TimeSpan.Zero }, record))
+            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.ids, tokens = new[] { token }, delay = TimeSpan.Zero }, record))
                 .Should().Be(overwrittenDuringTheLease ? 1 : 0, "only an overwritten row is left under the lease");
             var lateStore = race.StoreAsync(race.Consumer2, 3);
             await race.WaitUntilBlockedByAsync(race.WorkerA, lateStore);
@@ -208,7 +208,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         }
         await using (var conn = await _db.OpenConnectionAsync())
         {
-            await conn.ExecuteAsync($"truncate {Table}");
+            await conn.ExecuteAsync($"TRUNCATE {Table}");
         }
         return new Race(await _db.OpenConnectionAsync(), await _db.OpenConnectionAsync(), await _db.OpenConnectionAsync(),
             await _db.OpenConnectionAsync(), await _db.OpenConnectionAsync());
@@ -241,7 +241,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         public async Task<(DateTimeOffset EventTime, string Status, int AttemptCount, string? Error)> RowAsync()
         {
             var (time, status, attempts, error) = await observer.QuerySingleAsync<(DateTime, string, int, string?)>(
-                $"select event_time, status, attempt_count, last_error from {Table} where entity_id = @Entity", new { Entity });
+                $"SELECT event_time, status, attempt_count, last_error FROM {Table} WHERE entity_id = @Entity", new { Entity });
             return (new DateTimeOffset(time), status, attempts, error);
         }
 
@@ -253,13 +253,13 @@ public sealed class ClaimRaceTests(SyncFixture app)
         public Task<(DateTime? NextAttemptAt, Guid? LockToken)> StateAsync()
         {
             return observer.QuerySingleAsync<(DateTime?, Guid?)>(
-                $"select next_attempt_at, lock_token from {Table} where entity_id = @Entity", new { Entity });
+                $"SELECT next_attempt_at, lock_token FROM {Table} WHERE entity_id = @Entity", new { Entity });
         }
 
         /// <summary>Whether the entity is due now (null: idle).</summary>
         public Task<bool?> DueAsync()
         {
-            return observer.QuerySingleAsync<bool?>($"select next_attempt_at <= now() from {Table} where entity_id = @Entity", new { Entity });
+            return observer.QuerySingleAsync<bool?>($"SELECT next_attempt_at <= now() FROM {Table} WHERE entity_id = @Entity", new { Entity });
         }
 
         /// <summary>Waits until <paramref name="statement"/> is blocked on a lock that <paramref name="holder"/>'s transaction holds.</summary>
@@ -267,7 +267,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         {
             var deadline = DateTime.UtcNow.AddSeconds(10);
             while (!await observer.ExecuteScalarAsync<bool>(
-                       "select exists (select 1 from pg_stat_activity where @pid = any(pg_blocking_pids(pid)))", new { pid = holder.ProcessID }))
+                       "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE @pid = ANY(pg_blocking_pids(pid)))", new { pid = holder.ProcessID }))
             {
                 statement.IsCompleted.Should().BeFalse("the statement should be waiting for a lock");
                 DateTime.UtcNow.Should().BeBefore(deadline, "the statement should be waiting for a lock");

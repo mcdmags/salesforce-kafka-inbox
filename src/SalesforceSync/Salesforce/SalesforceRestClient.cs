@@ -58,9 +58,9 @@ public sealed class SalesforceRestClient(HttpClient http)
 
     /// <summary>
     /// sObject Describe: the fields and the record types (<c>recordTypeInfos</c>); with
-    /// <paramref name="ifModifiedSince"/>, returns a null schema on 304 Not Modified.
+    /// <paramref name="ifModifiedSince"/>, returns null on 304 Not Modified.
     /// </summary>
-    public async Task<DescribeResult> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct)
+    public async Task<SObjectSchema?> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, EnsureFits($"{DataPath}/sobjects/{sobject}/describe"));
         if (ifModifiedSince is { } since)
@@ -71,16 +71,14 @@ public sealed class SalesforceRestClient(HttpClient http)
         using var res = await http.SendAsync(request, ct);
         if (res.StatusCode == HttpStatusCode.NotModified)
         {
-            return new DescribeResult(null);
+            return null;
         }
 
         await EnsureSuccessAsync(res, ct);
 
         var body = await res.Content.ReadFromJsonAsync<DescribeBody>(Json, ct)
                    ?? throw new InvalidOperationException($"Empty describe response for {sobject}");
-        return new DescribeResult(new SObjectSchema(body.Name, body.Fields.Select(f => new SalesforceField(
-            f.Name, f.Type, f.Length, f.Precision, f.Scale, f.Createable, f.Updateable, f.Nillable, f.Digits)),
-            body.RecordTypeInfos));
+        return new SObjectSchema(body.Name, body.Fields, body.RecordTypeInfos);
     }
 
     /// <summary>
@@ -182,13 +180,10 @@ public sealed class SalesforceRestClient(HttpClient http)
 
         var subresponses = await PostCompositeAsync(payload, ct);
 
-        return [.. subresponses.Select(sub =>
-        {
-            // A subrequest that failed as a whole answers with an error list instead of one result per record
-            return sub.HttpStatusCode >= 400 || sub.Body.ValueKind != JsonValueKind.Array
-                ? new CollectionResult(sub.ReferenceId, null, ParseErrors(sub.ReferenceId, sub.Body))
-                : new CollectionResult(sub.ReferenceId, [.. sub.Body.EnumerateArray().Select(ParseRecordResult)], []);
-        })];
+        // A subrequest that failed as a whole answers with an error list instead of one result per record
+        return [.. subresponses.Select(sub => sub.HttpStatusCode >= 400 || sub.Body.ValueKind != JsonValueKind.Array
+            ? new CollectionResult(sub.ReferenceId, null, ParseErrors(sub.ReferenceId, sub.Body))
+            : new CollectionResult(sub.ReferenceId, [.. sub.Body.EnumerateArray().Select(ParseRecordResult)], []))];
     }
 
     /// <summary>Posts a Composite request and returns its subresponses, in request order.</summary>
@@ -233,12 +228,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// <summary>A value as a SOQL string literal: quoted, with backslashes and quotes escaped.</summary>
     public static string SoqlLiteral(string value)
     {
-        return $"'{EscapeSoql(value)}'";
-    }
-
-    private static string EscapeSoql(string s)
-    {
-        return s.Replace("\\", "\\\\").Replace("'", "\\'");
+        return $"'{value.Replace("\\", "\\\\").Replace("'", "\\'")}'";
     }
 
     private static List<SalesforceError> ParseErrors(string? referenceId, JsonElement body)
@@ -293,9 +283,7 @@ public sealed class SalesforceRestClient(HttpClient http)
 
     // ---------- DTOs ----------
 
-    private sealed record DescribeBody(string Name, List<DescribeField> Fields, List<SalesforceRecordType>? RecordTypeInfos);
-    private sealed record DescribeField(string Name, string Type, int Length, int Precision, int Scale,
-        bool Createable, bool Updateable, bool Nillable, int Digits);
+    private sealed record DescribeBody(string Name, List<SalesforceField> Fields, List<SalesforceRecordType>? RecordTypeInfos);
     private sealed record CompositeBody(List<SubResponse> CompositeResponse);
     private sealed record QueryPage(List<JsonElement> Records, string? NextRecordsUrl);
     private sealed record SubResponse(string ReferenceId, int HttpStatusCode, JsonElement Body);

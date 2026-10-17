@@ -28,12 +28,4 @@ public static class Any
             return prefix + Fixture.Create<string>();
         }
     }
-
-    public static string[] Strings(string prefix, int count)
-    {
-        lock (Gate)
-        {
-            return [.. Enumerable.Range(0, count).Select(_ => prefix + Fixture.Create<string>())];
-        }
-    }
 }

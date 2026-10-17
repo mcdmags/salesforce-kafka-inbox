@@ -152,18 +152,17 @@ public class SyncFixture : IAsyncLifetime
         var instanceUrl = _org.Url.GetLeftPart(UriPartial.Authority);
         for (var i = 0; i < Pods; i++)
         {
-            var name = $"pod-{i}";
             var settings = new Dictionary<string, string?>(WorkerSettings)
             {
                 ["ConnectionStrings:inboxdb"] = inbox,
                 ["ConnectionStrings:kafka"] = kafka,
                 ["Salesforce:InstanceUrl"] = instanceUrl,
                 // Pods share a process here, so name them apart (the mock org counts requests per User-Agent)
-                ["Salesforce:UserAgentInstance"] = name,
+                ["Salesforce:UserAgentInstance"] = $"pod-{i}",
                 ["ConnectionStrings:redis"] = _redis?.GetConnectionString()
             };
             // Started one at a time: StartAsync returns once the schema is applied, so later pods find it in place
-            _pods.Add(await WorkerPod.StartAsync(name, settings, ct));
+            _pods.Add(await WorkerPod.StartAsync(settings, ct));
         }
 
         await OnStartedAsync();
@@ -196,12 +195,12 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// Publishes a raw message value as it is, under any Kafka key (or none) and on either topic. The sync must not
+    /// Publishes a raw message value as it is, under any Kafka key (or none). The sync must not
     /// depend on the key, so tests use this to scatter one entity's events over partitions.
     /// </summary>
-    public async Task PublishRawAsync(string? key, string value, string topic = Topic)
+    public async Task PublishRawAsync(string? key, string value)
     {
-        await _producer!.ProduceAsync(topic, new Message<string, string> { Key = key!, Value = value });
+        await _producer!.ProduceAsync(Topic, new Message<string, string> { Key = key!, Value = value });
     }
 
     /// <summary>Fire-and-forget produce for bulk loads; call <see cref="Flush"/> afterwards.</summary>
@@ -400,7 +399,7 @@ public class SyncFixture : IAsyncLifetime
     {
         await using var conn = await Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<StoredRow>(
-            $"select id, payload::text, status, attempt_count, last_error_code, next_attempt_at, lock_token from {InboxTable(entityType)} where entity_id = @key",
+            $"SELECT id, payload::text, status, attempt_count, last_error_code, next_attempt_at, lock_token FROM {InboxTable(entityType)} WHERE entity_id = @key",
             new { key });
         return rows.Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockToken))
             .SingleOrDefault();
@@ -412,8 +411,7 @@ public class SyncFixture : IAsyncLifetime
 
     private static long VersionOf(string payload)
     {
-        var time = DateTimeOffset.Parse((string)JsonNode.Parse(payload)!["meta"]!["time"]!, CultureInfo.InvariantCulture);
-        return (long)(time - BaseTime).TotalMilliseconds;
+        return (long)(TimeOf(JsonNode.Parse(payload)!.AsObject()) - BaseTime).TotalMilliseconds;
     }
 
     /// <summary>
@@ -424,9 +422,10 @@ public class SyncFixture : IAsyncLifetime
     {
         await using var conn = await Db.OpenConnectionAsync();
         await using var tx = await conn.BeginTransactionAsync();
+        var table = InboxTable();
         foreach (var e in events)
         {
-            await conn.StoreAsync(InboxTable(), entityId, TimeOf(e), e.ToJsonString(), tx);
+            await conn.StoreAsync(table, entityId, TimeOf(e), e.ToJsonString(), tx);
         }
         await tx.CommitAsync();
     }
@@ -443,7 +442,7 @@ public class SyncFixture : IAsyncLifetime
     /// </summary>
     public async Task<NpgsqlDataSource> CreateSchemaAsync(string schema)
     {
-        await ExecuteSqlAsync($"drop schema if exists {schema} cascade; create schema {schema}");
+        await ExecuteSqlAsync($"DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}");
         return NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(ConnectionString)
         {
             SearchPath = schema,

@@ -14,13 +14,10 @@ public sealed class WorkerPod : IAsyncDisposable
 {
     private readonly IHost _host;
 
-    private WorkerPod(string name, IHost host)
+    private WorkerPod(IHost host)
     {
-        Name = name;
         _host = host;
     }
-
-    public string Name { get; }
 
     public IServiceProvider Services => _host.Services;
 
@@ -30,7 +27,7 @@ public sealed class WorkerPod : IAsyncDisposable
     /// developer's ConnectionStrings__* variables can't redirect the tests.
     /// </summary>
     /// <remarks>Returns once the hosted services have started: the inbox schema is in place, the loops are running.</remarks>
-    public static async Task<WorkerPod> StartAsync(string name, IReadOnlyDictionary<string, string?> settings, CancellationToken ct)
+    public static async Task<WorkerPod> StartAsync(IReadOnlyDictionary<string, string?> settings, CancellationToken ct)
     {
         var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
         {
@@ -56,7 +53,7 @@ public sealed class WorkerPod : IAsyncDisposable
             host.Dispose();
             throw;
         }
-        return new WorkerPod(name, host);
+        return new WorkerPod(host);
     }
 
     public async ValueTask DisposeAsync()
