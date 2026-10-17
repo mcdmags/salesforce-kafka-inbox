@@ -107,6 +107,9 @@ public class SyncFixture : IAsyncLifetime
         ["FakeSalesforce:Latency"] = "00:00:00",
         // The worker's SalesforceLimits:DailyApiAllocation (appsettings.json)
         ["FakeSalesforce:DailyApiLimit"] = "115000",
+        // An org whose automation refuses to delete an Account that records still name (Salesforce itself wouldn't,
+        // with Text foreign keys): DeleteTests covers the Account's delete waiting for its children (DEPENDENCY_NOT_SYNCED)
+        ["FakeSalesforce:RefuseDeletingReferencedRecords"] = "true",
         ["Logging:LogLevel:Default"] = "Warning"
     };
 

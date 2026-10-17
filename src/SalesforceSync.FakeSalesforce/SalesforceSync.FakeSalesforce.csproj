@@ -8,4 +8,8 @@
     <RootNamespace>SalesforceSync.FakeSalesforce</RootNamespace>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="SalesforceSync.Tests" />
+  </ItemGroup>
+
 </Project>

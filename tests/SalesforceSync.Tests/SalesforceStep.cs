@@ -1,7 +1,9 @@
+using System.Net.Http.Headers;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
@@ -36,10 +38,15 @@ internal static class SalesforceStep
             NullLogger<SalesforceSchemaCache>.Instance);
     }
 
-    /// <summary>A client of the org through <paramref name="handler"/>, at the address the caches are keyed by.</summary>
+    /// <summary>
+    /// A client of the org through <paramref name="handler"/>, at the address the caches are keyed by, with the mock
+    /// org's first access token (as after OAuth: the Salesforce step has no auth handler).
+    /// </summary>
     public static HttpClient Http(HttpMessageHandler handler)
     {
-        return new(handler) { BaseAddress = new Uri(OrgUrl) };
+        var http = new HttpClient(handler) { BaseAddress = new Uri(OrgUrl) };
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FakeSalesforceStore.FirstAccessToken);
+        return http;
     }
 
     /// <summary>The Salesforce step never takes a slot.</summary>

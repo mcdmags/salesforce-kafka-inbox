@@ -15,7 +15,8 @@ public sealed record FakeField(
     bool Nillable = true,
     string? ReferenceTo = null,
     int Digits = 0,
-    string? KeyOf = null)
+    string? KeyOf = null,
+    bool CascadeDelete = false)
 {
     /// <summary>
     /// A reference field's relationship name, by Salesforce's convention: <c>AccountId</c> -> <c>Account</c>,
@@ -122,8 +123,10 @@ public static class FakeSchema
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
                 new(RecordTypeIdField, "reference", 18, ReferenceTo: "RecordType"),
                 new("ExternalId__c", "string", 255),
-                // The standard lookup every org's Contact has; this org's sync leaves it alone and uses AccountId__c
-                new("AccountId", "reference", 18, ReferenceTo: "Account"),
+                // The standard lookup every org's Contact has; this org's sync leaves it alone and uses AccountId__c.
+                // Its child relationship cascades: deleting an Account deletes the contacts it links (SOAP API Developer
+                // Guide, "Referential Integrity", undelete())
+                new("AccountId", "reference", 18, ReferenceTo: "Account", CascadeDelete: true),
                 new("AccountId__c", "string", 255, KeyOf: "Account"),
                 new("FirstName", "string", 40),
                 new("LastName", "string", 80, Nillable: false),

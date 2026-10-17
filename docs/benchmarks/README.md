@@ -25,11 +25,45 @@ the [run before it](#latest-run-main-at-7a145b0-after-the-simplification) measur
   than a synced one is never stored, so every row of a drained inbox ends `done`.
 - **No `Sync:CoalesceDelay`**: a stored event makes its entity due at once (see the
   [realistic-ingest sweep](#realistic-ingest-sweep-2026-10-16-main-at-85d1de7)).
+- **The drain workload is account aggregates, with deletes** (see [below](#the-drain-workload)): every number
+  below was measured with per-entity Account and relationship events built by hand, no contacts and no deletes.
 
 Re-run the benchmarks before comparing any of these numbers with the current code.
 
 [Sequential, limiter-only vs full](#sequential-limiter-only-vs-full) compares this version with one that has no parallel
 processing or race-condition handling, measured on `main` at 01b53b3.
+
+## The drain workload
+
+Since the deletes (PR #65) the drain and streaming benchmarks generate what the upstream publishes, **account
+aggregates** (`AggregateWorkload`: `{ meta, before, after }`, the Account with its Profile, relationships and
+contacts), and store what `AccountAggregate.TrySplit` makes of each, read and stored through each type's
+`ISalesforceEntitySync` exactly as the Kafka consumer does (streaming) or as storing them in order would leave the
+inboxes (preloaded). `Events` (5,000) counts aggregates. Each one changes its Account (Description and Profile score
+`vN`); 15% also touch one of the account's relationships and 15% one of its 3 contacts, a touched child it already
+has being removed (a delete) 30% of the time and changed otherwise, so removed children come back later as new
+records; a tenth of the accounts, never named by another account's relationship, may be deleted with all their
+children (2% of their aggregates once they have two versions; no aggregate follows a delete). Seeded (42): every
+iteration gets the same aggregates. 5,000 aggregates split into these entity events (counted from the generator,
+not a benchmark run), about a quarter more inbox work than the 5,000 hand-built events before:
+
+| Accounts | Entity events | Account | Contact | Relationship | Deletes | Accounts deleted | Entities absent at the end |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 50 (streaming) | 6,448 | 5,000 | 751 | 697 | 198 | 5 | 92 of 762 |
+| 100 | 6,453 | 5,000 | 777 | 676 | 179 | 6 | 98 of 990 |
+| 1,000 | 6,227 | 5,000 | 730 | 497 | 36 | 4 | 33 of 2,113 |
+
+The check, every iteration: every account, relationship and contact the aggregates end with is in the org at its
+newest version (a relationship or contact naming the right Accounts), every removed or deleted one is absent (an
+Account with its Profile), no record's write history goes backwards (a re-added child is a new record with a
+history of its own), every entity's one inbox row holds its newest event and is `done`, and no two claims of one
+entity overlapped. The `//` line adds `entityEvents`, `contactEvents`, `deleteEvents` and `deletedEntities`;
+the org's counters print `deletes=N (requests=M)`. A unit test (`AggregateWorkloadTests`) checks that the expected
+end state is what the split events lead to, and that the check passes an org that got the events in order and
+fails a stale record and a missed delete.
+
+**Results pending**: the benchmarks have not been run on this workload yet; the numbers on this page are from the
+earlier workload.
 
 ## Environment
 

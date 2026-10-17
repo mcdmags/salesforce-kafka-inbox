@@ -19,8 +19,9 @@ public static class AccountSync
     public static readonly SyncStrategy<AccountEvent> Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries);
 
     /// <summary>
-    /// A deleted event deletes the Profile and then the Account, children first: the org refuses to delete an Account
-    /// whose records still name it (and its contacts' and relationships' own deletes come through their inboxes).
+    /// A deleted event deletes the Profile and then the Account, children first: an org whose automation refuses to
+    /// delete an Account that records still name accepts it in that order (Salesforce itself refuses nothing for Text
+    /// keys; the contacts' and relationships' own deletes come through their inboxes).
     /// Any other event upserts the Account and, if the event has one, its Profile.
     /// </summary>
     public static SyncUnit Map(string accountKey, AccountEvent e)

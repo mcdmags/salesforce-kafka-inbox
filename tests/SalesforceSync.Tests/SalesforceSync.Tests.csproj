@@ -26,6 +26,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The drain benchmarks' workload, so its expected end state is checked without running the benchmarks -->
+    <Compile Include="..\..\benchmarks\SalesforceSync.Benchmarks\AggregateWorkload.cs" Link="Benchmarks\AggregateWorkload.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Xunit" />
     <Using Include="FluentAssertions" />
     <Using Include="AutoFixture" />
