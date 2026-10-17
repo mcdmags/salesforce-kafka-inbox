@@ -140,9 +140,10 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Inbox -> Salesforce: the database context, one engine, and per synced object its sync (its strategy, topic and
-    /// inbox). Register a new object's sync here (its <see cref="InboxRow"/> type is mapped in <see cref="SyncDbContext"/>
-    /// and a migration creates its table): the consumer subscribes to its topic and the worker loops pick it up.
+    /// Inbox -> Salesforce: the database context, one engine, and per synced object its sync (its strategy and inbox).
+    /// Register a new object's sync here (its <see cref="InboxRow"/> type is mapped in <see cref="SyncDbContext"/> and a
+    /// migration creates its table): the consumer stores the events of its type that <see cref="AccountAggregate"/>
+    /// splits out, and the worker loops pick it up.
     /// </summary>
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {
@@ -150,22 +151,21 @@ public static class SyncServiceCollectionExtensions
         services.AddPooledDbContextFactory<SyncDbContext>((sp, o) => SyncDbContext.Configure(o,
             sp.GetRequiredService<NpgsqlDataSource>(), sp.GetRequiredService<IOptions<PostgresRetryOptions>>().Value));
         services.AddSingleton(typeof(IRepository<>), typeof(InboxRepository<>)); // one per inbox row type
-        services.AddTransient<SalesforceBatchUpsertService>();
+        services.AddTransient<SalesforceBatchSyncService>();
 
         // The synced objects
-        AddEntitySync<AccountEvent, AccountInboxRow>(services, AccountSync.Strategy, AccountSync.DefaultTopic);
-        AddEntitySync<AccountRelationshipEvent, AccountRelationshipInboxRow>(services,
-            AccountRelationshipSync.Strategy, AccountRelationshipSync.DefaultTopic);
-        AddEntitySync<ContactEvent, ContactInboxRow>(services, ContactSync.Strategy, ContactSync.DefaultTopic);
+        AddEntitySync<AccountEvent, AccountInboxRow>(services, AccountSync.Strategy);
+        AddEntitySync<AccountRelationshipEvent, AccountRelationshipInboxRow>(services, AccountRelationshipSync.Strategy);
+        AddEntitySync<ContactEvent, ContactInboxRow>(services, ContactSync.Strategy);
         return services;
     }
 
-    private static void AddEntitySync<TEvent, TRow>(IServiceCollection services, UpsertStrategy<TEvent> strategy, string defaultTopic)
+    private static void AddEntitySync<TEvent, TRow>(IServiceCollection services, SyncStrategy<TEvent> strategy)
         where TRow : InboxRow, IInboxRow, new()
     {
         ValidateLimits<TRow>();
         services.AddTransient<ISalesforceEntitySync>(sp => new EntitySyncService<TEvent, TRow>(
-            sp.GetRequiredService<SalesforceBatchUpsertService>(), sp.GetRequiredService<IRepository<TRow>>(), strategy, defaultTopic));
+            sp.GetRequiredService<SalesforceBatchSyncService>(), sp.GetRequiredService<IRepository<TRow>>(), strategy));
     }
 
     /// <summary>A row type's query and write limits are within Salesforce's (<see cref="IInboxRow"/>).</summary>
@@ -182,7 +182,7 @@ public static class SyncServiceCollectionExtensions
         {
             throw new InvalidOperationException(
                 $"{typeof(TRow).Name}.{nameof(IInboxRow.MaxRecordsPerWrite)} ({TRow.MaxRecordsPerWrite}) " +
-                $"must be 1 to {SalesforceRestClient.MaxCollectionRecords} (records per sObject Collections upsert).");
+                $"must be 1 to {SalesforceRestClient.MaxCollectionRecords} (records per sObject Collections upsert or delete).");
         }
     }
 }

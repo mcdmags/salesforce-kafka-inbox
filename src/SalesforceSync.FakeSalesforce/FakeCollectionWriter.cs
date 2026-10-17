@@ -6,8 +6,8 @@ namespace SalesforceSync.FakeSalesforce;
 /// <summary>
 /// sObject Collections upsert by external id (PATCH .../composite/sobjects/{SObject}/{field}): each record is checked
 /// the way Salesforce checks it (type, fields, lookups, foreign keys, uniqueness, injected faults) and gets a result of
-/// its own (allOrNone false, the only mode the sync uses). Not thread-safe; <see cref="FakeSalesforceStore"/> holds its
-/// lock.
+/// its own (allOrNone false, the only mode the sync uses); and delete by Id (<see cref="Delete"/>). Not thread-safe;
+/// <see cref="FakeSalesforceStore"/> holds its lock.
 /// </summary>
 internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults faults, FakeCounters counters)
 {
@@ -62,6 +62,80 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         var result = Result(outcome, id);
         result["created"] = existing is null && result["success"]!.GetValue<bool>();
         return result;
+    }
+
+    /// <summary>
+    /// Delete by Id (DELETE .../composite/sobjects?ids=...): the records may be of any objects, and each gets a result of
+    /// its own, in request order. A deleted record goes to the Recycle Bin; deleting it again is
+    /// <c>ENTITY_IS_DELETED</c>, an Id no record ever had <c>INVALID_CROSS_REFERENCE_KEY</c>. Injected faults apply
+    /// (e.g. <c>DELETE_FAILED</c>, a Contact with cases), and so do lost responses.
+    /// </summary>
+    public JsonArray Delete(IReadOnlyList<string> ids)
+    {
+        if (ids.Count is 0 or > MaxRecords)
+        {
+            throw new FakeSalesforceException(400, "LIMIT_EXCEEDED", $"Between 1 and {MaxRecords} ids are allowed per request");
+        }
+
+        // A malformed id fails the whole request, not just its record
+        if (ids.FirstOrDefault(id => id.Length is not (15 or 18) || !id.All(char.IsAsciiLetterOrDigit)) is { } malformed)
+        {
+            throw new FakeSalesforceException(400, "MALFORMED_ID", $"malformed id {malformed}");
+        }
+
+        var results = new JsonArray();
+        foreach (var id in ids)
+        {
+            results.Add(Result(DeleteOne(id), id));
+        }
+
+        var failed = results.Count(r => !r!["success"]!.GetValue<bool>());
+        counters.RecordsSucceeded += results.Count - failed;
+        counters.RecordsFailed += failed;
+        return results;
+    }
+
+    private (int Status, JsonNode? Body) DeleteOne(string id)
+    {
+        if (records.FindById(id) is not var (sobject, record))
+        {
+            return records.IsDeleted(id)
+                ? (400, Errors("ENTITY_IS_DELETED", "entity is deleted"))
+                : (400, Errors("INVALID_CROSS_REFERENCE_KEY", $"invalid cross reference id: {id}"));
+        }
+
+        var extId = Str(record[ExternalIdField]);
+        if (faults.Take(sobject, extId) is { } fault)
+        {
+            return (400, Errors(fault.Code, fault.Message));
+        }
+
+        if (Dependents(sobject, extId) is { Count: > 0 } dependents)
+        {
+            return (400, Errors("DELETE_FAILED", $"Your attempt to delete {extId} could not be completed because it is associated " +
+                $"with the following records: {string.Join(", ", dependents)}"));
+        }
+
+        faults.NoteWrite(sobject, extId);
+        records.Delete(sobject, id);
+        counters.Deletes++;
+        return (204, null);
+    }
+
+    /// <summary>
+    /// The records whose foreign keys (Text fields holding a parent's external id) name this one: the org's automation,
+    /// simulated, refuses to delete a parent while they exist, as it refuses a child whose parent is missing
+    /// (<see cref="MissingParent"/>). A Text field is no relationship to Salesforce, so nothing cascades.
+    /// </summary>
+    private List<string> Dependents(string sobject, string? externalId)
+    {
+        return externalId is null
+            ? []
+            : [.. FakeSchema.Objects
+                .SelectMany(o => o.Value.Where(f => sobject.Equals(f.KeyOf, StringComparison.OrdinalIgnoreCase)).Select(f => (Child: o.Key, Key: f.Name)))
+                .SelectMany(k => records.Table(k.Child).Values.Where(r => Str(r[k.Key]) == externalId)
+                    .Select(r => $"{k.Child} {Str(r[ExternalIdField])}"))
+                .Distinct()];
     }
 
     /// <summary>A record's result: <c>{ "id", "success", "errors" }</c>, errors as Collections lists them.</summary>

@@ -1,10 +1,12 @@
 namespace SalesforceSync.FakeSalesforce;
 
 /// <param name="WriteRequests">Write calls: Composite requests that contained sObject Collections subrequests, and
-/// sObject Collections upserts.</param>
-/// <param name="RecordsSucceeded">Records created or updated.</param>
+/// sObject Collections upserts and deletes.</param>
+/// <param name="RecordsSucceeded">Records created, updated or deleted.</param>
 /// <param name="RecordsFailed">Records rejected with an error of their own.</param>
 /// <param name="UpsertRequests">sObject Collections upserts (also counted in <paramref name="WriteRequests"/>).</param>
+/// <param name="Deletes">Records deleted.</param>
+/// <param name="DeleteRequests">sObject Collections deletes, as calls or subrequests.</param>
 /// <param name="ApiCalls">Calls counted against the daily API allocation.</param>
 /// <param name="Queries">SOQL queries run, as Composite subrequests or on their own.</param>
 /// <param name="Creates">Records created.</param>
@@ -27,13 +29,16 @@ public sealed record FakeSalesforceStats(
     long DescribesNotModified,
     long CompositeRequests,
     long UpsertRequests,
+    long Deletes,
+    long DeleteRequests,
     int Records)
 {
     public override string ToString()
     {
         return $"api={ApiCalls} composite={CompositeRequests} upserts={UpsertRequests} queries={Queries} " +
                $"writeRequests={WriteRequests} recordsOk={RecordsSucceeded} recordsFailed={RecordsFailed} " +
-               $"creates={Creates} updates={Updates} describes={Describes} (notModified={DescribesNotModified}) " +
+               $"creates={Creates} updates={Updates} deletes={Deletes} (requests={DeleteRequests}) " +
+               $"describes={Describes} (notModified={DescribesNotModified}) " +
                $"concurrencyRejected={ConcurrencyRejections} records={Records}";
     }
 }

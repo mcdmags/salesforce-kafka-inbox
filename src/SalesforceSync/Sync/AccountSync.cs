@@ -14,13 +14,23 @@ namespace SalesforceSync.Sync;
 public static class AccountSync
 {
     public const string Type = "account";
-    public const string DefaultTopic = "account-changes";
 
     /// <summary>The strategy the engine runs.</summary>
-    public static readonly UpsertStrategy<AccountEvent> Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries);
+    public static readonly SyncStrategy<AccountEvent> Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries);
 
-    public static UpsertUnit Map(string accountKey, AccountEvent e)
+    /// <summary>
+    /// A deleted event deletes the Profile and then the Account, children first: the org refuses to delete an Account
+    /// whose records still name it (and its contacts' and relationships' own deletes come through their inboxes).
+    /// Any other event upserts the Account and, if the event has one, its Profile.
+    /// </summary>
+    public static SyncUnit Map(string accountKey, AccountEvent e)
     {
+        if (e.Meta?.IsDelete() == true)
+        {
+            return new SyncUnit([SObjectRecord.Deleting<ProfileSObject>("prof", e.Account?.Profile?.ExternalId ?? accountKey),
+                SObjectRecord.Deleting<AccountSObject>("acct", accountKey)]);
+        }
+
         var payload = e.Account ?? throw new ArgumentException("account is required");
         var records = new List<SObjectRecord> { SObjectRecord.From("acct", ToAccount(payload)) };
 
@@ -32,10 +42,10 @@ public static class AccountSync
             profile.AccountId = accountKey;
             records.Add(SObjectRecord.From("prof", profile));
         }
-        return new UpsertUnit(records);
+        return new SyncUnit(records);
     }
 
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<AccountSObject>(units), SoqlQuery.RecordsOf<ProfileSObject>(units)];
     }
@@ -87,11 +97,13 @@ public static class AccountSync
 }
 
 /// <summary>
-/// Inbox event for an account and its profile (entity type "account", key = account.externalId), as the source
-/// system sends it. The JSON is camelCase; nothing here is a Salesforce name.
-/// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z" },
+/// Inbox event for an account and its profile (entity type "account", key = account.externalId): the account part of
+/// its aggregate (<see cref="AccountAggregate"/>) as the source system sends it, or a delete of the Account (its key,
+/// and its Profile's if that has its own). The JSON is camelCase; nothing here is a Salesforce name.
+/// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" },
 ///   "account": { "externalId": "ACC-1", "name": "Acme", "rating": "Hot", "isActive": true,
-///                "profile": { "tier": "Gold", "score": 87.5 } } }</code>
+///                "profile": { "tier": "Gold", "score": 87.5 } } }
+/// { "meta": { "time": "2026-10-15T01:02:03.456Z", "type": "deleted" }, "account": { "externalId": "ACC-1" } }</code>
 /// An event always carries the full record: a property that is null or absent means "empty in the source", and the
 /// field is cleared in Salesforce. The one exception is <see cref="AccountPayload.Profile"/> as a whole.
 /// </summary>

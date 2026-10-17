@@ -121,7 +121,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         var withoutProfile = SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = name, ["rating"] = "Cold" }, []);
         withoutProfile["account"]!.AsObject().Remove("profile");
-        await app.PublishRawAsync(acct, withoutProfile.ToJsonString());
+        await app.PublishRawAsync(acct, SyncFixture.AsAggregate(withoutProfile).ToJsonString());
         await app.WaitForInboxSettledAsync(acct, version: 2);
 
         ((string?)(await app.GetRecordAsync("Account", acct))!["Rating"]).Should().Be("Cold");
@@ -202,7 +202,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         // An older version arrives late (replay / out-of-order producer)
         await app.PublishAsync(acct, 3, new JsonObject { ["name"] = name, ["rating"] = "Cold" }, new JsonObject { ["tier"] = "Bronze" });
-        await WaitUntilConsumedAsync(acct);
+        await app.WaitUntilConsumedAsync(acct);
         (await app.GetInboxAsync(acct)).Should().Be((5L, "done"), "an older event doesn't overwrite the row");
 
         // v3 never reached Salesforce
@@ -229,14 +229,14 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         v2["meta"]!["time"] = "2026-01-01T00:00:00.0010011Z";
         var micros = SyncFixture.Micros(0);
 
-        await app.PublishRawAsync(acct, v1.ToJsonString());
+        await app.PublishRawAsync(acct, SyncFixture.AsAggregate(v1).ToJsonString());
         await app.WaitForInboxSettledAsync(acct, version: 1);
         await using var conn = await app.Db.OpenConnectionAsync();
         var storedTime = $"SELECT (extract(epoch FROM event_time) * 1000000)::bigint FROM {SyncFixture.InboxTable()} WHERE entity_id = @acct";
         (await conn.QuerySingleAsync<long>(storedTime, new { acct }))
             .Should().Be(micros + 1_000, "the consumer stores meta.time, cut to the microsecond");
 
-        await app.PublishRawAsync(acct, v2.ToJsonString());
+        await app.PublishRawAsync(acct, SyncFixture.AsAggregate(v2).ToJsonString());
         await Eventually.ValueAsync(() => app.GetRecordAsync("Account", acct), a => (string?)a?["Name"] == "v2", "v2 to be synced");
         (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
         (await conn.QuerySingleAsync<long>(storedTime, new { acct })).Should().Be(micros + 1_001);
@@ -248,11 +248,11 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         var acct = SyncFixture.NewAccountId();
         var v1 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = Any.String("Acme "), ["rating"] = "Hot" }, []);
 
-        await app.PublishRawAsync(acct, v1.ToJsonString());
+        await app.PublishRawAsync(acct, SyncFixture.AsAggregate(v1).ToJsonString());
         await app.WaitForInboxSettledAsync(acct, version: 1);
         var before = await app.GetInboxRowAsync(acct);
-        await app.PublishRawAsync(acct, v1.ToJsonString());            // Kafka redelivery, after the first was synced
-        await WaitUntilConsumedAsync(acct);
+        await app.PublishRawAsync(acct, SyncFixture.AsAggregate(v1).ToJsonString());            // Kafka redelivery, after the first was synced
+        await app.WaitUntilConsumedAsync(acct);
 
         (await app.GetInboxRowAsync(acct)).Should().Be(before, "as new as a done row: the store leaves it as it is");
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("a redelivery must not write to Salesforce");
@@ -271,30 +271,26 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Event_without_a_time_offset_or_a_valid_type_or_for_another_entity_type_is_skipped_at_ingest()
+    public async Task Aggregate_without_a_time_offset_or_a_valid_type_or_an_account_is_skipped_at_ingest()
     {
         var acct = SyncFixture.NewAccountId();
         var name = Any.String("Acme ");
-        var valid = SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = name }, []);
-        var noOffset = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "never stored" }, []);
+        var valid = SyncFixture.AsAggregate(SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = name }, []));
+        var noOffset = SyncFixture.AsAggregate(SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "never stored" }, []));
         noOffset["meta"]!["time"] = ((string)noOffset["meta"]!["time"]!).TrimEnd('Z');
-        var relationship = new JsonObject
-        {
-            ["meta"] = SyncFixture.Meta(1),
-            ["accountRelationship"] = new JsonObject { ["externalId"] = acct, ["accountExternalId"] = "A", ["relatedAccountExternalId"] = "B" }
-        };
+        var noAccount = new JsonObject { ["meta"] = SyncFixture.Meta(1), ["before"] = null, ["after"] = null };
 
         // All under one key, so one partition: by the time the valid event is stored, the others have been handled
-        await app.PublishRawAsync(acct, noOffset.ToJsonString());      // no explicit offset
-        await app.PublishRawAsync(acct, relationship.ToJsonString());  // a relationship event on the account topic
+        await app.PublishRawAsync(acct, noOffset.ToJsonString());   // no explicit offset
+        await app.PublishRawAsync(acct, noAccount.ToJsonString());  // neither before nor after
         await app.PublishRawAsync(acct, "not json");
-        await app.PublishRawAsync(acct, WithType(valid, null).ToJsonString());       // no meta.type
-        await app.PublishRawAsync(acct, WithType(valid, "deleted").ToJsonString());  // deletes are not synced
+        await app.PublishRawAsync(acct, WithType(valid, null).ToJsonString());      // no meta.type
+        await app.PublishRawAsync(acct, WithType(valid, "upserted").ToJsonString()); // no type the sync knows
         await app.PublishRawAsync(acct, valid.ToJsonString());
 
         (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
-        (await app.GetInboxAsync(acct, SyncFixture.Relationships)).Should().BeNull("a topic's events are read as that topic's type only");
         ((string?)(await app.GetRecordAsync("Account", acct))!["Name"]).Should().Be(name);
+        (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("nothing of the skipped messages was stored");
     }
 
     [Fact]
@@ -307,11 +303,11 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         }
 
         // One account's events under different keys and none (so on different partitions), newest neither first nor last
-        await app.PublishRawAsync(Any.String("other-key-"), Version(2).ToJsonString());
-        await app.PublishRawAsync(null, Version(5).ToJsonString());
-        await app.PublishRawAsync(Any.String("other-key-"), Version(1).ToJsonString());
-        await app.PublishRawAsync(acct, Version(4).ToJsonString());
-        await app.PublishRawAsync(null, Version(3).ToJsonString());
+        await app.PublishRawAsync(Any.String("other-key-"), SyncFixture.AsAggregate(Version(2)).ToJsonString());
+        await app.PublishRawAsync(null, SyncFixture.AsAggregate(Version(5)).ToJsonString());
+        await app.PublishRawAsync(Any.String("other-key-"), SyncFixture.AsAggregate(Version(1)).ToJsonString());
+        await app.PublishRawAsync(acct, SyncFixture.AsAggregate(Version(4)).ToJsonString());
+        await app.PublishRawAsync(null, SyncFixture.AsAggregate(Version(3)).ToJsonString());
 
         (await app.WaitForInboxSettledAsync(acct, version: 5)).Should().Be((5L, "done"), "the newest meta.time is the one that must be written");
 
@@ -402,17 +398,6 @@ public sealed class SyncEndToEndTests(SyncFixture app)
 
         var transport = await app.Salesforce.GetFromJsonAsync<JsonObject>("/__fake/transport");
         ((long)transport!["acceptGzip"]!).Should().BePositive("the worker accepts compressed responses");
-    }
-
-    /// <summary>
-    /// Waits until the consumer has handled what was published under <paramref name="key"/> so far: an event of a fresh
-    /// account under the same key goes to the same partition, after them, and the sync doesn't use the key.
-    /// </summary>
-    private async Task WaitUntilConsumedAsync(string key)
-    {
-        var marker = SyncFixture.NewAccountId();
-        await app.PublishRawAsync(key, SyncFixture.AccountEvent(marker, 1, new JsonObject { ["name"] = "marker" }, []).ToJsonString());
-        await app.WaitForInboxSettledAsync(marker, version: 1);
     }
 
     /// <summary>A copy of the event with another meta.type (null = none).</summary>

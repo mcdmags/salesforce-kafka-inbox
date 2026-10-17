@@ -3,13 +3,13 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// The records of one entity, written in the same request. Each record is saved or rejected on its own (they are not
-/// atomic); the entity counts as synced only when all of them are. A record must come after the records it looks up
-/// (by a lookup or a foreign key).
+/// The records of one entity, upserted or deleted in the same request. Each record is saved or rejected on its own
+/// (they are not atomic); the entity counts as synced only when all of them are. A record must come after the records
+/// it looks up (by a lookup or a foreign key).
 /// </summary>
-public sealed record UpsertUnit(IReadOnlyList<SObjectRecord> Records);
+public sealed record SyncUnit(IReadOnlyList<SObjectRecord> Records);
 
-/// <summary>A Salesforce record to create or update, identified by an external id.</summary>
+/// <summary>A Salesforce record to create or update, or to delete, identified by an external id.</summary>
 /// <param name="ReferenceId">Unique within its unit; other records of the unit can point at it before it exists.</param>
 /// <param name="Fields">Desired values by API name. Fields not listed are left alone.</param>
 /// <param name="Lookups">Reference fields to set to another record's Id.</param>
@@ -24,6 +24,9 @@ public sealed record UpsertUnit(IReadOnlyList<SObjectRecord> Records);
 /// <param name="SObject">The object's API name, e.g. Account.</param>
 /// <param name="ExternalIdField">The external id field the record is matched by.</param>
 /// <param name="ExternalId">Its value: the record's identity in this sync.</param>
+/// <param name="Delete">
+/// Delete the record rather than upsert it (<see cref="Deleting{TSObject}"/>): only its object and external id count.
+/// </param>
 public sealed record SObjectRecord(
     string ReferenceId,
     string SObject,
@@ -32,7 +35,8 @@ public sealed record SObjectRecord(
     IReadOnlyDictionary<string, object?> Fields,
     IReadOnlyList<SObjectLookup>? Lookups = null,
     string? RecordType = null,
-    IReadOnlyList<SObjectLookup>? ForeignKeys = null)
+    IReadOnlyList<SObjectLookup>? ForeignKeys = null,
+    bool Delete = false)
 {
     /// <summary>
     /// The record for an sObject instance: the object, external id field, record type, field names, lookups and
@@ -74,6 +78,20 @@ public sealed record SObjectRecord(
             meta.RecordType, foreignKeys);
     }
 
+    /// <summary>
+    /// A delete of the <typeparamref name="TSObject"/> record with this external id. The id is all a delete needs: the
+    /// read finds the record's Salesforce Id by it, and a record the read doesn't find is deleted already.
+    /// </summary>
+    /// <exception cref="ArgumentException">The external id is missing.</exception>
+    public static SObjectRecord Deleting<TSObject>(string referenceId, string externalId) where TSObject : class
+    {
+        var meta = SObjectMetadata<TSObject>.Instance;
+        return string.IsNullOrWhiteSpace(externalId)
+            ? throw new ArgumentException($"{meta.SObject}.{meta.ExternalIdField} is required")
+            : new SObjectRecord(referenceId, meta.SObject, meta.ExternalIdField, externalId, new Dictionary<string, object?>(),
+                Delete: true);
+    }
+
     /// <summary>The records this one points at: by its lookups, then by its foreign keys.</summary>
     public IEnumerable<SObjectLookup> Parents => (Lookups ?? []).Concat(ForeignKeys ?? []);
 }
@@ -88,7 +106,7 @@ public sealed record SObjectRecord(
 public sealed record SObjectLookup(string Field, string SObject, string ExternalIdField, string ExternalId);
 
 /// <summary>The outcome for one entity (one unit).</summary>
-public sealed record UpsertResult(string Key, SyncOutcome Outcome, IReadOnlyList<SalesforceError> Errors)
+public sealed record SyncResult(string Key, SyncOutcome Outcome, IReadOnlyList<SalesforceError> Errors)
 {
     /// <summary>The error that decided the outcome (errors are ordered most significant first).</summary>
     public SalesforceError? PrimaryError =>
@@ -97,10 +115,10 @@ public sealed record UpsertResult(string Key, SyncOutcome Outcome, IReadOnlyList
 
 public enum SyncOutcome
 {
-    /// <summary>Salesforce already matches the inbox state; nothing was written.</summary>
+    /// <summary>Salesforce already matches the inbox state (a record to delete isn't there); nothing was written.</summary>
     Unchanged,
 
-    /// <summary>The differing fields were written.</summary>
+    /// <summary>The differing fields were written, and the records to delete deleted.</summary>
     Saved,
 
     /// <summary>Not saved because of another entity's record (skipped with it): retry now, no attempt spent.</summary>

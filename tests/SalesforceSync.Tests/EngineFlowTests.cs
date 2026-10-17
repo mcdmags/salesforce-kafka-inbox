@@ -13,7 +13,7 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class EngineFlowTests
 {
-    private static readonly UpsertStrategy<AccountEvent> Accounts = AccountSync.Strategy;
+    private static readonly SyncStrategy<AccountEvent> Accounts = AccountSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly RecordingInbox _inbox = new();
@@ -22,7 +22,7 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task The_consumer_stores_an_event_with_the_time_it_read_from_meta_time()
     {
-        var sync = new EntitySyncService<AccountEvent, AccountInboxRow>(Engine(), _inbox, Accounts, "topic");
+        var sync = new EntitySyncService<AccountEvent, AccountInboxRow>(Engine(), _inbox, Accounts);
         var json = Row(1, "ACC-1", "2026-10-14T03:02:03.1234567+02:00").Payload;
 
         sync.TryReadEvent(json, out var entityId, out var eventTime, out var problem).Should().BeTrue("the event is valid, but: {0}", problem);
@@ -34,7 +34,7 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task An_empty_claim_is_nothing_to_do()
     {
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
+        (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
 
         _inbox.Calls.Should().Equal("claim");
     }
@@ -48,7 +48,7 @@ public sealed class EngineFlowTests
             Invalid(3, "ACC-2"),
         ]);
 
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
 
         ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("new");
         _inbox.Calls.Should().Equal("claim", "record");
@@ -64,7 +64,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.AddRange([Row(1, "ACC-1", "2026-10-14T01:00:00Z"), Row(2, "ACC-2", "2026-10-14T02:00:00Z")]);
         _org.LoseResponsesFor("Account", "ACC-1", 1);
 
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
 
         _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "hold");
     }
@@ -75,7 +75,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
         _http.Throw = new SalesforceResponseException(HttpStatusCode.TooManyRequests, "");
 
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
+        (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
 
         _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: Salesforce 429:  ()");
     }
@@ -86,7 +86,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
         _http.Throw = new HttpRequestException(HttpRequestError.ConnectionError, "refused");
 
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
+        (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
 
         _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: refused ()");
     }
@@ -97,7 +97,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(Invalid(1, "ACC-1"));
         _http.Throw = new InvalidOperationException("Salesforce must not be called");
 
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
+        (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
 
         _inbox.Recorded!.Dead.Should().ContainSingle();
     }
@@ -112,7 +112,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.AddRange([Contact(1, "C-1", "ACC-9"), Contact(2, "C-2", "ACC-9")]);
         var before = _org.GetStats();
 
-        (await Engine().UpsertBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().SyncBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
 
         _inbox.Calls.Should().Equal("claim", "record");
         _inbox.Recorded!.Synced.Should().Equal([1L], "C-1's row");
@@ -128,7 +128,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.AddRange([Contact(1, "C-1", "ACC-9"), Contact(2, "C-2", "ACC-9")]);
         _org.LoseResponsesFor("Contact", "C-1", 1);
 
-        (await Engine().UpsertBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().SyncBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
 
         _inbox.Calls.Should().Equal("claim", "hold");
     }
@@ -137,7 +137,7 @@ public sealed class EngineFlowTests
     private async Task CreateAccountAsync(string account)
     {
         _inbox.Rows.Add(Row(9, account, "2026-10-14T01:00:00Z"));
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
+        (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
         _inbox.Rows.Clear();
         _inbox.Calls.Clear();
         _http.Writes = 0;
@@ -174,7 +174,7 @@ public sealed class EngineFlowTests
         _http.FailWrite = null;
         _http.Writes = 0;
 
-        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(3);
+        (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(3);
 
         _http.Writes.Should().Be(1, "NEW is unchanged now: only OLD's and KIDS's changes are written, in one Composite request");
         _inbox.Recorded!.Synced.Should().BeEquivalentTo([1L, 2L, 3L], "NEW's, OLD's and KIDS's rows");
@@ -208,14 +208,14 @@ public sealed class EngineFlowTests
     public async Task An_Account_and_Profile_write_whose_answer_is_lost_holds_the_whole_batch()
     {
         _inbox.Rows.AddRange([AccountRow(1, "ACC-1", "2026-10-14T01:00:00Z", "One", "Gold"), AccountRow(2, "ACC-2", "2026-10-14T01:00:00Z", "Two", "Gold")]);
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
         _inbox.Rows.Clear();
         _inbox.Calls.Clear();
         _http.Writes = 0;
         _inbox.Rows.AddRange([AccountRow(3, "ACC-1", "2026-10-14T02:00:00Z", "One!", "Gold"), AccountRow(4, "ACC-2", "2026-10-14T02:00:00Z", "Two", "Silver")]);
         _org.LoseResponsesFor("Profile__c", "ACC-2", 1);
 
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
 
         _http.Writes.Should().Be(1, "ACC-1's Account and ACC-2's Profile in one Composite request");
         _inbox.Calls.Should().Equal(["claim", "hold"], "the org applied it, but the batch's outcome is unknown until the held rows are read again");
@@ -223,7 +223,7 @@ public sealed class EngineFlowTests
 
         _inbox.Calls.Clear();
         _http.Writes = 0;
-        (await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
 
         _http.Writes.Should().Be(0, "the read finds both writes applied, the lost one included");
         _inbox.Recorded!.Synced.Should().BeEquivalentTo([3L, 4L], "ACC-1's and ACC-2's rows");
@@ -236,7 +236,7 @@ public sealed class EngineFlowTests
     {
         var engine = Engine();
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
-        await engine.UpsertBatchAsync(Accounts, _inbox, CancellationToken.None); // describes are cached now
+        await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None); // describes are cached now
         _inbox.Calls.Clear();
         _http.OnRead = request => new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -244,12 +244,12 @@ public sealed class EngineFlowTests
             Content = new StringContent(/*lang=json,strict*/ """{"compositeResponse":[{"referenceId":"q0","httpStatusCode":400,"httpHeaders":{},"body":[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating'"}]}]}""")
         };
 
-        await engine.UpsertBatchAsync(Accounts, _inbox, CancellationToken.None);
+        await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None);
 
         _inbox.Calls.Should().HaveElementAt(1, "fail all: Query q0 failed: q0: INVALID_FIELD No such column 'Rating' (INVALID_FIELD)");
         var before = _org.GetStats();
         _http.OnRead = null;
-        await engine.UpsertBatchAsync(Accounts, _inbox, CancellationToken.None);
+        await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None);
         var after = _org.GetStats();
         (after.Describes - before.Describes).Should().BeGreaterThan(0, "the cached describe was invalidated");
         (after.DescribesNotModified - before.DescribesNotModified).Should().Be(0, "an invalidated describe is unconditional");
@@ -261,7 +261,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
         _http.OnRead = _ => throw new TaskCanceledException("The lease cutoff");
 
-        await Engine().UpsertBatchAsync(Accounts, _inbox, CancellationToken.None);
+        await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None);
 
         _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: The lease cutoff ()");
     }
@@ -273,14 +273,14 @@ public sealed class EngineFlowTests
     {
         static Work Entity(string id, long eventId)
         {
-            return new(id, new UpsertUnit([]), eventId);
+            return new(id, new SyncUnit([]), eventId);
         }
 
         var batch = new PreparedBatch([Entity("A", 1), Entity("B", 2), Entity("C", 3), Entity("D", 4), Entity("E", 5)],
             [new FailedEvent(8, "bad", SalesforceErrors.InvalidEvent)]);
         SalesforceError[] error = [new(null, "PROCESSING_HALTED", "x"), new("acct", "SOME_CODE", "why")];
 
-        var outcomes = batch.Outcomes(new Dictionary<string, UpsertResult>
+        var outcomes = batch.Outcomes(new Dictionary<string, SyncResult>
         {
             ["A"] = new("A", SyncOutcome.Saved, []),
             ["B"] = new("B", SyncOutcome.Unchanged, []),
@@ -305,9 +305,9 @@ public sealed class EngineFlowTests
     /// Profile upserts, an existing one a level-1 Contact upsert besides, and KIDS level-0 Contact and Profile upserts:
     /// 6 in all, so NEW, OLD and KIDS together take two write requests (5 upserts each at most), KIDS's the second.
     /// </summary>
-    private static readonly UpsertStrategy<AccountEvent> ThreeObjects = new("account",
+    private static readonly SyncStrategy<AccountEvent> ThreeObjects = new("account",
         e => e.Account?.ExternalId, e => e.Meta,
-        (key, e) => new UpsertUnit(
+        (key, e) => new SyncUnit(
         [
             .. key == "KIDS" ? [] : new[] { new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = e.Account!.Name }) },
             new SObjectRecord("contact", "Contact", "ExternalId__c", $"C-{key}", new Dictionary<string, object?> { ["LastName"] = e.Account!.Name },
@@ -328,7 +328,7 @@ public sealed class EngineFlowTests
     {
         await CreateAccountAsync("KIDS");
         _inbox.Rows.AddRange([Row(8, "OLD", "2026-10-14T01:00:00Z", "Gold"), Row(9, "KIDS", "2026-10-14T01:00:00Z", "Gold")]);
-        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
         _inbox.Recorded!.Synced.Should().HaveCount(2);
         _inbox.Rows.Clear();
         _inbox.Calls.Clear();
@@ -342,14 +342,14 @@ public sealed class EngineFlowTests
             Row(3, "KIDS", "2026-10-14T02:00:00Z", "Silver")]);
         var before = _org.GetStats().WriteRequests;
 
-        (await Engine().UpsertBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(3);
+        (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(3);
 
         _http.Writes.Should().Be(2, "the batch stops at its failed second call");
         _org.FindByExternalId("Account", "NEW").Should().NotBeNull("the first call's records are in Salesforce");
         (_org.GetStats().WriteRequests - before).Should().BeGreaterThanOrEqualTo(1, "the first call reached the org");
     }
 
-    private SalesforceBatchUpsertService Engine()
+    private SalesforceBatchSyncService Engine()
     {
         _http.InnerHandler ??= new FakeSalesforceHandler(_org);
         return SalesforceStep.Service(SalesforceStep.Http(_http), Options.Create(new SalesforceOptions()));

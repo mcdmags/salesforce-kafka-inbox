@@ -4,19 +4,17 @@ public sealed class LoadGeneratorOptions
 {
     public const string Section = "LoadGenerator";
 
+    /// <summary>The one topic: account aggregates, the Account with its relationships and contacts.</summary>
     public string Topic { get; set; } = "account-changes";
 
-    /// <summary>Account-to-account relationship events (Account_Relationship__c).</summary>
-    public string RelationshipTopic { get; set; } = "account-relationship-changes";
-
-    /// <summary>Chance that an account event is followed by a relationship event between it and another account.</summary>
+    /// <summary>Chance that an account event also touches one of its relationships (Account_Relationship__c) to another account.</summary>
     public double RelationshipProbability { get; set; } = 0.15;
 
-    /// <summary>Contact events (Contact, looked up by its Account's external id).</summary>
-    public string ContactTopic { get; set; } = "contact-changes";
-
-    /// <summary>Chance that an account event is followed by an event of one of its contacts (up to 3 per account).</summary>
+    /// <summary>Chance that an account event also touches one of its contacts (up to 3 per account).</summary>
     public double ContactProbability { get; set; } = 0.15;
+
+    /// <summary>Chance that touching a relationship or contact the account has removes it (a delete), rather than changing it.</summary>
+    public double ChildRemovalProbability { get; set; } = 0.2;
 
     /// <summary>Distinct accounts. Fewer accounts = more updates per account = more ordering pressure.</summary>
     public int Accounts { get; set; } = 500;

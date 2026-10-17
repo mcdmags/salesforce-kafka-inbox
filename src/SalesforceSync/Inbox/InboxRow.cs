@@ -16,7 +16,7 @@ public abstract class InboxRow
     /// <summary>The entity's id, read from the event by the consumer; unique in the table.</summary>
     public string EntityId { get; set; } = "";
 
-    /// <summary>The Kafka message value, unchanged (jsonb); never read by SQL.</summary>
+    /// <summary>The entity's event as the consumer split it from its Kafka message (jsonb); never read by SQL.</summary>
     public string Payload { get; set; } = "";
 
     /// <summary>The event's time (its meta.time), cut to the microsecond (<see cref="ToWholeMicroseconds"/>); set by the consumer.</summary>

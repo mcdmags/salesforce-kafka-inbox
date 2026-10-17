@@ -3,12 +3,12 @@ using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Inbox;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Sync.Upsert;
+using SalesforceSync.Sync.Write;
 
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// The one sync engine for every Salesforce object. <see cref="UpsertBatchAsync{TEvent, TRow}"/>
+/// The one sync engine for every Salesforce object. <see cref="SyncBatchAsync{TEvent, TRow}"/>
 /// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds each entity's newest
 /// event, and the strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
@@ -20,25 +20,26 @@ namespace SalesforceSync.Sync;
 /// dead-lettered on its own.</item>
 /// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
 /// one Composite request reads the current records (more only when very long ids need more than 5 queries), then
-/// what differs is written with sObject Collections upserts, one per level and object: one upsert call when the
-/// writes are of one object, else one Composite request of them, parents first (Accounts, then their Profiles: 1
-/// call), whatever the objects.</item>
+/// what differs is written with sObject Collections upserts, one per level and object, and the records to delete
+/// that Salesforce has are deleted with one Collections delete: one call when the request has one collection, else
+/// one Composite request of them, parents first and the delete last (Accounts, then their Profiles: 1 call),
+/// whatever the objects.</item>
 /// <item>Records each entity's outcome in one transaction: done, released for the
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
 /// every claimed entity is held (the write's outcome is unknown) or retried. An entity whose row a newer event
 /// overwrote meanwhile gets no outcome: its row stays pending and due.</item>
 /// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="PreparedBatch"/> and the
-/// ones in <c>Sync/Upsert</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
+/// ones in <c>Sync/Write</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
 /// through <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
 /// </summary>
-public sealed class SalesforceBatchUpsertService(
+public sealed class SalesforceBatchSyncService(
     SalesforceRestClient salesforce,
     SalesforceSchemaCache schemaCache,
     SalesforceErrors errors,
     IOptions<SalesforceOptions> salesforceOptions,
     IOptions<SyncOptions> options,
-    ILogger<SalesforceBatchUpsertService> log)
+    ILogger<SalesforceBatchSyncService> log)
 {
     /// <summary>
     /// How inbox payloads (whole event envelopes) are deserialized into a strategy's event type: camelCase JSON,
@@ -59,9 +60,9 @@ public sealed class SalesforceBatchUpsertService(
     private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
     private readonly WriteResultInterpreter _interpreter = new(errors);
 
-    /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
+    /// <summary>Claims, writes (upserts and deletes) and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do).</returns>
-    public async Task<int> UpsertBatchAsync<TEvent, TRow>(UpsertStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
+    public async Task<int> SyncBatchAsync<TEvent, TRow>(SyncStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
         where TRow : InboxRow, IInboxRow, new()
     {
         // Give up on Salesforce before the lease runs out, so another worker never claims an entity while this one
@@ -86,7 +87,7 @@ public sealed class SalesforceBatchUpsertService(
         // transaction held for up to the request timeout keeps locks, a pooled connection per worker and autovacuum's
         // horizon on a high-churn table. A crash between here and step 4 leaves the rows pending under an expiring
         // lease; the retry reads Salesforce and writes only what still differs.
-        Dictionary<string, UpsertResult> results;
+        Dictionary<string, SyncResult> results;
         try
         {
             results = (await WriteToSalesforceAsync(batch.Units, [.. strategy.Queries([.. batch.Work.Select(w => w.Unit)])],
@@ -124,10 +125,11 @@ public sealed class SalesforceBatchUpsertService(
     /// The Salesforce half of a batch, for any sObjects: one Composite request reads the current records (one per 5
     /// queries; only very long ids make more than 5, as each query's URL must fit a call), then what differs is
     /// written with sObject Collections upserts by external id, one per level and object (and
-    /// <paramref name="maxRecordsPerWrite"/> records).
-    /// Each write request (more than 5 upserts are split over further requests) is one call: its upsert on its own when
-    /// it has one (a single object), else one Composite request of them, parents first. Returns one outcome per unit.
-    /// Nothing here touches the inbox.
+    /// <paramref name="maxRecordsPerWrite"/> records), and the records to delete that the read found are deleted by
+    /// their Ids with one Collections delete (a record to delete the read didn't find is gone already: no call).
+    /// Each write request (more than 5 collections are split over further requests) is one call: its collection on its
+    /// own when it has one, else one Composite request of them, parents first and the delete last. Returns one outcome
+    /// per unit. Nothing here touches the inbox.
     /// </summary>
     /// <remarks>
     /// A write call that fails as a whole (the call, not records or subrequests in it) throws, and the caller fails
@@ -142,7 +144,7 @@ public sealed class SalesforceBatchUpsertService(
     /// <param name="maxRecordsPerWrite">The row type's <see cref="IInboxRow.MaxRecordsPerWrite"/>.</param>
     /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
     /// <param name="ct">Cancels the calls; shutdown, not a failure.</param>
-    internal async Task<List<UpsertResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
+    internal async Task<List<SyncResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, SyncUnit Unit)> units,
         IReadOnlyList<SoqlQuery> queries, int maxValuesPerQuery, int maxRecordsPerWrite, CancellationToken ct)
     {
         if (units.Count > ReadQueryBuilder.MaxEntitiesPerBatch)
@@ -150,7 +152,7 @@ public sealed class SalesforceBatchUpsertService(
             throw new ArgumentOutOfRangeException(nameof(units), $"At most {ReadQueryBuilder.MaxEntitiesPerBatch} units per call");
         }
 
-        var results = new List<UpsertResult>(units.Count);
+        var results = new List<SyncResult>(units.Count);
         if (units.Count == 0)
         {
             return results;
@@ -172,15 +174,16 @@ public sealed class SalesforceBatchUpsertService(
         // 3. Read: one Composite call with the strategy's queries (more only if long ids split them into more than 5)
         var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas, maxValuesPerQuery), schemas.Keys, ct);
 
-        // 4. Decide per record: unchanged, create or update (by what the read found), and how each lookup is linked;
-        // the writes are grouped into collections and Composite requests
+        // 4. Decide per record: unchanged, create, update or delete (by what the read found), and how each lookup is
+        // linked; the writes are grouped into collections and Composite requests
         var plan = WritePlanner.Plan(normalized, current, maxRecordsPerWrite);
         results.AddRange(plan.NotSent);
 
-        // 5. Send. A request of one object is its Collections upsert; a request of several objects (Accounts and their
-        // Profiles, or a new child linked to its new parent by a lookup's @{reference}) is one Composite request of
-        // their upserts, parents first. Either way one call per request.
-        // 6. Per-record results -> one outcome per unit, the same way for both; a unit with writes in several upserts
+        // 5. Send. A request of one collection is that Collections upsert or delete; a request of several (Accounts and
+        // their Profiles, a new child linked to its new parent by a lookup's @{reference}, upserts and deletes) is one
+        // Composite request of them, parents first and the delete last. Either way one call per request, and a delete
+        // whose answer is lost is held like an upsert: a late delete must not remove a record a newer event recreated.
+        // 6. Per-record results -> one outcome per unit, the same way for all; a unit with writes in several collections
         // gets one outcome from all of them. Inside a Composite request a child is sent even if its new parent failed
         // in an earlier subrequest: the org decides, and the parent's result decides the unit.
         foreach (var request in plan.Requests)
@@ -189,7 +192,7 @@ public sealed class SalesforceBatchUpsertService(
             IReadOnlyList<CollectionResult> answers;
             try
             {
-                answers = await salesforce.UpsertAsync(collections, ct);
+                answers = await salesforce.WriteAsync(collections, ct);
             }
             catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
             {
@@ -208,7 +211,7 @@ public sealed class SalesforceBatchUpsertService(
     /// A record type the cached describe doesn't have (or not as active and available), or whose Id Salesforce
     /// rejected, may just have been created, activated or assigned: its object is described again next time.
     /// </summary>
-    private async Task InvalidateRecordTypesAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units, IEnumerable<UpsertResult> results,
+    private async Task InvalidateRecordTypesAsync(IReadOnlyList<(string Key, SyncUnit Unit)> units, IEnumerable<SyncResult> results,
         CancellationToken ct)
     {
         var failed = results
@@ -224,7 +227,7 @@ public sealed class SalesforceBatchUpsertService(
         }
     }
 
-    private async Task<Dictionary<string, SObjectSchema>> DescribeAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
+    private async Task<Dictionary<string, SObjectSchema>> DescribeAsync(IReadOnlyList<(string Key, SyncUnit Unit)> units,
         IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
     {
         var sobjects = units.SelectMany(u => u.Unit.Records)
@@ -276,7 +279,7 @@ public sealed class SalesforceBatchUpsertService(
         }
     }
 
-    private void LogFailures(string entityType, PreparedBatch batch, IEnumerable<UpsertResult> results)
+    private void LogFailures(string entityType, PreparedBatch batch, IEnumerable<SyncResult> results)
     {
         foreach (var invalid in batch.Invalid)
         {

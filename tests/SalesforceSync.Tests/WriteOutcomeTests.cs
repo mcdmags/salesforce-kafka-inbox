@@ -58,15 +58,15 @@ public sealed class WriteOutcomeTests
         new SalesforceResponseException(HttpStatusCode.ServiceUnavailable, body).IsSalesforceError.Should().Be(own);
     }
 
-    // ---------- Read vs write, through the upserter ----------
+    // ---------- Read vs write, through the engine ----------
 
     [Fact]
     public async Task A_failed_read_is_not_an_unknown_outcome()
     {
-        var (upserter, org, failing) = Upserter();
+        var (engine, org, failing) = Engine();
         failing.FailReads = true;
 
-        var upsert = () => Upsert(upserter, "A1");
+        var upsert = () => Upsert(engine, "A1");
 
         (await upsert.Should().ThrowAsync<HttpRequestException>()).Which.Should().NotBeOfType<UnknownOutcomeException>();
         org.FindByExternalId("Account", "A1").Should().BeNull();
@@ -75,10 +75,10 @@ public sealed class WriteOutcomeTests
     [Fact]
     public async Task A_write_that_fails_after_it_was_sent_is_an_unknown_outcome()
     {
-        var (upserter, org, _) = Upserter();
+        var (engine, org, _) = Engine();
         org.LoseResponsesFor("Account", "A1", 1);
 
-        var upsert = () => Upsert(upserter, "A1");
+        var upsert = () => Upsert(engine, "A1");
 
         (await upsert.Should().ThrowAsync<UnknownOutcomeException>()).WithInnerException<HttpRequestException>();
         org.FindByExternalId("Account", "A1").Should().NotBeNull("the org applied the write; only the answer was lost");
@@ -87,11 +87,11 @@ public sealed class WriteOutcomeTests
     [Fact]
     public async Task A_write_Salesforce_rejected_is_not_an_unknown_outcome()
     {
-        var (upserter, _, failing) = Upserter();
+        var (engine, _, failing) = Engine();
         failing.FailWrites = true;
         failing.Status = HttpStatusCode.BadRequest;
 
-        var upsert = () => Upsert(upserter, "A1");
+        var upsert = () => Upsert(engine, "A1");
 
         await upsert.Should().ThrowAsync<SalesforceResponseException>();
     }
@@ -99,23 +99,23 @@ public sealed class WriteOutcomeTests
     [Fact]
     public async Task A_cancelled_write_is_an_unknown_outcome()
     {
-        var (upserter, _, failing) = Upserter();
+        var (engine, _, failing) = Engine();
         failing.FailWrites = true;
         failing.Cancel = true;
 
-        var upsert = () => Upsert(upserter, "A1");
+        var upsert = () => Upsert(engine, "A1");
 
         (await upsert.Should().ThrowAsync<UnknownOutcomeException>()).WithInnerException<OperationCanceledException>();
     }
 
-    private static Task<List<UpsertResult>> Upsert(SalesforceBatchUpsertService upserter, string key)
+    private static Task<List<SyncResult>> Upsert(SalesforceBatchSyncService engine, string key)
     {
-        var unit = new UpsertUnit([new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = "Acme" })]);
-        return upserter.WriteToSalesforceAsync([(key, unit)], [.. AccountSync.Queries([unit])],
+        var unit = new SyncUnit([new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = "Acme" })]);
+        return engine.WriteToSalesforceAsync([(key, unit)], [.. AccountSync.Queries([unit])],
             AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
     }
 
-    private static (SalesforceBatchUpsertService, FakeSalesforceStore, FailingHandler) Upserter()
+    private static (SalesforceBatchSyncService, FakeSalesforceStore, FailingHandler) Engine()
     {
         var org = new FakeSalesforceStore(new FakeSalesforceOptions { EnforceDailyLimit = false });
         var options = Options.Create(new SalesforceOptions { CompressRequestsLargerThan = 0 });

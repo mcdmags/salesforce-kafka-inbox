@@ -1,13 +1,14 @@
 using System.Text.RegularExpressions;
 using SalesforceSync.Salesforce;
 
-namespace SalesforceSync.Sync.Upsert;
+namespace SalesforceSync.Sync.Write;
 
 /// <summary>
 /// One write request, one API call: its units and their writes by collection, each collection an sObject Collections
-/// upsert by external id. A request of one collection (one object, e.g. only Accounts changed) is that upsert on its
-/// own; one of several (Accounts and their Profiles, or a new child linked to its new parent by a lookup) is one
-/// Composite request with an upsert subrequest per collection, parents first. The collections' order, their reference
+/// upsert by external id, or the Collections delete of the request's records to delete, by Id. A request of one
+/// collection (one object, e.g. only Accounts changed, or only deletes) is that collection on its own; one of several
+/// (Accounts and their Profiles, a new child linked to its new parent by a lookup, upserts and deletes) is one
+/// Composite request with a subrequest per collection, parents first and the delete last. The collections' order, their reference
 /// ids and every write's position are fixed when the request is assembled (<see cref="Pack"/>), so building the
 /// request and reading its results never depend on each other.
 /// </summary>
@@ -35,11 +36,11 @@ internal sealed partial class CompositeWrite
     /// <param name="units">The units with writes, in order.</param>
     /// <param name="maxRecordsPerWrite">The row type's <see cref="Inbox.IInboxRow.MaxRecordsPerWrite"/>: records per collection.</param>
     /// <returns>The requests, and a permanent failure for each unit that can't fit any request.</returns>
-    public static (List<CompositeWrite> Requests, List<UpsertResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units,
+    public static (List<CompositeWrite> Requests, List<SyncResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units,
         int maxRecordsPerWrite)
     {
         var requests = new List<CompositeWrite>();
-        var tooLarge = new List<UpsertResult>();
+        var tooLarge = new List<SyncResult>();
 
         foreach (var unit in units)
         {
@@ -71,15 +72,17 @@ internal sealed partial class CompositeWrite
     }
 
     /// <summary>
-    /// The upserts, in the order and with the reference ids fixed by <see cref="Pack"/>: parents first, so a new parent
-    /// exists before its child is sent. Each record carries its external id and exactly the fields planned for it (all
-    /// of a new record's, only the changed ones of an existing record; a lookup as the Id the read found, or as a
-    /// reference to its new parent's result).
+    /// The upserts and the delete, in the order and with the reference ids fixed by <see cref="Pack"/>: parents first, so
+    /// a new parent exists before its child is sent. Each upserted record carries its external id and exactly the
+    /// fields planned for it (all of a new record's, only the changed ones of an existing record; a lookup as the Id the
+    /// read found, or as a reference to its new parent's result); each deleted one is its Id.
     /// </summary>
     public List<CollectionRequest> BuildRequests()
     {
-        return [.. Collections.Select(c => new CollectionRequest(c.ReferenceId, c.Key.SObject, c.Key.ExternalIdField,
-            [.. c.Writes.Select(w => w.Body())]))];
+        return [.. Collections.Select(c => c.Key.Delete
+            ? new CollectionDelete(c.ReferenceId, [.. c.Writes.Select(w => w.Id!)])
+            : (CollectionRequest)new CollectionUpsert(c.ReferenceId, c.Key.SObject, c.Key.ExternalIdField,
+                [.. c.Writes.Select(w => w.Body())]))];
     }
 
     /// <summary>Whether a unit needing these collections (key -> records) still fits within the limits.</summary>
@@ -129,10 +132,10 @@ internal sealed partial class CompositeWrite
         Collections = collections;
     }
 
-    /// <summary>E.g. Account, Contact_ref. Reference ids take letters, digits and underscores only.</summary>
+    /// <summary>E.g. Account, Contact_ref, delete. Reference ids take letters, digits and underscores only.</summary>
     private static string ReferenceIdFor(CollectionKey key)
     {
-        return NotReferenceIdCharacter().Replace($"{key.SObject}{(key.ByReference ? "_ref" : "")}", "_");
+        return key.Delete ? "delete" : NotReferenceIdCharacter().Replace($"{key.SObject}{(key.ByReference ? "_ref" : "")}", "_");
     }
 
     [GeneratedRegex("[^A-Za-z0-9_]")]
@@ -142,12 +145,21 @@ internal sealed partial class CompositeWrite
 /// <summary>The writes of one unit; the unit is saved only if all of them are.</summary>
 internal sealed record PlannedUnit(string Key, IReadOnlyList<PlannedWrite> Writes);
 
-/// <summary>The collection (one upsert) a write goes into: one per level and object.</summary>
+/// <summary>The collection (one upsert) a write goes into: one per level and object; or <see cref="Deletes"/>.</summary>
 /// <param name="Depth">0 for a record that points at nothing in its unit (by a lookup or a foreign key), 1 for its children, ...</param>
 /// <param name="ExternalIdField">The external id field as the org names it, which the upsert matches records by.</param>
 /// <param name="ByReference">It points at its new parent by reference (<c>@{Account[3].id}</c>).</param>
 /// <param name="SObject">The object's API name.</param>
-internal sealed record CollectionKey(int Depth, string SObject, string ExternalIdField, bool ByReference);
+/// <param name="Delete">The collection deletes its records, by Id.</param>
+internal sealed record CollectionKey(int Depth, string SObject, string ExternalIdField, bool ByReference, bool Delete = false)
+{
+    /// <summary>
+    /// The one delete of a request: a Collections delete takes the Ids of records of any objects. It goes after every
+    /// upsert of the request, so a child that the upserts move to another parent is not taken down by a delete of its
+    /// old parent in the same request (a master-detail delete cascades to the children).
+    /// </summary>
+    public static readonly CollectionKey Deletes = new(int.MaxValue, "", "Id", false, Delete: true);
+}
 
 /// <summary>A lookup to set, by reference, to a record that is created in the same request.</summary>
 internal sealed record ParentReference(SalesforceField Field, PlannedWrite Parent);
@@ -164,25 +176,28 @@ internal enum WriteStatus
     Permanent
 }
 
-/// <summary>One record to create (<paramref name="id"/> null) or update, and what came of it.</summary>
+/// <summary>One record to create (<paramref name="id"/> null), update or delete, and what came of it.</summary>
 /// <param name="changes">The fields to send, by API name.</param>
 /// <param name="parents">The new records of its unit it points at (by a lookup or a foreign key): sent before it.</param>
 /// <param name="lookupFields">The lookups this write sets, by field name.</param>
 /// <param name="record">The record as normalized against Describe.</param>
-/// <param name="id">Its Id in Salesforce, null when it is new.</param>
+/// <param name="id">Its Id in Salesforce, null when it is new; a delete is by it.</param>
 /// <param name="links">The lookups set by reference to a new parent's result.</param>
 /// <param name="depth">Its level in the unit: after every record it points at.</param>
 internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnlyDictionary<string, object?> changes,
     IReadOnlyList<ParentReference> links, IReadOnlyList<PlannedWrite> parents, IReadOnlySet<string> lookupFields, int depth)
 {
     public bool Create => id is null;
+    public bool Delete => record.Record.Delete;
+    public string? Id => id;
     public string ReferenceId => record.ReferenceId;
     public IReadOnlyList<ParentReference> Links => links;
     public IReadOnlyList<PlannedWrite> Parents => parents;
     public IReadOnlySet<string> LookupFields => lookupFields;
 
-    public CollectionKey Collection { get; } =
-        new(depth, record.Schema.Name, record.Schema.Find(record.Record.ExternalIdField)!.Name, links.Count > 0);
+    public CollectionKey Collection { get; } = record.Record.Delete
+        ? CollectionKey.Deletes
+        : new(depth, record.Schema.Name, record.Schema.Find(record.Record.ExternalIdField)!.Name, links.Count > 0);
 
     /// <summary>Where the record is in the request: its collection's reference id and its position in it.</summary>
     public string? CollectionReferenceId { get; set; }
