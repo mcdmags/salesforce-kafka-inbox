@@ -1033,6 +1033,109 @@ public sealed class SalesforceBatchSyncServiceTests
         (_org.GetStats().Describes - before.Describes).Should().BeGreaterThan(0, "the cached describe was invalidated");
     }
 
+    // ---------- Deletes: the same engine, records the read found deleted by Id ----------
+
+    [Fact]
+    public async Task A_contact_to_delete_is_read_by_its_key_then_deleted_by_its_Id_in_one_call()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contacts(("C1", "A1", new() { ["lastName"] = "One" }), ("C2", "A1", new() { ["lastName"] = "Two" }));
+        var ids = new[] { IdOf("Contact", "C1"), IdOf("Contact", "C2") };
+        var before = _org.GetStats();
+
+        (await DeleteContacts("C1", "C2")).Should().OnlyContain(r => r.Outcome == SyncOutcome.Saved);
+
+        _org.FindByExternalId("Contact", "C1").Should().BeNull();
+        _org.FindByExternalId("Contact", "C2").Should().BeNull();
+        var after = _org.GetStats();
+        (after.ApiCalls - before.ApiCalls).Should().Be(2, "one read, one delete for the batch");
+        (after.DeleteRequests - before.DeleteRequests, after.Deletes - before.Deletes).Should().Be((1L, 2L));
+        var delete = _org.WriteRequests[^1];
+        ((string?)delete["method"], (string?)delete["url"]).Should().Be(("DELETE",
+            $"/services/data/v62.0/composite/sobjects?ids={ids[0]},{ids[1]}&allOrNone=false"));
+    }
+
+    [Fact]
+    public async Task A_record_to_delete_that_Salesforce_does_not_have_costs_only_the_read()
+    {
+        var before = _org.GetStats();
+
+        (await DeleteContacts("NEVER-SYNCED")).Single().Outcome.Should().Be(SyncOutcome.Unchanged, "nothing to delete: done");
+
+        var after = _org.GetStats();
+        (after.ApiCalls - after.Describes - (before.ApiCalls - before.Describes)).Should().Be(1, "the read only (and a first describe)");
+        after.WriteRequests.Should().Be(before.WriteRequests);
+    }
+
+    [Fact]
+    public async Task Upserts_and_a_delete_of_one_batch_are_one_Composite_call_with_the_delete_last()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contact("OLD", "A1", new() { ["lastName"] = "Old" });
+        var before = _org.GetStats();
+
+        var newContact = ContactStrategy.Map("NEW", Read<ContactEvent>(new JsonObject
+        {
+            ["contact"] = new JsonObject { ["externalId"] = "NEW", ["accountExternalId"] = "A1", ["lastName"] = "New" }
+        }));
+        var results = await Write(ContactStrategy, [("NEW", newContact), ("OLD", new SyncUnit([SObjectRecord.Deleting<ContactSObject>("contact", "OLD")]))]);
+
+        results.Should().OnlyContain(r => r.Outcome == SyncOutcome.Saved);
+        (_org.GetStats().ApiCalls - before.ApiCalls).Should().Be(2, "one read, one Composite write");
+        var write = _org.WriteRequests[^1];
+        ((string?)Sub(write, 0)["method"], (string?)Sub(write, 1)["method"]).Should().Be(("PATCH", "DELETE"));
+        Sub(write, 1).ContainsKey("body").Should().BeFalse("a delete's Ids are in its URL");
+        _org.FindByExternalId("Contact", "OLD").Should().BeNull();
+        _org.FindByExternalId("Contact", "NEW").Should().NotBeNull();
+    }
+
+    [Theory]
+    [InlineData("INSUFFICIENT_ACCESS_OR_READONLY", SyncOutcome.PermanentFailure)]
+    [InlineData("UNABLE_TO_LOCK_ROW", SyncOutcome.TransientFailure)]
+    public async Task A_delete_the_org_refuses_is_permanent_or_transient_by_its_code_and_the_record_stays(string code, SyncOutcome outcome)
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contact("C1", "A1", new() { ["lastName"] = "Kept" });
+        _org.InjectFault("Contact", "C1", code, "refused", 1);
+
+        var result = (await DeleteContacts("C1")).Single();
+
+        (result.Outcome, result.PrimaryError?.Code).Should().Be((outcome, code));
+        _org.FindByExternalId("Contact", "C1").Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task A_delete_whose_answer_is_lost_has_an_unknown_outcome()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contact("C1", "A1", new() { ["lastName"] = "Gone" });
+        _org.LoseResponsesFor("Contact", "C1", 1);
+
+        var delete = () => DeleteContacts("C1");
+
+        await delete.Should().ThrowAsync<UnknownOutcomeException>("the caller holds the entities, as for a lost upsert");
+        _org.FindByExternalId("Contact", "C1").Should().BeNull("the org did delete it");
+    }
+
+    [Fact]
+    public async Task An_Account_delete_refused_while_its_contacts_exist_waits_for_their_deletes_then_deletes_its_Profile_and_itself()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" });
+        await Contact("C1", "A1", new() { ["lastName"] = "Child" });
+        var account = new SyncUnit([SObjectRecord.Deleting<ProfileSObject>("prof", "P-A1"), SObjectRecord.Deleting<AccountSObject>("acct", "A1")]);
+
+        var early = (await Write(AccountStrategy, [("A1", account)])).Single();
+
+        (early.Outcome, early.PrimaryError?.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced),
+            "the contact's own delete, from its own inbox, goes first; the account retries meanwhile");
+        _org.FindByExternalId("Account", "A1").Should().NotBeNull();
+        _org.FindByExternalId("Profile__c", "P-A1").Should().BeNull("the Profile, first in the unit, was deleted: the retry won't send it again");
+
+        (await DeleteContacts("C1")).Single().Outcome.Should().Be(SyncOutcome.Saved);
+        (await Write(AccountStrategy, [("A1", account)])).Single().Outcome.Should().Be(SyncOutcome.Saved);
+        _org.FindByExternalId("Account", "A1").Should().BeNull();
+    }
+
     // ---------- Helpers ----------
 
     private async Task<SyncResult> Account(string key, Dictionary<string, object?> account, Dictionary<string, object?> profile)
@@ -1078,6 +1181,19 @@ public sealed class SalesforceBatchSyncServiceTests
         })]);
     }
 
+    /// <summary>Deletes of contacts by key, as the contact strategy maps them, through the engine minus the inbox.</summary>
+    private Task<List<SyncResult>> DeleteContacts(params string[] keys)
+    {
+        return Write(ContactStrategy, [.. keys.Select(k => (k, new SyncUnit([SObjectRecord.Deleting<ContactSObject>("contact", k)])))]);
+    }
+
+    /// <summary>Units of a strategy through the engine minus the inbox: query, then write and delete.</summary>
+    private Task<List<SyncResult>> Write<TEvent>(SyncStrategy<TEvent> strategy, List<(string Key, SyncUnit Unit)> units)
+    {
+        return _engine.WriteToSalesforceAsync(units, [.. strategy.Queries([.. units.Select(u => u.Unit)])],
+            ContactInboxRow.MaxValuesPerQuery, ContactInboxRow.MaxRecordsPerWrite, CancellationToken.None);
+    }
+
     /// <summary>What the engine does with a strategy, minus the inbox: map, then query and upsert.</summary>
     private Task<List<SyncResult>> Upsert<TEvent>(SyncStrategy<TEvent> strategy, params (string Key, TEvent Event)[] items)
     {
@@ -1115,7 +1231,7 @@ public sealed class SalesforceBatchSyncServiceTests
     private static async Task<IReadOnlyList<RecordResult>> Upsert(SalesforceRestClient client, string sobject, string externalIdField,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> records, CancellationToken ct)
     {
-        return (await client.UpsertAsync([new CollectionRequest(sobject, sobject, externalIdField, records)], ct)).Single().Records!;
+        return (await client.WriteAsync([new CollectionUpsert(sobject, sobject, externalIdField, records)], ct)).Single().Records!;
     }
 
     /// <summary>The i-th subrequest of a recorded composite write.</summary>

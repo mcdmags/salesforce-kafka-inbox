@@ -5,15 +5,15 @@ namespace SalesforceSync.Sync.Write;
 
 /// <summary>What to do with a batch after the read.</summary>
 /// <param name="Requests">
-/// The write requests, each with its units and their writes by collection (one upsert each), each one API call: one
-/// Collections upsert, or one Composite request of several (<see cref="CompositeWrite"/>).
+/// The write requests, each with its units and their writes by collection (one upsert each, and one delete), each one
+/// API call: one Collections upsert or delete, or one Composite request of several (<see cref="CompositeWrite"/>).
 /// </param>
 /// <param name="NotSent">The units that won't be sent, with their outcome: unchanged, rejected, too large, or waiting for a lookup target.</param>
 internal sealed record WritePlan(IReadOnlyList<CompositeWrite> Requests, IReadOnlyList<SyncResult> NotSent);
 
 /// <summary>
 /// Turns units and Salesforce's current records into the collection requests to send. Whether a record is created or
-/// updated is decided by what the read found. A lookup becomes a literal Id, or a reference to a new record's upsert in
+/// updated is decided by what the read found, and so is whether a record to delete is sent (by its Id) at all. A lookup becomes a literal Id, or a reference to a new record's upsert in
 /// the same request (<c>@{Account[3].id}</c>); a foreign key stays the text it is, and only puts its record after its
 /// parent. Compares a record's normalized values with what Salesforce has (<see cref="Changes"/>). No I/O.
 /// </summary>
@@ -57,8 +57,8 @@ internal static class WritePlanner
     }
 
     /// <summary>
-    /// The unit's writes: a create for each record Salesforce doesn't have, an update for each one that differs, nothing
-    /// for the rest. A lookup becomes the target's Id when the target exists, and a link to the target's create when
+    /// The unit's writes: a create for each record Salesforce doesn't have, an update for each one that differs, a delete
+    /// for each record to delete that Salesforce has, nothing for the rest. A lookup becomes the target's Id when the target exists, and a link to the target's create when
     /// the target is an earlier record of this unit that is new. Lookups and foreign keys both put a record one level
     /// below the records of the unit they point at (so it is sent after them), and make a new one of those its parent.
     /// </summary>
@@ -76,6 +76,19 @@ internal static class WritePlanner
         foreach (var record in unit.Records)
         {
             var existing = current.Find(record.Record);
+            if (record.Record.Delete)
+            {
+                // By the Id the read found; a record the read didn't find is deleted already (or never was), so
+                // nothing is sent for it
+                if (existing is not null)
+                {
+                    writes.Add(new PlannedWrite(record, existing.Id, new Dictionary<string, object?>(), [], [],
+                        new HashSet<string>(), depth: 0));
+                }
+
+                continue;
+            }
+
             var changes = Changes(record, existing, problems);
             var links = new List<ParentReference>();
             var parents = new List<PlannedWrite>();

@@ -22,9 +22,10 @@ namespace SalesforceSync.Sync;
 /// dead-lettered on its own.</item>
 /// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
 /// one Composite request reads the current records (more only when very long ids need more than 5 queries), then
-/// what differs is written with sObject Collections upserts, one per level and object: one upsert call when the
-/// writes are of one object, else one Composite request of them, parents first (Accounts, then their Profiles: 1
-/// call), whatever the objects.</item>
+/// what differs is written with sObject Collections upserts, one per level and object, and the records to delete
+/// that Salesforce has are deleted with one Collections delete: one call when the request has one collection, else
+/// one Composite request of them, parents first and the delete last (Accounts, then their Profiles: 1 call),
+/// whatever the objects.</item>
 /// <item>Records each entity's outcome in one transaction: done, released for the
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
 /// every claimed entity is held (the write's outcome is unknown), deferred (rate limited) or retried. An entity whose
@@ -62,7 +63,7 @@ public sealed class SalesforceBatchSyncService(
     private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
     private readonly WriteResultInterpreter _interpreter = new(errors);
 
-    /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
+    /// <summary>Claims, writes (upserts and deletes) and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
     public async Task<int> SyncBatchAsync<TEvent, TRow>(SyncStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
         where TRow : InboxRow, IInboxRow, new()
@@ -139,10 +140,11 @@ public sealed class SalesforceBatchSyncService(
     /// The Salesforce half of a batch, for any sObjects: one Composite request reads the current records (one per 5
     /// queries; only very long ids make more than 5, as each query's URL must fit a call), then what differs is
     /// written with sObject Collections upserts by external id, one per level and object (and
-    /// <paramref name="maxRecordsPerWrite"/> records).
-    /// Each write request (more than 5 upserts are split over further requests) is one call: its upsert on its own when
-    /// it has one (a single object), else one Composite request of them, parents first. Returns one outcome per unit.
-    /// Nothing here touches the inbox.
+    /// <paramref name="maxRecordsPerWrite"/> records), and the records to delete that the read found are deleted by
+    /// their Ids with one Collections delete (a record to delete the read didn't find is gone already: no call).
+    /// Each write request (more than 5 collections are split over further requests) is one call: its collection on its
+    /// own when it has one, else one Composite request of them, parents first and the delete last. Returns one outcome
+    /// per unit. Nothing here touches the inbox.
     /// </summary>
     /// <remarks>
     /// A write call that fails as a whole (the call, not records or subrequests in it) throws, and the caller fails,
@@ -187,15 +189,16 @@ public sealed class SalesforceBatchSyncService(
         // 3. Read: one Composite call with the strategy's queries (more only if long ids split them into more than 5)
         var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas, maxValuesPerQuery), schemas.Keys, ct);
 
-        // 4. Decide per record: unchanged, create or update (by what the read found), and how each lookup is linked;
-        // the writes are grouped into collections and Composite requests
+        // 4. Decide per record: unchanged, create, update or delete (by what the read found), and how each lookup is
+        // linked; the writes are grouped into collections and Composite requests
         var plan = WritePlanner.Plan(normalized, current, maxRecordsPerWrite);
         results.AddRange(plan.NotSent);
 
-        // 5. Send. A request of one object is its Collections upsert; a request of several objects (Accounts and their
-        // Profiles, or a new child linked to its new parent by a lookup's @{reference}) is one Composite request of
-        // their upserts, parents first. Either way one call per request.
-        // 6. Per-record results -> one outcome per unit, the same way for both; a unit with writes in several upserts
+        // 5. Send. A request of one collection is that Collections upsert or delete; a request of several (Accounts and
+        // their Profiles, a new child linked to its new parent by a lookup's @{reference}, upserts and deletes) is one
+        // Composite request of them, parents first and the delete last. Either way one call per request, and a delete
+        // whose answer is lost is held like an upsert: a late delete must not remove a record a newer event recreated.
+        // 6. Per-record results -> one outcome per unit, the same way for all; a unit with writes in several collections
         // gets one outcome from all of them. Inside a Composite request a child is sent even if its new parent failed
         // in an earlier subrequest: the org decides, and the parent's result decides the unit.
         foreach (var request in plan.Requests)
@@ -204,7 +207,7 @@ public sealed class SalesforceBatchSyncService(
             IReadOnlyList<CollectionResult> answers;
             try
             {
-                answers = await salesforce.UpsertAsync(collections, ct);
+                answers = await salesforce.WriteAsync(collections, ct);
             }
             catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
             {

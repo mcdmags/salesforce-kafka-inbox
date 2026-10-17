@@ -91,6 +91,8 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
                 {
                     res = request.Method == HttpMethod.Patch && FakeSalesforceStore.UpsertTarget(path) is (var sobject, var field)
                         ? Json(request, HttpStatusCode.OK, store.Upsert(sobject, field, path, await ReadJsonAsync(request, ct)))
+                        : FakeSalesforceStore.IsDelete(request.Method.Method, path)
+                        ? Json(request, HttpStatusCode.OK, store.Delete(uri))
                         : request.Method == HttpMethod.Get && path.EndsWith("/query", StringComparison.OrdinalIgnoreCase)
                         ? Json(request, HttpStatusCode.OK, store.Query(FakeSalesforceStore.QueryOf(uri)))
                         : request.Method == HttpMethod.Post && path.EndsWith("/composite", StringComparison.OrdinalIgnoreCase)

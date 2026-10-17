@@ -108,7 +108,7 @@ public sealed class WriteRulesTests
             current);
 
         plan.NotSent.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "SAME" && r.Outcome == SyncOutcome.Unchanged);
-        var upsert = plan.Requests.Should().ContainSingle().Subject.BuildRequests().Should().ContainSingle().Subject;
+        var upsert = plan.Requests.Should().ContainSingle().Subject.Upserts().Should().ContainSingle().Subject;
         upsert.ReferenceId.Should().Be("Account");
         upsert.Records.Select(r => r["ExternalId__c"]).Should().Equal("NEW", "OLD");
         upsert.Records[0].Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "Name", "Active__c"], "a create sends every field");
@@ -126,7 +126,7 @@ public sealed class WriteRulesTests
 
         var plan = Plan([Normalized(AccountWithContact("A1"))], current);
 
-        var contact = plan.Requests.Single().BuildRequests().Single(r => r.ReferenceId.StartsWith("Contact")).Records.Single();
+        var contact = plan.Requests.Single().Upserts().Single(r => r.ReferenceId.StartsWith("Contact")).Records.Single();
         contact.Should().ContainKey("AccountId", what).WhoseValue.Should().Be(value);
     }
 
@@ -165,7 +165,7 @@ public sealed class WriteRulesTests
     {
         var request = Request(AccountWithProfile("A1"), AccountWithProfile("A2"));
 
-        var upserts = request.BuildRequests();
+        var upserts = request.Upserts();
 
         upserts.Select(u => (u.ReferenceId, u.SObject, u.ExternalIdField)).Should().Equal(
             ("Account", "Account", "ExternalId__c"), ("Profile__c", "Profile__c", "ExternalId__c"));
@@ -189,9 +189,9 @@ public sealed class WriteRulesTests
             CurrentRecords.None).Requests.Should().ContainSingle().Subject;
         var both = Plan([Normalized(new SyncUnit([widget, gadget]))], CurrentRecords.None).Requests.Should().ContainSingle().Subject;
 
-        widgetsOnly.BuildRequests().Select(u => (u.ReferenceId, u.Url, u.Records.Count)).Should().Equal(
+        widgetsOnly.Upserts().Select(u => (u.ReferenceId, u.Url, u.Records.Count)).Should().Equal(
             [("Widget__c", "/services/data/v62.0/composite/sobjects/Widget__c/Key__c", 2)], "one object: one upsert, a call of its own");
-        both.BuildRequests().Select(u => (u.ReferenceId, u.Url)).Should().Equal(
+        both.Upserts().Select(u => (u.ReferenceId, u.Url)).Should().Equal(
             [("Widget__c", "/services/data/v62.0/composite/sobjects/Widget__c/Key__c"), ("Gadget__c", "/services/data/v62.0/composite/sobjects/Gadget__c/Key__c")],
             "two objects: one request (Composite) of an upsert each, the parent first by its foreign key");
 
@@ -215,7 +215,7 @@ public sealed class WriteRulesTests
 
         if (written)
         {
-            var upsert = plan.Requests.Single().BuildRequests().Should().ContainSingle().Subject;
+            var upsert = plan.Requests.Single().Upserts().Should().ContainSingle().Subject;
             upsert.Records.Single().Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "AccountId__c"]);
             upsert.Records.Single()["AccountId__c"].Should().Be("A1");
         }
@@ -230,7 +230,7 @@ public sealed class WriteRulesTests
     public void A_child_whose_new_parent_failed_in_an_earlier_upsert_is_sent_the_org_decides_and_the_parent_decides_the_unit()
     {
         var request = Request(AccountWithProfile("A1"), AccountWithProfile("A2"));
-        request.BuildRequests()[1].Records.Should().HaveCount(2, "both Profiles are in the Composite request, A1's too");
+        request.Upserts()[1].Records.Should().HaveCount(2, "both Profiles are in the Composite request, A1's too");
 
         var results = Interpret(request,
             new CollectionResult("Account",
@@ -284,7 +284,7 @@ public sealed class WriteRulesTests
         var plan = Plan([Normalized(AccountWithContact("A1")), Normalized(AccountWithContact("A2"))], CurrentRecords.None);
         var request = plan.Requests.Single();
 
-        JsonSerializer.Serialize(request.BuildRequests()).Should().Be(JsonSerializer.Serialize(request.BuildRequests()));
+        JsonSerializer.Serialize(request.Upserts()).Should().Be(JsonSerializer.Serialize(request.Upserts()));
         request.Collections.Select(c => c.ReferenceId).Should().Equal("Account", "Contact_ref");
     }
 
@@ -412,7 +412,7 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
         var request = Plan([Normalized(Account("A1", "New")), Normalized(Account("A2", "Created"))], current).Requests.Single();
 
-        var upsert = request.BuildRequests().Should().ContainSingle().Subject;
+        var upsert = request.Upserts().Should().ContainSingle().Subject;
 
         (upsert.ReferenceId, upsert.SObject, upsert.ExternalIdField).Should().Be(("Account", "Account", "ExternalId__c"));
         JsonSerializer.Serialize(upsert.Records).Should().Be(JsonSerializer.Serialize(new object[]
@@ -431,7 +431,7 @@ public sealed class WriteRulesTests
             ("Profile__c", /*lang=json,strict*/ """{"Id":"a00000000000002AAA","ExternalId__c":"P-A2","Tier__c":"Silver","AccountId__c":"A2"}"""));
         var request = Plan([Normalized(Account("A1", "New")), Normalized(AccountWithProfile("A2"))], current).Requests.Single();
 
-        var upserts = request.BuildRequests();
+        var upserts = request.Upserts();
 
         upserts.Select(u => (u.ReferenceId, u.SObject, u.Records.Count)).Should().Equal(("Account", "Account", 1), ("Profile__c", "Profile__c", 1));
         JsonSerializer.Serialize(upserts[1].Records).Should().Be(JsonSerializer.Serialize(new object[]
@@ -443,11 +443,11 @@ public sealed class WriteRulesTests
     [Fact]
     public void A_new_child_linked_to_its_new_parent_by_reference_shares_the_request_with_the_other_writes()
     {
-        Request(AccountWithContact("A1")).BuildRequests().Select(u => u.ReferenceId).Should().Equal("Account", "Contact_ref");
+        Request(AccountWithContact("A1")).Upserts().Select(u => u.ReferenceId).Should().Equal("Account", "Contact_ref");
 
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A2","Name":"Old","Active__c":false}"""));
         var request = Plan([Normalized(AccountWithContact("A1")), Normalized(Account("A2", "New"))], current).Requests.Single();
-        request.BuildRequests().Select(u => (u.ReferenceId, u.Records.Count)).Should().Equal([("Account", 2), ("Contact_ref", 1)],
+        request.Upserts().Select(u => (u.ReferenceId, u.Records.Count)).Should().Equal([("Account", 2), ("Contact_ref", 1)],
             "A2's update goes in the same upsert as A1's create");
     }
 
@@ -460,7 +460,7 @@ public sealed class WriteRulesTests
 
         var requests = Plan(units, Rows([.. existing])).Requests;
 
-        requests.Select(r => r.BuildRequests().Single().Records.Count).Should().Equal([200, 100], "one upsert each");
+        requests.Select(r => r.Upserts().Single().Records.Count).Should().Equal([200, 100], "one upsert each");
         requests.SelectMany(r => r.Collections.SelectMany(c => c.Writes)).Should().HaveCount(300).And.OnlyHaveUniqueItems();
     }
 
@@ -516,7 +516,104 @@ public sealed class WriteRulesTests
         result.Outcome.Should().Be(outcome);
     }
 
+    // ---------- Deletes ----------
+
+    [Fact]
+    public void A_record_to_delete_that_Salesforce_has_is_deleted_by_its_Id_and_one_it_does_not_have_costs_nothing()
+    {
+        var current = Rows(("Contact", $$"""{"Id":"{{ContactId}}","ExternalId__c":"C1"}"""));
+
+        var plan = Plan([Normalized(Deleting("C1")), Normalized(Deleting("C2"))], current);
+
+        var delete = plan.Requests.Should().ContainSingle().Subject.BuildRequests().Should().ContainSingle().Subject
+            .Should().BeOfType<CollectionDelete>().Subject;
+        (delete.ReferenceId, delete.Ids.Single()).Should().Be(("delete", ContactId));
+        delete.Url.Should().Be($"/services/data/v62.0/composite/sobjects?ids={ContactId}&allOrNone=false");
+        plan.NotSent.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "C2" && r.Outcome == SyncOutcome.Unchanged,
+            "not in Salesforce: deleted already, or never synced");
+    }
+
+    [Fact]
+    public void Upserts_and_deletes_of_a_batch_share_one_Composite_request_with_the_delete_last()
+    {
+        var current = Rows(("Contact", $$"""{"Id":"{{ContactId}}","ExternalId__c":"C1"}"""));
+
+        var plan = Plan([Normalized(Deleting("C1")), Normalized(Account("A1", "Acme"))], current);
+
+        plan.Requests.Should().ContainSingle("one call").Subject.BuildRequests().Select(r => (r.ReferenceId, r.Method.Method))
+            .Should().Equal([("Account", "PATCH"), ("delete", "DELETE")]);
+    }
+
+    [Fact]
+    public void An_entitys_records_to_delete_are_deleted_in_its_order_and_more_than_a_collection_takes_go_to_further_requests()
+    {
+        var accountAndProfile = new SyncUnit(
+        [
+            new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P-A1", new Dictionary<string, object?>(), Delete: true),
+            new SObjectRecord("acct", "Account", "ExternalId__c", "A1", new Dictionary<string, object?>(), Delete: true)
+        ]);
+        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1"}"""),
+            ("Profile__c", /*lang=json,strict*/ """{"Id":"a00000000000001AAA","ExternalId__c":"P-A1"}"""));
+
+        var request = Plan([Normalized(accountAndProfile)], current).Requests.Single();
+        ((CollectionDelete)request.BuildRequests().Single()).Ids.Should().Equal(["a00000000000001AAA", AccountId],
+            "children first, as the strategy lists them: a parent may not be deleted while they point at it");
+
+        var many = Enumerable.Range(0, 3).Select(i => $"C{i}").ToList();
+        var rows = Rows([.. many.Select((c, i) => ("Contact", $$"""{"Id":"003000000000{{i:D3}}AAA","ExternalId__c":"{{c}}"}"""))]);
+        var requests = WritePlanner.Plan([.. many.Select(c => Normalized(Deleting(c)))], rows, maxRecordsPerWrite: 2).Requests;
+        requests.Select(r => ((CollectionDelete)r.BuildRequests().Single()).Ids.Count).Should().Equal([2, 1],
+            "a delete takes the row type's MaxRecordsPerWrite Ids, as an upsert takes its records");
+    }
+
+    public static TheoryData<string, string, SyncOutcome, string?> DeleteResults()
+    {
+        return new()
+        {
+            { "ENTITY_IS_DELETED", "entity is deleted", SyncOutcome.Saved, null },
+            { "INVALID_CROSS_REFERENCE_KEY", "invalid cross reference id", SyncOutcome.Saved, null },
+            { "NOT_FOUND", "The requested resource does not exist", SyncOutcome.Saved, null },
+            { "DELETE_FAILED", "entity is deleted", SyncOutcome.Saved, null },
+            { "DELETE_FAILED", "Your attempt to delete Acme could not be completed because it is associated with the following contacts.",
+                SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced },
+            { "DELETE_FAILED", "Cannot delete: a validation rule", SyncOutcome.PermanentFailure, "DELETE_FAILED" },
+            { "INSUFFICIENT_ACCESS_OR_READONLY", "insufficient access rights on object id", SyncOutcome.PermanentFailure,
+                "INSUFFICIENT_ACCESS_OR_READONLY" },
+            { "UNABLE_TO_LOCK_ROW", "unable to obtain exclusive access to this record", SyncOutcome.TransientFailure, "UNABLE_TO_LOCK_ROW" },
+            { "ENTITY_IS_LOCKED", "the entity is locked for editing (an approval)", SyncOutcome.TransientFailure, "ENTITY_IS_LOCKED" }
+        };
+    }
+
+    [Theory, MemberData(nameof(DeleteResults))]
+    public void A_deletes_result_decides_its_units_outcome_and_a_record_gone_already_is_deleted(string code, string message,
+        SyncOutcome outcome, string? decidingCode)
+    {
+        var current = Rows(("Contact", $$"""{"Id":"{{ContactId}}","ExternalId__c":"C1"}"""));
+        var request = Plan([Normalized(Deleting("C1"))], current).Requests.Single();
+
+        var result = Interpret(request, new CollectionResult("delete",
+            [new RecordResult(false, null, [new SalesforceError(null, code, message)])], [])).Single();
+
+        (result.Outcome, outcome == SyncOutcome.Saved ? null : result.PrimaryError?.Code).Should().Be((outcome, decidingCode), $"{code}: {message}");
+    }
+
+    [Fact]
+    public void The_codes_that_mean_gone_on_a_delete_keep_their_meaning_on_an_update()
+    {
+        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
+        var request = Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
+
+        Interpret(request, Failed("Account", "ENTITY_IS_DELETED")).Single().Outcome.Should().Be(SyncOutcome.TransientFailure,
+            "an update of a record deleted after the read is retried, not taken for success");
+    }
+
     // ---------- Helpers ----------
+
+    /// <summary>A delete of a Contact by its external id, as a strategy maps a removed contact.</summary>
+    private static SyncUnit Deleting(string key)
+    {
+        return new([new SObjectRecord("contact", "Contact", "ExternalId__c", key, new Dictionary<string, object?>(), Delete: true)]);
+    }
 
     private static SalesforceField Field(string name, string type, bool createable = true, bool updateable = true, bool nillable = true)
     {
@@ -606,5 +703,14 @@ public sealed class WriteRulesTests
     private static CollectionResult Failed(string referenceId, params string[] codes)
     {
         return new(referenceId, [new RecordResult(false, null, [.. codes.Select(code => new SalesforceError(null, code, "failed"))])], []);
+    }
+}
+
+internal static class CompositeWriteTestExtensions
+{
+    /// <summary>The request's collections, all of them upserts (in a test of upserts only).</summary>
+    public static List<CollectionUpsert> Upserts(this CompositeWrite request)
+    {
+        return [.. request.BuildRequests().Cast<CollectionUpsert>()];
     }
 }

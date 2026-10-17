@@ -275,7 +275,7 @@ public sealed class WriteStepsTests
         tooLarge.Should().BeEmpty();
         var request = requests.Should().ContainSingle().Subject;
         request.Units.Select(u => u.Key).Should().Equal("NEW", "OLD", "NEW2");
-        request.BuildRequests().Select(r => (r.ReferenceId, r.Records.Count)).Should().Equal([("Account", 3), ("Profile__c", 2)],
+        request.Upserts().Select(r => (r.ReferenceId, r.Records.Count)).Should().Equal([("Account", 3), ("Profile__c", 2)],
             "one upsert per level and object, creates and updates together");
     }
 
@@ -311,7 +311,7 @@ public sealed class WriteStepsTests
             [.. Enumerable.Range(0, 3).Select(i => new PlannedUnit($"A{i}", [Write("Account", create: true)]))], maxRecordsPerWrite: 2);
 
         tooLarge.Should().BeEmpty();
-        requests.Select(r => r.BuildRequests().Single().Records.Count).Should().Equal(2, 1);
+        requests.Select(r => r.Upserts().Single().Records.Count).Should().Equal(2, 1);
     }
 
     [Fact]
@@ -336,6 +336,32 @@ public sealed class WriteStepsTests
         var failed = tooLarge.Should().ContainSingle().Subject;
         (failed.Key, failed.Outcome, failed.PrimaryError!.Code).Should().Be(("BIG", SyncOutcome.PermanentFailure, "LIMIT_EXCEEDED"));
         requests.Should().ContainSingle().Which.Units.Should().ContainSingle().Which.Key.Should().Be("OK");
+    }
+
+    // ---------- Collections delete ----------
+
+    [Fact]
+    public async Task A_delete_of_as_many_Ids_as_a_collection_takes_fits_a_call_and_one_more_is_refused_before_sending()
+    {
+        var ids = Enumerable.Range(0, SalesforceRestClient.MaxCollectionRecords + 1).Select(i => $"003{i:D12}AAA").ToList();
+        var full = new CollectionDelete("delete", ids[..SalesforceRestClient.MaxCollectionRecords]);
+
+        SalesforceRestClient.FitsUrlLimit(full.Url).Should().BeTrue("200 Ids of 18 characters are under 4 KB: {0} bytes", full.Url.Length);
+        full.Url.Should().StartWith("/services/data/v62.0/composite/sobjects?ids=003000000000000AAA,003000000000001AAA,")
+            .And.EndWith("&allOrNone=false");
+
+        var client = new SalesforceRestClient(SalesforceStep.Http(new ThrowingHandler()));
+        var tooMany = () => client.WriteAsync([new CollectionDelete("delete", ids)], CancellationToken.None);
+        await tooMany.Should().ThrowAsync<ArgumentOutOfRangeException>().WithMessage("delete: 201 records*");
+    }
+
+    /// <summary>A handler the test must never reach: the client refuses before sending.</summary>
+    private sealed class ThrowingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            throw new InvalidOperationException("Nothing may be sent");
+        }
     }
 
     // ---------- Helpers ----------

@@ -3,8 +3,9 @@ using SalesforceSync.Salesforce;
 namespace SalesforceSync.Sync.Write;
 
 /// <summary>
-/// Turns Salesforce's per-record results into one outcome per unit: saved only if every record is; permanent if
-/// any record's own error is; else transient if any is; else not attempted.
+/// Turns Salesforce's per-record results into one outcome per unit: saved (or deleted) only if every record is;
+/// permanent if any record's own error is; else transient if any is; else not attempted. Upserts and deletes are
+/// read the same way: a refused delete is permanent or transient by its code like a rejected upsert.
 /// </summary>
 internal sealed class WriteResultInterpreter(SalesforceErrors errors)
 {
@@ -54,7 +55,10 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
                 continue;
             }
 
-            if (result is { Success: true })
+            // A record to delete that is gone already (deleted after the read, by someone else or by an earlier attempt
+            // whose answer was lost) is what the delete wanted
+            if (result is { Success: true } || (write.Delete && result is { Errors: [_, ..] why }
+                                                && why.All(SalesforceErrors.IsAlreadyDeleted)))
             {
                 write.Status = WriteStatus.Saved;
                 continue;
@@ -138,7 +142,9 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     /// org rejecting a record because its foreign key's parent isn't there (a message listed in
     /// <see cref="SalesforceOptions.ParentMissingMessages"/>, whatever the code), is the same situation as the read not
     /// finding it: the parent is expected to arrive through its own sync, so the record waits for it rather than being
-    /// dead-lettered.
+    /// dead-lettered. The same in reverse: a delete refused because records still point at it
+    /// (<see cref="SalesforceErrors.HasDependents"/>, an Account whose contacts are not deleted yet) waits for their
+    /// deletes, which their own inboxes sync.
     /// <para>
     /// Salesforce rejecting the RecordTypeId (the record type was deactivated or unassigned after the describe) is an
     /// <see cref="SalesforceErrors.InvalidRecordType"/>, like the describe not offering it: retried, not dead-lettered.
@@ -157,7 +163,8 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
         var targetMissing = (write.LookupFields.Count > 0
                              && e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED"
                              && (e.Fields is not { Count: > 0 } || e.Fields.Any(write.LookupFields.Contains)))
-                            || errors.IsParentMissing(e);
+                            || errors.IsParentMissing(e)
+                            || (write.Delete && SalesforceErrors.HasDependents(e));
         return targetMissing
             ? new SalesforceError(write.ReferenceId, SalesforceErrors.DependencyNotSynced, $"{e.Code}: {e.Message}", e.Fields)
             : e with { ReferenceId = write.ReferenceId };
@@ -176,6 +183,6 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     /// </summary>
     private static bool IsStaleUpdate(PlannedWrite write, SalesforceError e)
     {
-        return !write.Create && e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED" or "REQUIRED_FIELD_MISSING";
+        return !write.Create && !write.Delete && e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED" or "REQUIRED_FIELD_MISSING";
     }
 }
