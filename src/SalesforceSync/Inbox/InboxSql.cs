@@ -200,20 +200,20 @@ public sealed partial class InboxSql
             """;
 
         /// <summary>
-        /// Ends the lease on the rows (@ids) that @token still holds, due again after @delay, with no attempt spent:
+        /// Ends the lease on the rows (@ids) that any of @tokens still holds, due again after @delay, with no attempt spent:
         /// what becomes of a row that gets no outcome. Last in an outcome transaction, those are the rows not attempted
         /// (skipped because of another entity's record) and the rows a newer event overwrote during the lease (see
         /// <see cref="StillClaimed"/>), whatever was recorded for the others; a claim rate limited as a whole is
         /// deferred with this statement alone.
         /// They are pending, and due now (held or deferred: when the hold or deferral ends) instead of at the lease's
         /// end, which the store kept as an overwritten row's next_attempt_at. Ending a lease needs no check of the
-        /// claimed event: the row is due again either way. A retried claim ends the leases of the attempt it lost the
-        /// same way.
+        /// claimed event: the row is due again either way. A retried claim ends the leases of the attempts it lost
+        /// the same way, all their tokens at once. The rows are looked up by @ids: lock_token has no index.
         /// </summary>
         public const string EndLease = """
             update {inbox} i
             set lock_token = null, next_attempt_at = now() + @delay, last_updated = now()
-            where i.id = any(@ids) and i.lock_token = @token
+            where i.id = any(@ids) and i.lock_token = any(@tokens)
             """;
     }
 }

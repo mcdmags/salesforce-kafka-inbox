@@ -462,8 +462,8 @@ coming back after that.
   or a call takes longer than expected. Startup requires `Sync:Lease` to be longer than the HTTP request timeout, and a
   worker cancels its Salesforce call at 80% of the lease, but a pause or an outage doesn't respect either.
 - **A claim retried after a lost commit.** The claim's commit succeeds, but the connection drops before the answer
-  arrives, and the claim is retried. The first attempt's leases exist, but no running code owns them; the retry
-  releases them by that attempt's `lock_token`.
+  arrives, and the claim is retried. The lost attempts' leases exist, but no running code owns them; the retry
+  releases them, by their `lock_token`s, in one statement (`EndLease`).
 
 In both cases the stale claim and the new one hold the same `event_time`, so only a value that is new on every claim
 can tell them apart: that is the lock token. (`attempt_count` can't: it counts failures, not claims, so two claims of

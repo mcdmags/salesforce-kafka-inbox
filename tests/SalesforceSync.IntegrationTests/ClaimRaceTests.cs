@@ -165,7 +165,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         {
             var args = new { ids = claimed.Select(e => e.RowId).ToArray(), times = claimed.Select(e => e.EventTime).ToArray(), token };
             (await race.WorkerA.ExecuteAsync(Sql.Done, args, record)).Should().Be(overwrittenDuringTheLease ? 0 : 1);
-            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.ids, token, delay = TimeSpan.Zero }, record))
+            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.ids, tokens = new[] { token }, delay = TimeSpan.Zero }, record))
                 .Should().Be(overwrittenDuringTheLease ? 1 : 0, "only an overwritten row is left under the lease");
             var lateStore = race.StoreAsync(race.Consumer2, 3);
             await race.WaitUntilBlockedByAsync(race.WorkerA, lateStore);
