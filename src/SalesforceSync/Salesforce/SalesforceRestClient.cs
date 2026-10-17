@@ -180,13 +180,10 @@ public sealed class SalesforceRestClient(HttpClient http)
 
         var subresponses = await PostCompositeAsync(payload, ct);
 
-        return [.. subresponses.Select(sub =>
-        {
-            // A subrequest that failed as a whole answers with an error list instead of one result per record
-            return sub.HttpStatusCode >= 400 || sub.Body.ValueKind != JsonValueKind.Array
-                ? new CollectionResult(sub.ReferenceId, null, ParseErrors(sub.ReferenceId, sub.Body))
-                : new CollectionResult(sub.ReferenceId, [.. sub.Body.EnumerateArray().Select(ParseRecordResult)], []);
-        })];
+        // A subrequest that failed as a whole answers with an error list instead of one result per record
+        return [.. subresponses.Select(sub => sub.HttpStatusCode >= 400 || sub.Body.ValueKind != JsonValueKind.Array
+            ? new CollectionResult(sub.ReferenceId, null, ParseErrors(sub.ReferenceId, sub.Body))
+            : new CollectionResult(sub.ReferenceId, [.. sub.Body.EnumerateArray().Select(ParseRecordResult)], []))];
     }
 
     /// <summary>Posts a Composite request and returns its subresponses, in request order.</summary>
