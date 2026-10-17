@@ -42,6 +42,12 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         return new PooledDbContextFactory<SyncDbContext>(options.Options);
     }
 
+    /// <summary>A context for its model alone (table names, pending model changes): it never connects.</summary>
+    public static SyncDbContext ForModel()
+    {
+        return new(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
+    }
+
     /// <summary>Over the shared data source, with transient failures retried as <see cref="PostgresRetryStrategy"/> does.</summary>
     public static void Configure(DbContextOptionsBuilder options, NpgsqlDataSource db, PostgresRetryOptions retry)
     {
@@ -86,7 +92,7 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
 
     /// <summary>
     /// An inbox table: one row per entity, holding its newest Kafka event, what became of it and the entity's sync state
-    /// (due when, leased by whom, synced up to); the id is a bigserial. Columns with a database default are left out of
+    /// (due when, leased by whom); the id is a bigserial. Columns with a database default are left out of
     /// an insert while they hold the CLR default, so a new row gets the database's clock and 'pending'.
     /// </summary>
     private static void ConfigureInbox<TRow>(EntityTypeBuilder<TRow> entity, string table) where TRow : InboxRow

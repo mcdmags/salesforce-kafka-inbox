@@ -329,8 +329,8 @@ public sealed class InboxEventTests
     [Fact]
     public void Every_change_to_the_model_has_its_migration()
     {
-        // Only the model and the migrations' snapshot are compared: nothing connects to this address
-        using var db = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
+        // Only the model and the migrations' snapshot are compared
+        using var db = SyncDbContext.ForModel();
 
         db.Database.HasPendingModelChanges().Should().BeFalse(
             "a change to SyncDbContext's model needs a migration: dotnet ef migrations add <Name> --project src/SalesforceSync --output-dir Data/Migrations");

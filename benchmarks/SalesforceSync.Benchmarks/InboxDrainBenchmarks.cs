@@ -90,7 +90,7 @@ public abstract class DrainBenchmarkBase
 
     private static T FromModel<T>(Func<SyncDbContext, T> read)
     {
-        using var model = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
+        using var model = SyncDbContext.ForModel();
         return read(model);
     }
 

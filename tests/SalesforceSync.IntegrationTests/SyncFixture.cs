@@ -369,16 +369,22 @@ public class SyncFixture : IAsyncLifetime
         res.EnsureSuccessStatusCode();
     }
 
+    private static readonly IReadOnlyDictionary<string, string> InboxTables = ReadInboxTables();
+
     /// <summary>The inbox table of an entity type, as the EF model names it.</summary>
     public static string InboxTable(string entityType = Accounts)
     {
-        // Only the model is read: nothing connects to this address
-        using var model = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
-        return entityType switch
+        return InboxTables[entityType];
+    }
+
+    private static Dictionary<string, string> ReadInboxTables()
+    {
+        using var model = SyncDbContext.ForModel();
+        return new()
         {
-            Relationships => model.TableOf<AccountRelationshipInboxRow>(),
-            Contacts => model.TableOf<ContactInboxRow>(),
-            _ => model.TableOf<AccountInboxRow>()
+            [Accounts] = model.TableOf<AccountInboxRow>(),
+            [Relationships] = model.TableOf<AccountRelationshipInboxRow>(),
+            [Contacts] = model.TableOf<ContactInboxRow>()
         };
     }
 
