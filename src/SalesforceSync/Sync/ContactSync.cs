@@ -29,10 +29,7 @@ public static class ContactSync
     // What to read: the contacts themselves (to diff) and the Accounts they point at (to know they exist)
     public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
     {
-        return [
-        SoqlQuery.RecordsOf<ContactSObject>(units),
-        SoqlQuery.LookupTargetsOf<AccountSObject>(units)
-    ];
+        return [SoqlQuery.RecordsOf<ContactSObject>(units), SoqlQuery.LookupTargetsOf<AccountSObject>(units)];
     }
 
     /// <summary>Payload -> sObject, one line per field (see <see cref="AccountSync.ToAccount"/>).</summary>

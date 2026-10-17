@@ -318,7 +318,7 @@ public sealed class InboxEventTests
 
         if (valid)
         {
-            use.Should().NotThrow().Which.Claim.Should().Contain($"update {table} ");
+            use.Should().NotThrow().Which.Claim.Should().Contain($"UPDATE {table} ");
         }
         else
         {

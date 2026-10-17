@@ -84,7 +84,6 @@ public sealed record SalesforceError(string? ReferenceId, string Code, string? M
 public sealed class SalesforceQueryException(string referenceId, IReadOnlyList<SalesforceError> errors)
     : Exception($"Query {referenceId} failed: {string.Join("; ", errors)}")
 {
-    public string ReferenceId { get; } = referenceId;
     public IReadOnlyList<SalesforceError> Errors { get; } = errors;
 }
 

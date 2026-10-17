@@ -272,21 +272,21 @@ into SQL). An inbox row also holds its entity's sync state: when it is due and t
 it; no table is shared by the types. The tables the migrations create:
 
 ```sql
-create table sf_account_inbox (                 -- and sf_account_relationship_inbox, sf_contact_inbox, ...
-  id              bigserial   primary key,
-  entity_id       text        not null,          -- the entity's id, read from the typed event by the consumer
-  payload         jsonb       not null,          -- the Kafka message value, unchanged; never read by SQL
-  status          text        not null default 'pending',  -- pending | done | dead
-  attempt_count   int         not null default 0,          -- times this event failed (a newer event starts at 0)
+CREATE TABLE sf_account_inbox (                 -- and sf_account_relationship_inbox, sf_contact_inbox, ...
+  id              bigserial   PRIMARY KEY,
+  entity_id       text        NOT NULL,          -- the entity's id, read from the typed event by the consumer
+  payload         jsonb       NOT NULL,          -- the Kafka message value, unchanged; never read by SQL
+  status          text        NOT NULL DEFAULT 'pending',  -- pending | done | dead
+  attempt_count   int         NOT NULL DEFAULT 0,          -- times this event failed (a newer event starts at 0)
   last_error      text,
   last_error_code text,
-  last_updated    timestamptz not null default now(),
-  event_time      timestamptz not null,                    -- the event's meta.time, read by the consumer
+  last_updated    timestamptz NOT NULL DEFAULT now(),
+  event_time      timestamptz NOT NULL,                    -- the event's meta.time, read by the consumer
   next_attempt_at timestamptz,            -- null: nothing to do (not pending); else claimable from then on (backoff and lease included)
   lock_token      uuid                    -- which claim holds the lease (until next_attempt_at)
 );
-create unique index sf_account_inbox_entity_id on sf_account_inbox (entity_id);
-create index sf_account_inbox_ready on sf_account_inbox (next_attempt_at) where next_attempt_at is not null;
+CREATE UNIQUE INDEX sf_account_inbox_entity_id ON sf_account_inbox (entity_id);
+CREATE INDEX sf_account_inbox_ready ON sf_account_inbox (next_attempt_at) WHERE next_attempt_at IS NOT NULL;
 ```
 
 The inboxes vacuum after 2% of their rows changed (`autovacuum_vacuum_scale_factor = 0.02`, threshold 1,000), not
@@ -310,8 +310,8 @@ bookkeeping is in the row's own columns.
 consumer, which two events count as equally new (the store compares their times) is decided the same way for every
 event, never by how a time is rounded on its way in.
 
-**Store** (`InboxSql.Store`, one statement): insert the event into the entity's row (`on conflict (entity_id) do
-update ... where event_time < excluded.event_time or (event_time = excluded.event_time and status <> 'done')`),
+**Store** (`InboxSql.Store`, one statement): insert the event into the entity's row (`ON CONFLICT (entity_id) DO
+UPDATE ... WHERE event_time < excluded.event_time OR (event_time = excluded.event_time AND status <> 'done')`),
 keeping any lease on it. A new entity, or an idle one (`next_attempt_at` null), becomes due at once, and one that
 is already due, backing off, deferred, held or leased keeps its time (a leased row's is the lease's end). The events
 of an entity that arrive before it is claimed overwrite its row one after the other, and only the last is written.
@@ -329,7 +329,7 @@ before another worker's lease on it commits re-checks the row when it locks it, 
 (`ClaimRaceTests`). Storing an event locks the row too, so a claim skips an entity whose event is being stored, and a
 second event of the entity waits until the first has committed, and then overwrites it.
 
-**Plans.** Every lookup is by key: a primary key (`= any` of an array, never a join the planner could turn into a
+**Plans.** Every lookup is by key: a primary key (`= ANY` of an array, never a join the planner could turn into a
 scan), the unique `entity_id` index, or the front of the ready index. The claim on `sf_sync_state` before this design
 was checked with `EXPLAIN ANALYZE` (generic plans) against statistics taken while everything was idle and then a
 100,000-entity backlog, and against statistics taken during a backlog that had since drained: the same index plans
@@ -359,15 +359,15 @@ Postgres's row lock orders them (see below).
 
 ```sql
 -- Dead letters of one type, by cause
-select entity_id, payload -> 'meta' ->> 'time' as time, last_error_code, last_error
-from sf_account_inbox where status = 'dead' order by id desc;
+SELECT entity_id, payload -> 'meta' ->> 'time' AS time, last_error_code, last_error
+FROM sf_account_inbox WHERE status = 'dead' ORDER BY id DESC;
 
 -- What an inbox holds for one entity: its newest event
-select id, status, attempt_count, last_error_code, payload
-from sf_account_inbox where entity_id = 'ACC-000001';
+SELECT id, status, attempt_count, last_error_code, payload
+FROM sf_account_inbox WHERE entity_id = 'ACC-000001';
 
 -- Its state: due when, leased by whom
-select next_attempt_at, lock_token from sf_account_inbox where entity_id = 'ACC-000001';
+SELECT next_attempt_at, lock_token FROM sf_account_inbox WHERE entity_id = 'ACC-000001';
 ```
 
 (Queries like these, for people, may look inside the payload; the worker's own SQL never does.)
@@ -412,7 +412,7 @@ Every result the worker can record (done, retried, dead, held) goes through the 
 each would otherwise overwrite the newer event's status.
 
 **The check and the consumer can't interleave.** The check is part of the worker's own update of ACC-1's row
-(`... where lock_token = @token and event_time = 09:59`), and the consumer updates the same row, so Postgres's row
+(`... WHERE lock_token = @token AND event_time = 09:59`), and the consumer updates the same row, so Postgres's row
 lock puts one after the other. If the consumer's write committed first, the worker's update finds 10:00 and changes
 nothing. If the consumer is still writing, the worker's update waits for it and then checks its condition again on
 the row the consumer left (under READ COMMITTED an UPDATE that waited for a row re-checks its WHERE on the row's
@@ -435,7 +435,7 @@ that time.
    (cancels the call) at 80% of the lease, measured from the claim, so it gives up before anyone else can claim the
    entity.
 3. **Release.** The outcome transaction records done, retry, dead or hold; every statement only touches rows
-   `where lock_token = @token`, so a worker whose lease expired and was claimed by another changes nothing, and only
+   `WHERE lock_token = @token`, so a worker whose lease expired and was claimed by another changes nothing, and only
    rows that still hold the event the claim read (see [Overwritten while claimed](#the-inbox)). Each statement also
    ends the lease of its rows and sets `next_attempt_at`: null for a finished row, else when it is due again (the end
    of the backoff or hold). Its last statement (`EndLease`) ends the lease of the rows left, those not attempted and
@@ -462,8 +462,8 @@ coming back after that.
   or a call takes longer than expected. Startup requires `Sync:Lease` to be longer than the HTTP request timeout, and a
   worker cancels its Salesforce call at 80% of the lease, but a pause or an outage doesn't respect either.
 - **A claim retried after a lost commit.** The claim's commit succeeds, but the connection drops before the answer
-  arrives, and the claim is retried. The first attempt's leases exist, but no running code owns them; the retry
-  releases them by that attempt's `lock_token`.
+  arrives, and the claim is retried. The lost attempts' leases exist, but no running code owns them; the retry
+  releases them, by their `lock_token`s, in one statement (`EndLease`).
 
 In both cases the stale claim and the new one hold the same `event_time`, so only a value that is new on every claim
 can tell them apart: that is the lock token. (`attempt_count` can't: it counts failures, not claims, so two claims of
@@ -549,8 +549,8 @@ permanent, dead-lettered). For a real Lookup field, Salesforce's own `INVALID_CR
 To re-queue dead letters once the cause is fixed (e.g. the missing Account now exists):
 
 ```sql
-update sf_account_relationship_inbox set status = 'pending', attempt_count = 0, next_attempt_at = now()
-where status = 'dead' and last_error_code = 'DEPENDENCY_NOT_SYNCED';
+UPDATE sf_account_relationship_inbox SET status = 'pending', attempt_count = 0, next_attempt_at = now()
+WHERE status = 'dead' AND last_error_code = 'DEPENDENCY_NOT_SYNCED';
 ```
 
 (`sf_account_inbox` and `sf_contact_inbox` the same way. Setting `next_attempt_at` is what makes the rows due again;
@@ -1473,7 +1473,7 @@ deleted.
 
 **How a call acquires a token.** `SalesforceRateLimiter.AcquireAsync`, in one transaction:
 
-1. Lock the `sf_rate_limit` row (`select * ... for update`, the only raw SQL besides `select clock_timestamp()`). Every
+1. Lock the `sf_rate_limit` row (`SELECT * ... FOR UPDATE`, the only raw SQL besides `SELECT clock_timestamp()`). Every
    acquire in every pod queues here, so no two decide at once. The database clock is read in the same statement, so
    every pod uses one clock, whatever its own says.
 2. Read this integration's calls in the buckets since `BudgetWindow + UsageBucket` ago (LINQ).
@@ -1520,10 +1520,10 @@ tokens and slowdown), so the last pod to start wins: roll out `RateLimit` change
 
 ```sql
 -- Salesforce's last report, the current and normal rate, the pause and this integration's budget
-select * from sf_limit_status;
+SELECT * FROM sf_limit_status;
 
 -- this integration's own calls over the default window (a view can't read the configured BudgetWindow)
-select sum(calls) from sf_api_usage where bucket >= now() - interval '24 hours 10 minutes';
+SELECT sum(calls) FROM sf_api_usage WHERE bucket >= now() - interval '24 hours 10 minutes';
 ```
 
 ### Concurrency slots: Postgres advisory locks
@@ -1579,9 +1579,9 @@ outlive a connection.
 To see the slots held right now:
 
 ```sql
-select pid, objid::bigint - 1397096448 as slot, application_name, client_addr, state
-from pg_locks join pg_stat_activity using (pid)
-where locktype = 'advisory' and classid = 0 and objid::bigint between 1397096448 and 1397096448 + 100;
+SELECT pid, objid::bigint - 1397096448 AS slot, application_name, client_addr, state
+FROM pg_locks JOIN pg_stat_activity USING (pid)
+WHERE locktype = 'advisory' AND classid = 0 AND objid::bigint BETWEEN 1397096448 AND 1397096448 + 100;
 ```
 
 ## Using a real Salesforce org

@@ -4,7 +4,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Sync.Upsert;
 
 namespace SalesforceSync.Inbox;
 
@@ -34,34 +33,38 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 
     /// <summary>
     /// Locks and leases a batch of due rows and reads them (<see cref="InboxSql.Template.Claim"/>), in a transaction of
-    /// its own, so the rows are read before the commit is sent. A fresh token per attempt: if a
-    /// commit's outcome is unknown and the claim is retried, rows leased by the lost attempt are not mistaken for this
-    /// one's. The retry ends their leases first (<see cref="InboxSql.Template.EndLease"/>), so they don't wait for the
-    /// leases to expire (and a lease nobody works on is never taken over). The transaction ends before Salesforce is
-    /// called: from then on the lease (lock_token, and next_attempt_at as its end) protects the entities, not a lock.
+    /// its own, so the rows are read before the commit is sent. The transaction ends before Salesforce is called: from
+    /// then on the lease (lock_token, and next_attempt_at as its end) protects the entities, not a lock.
+    /// <para>
+    /// Each attempt leases under a fresh token. If a commit's outcome is unknown and the claim is retried, the attempts
+    /// before may have leased rows nobody works on: the retry first ends those leases, by the lost tokens and the rows
+    /// they read, in one statement (<see cref="InboxSql.Template.EndLease"/>), so the rows are due at once, not when the
+    /// leases expire, and are not mistaken for this attempt's.
+    /// </para>
     /// </summary>
     public Task<InboxClaim> ClaimAsync(CancellationToken ct)
     {
-        var attempted = new List<Guid>();
-        var attemptedRowIds = new HashSet<long>();
+        // What the attempts so far leased: if this runs again, their commits were lost
+        var lostTokens = new List<Guid>();
+        var lostRowIds = new List<long>();
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
             var sql = InboxSql.For(db.TableOf<TEntity>());
-            var ids = attemptedRowIds.ToArray();
-            foreach (var lost in attempted)
+            if (lostRowIds.Count > 0)
             {
-                await db.Database.ExecuteAsync(sql.EndLease, t, new { ids, token = lost, delay = TimeSpan.Zero });
+                await db.Database.ExecuteAsync(sql.EndLease, t,
+                    new { ids = lostRowIds.ToArray(), tokens = lostTokens.ToArray(), delay = TimeSpan.Zero });
             }
 
             var token = Guid.NewGuid();
-            attempted.Add(token);
             var events = await db.Database.QueryAsync<InboxEvent>(sql.Claim, t, new
             {
                 token,
                 lease = _opt.Lease,
-                batchSize = Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)
+                batchSize = _opt.BatchSize
             });
-            attemptedRowIds.UnionWith(events.Select(e => e.RowId));
+            lostTokens.Add(token);
+            lostRowIds.AddRange(events.Select(e => e.RowId));
             return new InboxClaim(token, events);
         }, ct);
     }
@@ -120,7 +123,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
     {
         return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).EndLease, t,
-            new { ids = claim.RowIds, token = claim.Token, delay }), ct);
+            new { ids = claim.RowIds, tokens = new[] { claim.Token }, delay }), ct);
     }
 
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
@@ -145,7 +148,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             var sql = InboxSql.For(db.TableOf<TEntity>());
             if (await record(db, sql, t) < claim.Events.Count)
             {
-                await db.Database.ExecuteAsync(sql.EndLease, t, new { ids = claim.RowIds, token = claim.Token, delay });
+                await db.Database.ExecuteAsync(sql.EndLease, t, new { ids = claim.RowIds, tokens = new[] { claim.Token }, delay });
             }
         }, ct);
     }
@@ -170,11 +173,6 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// <summary>{ "row id": [error, code] }, as InboxSql.Fail takes the errors.</summary>
     private static string ErrorsJson(IReadOnlyList<FailedEvent> rows)
     {
-        var errors = new Dictionary<string, string?[]>(StringComparer.Ordinal);
-        foreach (var row in rows)
-        {
-            errors[row.RowId.ToString(CultureInfo.InvariantCulture)] = [row.Error, row.Code];
-        }
-        return JsonSerializer.Serialize(errors);
+        return JsonSerializer.Serialize(rows.ToDictionary(r => r.RowId.ToString(CultureInfo.InvariantCulture), r => new[] { r.Error, r.Code }));
     }
 }

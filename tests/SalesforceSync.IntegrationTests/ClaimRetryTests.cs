@@ -42,10 +42,10 @@ public sealed class ClaimRetryTests(SyncFixture app)
         lostCommit.Commits.Should().Be(2, "the claim ran again");
         claim.Events.Should().ContainSingle();
         await using var check = await db.OpenConnectionAsync();
-        (await check.QuerySingleAsync<Guid?>($"select lock_token from {SyncFixture.InboxTable()} where entity_id = @entity", new { entity }))
+        (await check.QuerySingleAsync<Guid?>($"SELECT lock_token FROM {SyncFixture.InboxTable()} WHERE entity_id = @entity", new { entity }))
             .Should().Be(claim.Token, "the lost attempt's lease was released, not left to expire, and the retry leased the entity");
 
-        await check.ExecuteAsync($"drop schema {Schema} cascade");
+        await check.ExecuteAsync($"DROP SCHEMA {Schema} CASCADE");
     }
 
     private sealed class LoseFirstCommit : DbTransactionInterceptor

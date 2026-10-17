@@ -40,7 +40,7 @@ public sealed class SalesforceConcurrencySlots(
                 foreach (var i in Enumerable.Range(0, maxConcurrent).OrderBy(_ => Random.Shared.Next()))
                 {
                     var candidate = KeyBase + i;
-                    if (await db.Database.QuerySingleAsync<bool>("select pg_try_advisory_lock(@key)", t, new { key = candidate }))
+                    if (await db.Database.QuerySingleAsync<bool>("SELECT pg_try_advisory_lock(@key)", t, new { key = candidate }))
                     {
                         return candidate;
                     }
@@ -69,7 +69,7 @@ public sealed class SalesforceConcurrencySlots(
         {
             try
             {
-                await db.Database.ExecuteAsync("select pg_advisory_unlock(@key)", CancellationToken.None, new { key });
+                await db.Database.ExecuteAsync("SELECT pg_advisory_unlock(@key)", CancellationToken.None, new { key });
             }
             catch (Exception ex) when (PostgresRetryStrategy.IsTransient(ex) || ex is InvalidOperationException)
             {

@@ -89,10 +89,10 @@ public sealed class LeaseTests(SyncFixture app)
         // A real worker takes the entity over once the lease has expired, and syncs it
         (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
         // The stale worker's claim gets the row's new time, so that only the token stands in its way
-        await ExecuteAsync($"update {Sql.Table} set event_time = event_time + interval '1000 seconds' where id = @id", new { id = claim.RowIds[0] });
+        await ExecuteAsync($"UPDATE {Sql.Table} SET event_time = event_time + interval '1000 seconds' WHERE id = @id", new { id = claim.RowIds[0] });
         await using (var conn = await app.Db.OpenConnectionAsync())
         {
-            var time = await conn.QuerySingleAsync<DateTime>($"select event_time from {Sql.Table} where entity_id = @acct", new { acct });
+            var time = await conn.QuerySingleAsync<DateTime>($"SELECT event_time FROM {Sql.Table} WHERE entity_id = @acct", new { acct });
             claim = claim with { Events = [claim.Events.Single() with { EventTime = new DateTimeOffset(time) }] };
         }
         var (claimed, times) = (claim.RowIds, claim.EventTimes);
@@ -156,9 +156,9 @@ public sealed class LeaseTests(SyncFixture app)
         await using var tx = await conn.BeginTransactionAsync();
         await conn.StoreAsync(Sql.Table, acct, SyncFixture.TimeOf(e), e.ToJsonString(), tx);
         var rows = await conn.QueryAsync<InboxEvent>($"""
-            update {Sql.Table} set lock_token = @token, next_attempt_at = now() + @lease
-            where entity_id = @acct
-            returning id, entity_id, payload::text, event_time
+            UPDATE {Sql.Table} SET lock_token = @token, next_attempt_at = now() + @lease
+            WHERE entity_id = @acct
+            RETURNING id, entity_id, payload::text, event_time
             """, new { token, lease, acct }, tx);
         await tx.CommitAsync();
         return new InboxClaim(token, rows);

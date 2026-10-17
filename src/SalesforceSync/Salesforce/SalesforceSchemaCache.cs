@@ -58,12 +58,12 @@ public sealed class SalesforceSchemaCache(
 
     private long _lastWarningTicks;
 
-    /// <param name="fetch">Calls Describe; the argument is the If-Modified-Since value (null = unconditional).</param>
+    /// <param name="fetch">Calls Describe; the argument is the If-Modified-Since value (null = unconditional), null back on 304 Not Modified.</param>
     /// <param name="sobject">The object's API name, e.g. Account.</param>
     /// <param name="refreshInterval">How old a cached Describe may be before it is checked again.</param>
     /// <param name="ct">Cancels the wait and the call.</param>
     public async Task<SObjectSchema> GetAsync(string sobject, TimeSpan refreshInterval,
-        Func<DateTimeOffset?, CancellationToken, Task<DescribeResult>> fetch, CancellationToken ct)
+        Func<DateTimeOffset?, CancellationToken, Task<SObjectSchema?>> fetch, CancellationToken ct)
     {
         var entry = _entries.GetOrAdd(sobject, _ => new Entry());
         if (Fresh(entry.State, entry.Invalidated, refreshInterval) is { } cached)
@@ -92,9 +92,9 @@ public sealed class SalesforceSchemaCache(
             var now = clock.GetUtcNow();
             var result = await fetch(basis?.FetchedAt, ct);
 
-            var schema = result.Schema ?? basis?.Schema
+            var schema = result ?? basis?.Schema
                          ?? throw new InvalidOperationException($"Describe of {sobject} returned no schema");
-            var state = new Snapshot(schema, result.Schema is not null ? now : basis!.FetchedAt, now);
+            var state = new Snapshot(schema, result is not null ? now : basis!.FetchedAt, now);
             entry.State = state;
             entry.Invalidated = false;
             await WriteSharedAsync(sobject, state, ct);
