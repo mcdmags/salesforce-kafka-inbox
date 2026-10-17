@@ -4,7 +4,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Sync.Upsert;
 
 namespace SalesforceSync.Inbox;
 
@@ -62,7 +61,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             {
                 token,
                 lease = _opt.Lease,
-                batchSize = Math.Min(_opt.BatchSize, ReadQueryBuilder.MaxEntitiesPerBatch)
+                batchSize = _opt.BatchSize
             });
             lostTokens.Add(token);
             lostRowIds.AddRange(events.Select(e => e.RowId));
