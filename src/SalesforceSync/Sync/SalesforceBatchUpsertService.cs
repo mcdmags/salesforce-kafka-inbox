@@ -217,17 +217,13 @@ public sealed class SalesforceBatchUpsertService(
         var failed = results
             .SelectMany(r => r.Errors.Where(e => e.Code == SalesforceErrors.InvalidRecordType).Select(e => (r.Key, e.ReferenceId)))
             .ToHashSet();
-        if (failed.Count == 0)
+        var sobjects = units
+            .SelectMany(u => u.Unit.Records.Where(r => failed.Contains((u.Key, r.ReferenceId))))
+            .Select(r => r.SObject)
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var sobject in sobjects)
         {
-            return;
-        }
-
-        foreach (var (key, unit) in units)
-        {
-            foreach (var record in unit.Records.Where(r => failed.Contains((key, r.ReferenceId))))
-            {
-                await schemaCache.InvalidateAsync(record.SObject, ct);
-            }
+            await schemaCache.InvalidateAsync(sobject, ct);
         }
     }
 
