@@ -82,27 +82,16 @@ public abstract class DrainBenchmarkBase
     private Dictionary<string, (string Account, string Related)> _relationships = [];
 
     // The tables as the EF model names them (only the model is read: nothing connects to this address)
-    private static readonly string AccountTable = TableOf<AccountInboxRow>();
-    private static readonly string RelationshipTable = TableOf<AccountRelationshipInboxRow>();
+    private static readonly string AccountTable = FromModel(model => model.TableOf<AccountInboxRow>());
+    private static readonly string RelationshipTable = FromModel(model => model.TableOf<AccountRelationshipInboxRow>());
     // Every inbox of the model, not only the two the events go to: AddInboxSync runs a worker per synced object, and
     // each one claims from its own table (the others stay empty)
-    private static readonly string[] InboxTables = AllInboxTables();
+    private static readonly string[] InboxTables = FromModel(model => model.InboxTables.ToArray());
 
-    private static string TableOf<TRow>() where TRow : InboxRow
+    private static T FromModel<T>(Func<SyncDbContext, T> read)
     {
-        using var model = Model();
-        return model.TableOf<TRow>();
-    }
-
-    private static string[] AllInboxTables()
-    {
-        using var model = Model();
-        return [.. model.InboxTables];
-    }
-
-    private static SyncDbContext Model()
-    {
-        return new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
+        using var model = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
+        return read(model);
     }
 
     /// <summary>
@@ -232,7 +221,7 @@ public abstract class DrainBenchmarkBase
     {
         await using var db = await _contexts.CreateDbContextAsync(ct);
         return await db.Database.QuerySingleAsync<bool>(
-            string.Join(" or ", InboxTables.Select(t => $"exists (select 1 from {t} where status = 'pending')")).Insert(0, "select "), ct);
+            "select " + string.Join(" or ", InboxTables.Select(t => $"exists (select 1 from {t} where status = 'pending')")), ct);
     }
 
     // ---------- Setup ----------
