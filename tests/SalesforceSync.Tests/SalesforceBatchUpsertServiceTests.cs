@@ -599,7 +599,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         var schema = (await new SalesforceRestClient(http).DescribeAsync("Account", null, CancellationToken.None))!;
 
         schema.RecordTypes.Should().ContainKey("business").WhoseValue.Should().Be(
-            new SalesforceRecordType("Business", RecordTypeId("Account", "Business"), Active: true, Available: true));
+            new SalesforceRecordType("Business", FakeSchema.RecordTypeIdOf("Account", "Business"), Active: true, Available: true));
         schema.RecordTypes["Master"].Available.Should().BeFalse();
         schema.Find(SObjectSchema.RecordTypeIdField)!.Type.Should().Be("reference");
     }
@@ -612,10 +612,10 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         (await Relationship("R1", "A1", "A2", [])).Outcome.Should().Be(SyncOutcome.Saved);
 
-        ((string?)_org.FindByExternalId("Account", "A1")!["RecordTypeId"]).Should().Be(RecordTypeId("Account", "Business"));
-        ((string?)_org.FindByExternalId("Profile__c", "P-A1")!["RecordTypeId"]).Should().Be(RecordTypeId("Profile__c", "Standard"));
+        ((string?)_org.FindByExternalId("Account", "A1")!["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Account", "Business"));
+        ((string?)_org.FindByExternalId("Profile__c", "P-A1")!["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Profile__c", "Standard"));
         ((string?)_org.FindByExternalId("Account_Relationship__c", "R1")!["RecordTypeId"])
-            .Should().Be(RecordTypeId("Account_Relationship__c", "Standard"));
+            .Should().Be(FakeSchema.RecordTypeIdOf("Account_Relationship__c", "Standard"));
     }
 
     [Fact]
@@ -624,11 +624,11 @@ public sealed class SalesforceBatchUpsertServiceTests
         await Account("A1", new() { ["name"] = "Acme" }, []);
         (await Account("A1", new() { ["name"] = "Acme" }, [])).Outcome.Should().Be(SyncOutcome.Unchanged, "the record type is the same");
 
-        _org.Edit("Account", "A1", new JsonObject { ["RecordTypeId"] = RecordTypeId("Account", "Master") });
+        _org.Edit("Account", "A1", new JsonObject { ["RecordTypeId"] = FakeSchema.RecordTypeIdOf("Account", "Master") });
         (await Account("A1", new() { ["name"] = "Acme" }, [])).Outcome.Should().Be(SyncOutcome.Saved);
 
         _org.History("Account", "A1")![^1].Select(kv => kv.Key).Should().Equal("RecordTypeId");
-        ((string?)_org.FindByExternalId("Account", "A1")!["RecordTypeId"]).Should().Be(RecordTypeId("Account", "Business"));
+        ((string?)_org.FindByExternalId("Account", "A1")!["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Account", "Business"));
     }
 
     [Fact]
@@ -692,11 +692,6 @@ public sealed class SalesforceBatchUpsertServiceTests
     private sealed class UnknownRecordTypeAccount
     {
         [JsonPropertyName("ExternalId__c")] public string? ExternalId { get; set; }
-    }
-
-    private static string RecordTypeId(string sobject, string developerName)
-    {
-        return FakeSchema.RecordTypes[sobject].Single(r => r.DeveloperName == developerName).Id;
     }
 
     // ---------- Records that fail without a cause ----------
@@ -897,9 +892,9 @@ public sealed class SalesforceBatchUpsertServiceTests
             ["LastName"] = last,
             ["Email"] = "ada@example.com",
             ["AccountId__c"] = "A1",
-            ["RecordTypeId"] = RecordTypeId("Contact", "Standard")
+            ["RecordTypeId"] = FakeSchema.RecordTypeIdOf("Contact", "Standard")
         }).Should().BeTrue("a new record's non-empty fields: {0}", record.ToJsonString());
-        ((string?)_org.FindByExternalId("Contact", "C1")!["RecordTypeId"]).Should().Be(RecordTypeId("Contact", "Standard"));
+        ((string?)_org.FindByExternalId("Contact", "C1")!["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Contact", "Standard"));
     }
 
     [Fact]
