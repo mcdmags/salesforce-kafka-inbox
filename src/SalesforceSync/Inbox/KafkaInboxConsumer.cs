@@ -129,8 +129,9 @@ public sealed class KafkaInboxConsumer(
 
     /// <summary>
     /// Marks the message as handled; the client commits stored offsets in the background (EnableAutoOffsetStore=false
-    /// + auto commit, see Program.cs). If a rebalance revoked the partition since the message was consumed, the store
-    /// fails: harmless, its new owner re-reads from the last commit, and the event stored again changes nothing once synced.
+    /// with auto commit, set in AddKafkaIngest). If a rebalance revoked the partition since the message was consumed,
+    /// the store fails: harmless, its new owner re-reads from the last commit, and the event stored again changes
+    /// nothing once synced.
     /// </summary>
     private void StoreOffset(ConsumeResult<string, string> result)
     {

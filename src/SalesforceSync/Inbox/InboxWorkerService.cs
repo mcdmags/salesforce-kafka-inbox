@@ -40,8 +40,14 @@ public sealed class InboxWorkerService(
             if (processed == 0)
             {
                 var jitter = TimeSpan.FromMilliseconds(Random.Shared.Next(0, 500));
-                try { await Task.Delay(options.Value.IdleDelay + jitter, ct); }
-                catch (OperationCanceledException) { break; }
+                try
+                {
+                    await Task.Delay(options.Value.IdleDelay + jitter, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
             }
         }
     }

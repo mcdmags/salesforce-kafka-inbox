@@ -24,9 +24,9 @@ internal sealed class FakeCounters
     public FakeSalesforceStats Snapshot(int records)
     {
         return new(
-        Interlocked.Read(ref _apiCalls), Queries, WriteRequests, RecordsSucceeded, RecordsFailed,
-        Creates, Updates, Interlocked.Read(ref _concurrencyRejections), Describes, DescribesNotModified,
-        CompositeRequests, UpsertRequests, records);
+            Interlocked.Read(ref _apiCalls), Queries, WriteRequests, RecordsSucceeded, RecordsFailed,
+            Creates, Updates, Interlocked.Read(ref _concurrencyRejections), Describes, DescribesNotModified,
+            CompositeRequests, UpsertRequests, records);
     }
 
     public void Reset()

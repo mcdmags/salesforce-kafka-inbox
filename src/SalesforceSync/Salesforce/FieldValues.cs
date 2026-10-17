@@ -315,7 +315,9 @@ public static class FieldValues
             case DateTimeOffset dto: parsed = dto; break;
             case DateTime dt:
                 parsed = new DateTimeOffset(dt.Kind == DateTimeKind.Unspecified
-                ? DateTime.SpecifyKind(dt, DateTimeKind.Utc) : dt.ToUniversalTime()); break;
+                    ? DateTime.SpecifyKind(dt, DateTimeKind.Utc)
+                    : dt.ToUniversalTime());
+                break;
             case string s:
                 // Salesforce returns "+0000"; .NET wants "+00:00"
                 if (s.Length > 5 && s[^5] is '+' or '-' && char.IsAsciiDigit(s[^1]))

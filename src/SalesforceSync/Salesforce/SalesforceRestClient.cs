@@ -241,14 +241,14 @@ public sealed class SalesforceRestClient(HttpClient http)
     private static RecordResult ParseRecordResult(JsonElement record)
     {
         return new(
-        record.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True,
-        record.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
-        record.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
-            ? errors.EnumerateArray().Select(e => ParseError(null, e, "statusCode")).ToList()
-            : [],
-        record.TryGetProperty("created", out var created) && created.ValueKind is JsonValueKind.True or JsonValueKind.False
-            ? created.GetBoolean()
-            : null);
+            record.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True,
+            record.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
+            record.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
+                ? errors.EnumerateArray().Select(e => ParseError(null, e, "statusCode")).ToList()
+                : [],
+            record.TryGetProperty("created", out var created) && created.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? created.GetBoolean()
+                : null);
     }
 
     /// <param name="codeProperty">"errorCode" in an error response, "statusCode" in a collection's per-record errors.</param>
@@ -257,11 +257,12 @@ public sealed class SalesforceRestClient(HttpClient http)
     private static SalesforceError ParseError(string? referenceId, JsonElement e, string codeProperty)
     {
         return new(
-        referenceId,
-        StringProperty(e, codeProperty) ?? "UNKNOWN_ERROR",
-        StringProperty(e, "message"),
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty("fields", out var f) && f.ValueKind == JsonValueKind.Array
-            ? f.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList() : null);
+            referenceId,
+            StringProperty(e, codeProperty) ?? "UNKNOWN_ERROR",
+            StringProperty(e, "message"),
+            e.ValueKind == JsonValueKind.Object && e.TryGetProperty("fields", out var f) && f.ValueKind == JsonValueKind.Array
+                ? f.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList()
+                : null);
     }
 
     private static string? StringProperty(JsonElement e, string name)

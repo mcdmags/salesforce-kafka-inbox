@@ -31,8 +31,8 @@ public sealed record UpsertStrategy<TEvent>(
 {
     /// <summary>
     /// Reads and validates a raw event: valid JSON for <typeparamref name="TEvent"/>, an entity with a non-empty id,
-    /// a time with an explicit offset, and a type of inserted or updated. The Kafka consumer admits only events that pass (anything else can never
-    /// be synced), and the engine reads claimed rows the same way.
+    /// a time with an explicit offset, and a type of inserted or updated. The Kafka consumer admits only events that
+    /// pass (anything else can never be synced), and the engine reads claimed rows the same way.
     /// </summary>
     /// <returns>False with <paramref name="problem"/> saying why the event can never be synced.</returns>
     public bool TryRead(string json, [NotNullWhen(true)] out ReadEvent<TEvent>? read, [NotNullWhen(false)] out string? problem)
