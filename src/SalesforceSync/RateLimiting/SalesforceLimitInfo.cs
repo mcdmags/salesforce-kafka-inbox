@@ -5,7 +5,6 @@ namespace SalesforceSync.RateLimiting;
 public sealed record LimitCounter(long Used, long Max)
 {
     public double Ratio => Max <= 0 ? 0 : (double)Used / Max;
-    public long Remaining => Math.Max(0, Max - Used);
     public override string ToString()
     {
         return $"{Used}/{Max}";

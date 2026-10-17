@@ -30,47 +30,12 @@ internal static class SalesforceStep
             NullLogger<SalesforceSchemaCache>.Instance);
     }
 
-    /// <summary>The Salesforce step never claims, records or takes a slot.</summary>
-    private sealed class NoDatabase : ISalesforceBatchGate, IRepository<AccountInboxRow>
+    /// <summary>The Salesforce step never takes a slot.</summary>
+    private sealed class NoDatabase : ISalesforceBatchGate
     {
-        private static NotSupportedException NotUsed()
-        {
-            return new("The Salesforce step does not use the inbox");
-        }
-
         public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct)
         {
-            throw NotUsed();
-        }
-
-        public Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct)
-        {
-            throw NotUsed();
-        }
-
-        public Task<InboxClaim> ClaimAsync(CancellationToken ct)
-        {
-            throw NotUsed();
-        }
-
-        public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
-        {
-            throw NotUsed();
-        }
-
-        public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
-        {
-            throw NotUsed();
-        }
-
-        public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
-        {
-            throw NotUsed();
-        }
-
-        public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
-        {
-            throw NotUsed();
+            throw new NotSupportedException("The Salesforce step does not use the inbox");
         }
     }
 }

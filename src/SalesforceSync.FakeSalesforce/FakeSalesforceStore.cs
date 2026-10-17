@@ -24,7 +24,6 @@ public sealed partial class FakeSalesforceStore
 
     private const int MaxCompositeSubrequests = 25;
     private const int MaxCompositeCollectionsAndQueries = 5;
-    public const int MaxCollectionRecords = FakeCollectionWriter.MaxRecords;
 
     /// <summary>A call's URI and headers together, at most (a Composite subrequest's URL is held to it alone).</summary>
     public const int MaxUriAndHeadersBytes = 16_384;
