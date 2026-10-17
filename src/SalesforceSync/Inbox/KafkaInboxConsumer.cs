@@ -29,7 +29,7 @@ public sealed class KafkaInboxConsumer(
     }
 
     /// <summary>Topic -> the entity type whose events it carries. Two types can't share a topic: a message says nothing but its topic about its type.</summary>
-    public static IReadOnlyDictionary<string, ISalesforceEntitySync> TopicsOf(IEnumerable<ISalesforceEntitySync> syncs, IConfiguration config)
+    private static IReadOnlyDictionary<string, ISalesforceEntitySync> TopicsOf(IEnumerable<ISalesforceEntitySync> syncs, IConfiguration config)
     {
         var byTopic = new Dictionary<string, ISalesforceEntitySync>(StringComparer.Ordinal);
         foreach (var sync in syncs)

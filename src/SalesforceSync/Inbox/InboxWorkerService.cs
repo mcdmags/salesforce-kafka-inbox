@@ -52,7 +52,7 @@ public sealed class InboxWorkerService(
     /// benchmarks, so they drive exactly what the worker runs.
     /// </summary>
     /// <returns>Inbox rows processed across all types (0 = nothing to do).</returns>
-    public static async Task<int> SyncOnceAsync(IServiceScopeFactory scopes, int rotation, CancellationToken ct)
+    internal static async Task<int> SyncOnceAsync(IServiceScopeFactory scopes, int rotation, CancellationToken ct)
     {
         await using var scope = scopes.CreateAsyncScope();
         var syncs = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().ToList();

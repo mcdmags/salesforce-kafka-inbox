@@ -197,7 +197,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     }
 
     /// <summary>The URL a query is sent with, as a Composite subrequest or a call of its own.</summary>
-    public static string QueryUrl(string soql)
+    internal static string QueryUrl(string soql)
     {
         return $"{DataPath}/query?q={Uri.EscapeDataString(soql)}";
     }
@@ -206,7 +206,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// Whether a URL is within <see cref="MaxUrlBytes"/>, counted in bytes as sent (UTF-8; an escaped query is ASCII,
     /// so its bytes are its characters).
     /// </summary>
-    public static bool FitsUrlLimit(string url)
+    internal static bool FitsUrlLimit(string url)
     {
         return Encoding.UTF8.GetByteCount(url) <= MaxUrlBytes;
     }
@@ -219,14 +219,14 @@ public sealed class SalesforceRestClient(HttpClient http)
                 $"({MaxUriAndHeadersBytes:N0} for the URI and headers together): {url[..Math.Min(url.Length, 200)]}...", nameof(url));
     }
 
-    public static string Soql(string sobject, IEnumerable<string> fields, string whereField, IEnumerable<string> values)
+    internal static string Soql(string sobject, IEnumerable<string> fields, string whereField, IEnumerable<string> values)
     {
         return $"SELECT {string.Join(",", fields)} FROM {sobject} WHERE {whereField} IN " +
                $"({string.Join(",", values.Select(SoqlLiteral))})";
     }
 
     /// <summary>A value as a SOQL string literal: quoted, with backslashes and quotes escaped.</summary>
-    public static string SoqlLiteral(string value)
+    internal static string SoqlLiteral(string value)
     {
         return $"'{value.Replace("\\", "\\\\").Replace("'", "\\'")}'";
     }

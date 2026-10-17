@@ -40,14 +40,14 @@ public abstract class SObjectMetadata
         return [.. assembly.GetTypes().Where(t => t.IsDefined(typeof(SObjectAttribute), false))];
     }
 
-    internal static SObjectAttribute ObjectOf(Type type)
+    private protected static SObjectAttribute ObjectOf(Type type)
     {
         return type.GetCustomAttribute<SObjectAttribute>()
                ?? throw new InvalidOperationException($"{type.Name} is not marked [SObject(...)]");
     }
 
     /// <summary><paramref name="field"/> pointing at the object of the sObject class <paramref name="target"/>, by its external id field.</summary>
-    internal static SObjectLookupField PointerTo(string field, Type target)
+    private protected static SObjectLookupField PointerTo(string field, Type target)
     {
         var sobject = ObjectOf(target);
         return new SObjectLookupField(field, sobject.Name, sobject.ExternalIdField);
