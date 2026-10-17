@@ -8,35 +8,33 @@ namespace SalesforceSync.IntegrationTests;
 /// </summary>
 public static class PgSql
 {
-    public static async Task<int> ExecuteAsync(this NpgsqlConnection conn, string sql, object? args = null, NpgsqlTransaction? transaction = null,
-        CancellationToken ct = default)
+    public static async Task<int> ExecuteAsync(this NpgsqlConnection conn, string sql, object? args = null, NpgsqlTransaction? transaction = null)
     {
         await using var command = Command(conn, sql, args, transaction);
-        return await command.ExecuteNonQueryAsync(ct);
+        return await command.ExecuteNonQueryAsync();
     }
 
-    public static async Task<List<T>> QueryAsync<T>(this NpgsqlConnection conn, string sql, object? args = null, NpgsqlTransaction? transaction = null,
-        CancellationToken ct = default)
+    public static async Task<List<T>> QueryAsync<T>(this NpgsqlConnection conn, string sql, object? args = null, NpgsqlTransaction? transaction = null)
     {
         await using var command = Command(conn, sql, args, transaction);
-        await using var reader = await command.ExecuteReaderAsync(ct);
+        await using var reader = await command.ExecuteReaderAsync();
         var rows = new List<T>();
-        while (await reader.ReadAsync(ct))
+        while (await reader.ReadAsync())
         {
             rows.Add(Read<T>(reader));
         }
         return rows;
     }
 
-    public static async Task<T> QuerySingleAsync<T>(this NpgsqlConnection conn, string sql, object? args = null, NpgsqlTransaction? transaction = null)
+    public static async Task<T> QuerySingleAsync<T>(this NpgsqlConnection conn, string sql, object? args = null)
     {
-        var rows = await conn.QueryAsync<T>(sql, args, transaction);
+        var rows = await conn.QueryAsync<T>(sql, args);
         return rows.Single();
     }
 
-    public static async Task<T?> ExecuteScalarAsync<T>(this NpgsqlConnection conn, string sql, object? args = null, NpgsqlTransaction? transaction = null)
+    public static async Task<T?> ExecuteScalarAsync<T>(this NpgsqlConnection conn, string sql, object? args = null)
     {
-        var rows = await conn.QueryAsync<T>(sql, args, transaction);
+        var rows = await conn.QueryAsync<T>(sql, args);
         return rows.FirstOrDefault();
     }
 
