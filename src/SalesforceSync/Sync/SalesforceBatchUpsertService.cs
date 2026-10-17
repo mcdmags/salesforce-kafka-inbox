@@ -295,9 +295,9 @@ public sealed class SalesforceBatchUpsertService(
 
     private void LogFailures(string entityType, PreparedBatch batch, IEnumerable<UpsertResult> results)
     {
-        foreach (var (id, error) in batch.Invalid)
+        foreach (var invalid in batch.Invalid)
         {
-            log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", id, SalesforceErrors.InvalidEvent, error);
+            log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", invalid.RowId, invalid.Code, invalid.Error);
         }
 
         foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure))

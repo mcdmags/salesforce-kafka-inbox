@@ -291,7 +291,8 @@ public sealed class EngineFlowTests
             return new(id, new UpsertUnit([]), eventId);
         }
 
-        var batch = new PreparedBatch([Entity("A", 1), Entity("B", 2), Entity("C", 3), Entity("D", 4), Entity("E", 5)], [(8, "bad")]);
+        var batch = new PreparedBatch([Entity("A", 1), Entity("B", 2), Entity("C", 3), Entity("D", 4), Entity("E", 5)],
+            [new FailedEvent(8, "bad", SalesforceErrors.InvalidEvent)]);
         SalesforceError[] error = [new(null, "PROCESSING_HALTED", "x"), new("acct", "SOME_CODE", "why")];
 
         var outcomes = batch.Outcomes(new Dictionary<string, UpsertResult>
