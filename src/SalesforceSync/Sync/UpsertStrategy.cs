@@ -61,7 +61,7 @@ public sealed record UpsertStrategy<TEvent>(
         {
             problem = "The event time must be an ISO-8601 time with an offset or Z, e.g. 2026-10-14T01:02:03.456Z";
         }
-        else if (Meta(e)?.Kind() is null)
+        else if (Meta(e)?.IsInsertOrUpdate() is not true)
         {
             problem = "The event type must be \"inserted\" or \"updated\" (deletes are not synced)";
         }
@@ -118,13 +118,6 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
     }
 }
 
-/// <summary>What the source says happened to the entity. Deletes are not synced.</summary>
-public enum EventType
-{
-    Inserted,
-    Updated
-}
-
 /// <summary>
 /// The <c>meta</c> object every event carries next to its entity:
 /// <c>{ "time": "2026-10-14T01:02:03.456Z", "type": "inserted" }</c>.
@@ -147,12 +140,14 @@ public sealed partial class EventMeta
     /// <summary>"inserted" or "updated", in any case. Kept as text so anything else is rejected by name rather than as bad JSON.</summary>
     public string? Type { get; set; }
 
-    /// <summary><see cref="Type"/> as an <see cref="EventType"/>, or null if it is missing or anything else (e.g. "deleted").</summary>
-    public EventType? Kind()
+    /// <summary>
+    /// Whether <see cref="Type"/> is one the sync takes: inserted or updated. Missing or anything else (e.g. "deleted")
+    /// is not; which of the two it is decides nothing, since Salesforce's state decides create or update.
+    /// </summary>
+    public bool IsInsertOrUpdate()
     {
-        return "inserted".Equals(Type, StringComparison.OrdinalIgnoreCase) ? EventType.Inserted
-                : "updated".Equals(Type, StringComparison.OrdinalIgnoreCase) ? EventType.Updated
-                : null;
+        return "inserted".Equals(Type, StringComparison.OrdinalIgnoreCase)
+               || "updated".Equals(Type, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary><see cref="Time"/> as an instant, or null if it is missing or not an ISO-8601 time with an offset.</summary>
