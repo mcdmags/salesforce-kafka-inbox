@@ -5,8 +5,9 @@ Salesforce client and rate limiter real; only the Salesforce HTTP endpoint mocke
 [main README](../../README.md#benchmarks).
 
 These numbers come from the claim and outcome tuning merged in PR #13, re-measured after the move to EF Core
-(PR #12). [Latest run](#latest-run-main-at-b5950c1) re-measures everything on `main` at b5950c1 (PR #47 to #65);
-the [run before it](#latest-run-main-at-2d20c16) measured `main` at 2d20c16 (PR #35 to #46);
+(PR #12). [Latest run](#latest-run-main-at-3f68779) re-measures everything on `main` at 3f68779 (PR #66);
+the [run before it](#latest-run-main-at-b5950c1) measured `main` at b5950c1 (PR #47 to #65);
+the [run before that](#latest-run-main-at-2d20c16) measured `main` at 2d20c16 (PR #35 to #46);
 the [run before that](#latest-run-main-at-7a145b0-after-the-simplification) measured `main` at 7a145b0 (PR #20 to #24).
 
 **Every number on this page describes an earlier design**, kept as its record. Since it was measured:
@@ -349,6 +350,69 @@ A claim of 75 entities locks them (LockHeads) in about 2 ms (median over the 108
 median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest single run 21.5 ms, under load. Leasing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
+
+## Latest run: main at 3f68779
+
+All 36 benchmarks (`--run full`) on `main` at 3f68779 (PR #66, the mock org aligned with the Salesforce API guides, and
+`Sync:MaxEntitiesPerBatch` as an option), on 2026-10-18. The environment is the same as in the
+[b5950c1 run](#latest-run-main-at-b5950c1) (Docker Postgres 17 with its defaults); the load average was 2 to 3, lower
+than then. The run took 7 minutes.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures: 0 overlapping claims, 0 entities not `done`, 0 stale
+rows, 0 wrong values, 0 write-history regressions, 0 failed records.
+
+**The workload changed, so the work counts and times are not comparable with the b5950c1 run.** Since PR #65 and #66
+the drain benchmarks also load contact events and account deletes (the first iteration: 6,453 account events, 676
+relationship events, 777 contact events, 179 delete events for 98 deleted accounts), so 100 accounts end as 990
+entities (was 718) and 1,000 accounts as 2,113 (was 1,618). The mock org also checks more of the API's rules. Compare
+the columns below with each other, not with the earlier tables.
+
+Preloaded drain, 5,000 events. The means are BenchmarkDotNet's; the work counts are the medians of the iterations
+without a Describe, at 0 ms latency:
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 212.7 ms | 1,184.7 ms | 33.09 MB | 30 | 15 | 6.28 | 1,028 | 38 |
+| 1 | 1 | 1,000 | 2,113 | 667.3 ms | 3,935.1 ms | 101.9 MB | 78 | 33 | 1.90 | 3,279 | 1166 |
+| 1 | 3 | 100 | 990 | 104.1 ms | 388.3 ms | 35.11 MB | 31 | 15 | 6.08 | 1,062 | 72 |
+| 1 | 3 | 1,000 | 2,113 | 394.0 ms | 1,077.1 ms | 107.23 MB | 82 | 35 | 1.90 | 3,277 | 1164 |
+| 4 | 1 | 100 | 990 | 112.5 ms | 315.8 ms | 37.21 MB | 32 | 15 | 5.77 | 1,118 | 128 |
+| 4 | 1 | 1,000 | 2,113 | 321.9 ms | 783.6 ms | 106.51 MB | 80 | 34 | 1.90 | 3,278 | 1165 |
+| 4 | 3 | 100 | 990 | 153.1 ms | 236.8 ms | 50.6 MB | 37 | 15 | 4.64 | 1,390 | 400 |
+| 4 | 3 | 1,000 | 2,113 | 461.9 ms | 453.3 ms | 126.93 MB | 91 | 40 | 1.88 | 3,318 | 1205 |
+| 8 | 1 | 100 | 990 | 127.9 ms | 232.2 ms | 45.59 MB | 35 | 15 | 4.73 | 1,363 | 373 |
+| 8 | 1 | 1,000 | 2,113 | 317.9 ms | 541.3 ms | 115.51 MB | 85 | 35 | 1.83 | 3,409 | 1296 |
+| 8 | 3 | 100 | 990 | 266.2 ms | 282.1 ms | 88.59 MB | 46 | 17 | 3.57 | 1,810 | 820 |
+| 8 | 3 | 1,000 | 2,113 | 450.6 ms | 572.3 ms | 147.61 MB | 104 | 46 | 1.75 | 3,574 | 1461 |
+
+Streaming (50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 3.043 s | 418.4 MB | 1,322 | 658 | 1.65 | 3,898 | 5 |
+| 4 | 3 | 4.473 s | 887.3 MB | 3,089 | 1,537 | 1.38 | 4,688 | 4 |
+| 8 | 1 | 4.320 s | 809.8 MB | 2,995 | 1,493 | 1.32 | 4,889 | 3 |
+| 8 | 3 | 5.047 s | 1,037.3 MB | 3,148 | 1,563 | 1.65 | 3,912 | 9 |
+
+- **Same shape as b5950c1**: one pod with 4 workers is the fastest streaming case, and more workers or pods make more
+  calls at the same coalescing (1.3 to 1.7), because an event makes its entity due at once (no `CoalesceDelay`).
+- **Preloaded drains** are fastest with 4 workers x 1 pod (112.5 ms) or 3 pods x 1 worker (104.1 ms) at 100 accounts
+  and 0 ms; 8 workers x 3 pods is the slowest (266.2 ms) with the most claims and retries (1,810 and 820).
+- **Latency** (25 ms per call) costs most where one worker makes the calls: 1 x 1 with 1,000 accounts goes from
+  667 ms to 3,935 ms, against 322 ms to 784 ms with 4 workers.
+
+Micro benchmarks (they don't touch the workload, and match the b5950c1 run within noise):
+
+| Method | Mean | Allocated |
+|---|--:|--:|
+| ParseLimitHeader | 663.30 ns | 2832 B |
+| PrepareTenEntities | 18,631.41 ns | 41472 B |
+| ReadAndValidateEvent | 1,217.56 ns | 1616 B |
+| MapAccountEvent | 1,690.94 ns | 4016 B |
+| MapPayloadToSObject | 21.17 ns | 200 B |
+| MapSObjectToRecord | 270.70 ns | 1008 B |
+| DiffNumber | 127.34 ns | 32 B |
+| DiffDateTime | 245.82 ns | 192 B |
 
 ## Latest run: main at b5950c1
 

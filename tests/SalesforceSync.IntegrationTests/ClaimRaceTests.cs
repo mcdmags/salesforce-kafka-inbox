@@ -3,7 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using SalesforceSync.Data;
-using SalesforceSync.Inbox;
+using SalesforceSync.Data.Inbox;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.IntegrationTests;

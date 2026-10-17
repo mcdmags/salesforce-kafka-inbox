@@ -2,9 +2,10 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using SalesforceSync.Data.Inbox;
 using SalesforceSync.FakeSalesforce;
-using SalesforceSync.RateLimiting;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Tests;

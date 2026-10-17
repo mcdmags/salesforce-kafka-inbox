@@ -38,7 +38,7 @@ public static class PgSql
     public static Task<int> StoreAsync(this NpgsqlConnection conn, string table, string entityId, DateTimeOffset eventTime, string payload,
         NpgsqlTransaction? transaction = null)
     {
-        return conn.ExecuteAsync(Inbox.InboxSql.For(table).Store,
+        return conn.ExecuteAsync(Data.Inbox.InboxSql.For(table).Store,
             new { entityId, eventTime = eventTime.ToUniversalTime(), payload }, transaction);
     }
 

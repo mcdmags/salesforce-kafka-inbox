@@ -1,0 +1,14 @@
+namespace SalesforceSync.Infrastructure.RateLimiting;
+
+/// <param name="mayHaveBeenProcessed">
+/// False (the normal case): the request was not sent, or Salesforce itself refused it. True: something in front of
+/// Salesforce answered 503, so a write may have gone through all the same.
+/// </param>
+/// <param name="retryAfter">How long to wait before calling Salesforce again.</param>
+public sealed class RateLimitedException(TimeSpan retryAfter, bool mayHaveBeenProcessed = false)
+    : Exception($"Salesforce rate limited; retry after {retryAfter}")
+{
+    public TimeSpan RetryAfter { get; } = retryAfter;
+
+    public bool MayHaveBeenProcessed { get; } = mayHaveBeenProcessed;
+}

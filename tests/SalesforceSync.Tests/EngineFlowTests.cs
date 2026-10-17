@@ -1,9 +1,9 @@
 using System.Net;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
-using SalesforceSync.Inbox;
-using SalesforceSync.RateLimiting;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Data.Inbox;
+using SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Tests;

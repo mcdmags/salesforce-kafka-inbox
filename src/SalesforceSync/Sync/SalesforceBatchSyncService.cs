@@ -1,9 +1,9 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
-using SalesforceSync.Inbox;
-using SalesforceSync.RateLimiting;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Data.Inbox;
+using SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync.Write;
 
 namespace SalesforceSync.Sync;

@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
-using SalesforceSync.Inbox;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Data.Inbox;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync;
 
@@ -95,13 +95,4 @@ public sealed class ContactSObject
     [JsonPropertyName("LastName")] public string? LastName { get; set; }
     [JsonPropertyName("Email")] public string? Email { get; set; }
     [JsonPropertyName("Phone")] public string? Phone { get; set; }
-}
-
-/// <summary>A row of <c>sf_contact_inbox</c>: events of the contact type.</summary>
-public sealed class ContactInboxRow : InboxRow, IInboxRow
-{
-    // A full batch's read in one Composite request (5 queries)
-    public static int MaxValuesPerQuery => 100;
-    // A margin under Salesforce's 200
-    public static int MaxRecordsPerWrite => 180;
 }

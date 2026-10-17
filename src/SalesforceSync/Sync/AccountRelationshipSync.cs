@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
-using SalesforceSync.Inbox;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Data.Inbox;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync;
 
@@ -98,13 +98,4 @@ public sealed class AccountRelationshipSObject
     [JsonPropertyName("Type__c")] public string? Type { get; set; }
     [JsonPropertyName("Start_Date__c")] public DateOnly? StartDate { get; set; }
     [JsonPropertyName("Active__c")] public bool? Active { get; set; }
-}
-
-/// <summary>A row of <c>sf_account_relationship_inbox</c>: events of the account relationship type.</summary>
-public sealed class AccountRelationshipInboxRow : InboxRow, IInboxRow
-{
-    // A full batch's read in one Composite request: 5 queries, up to 3 ids per relationship (itself, two Accounts)
-    public static int MaxValuesPerQuery => 100;
-    // A margin under Salesforce's 200
-    public static int MaxRecordsPerWrite => 180;
 }

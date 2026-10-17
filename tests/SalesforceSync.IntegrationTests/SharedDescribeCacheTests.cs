@@ -4,7 +4,7 @@ using Microsoft.Extensions.Caching.StackExchangeRedis;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.IntegrationTests;
 

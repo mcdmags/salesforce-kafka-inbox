@@ -1,5 +1,5 @@
-using SalesforceSync.Inbox;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Data.Inbox;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync;
 

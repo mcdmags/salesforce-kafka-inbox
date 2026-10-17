@@ -3,7 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using SalesforceSync.Data;
-using SalesforceSync.Inbox;
+using SalesforceSync.Data.Inbox;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Tests;

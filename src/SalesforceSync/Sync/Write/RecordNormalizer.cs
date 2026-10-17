@@ -1,4 +1,4 @@
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync.Write;
 

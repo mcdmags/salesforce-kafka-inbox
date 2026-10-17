@@ -91,7 +91,7 @@ The sync is three layers, each with one job:
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`). The
 model defines every table in `OnModelCreating` (partial indexes with `HasFilter`, autovacuum settings with
-`HasStorageParameter`), and EF migrations (`src/SalesforceSync/Data/Migrations`) create them at startup (see
+`HasStorageParameter`), and EF migrations (`src/SalesforceSync.Data/Migrations`) create them at startup (see
 [Schema and migrations](#schema-and-migrations)); `SchemaTests` checks the model against the real tables column by
 column, and a unit test fails when the model has changed without a migration. Every inbox table has the same columns, so
 they all live on the abstract `InboxRow`; `AccountInboxRow`, `AccountRelationshipInboxRow` and `ContactInboxRow` only
@@ -660,44 +660,28 @@ than the row when it arrived, leaves no trace in Postgres; Kafka, within its ret
 `SyncDbContext.OnModelCreating` defines every table: the inboxes (one `ConfigureInbox` call per inbox row type),
 `sf_rate_limit` (with its one `salesforce` row as seed data) and `sf_api_usage`, with the column names in snake_case,
 the partial indexes (`HasFilter`) and the autovacuum settings (`HasStorageParameter`). EF migrations in
-`src/SalesforceSync/Data/Migrations` create them; the `sf_limit_status` view, which has no model counterpart, is
-created by `migrationBuilder.Sql` in `InitialSchema` (and recreated without `own_calls_24h` by
-`LimitStatusWithoutOwnCalls`). Queries stay raw SQL (`InboxSql`, `RateLimitSql`) where LINQ can't express them.
+`src/SalesforceSync.Data/Migrations` create them; the `sf_limit_status` view, which has no model counterpart, is
+created by `migrationBuilder.Sql` in `InitialSchema`. Queries stay raw SQL (`InboxSql`, `RateLimitSql`) where LINQ
+can't express them.
 
-The migrations, in order:
-
-| Migration | Does |
-|---|---|
-| `InitialSchema` | The inboxes (one row per event), `sf_sync_state` (every entity's due time, lease and watermark), `sf_rate_limit`, `sf_api_usage` and the `sf_limit_status` view |
-| `LimitStatusWithoutOwnCalls` | Recreates `sf_limit_status` without `own_calls_24h` |
-| `InboxEventTime` | Adds `event_time` to every inbox, filled from each row's `meta.time` |
-| `InboxOneRowPerRecord` | Keeps each entity's newest row and makes `entity_id` unique |
-| `StateInInboxRow` | Moves every entity's state from `sf_sync_state` into its inbox row (`next_attempt_at` only for a pending row; a state row without an inbox row, which only a row deleted by hand leaves, is dropped), adds each inbox's ready index and drops `sf_sync_state` |
-| `DropReceivedAt` | Drops `received_at` from the inboxes: the sync orders events by `event_time`, and `last_updated` shows when a row last changed |
-| `LeaseInNextAttemptAt` | Drops `locked_until` from the inboxes: a lease ends at the row's `next_attempt_at` (a lease in progress keeps its end there; an expired one leaves the row due) |
-| `DropSyncedTime` | Drops `synced_time`, the watermark, from the inboxes: an event not newer than a synced one is never stored. A pending row the watermark covered (a redelivery not claimed yet) and every `superseded` row become `done` |
+There is one migration, `InitialSchema`: the inboxes (one row per entity, with its due time and lease), `sf_rate_limit`,
+`sf_api_usage` and the `sf_limit_status` view. The earlier history (a chain of migrations that evolved the first
+design into this one) was deleted and `InitialSchema` regenerated from the model, so **a database created with the
+earlier migrations doesn't match it**: its `__EFMigrationsHistory` names migrations that no longer exist. Start from a
+fresh database (or drop the sync's tables and `__EFMigrationsHistory`).
 
 At startup `SyncSchemaInitializer` (registered before the workers) runs `SyncSchema.MigrateAsync`: under a
 session-level advisory lock (`0x5346_5348`), so pods that start together migrate one at a time and each finds the work
 of the one before done, it applies the pending migrations with `Database.MigrateAsync()`. (EF 9 also locks its history
-table while it migrates; the advisory lock covers the check for a database from before migrations, below, as well.)
-Changing the model:
+table while it migrates.) Changing the model:
 
 ```bash
 dotnet tool restore
-dotnet ef migrations add <Name> --project src/SalesforceSync --output-dir Data/Migrations
+dotnet ef migrations add <Name> --project src/SalesforceSync.Data --output-dir Migrations
 ```
 
 A unit test (`Every_change_to_the_model_has_its_migration`, `HasPendingModelChanges`) fails while a model change
 has no migration.
-
-**Databases from before migrations.** A database whose tables were created by `sql/schema.sql` (the version before
-migrations) has no `__EFMigrationsHistory`. If its `sf_sync_state` has the `lock_token` column (the last shape that
-script made, identical to what `InitialSchema` creates), `InitialSchema` is recorded as applied instead of run, and
-later migrations apply as usual. Older shapes (an `sf_inbox` table, inboxes that held their own claim state with
-`retry_count`, an `sf_sync_state` with `entity_key`) are no longer upgraded: startup stops with an error that says so.
-Migrate such a database by hand to the shape `InitialSchema` creates and record that migration in
-`__EFMigrationsHistory`, or start from a fresh database.
 
 ## Writing to Salesforce
 
@@ -1124,9 +1108,9 @@ before anything is sent.
 
 The engine (`SalesforceBatchSyncService.SyncBatchAsync<TEvent, TRow>`) owns claiming, ordering, coalescing, rate
 limits, batching, normalization, diffing, parents first, retries and dead-lettering. Nothing in the engine, the consumer or
-the worker loops names an object. An object supplies, in one file: a payload class, an sObject class, an inbox row
-class (which selects the object's inbox table) and a static class with the mapping and the strategy, which says how an
-event becomes records, upserts or deletes. `AddInboxSync` registers it as an `EntitySyncService<TEvent, TRow>`, which does
+the worker loops names an object. An object supplies, in one file: a payload class, an sObject class and a static class with the mapping and the strategy,
+which says how an event becomes records, upserts or deletes; and an inbox row class (which selects the object's inbox
+table) in `SalesforceSync.Data/Inbox/`. `AddInboxSync` registers it as an `EntitySyncService<TEvent, TRow>`, which does
 the rest of `ISalesforceEntitySync` through the shared `IRepository<TRow>`. Its events come from the account aggregate
 (`AccountAggregate` names each child list's entity type); an object that isn't part of the aggregate needs its list
 added there, or a topic of its own.
@@ -1162,7 +1146,7 @@ public sealed class AccountRelationshipSObject
     [JsonPropertyName("Active__c")] public bool? Active { get; set; }
 }
 
-// 3. Inbox row: the object's inbox table. Every column is on InboxRow, so every object's inbox has the same fields;
+// 3. Inbox row (in SalesforceSync.Data/Inbox): the object's inbox table. Every column is on InboxRow, so every object's inbox has the same fields;
 //    the row type gives its batch's query and write sizes (IInboxRow; checked at registration: 1 to 2,000 ids per
 //    query, 1 to 200 records per upsert or delete)
 public sealed class AccountRelationshipInboxRow : InboxRow, IInboxRow
@@ -1174,7 +1158,7 @@ public sealed class AccountRelationshipInboxRow : InboxRow, IInboxRow
 }
 //    ... and in SyncDbContext.OnModelCreating
 //    modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
-//    Then a migration creates the table: dotnet ef migrations add <Name> --project src/SalesforceSync --output-dir Data/Migrations
+//    Then a migration creates the table: dotnet ef migrations add <Name> --project src/SalesforceSync.Data --output-dir Migrations
 
 // 4. Mapping and strategy: how to read an event (id, time, type), event -> records, and what to read
 public static class AccountRelationshipSync
@@ -1232,8 +1216,8 @@ related objects can arrive in any order. A strategy may build `SObjectRecord`s b
 engine requires.
 
 **Contact** has the same shape. `Sync/ContactSync.cs` is the complete example: `ContactEvent` / `ContactPayload` (the
-`contact` object of the event), `ContactSObject`, `ContactInboxRow` (`sf_contact_inbox`), and the strategy, which reads
-the contacts and the Accounts they point at, like relationships:
+`contact` object of the event), `ContactSObject`, and the strategy, which reads
+the contacts and the Accounts they point at, like relationships (its inbox row is `ContactInboxRow`, `sf_contact_inbox`, in `SalesforceSync.Data/Inbox/`):
 
 ```csharp
 // The Account by its external id, in a Text field; the read checks the Account exists
@@ -1284,22 +1268,25 @@ does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers
 
 ```
 src/
-  SalesforceSync/                 Worker:
-    Inbox/                        Kafka consumer, worker loops, InboxSql, InboxRow, IRepository (and the
-                                  claim and outcome types), InboxRepository
+  SalesforceSync/                 The entry project, the worker (Program, DI wiring):
+    Inbox/                        Kafka consumer, worker loops
     Sync/                         The engine (SalesforceBatchSyncService), PreparedBatch, EntitySyncService, the
                                   strategy and event meta, the engine's model types, AccountAggregate (a Kafka
                                   aggregate → the changed entities' events), and one file per synced object
-                                  (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy,
-                                  inbox row)
-    Sync/Write/                  The write path's rules, no I/O: normalize, read queries, diff, plan (parents first),
+                                  (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy)
+    Sync/Write/                   The write path's rules, no I/O: normalize, read queries, diff, plan (parents first),
                                   pack (one upsert per level and object, one delete; 2+ in a request → Composite), interpret
+  SalesforceSync.Infrastructure/  The Salesforce side (references Data):
     Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors,
                                   SObjectMetadata and the attributes the sObject classes are read by
     RateLimiting/                 Token bucket, daily budget, pause, concurrency slots, the batch gate
-    Data/                         SyncDbContext (the EF model: every table), SyncSchema (migrates at startup),
+  SalesforceSync.Data/            Postgres (no reference to the other two):
+    (root)                        SyncDbContext (the EF model: every table), SyncSchema (migrates at startup),
                                   PostgresRetryStrategy, raw-SQL helpers
-    Data/Migrations/              EF migrations (InitialSchema: the tables, and the sf_limit_status view)
+    Inbox/                        InboxRow and one row type per object, IRepository (and the claim and outcome
+                                  types), InboxRepository, InboxSql, SyncOptions
+    RateLimiting/                 The rate limiter's tables (RateLimitState, ApiUsageBucket) and RateLimitSql
+    Migrations/                   EF migrations (InitialSchema: the tables, and the sf_limit_status view)
   SalesforceSync.FakeSalesforce/  In-memory Salesforce (OAuth sessions, describe, query pages, composite, sObject
                                   Collections upsert and delete, allOrNone, a Recycle Bin, Salesforce-like value
                                   storage, Text foreign keys checked like the org's automation on write (and, opted
@@ -1419,10 +1406,7 @@ JSON) skipped at ingest, an event waiting for its entity's lease, a newer event 
 status and an older one leaving it as it is (`OneRowPerEntityTests`), an outcome for a claimed event never recorded on
 the newer event that overwrote it meanwhile, an
 expired worker unable to record anything, the unknown-outcome hold, every inbox table created at startup with
-identical columns, the unique `entity_id` indexes, the partial ready index and autovacuum settings, `InboxOneRowPerRecord`
-keeping each entity's newest row, `StateInInboxRow` moving each entity's state into its row (and back down),
-migrating again changing nothing, a database created
-before migrations recorded as migrated with its rows kept, and older shapes stopping startup untouched. Tests
+identical columns, the unique `entity_id` indexes, the partial ready index and autovacuum settings, migrating again changing nothing. Tests
 publish version N as `meta.time` = a fixed base time + N ms, and read it back from the stored payload. Relationships
 (`RelationshipTests`): one upsert with the two Accounts' keys as text once both exist, later only changed fields
 (an unchanged key not sent, a changed one sent); a relationship that arrives before its Accounts waits

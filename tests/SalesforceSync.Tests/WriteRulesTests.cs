@@ -1,6 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 using SalesforceSync.Sync.Write;
 
