@@ -5,9 +5,9 @@ using SalesforceSync.FakeSalesforce;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Kafka -> KafkaInboxConsumer -> sf_account_inbox (Postgres) -> InboxWorker -> mock Salesforce, with Postgres and Kafka in
-/// containers and the worker and mock org in-process. Each test uses its own account ids (AutoFixture) so tests don't
-/// interfere through shared state.
+/// Kafka -> KafkaInboxConsumer -> sf_account_inbox (Postgres) -> InboxWorkerService -> mock Salesforce, with Postgres
+/// and Kafka in containers and the worker and mock org in-process. Each test uses its own account ids (AutoFixture) so
+/// tests don't interfere through shared state.
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class SyncEndToEndTests(SyncFixture app)
@@ -37,13 +37,8 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         ((decimal?)profile["Score__c"]).Should().Be(score);
         ((string?)profile["AccountId__c"]).Should().Be(acct, "the Account's external id, as text");
 
-        ((string?)account["RecordTypeId"]).Should().Be(RecordTypeId("Account", "Business"), "every record gets its class's record type");
-        ((string?)profile["RecordTypeId"]).Should().Be(RecordTypeId("Profile__c", "Standard"));
-    }
-
-    private static string RecordTypeId(string sobject, string developerName)
-    {
-        return FakeSchema.RecordTypes[sobject].Single(r => r.DeveloperName == developerName).Id;
+        ((string?)account["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Account", "Business"), "every record gets its class's record type");
+        ((string?)profile["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Profile__c", "Standard"));
     }
 
     [Fact]
@@ -232,7 +227,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         v1["meta"]!["time"] = "2026-01-01T02:00:00.0010007+02:00";
         var v2 = SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v2" }, []);
         v2["meta"]!["time"] = "2026-01-01T00:00:00.0010011Z";
-        var micros = (SyncFixture.BaseTime - DateTimeOffset.UnixEpoch).Ticks / TimeSpan.TicksPerMicrosecond;
+        var micros = SyncFixture.Micros(0);
 
         await app.PublishRawAsync(acct, v1.ToJsonString());
         await app.WaitForInboxSettledAsync(acct, version: 1);
@@ -321,7 +316,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         (await app.WaitForInboxSettledAsync(acct, version: 5)).Should().Be((5L, "done"), "the newest meta.time is the one that must be written");
 
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v5");
-        var written = (await app.GetHistoryAsync("Account", acct)).Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+        var written = await app.GetWrittenVersionsAsync(acct);
         written.Should().BeInAscendingOrder().And.OnlyHaveUniqueItems("an older event must never be written after a newer one");
         ((decimal?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct)))!["Score__c"]).Should().Be(5m);
     }

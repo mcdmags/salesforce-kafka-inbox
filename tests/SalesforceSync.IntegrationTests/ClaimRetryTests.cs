@@ -52,15 +52,11 @@ public sealed class ClaimRetryTests(SyncFixture app)
     {
         public int Commits { get; private set; }
 
-        public override async Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData,
+        public override Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData,
             CancellationToken cancellationToken = default)
         {
             Commits++;
-            if (Commits == 1)
-            {
-                throw new NpgsqlException("connection reset", new IOException("broken pipe"));
-            }
-            await Task.CompletedTask;
+            return Commits == 1 ? throw new NpgsqlException("connection reset", new IOException("broken pipe")) : Task.CompletedTask;
         }
     }
 }

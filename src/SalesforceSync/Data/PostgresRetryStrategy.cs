@@ -23,7 +23,7 @@ public sealed class PostgresRetryStrategy(
     PostgresRetryOptions options)
     : NpgsqlRetryingExecutionStrategy(dependencies, options.MaxRetryCount, options.MaxRetryDelay, null)
 {
-    /// <summary>Npgsql's own classification, plus server shutdown/restart and connection-class SQLSTATEs.</summary>
+    /// <summary>Npgsql's own classification, plus every connection-class SQLSTATE.</summary>
     protected override bool ShouldRetryOn(Exception? exception)
     {
         return exception is not null && (base.ShouldRetryOn(exception) || IsTransient(exception));
@@ -55,8 +55,8 @@ public sealed class PostgresRetryStrategy(
     }
 
     /// <summary>
-    /// Transient by Npgsql's classification (network errors, timeouts, serialization failures, deadlocks, too many
-    /// connections, ...), or a server shutdown/restart or connection-class SQLSTATE.
+    /// Transient by Npgsql's classification (network errors, timeouts, serialization failures, deadlocks, server
+    /// shutdown or restart, too many connections, ...), or any connection-class SQLSTATE.
     /// </summary>
     public static bool IsTransient(Exception ex)
     {
@@ -64,10 +64,9 @@ public sealed class PostgresRetryStrategy(
         {
             // SaveChanges wraps the database's error
             DbUpdateException { InnerException: { } inner } => IsTransient(inner),
-            PostgresException pg => pg.IsTransient
-                                    || pg.SqlState.StartsWith("08", StringComparison.Ordinal)   // connection exception
-                                    || pg.SqlState is "57P01" or "57P02" or "57P03"             // admin/crash shutdown, cannot connect now
-                                    || pg.SqlState is "40001" or "40P01",                       // serialization failure, deadlock
+            // Npgsql already counts serialization failures, deadlocks, shutdowns and most of class 08, not all of it
+            // (08P01, a protocol violation, is not)
+            PostgresException pg => pg.IsTransient || pg.SqlState.StartsWith("08", StringComparison.Ordinal),
             NpgsqlException npgsql => npgsql.IsTransient,
             TimeoutException => true,
             _ => false

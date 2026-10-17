@@ -12,7 +12,7 @@ namespace SalesforceSync.IntegrationTests;
 /// Claims, stores and outcomes interleaved by hand on separate connections, in a schema of its own, so the pods (which
 /// work the public schema) never see its rows and every step happens exactly when the test says. Storing an event,
 /// claiming an entity and recording its outcome all update the entity's one inbox row, so Postgres's row lock orders
-/// them. The schema is created once and emptied before each test (see <see cref="OneRowPerEntityTests"/>).
+/// them. The schema is created once and emptied before each test (<see cref="SyncFixture.MigratedSchemaAsync"/>).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class ClaimRaceTests(SyncFixture app)
@@ -20,8 +20,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
     private const string Schema = "claim_race_test";
     private static readonly string Table = SyncFixture.InboxTable();
     private static readonly InboxSql Sql = InboxSql.For(Table);
-    private static NpgsqlDataSource? _db;
-    private static IDbContextFactory<SyncDbContext>? _contexts;
+    private IDbContextFactory<SyncDbContext>? _contexts;
 
     [Fact]
     public async Task A_second_event_of_an_entity_waits_for_the_first_to_commit_then_overwrites_it_and_an_entity_being_stored_is_not_claimed()
@@ -103,12 +102,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
     /// committed before the outcome.)
     /// </summary>
     [Theory]
-    [InlineData("done")]
-    [InlineData("failed")]
-    [InlineData("dead")]
-    [InlineData("released")]
-    [InlineData("failed all")]
-    [InlineData("held")]
+    [MemberData(nameof(SyncFixture.Outcomes), MemberType = typeof(SyncFixture))]
     public async Task An_outcome_that_waits_for_a_store_of_a_newer_event_is_not_recorded_on_it(string outcome)
     {
         await using var race = await StartAsync();
@@ -120,7 +114,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await using (var store = await race.Consumer2.BeginTransactionAsync())
         {
             await race.StoreAsync(race.Consumer2, 2, store);
-            var recording = Record(inbox, claim, outcome);
+            var recording = SyncFixture.RecordOutcomeAsync(inbox, claim, outcome);
             await race.WaitUntilBlockedByAsync(race.Consumer2, recording);
             await store.CommitAsync();
             await recording;
@@ -179,39 +173,13 @@ public sealed class ClaimRaceTests(SyncFixture app)
         (await race.DueAsync()).Should().BeTrue("v3 is due now, not when v1's lease would have ended");
     }
 
-    private static Task Record(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
-    {
-        var row = claim.RowIds.Single();
-        var failure = new FailedEvent(row, "failed", "SOME_CODE");
-        var none = CancellationToken.None;
-        return outcome switch
-        {
-            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], []), none),
-            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
-            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
-            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
-            "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
-            "held" => inbox.HoldAsync(claim, "lost", none),
-            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
-        };
-    }
-
     /// <summary>The test's schema, migrated, with no rows, and a race in it.</summary>
     private async Task<Race> StartAsync()
     {
-        if (_db is null)
-        {
-            var db = await app.CreateSchemaAsync(Schema);
-            _contexts = SyncDbContext.CreateFactory(db);
-            await SyncSchema.MigrateAsync(_contexts);
-            _db = db;
-        }
-        await using (var conn = await _db.OpenConnectionAsync())
-        {
-            await conn.ExecuteAsync($"TRUNCATE {Table}");
-        }
-        return new Race(await _db.OpenConnectionAsync(), await _db.OpenConnectionAsync(), await _db.OpenConnectionAsync(),
-            await _db.OpenConnectionAsync(), await _db.OpenConnectionAsync());
+        var (db, contexts) = await app.MigratedSchemaAsync(Schema);
+        _contexts = contexts;
+        return new Race(await db.OpenConnectionAsync(), await db.OpenConnectionAsync(), await db.OpenConnectionAsync(),
+            await db.OpenConnectionAsync(), await db.OpenConnectionAsync());
     }
 
     /// <summary>One entity, and connections for two consumers and two workers.</summary>
@@ -266,7 +234,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         public async Task WaitUntilBlockedByAsync(NpgsqlConnection holder, Task statement)
         {
             var deadline = DateTime.UtcNow.AddSeconds(10);
-            while (!await observer.ExecuteScalarAsync<bool>(
+            while (!await observer.QuerySingleAsync<bool>(
                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE @pid = ANY(pg_blocking_pids(pid)))", new { pid = holder.ProcessID }))
             {
                 statement.IsCompleted.Should().BeFalse("the statement should be waiting for a lock");

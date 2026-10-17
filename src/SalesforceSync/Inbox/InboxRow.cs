@@ -4,10 +4,10 @@ namespace SalesforceSync.Inbox;
 
 /// <summary>
 /// One row of an inbox table: an entity's newest Kafka event, what became of it, and the entity's sync state (when it is
-/// due, the lease of the worker processing it). One row per entity: a newer event overwrites it. Every
-/// inbox table has exactly these columns (the inbox configuration in SyncDbContext), so they all live here; a synced
-/// object only adds a subclass with its limits (<see cref="IInboxRow"/>) and gets its own table (<see cref="Data.SyncDbContext"/> maps each subclass to one; the base is not an entity, there is no
-/// shared table).
+/// due, the lease of the worker processing it). One row per entity: a newer event overwrites it. Every inbox table has
+/// exactly these columns (the inbox configuration in SyncDbContext), so they all live here; a synced object only adds
+/// a subclass with its limits (<see cref="IInboxRow"/>) and gets its own table (<see cref="Data.SyncDbContext"/> maps
+/// each subclass to one; the base is not an entity, there is no shared table).
 /// </summary>
 public abstract class InboxRow
 {

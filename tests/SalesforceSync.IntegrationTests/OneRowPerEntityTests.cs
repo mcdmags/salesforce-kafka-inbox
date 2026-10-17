@@ -12,16 +12,14 @@ namespace SalesforceSync.IntegrationTests;
 /// An inbox keeps one row per entity: storing an event overwrites the entity's row unless that holds a newer event,
 /// and an outcome is recorded on a claimed row only while it still holds the event the claim read. Through the
 /// worker's own repository, in a schema of its own, so the pods (which work the public schema) never see its rows and
-/// every step happens exactly when the test says. The schema is created once and emptied before each test: a data
-/// source per test would cost EF a service provider each, and more than twenty fail the run.
+/// every step happens exactly when the test says (<see cref="SyncFixture.MigratedSchemaAsync"/>).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class OneRowPerEntityTests(SyncFixture app)
 {
     private const string Schema = "one_row_per_entity_test";
     private static readonly string Table = SyncFixture.InboxTable();
-    private static NpgsqlDataSource? _db;
-    private static IDbContextFactory<SyncDbContext>? _contexts;
+    private IDbContextFactory<SyncDbContext>? _contexts;
 
     [Theory]
     [InlineData("pending")]
@@ -100,12 +98,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     /// and the entity is due, so the next claim takes v2.
     /// </summary>
     [Theory]
-    [InlineData("done")]
-    [InlineData("failed")]
-    [InlineData("dead")]
-    [InlineData("released")]
-    [InlineData("failed all")]
-    [InlineData("held")]
+    [MemberData(nameof(SyncFixture.Outcomes), MemberType = typeof(SyncFixture))]
     public async Task An_outcome_for_a_claimed_event_is_not_recorded_on_the_newer_event_that_overwrote_it(string outcome)
     {
         var db = await SchemaAsync();
@@ -117,7 +110,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
         // The consumer stores v2 while the worker is writing v1 to Salesforce
         await StoreAsync(inbox, entity, 2);
-        await RecordAsync(inbox, claim, outcome);
+        await SyncFixture.RecordOutcomeAsync(inbox, claim, outcome);
 
         (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0
                                                              && r.Error == null && r.ErrorCode == null, "nothing of v1's outcome lands on v2");
@@ -130,23 +123,6 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         next.Events.Should().ContainSingle().Which.EventTime.Should().Be(SyncFixture.TimeOf(Event(entity, 2)), "the next claim writes v2");
         await inbox.RecordAsync(next, Synced(next), CancellationToken.None);
         (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 2 && r.Status == "done");
-    }
-
-    private static Task RecordAsync(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
-    {
-        var row = claim.RowIds.Single();
-        var failure = new FailedEvent(row, "failed", "SOME_CODE");
-        var none = CancellationToken.None;
-        return outcome switch
-        {
-            "done" => inbox.RecordAsync(claim, Synced(claim), none),
-            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
-            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
-            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
-            "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
-            "held" => inbox.HoldAsync(claim, "lost", none),
-            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
-        };
     }
 
     private static BatchOutcomes Synced(InboxClaim claim)
@@ -168,19 +144,12 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     /// <summary>The test's schema, migrated, with no rows.</summary>
     private async Task<NpgsqlDataSource> SchemaAsync()
     {
-        if (_db is null)
-        {
-            var db = await app.CreateSchemaAsync(Schema);
-            _contexts = SyncDbContext.CreateFactory(db);
-            await SyncSchema.MigrateAsync(_contexts);
-            _db = db;
-        }
-        await ExecuteAsync(_db, $"TRUNCATE {Table}");
-        return _db;
+        (var db, _contexts) = await app.MigratedSchemaAsync(Schema);
+        return db;
     }
 
     /// <summary>The worker's repository; a hold short enough to see it end.</summary>
-    private static InboxRepository<AccountInboxRow> Inbox()
+    private InboxRepository<AccountInboxRow> Inbox()
     {
         return new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions { UnknownOutcomeHold = TimeSpan.FromMilliseconds(200) }));
     }
@@ -191,8 +160,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var row = await conn.QuerySingleAsync<StoredRow>(
             $"SELECT id, payload::text, status, attempt_count, last_error, last_error_code, event_time, last_updated FROM {Table} WHERE entity_id = @entity",
             new { entity });
-        var version = (long)(SyncFixture.TimeOf(JsonNode.Parse(row.Payload)!.AsObject()) - SyncFixture.BaseTime).TotalMilliseconds;
-        return new Row(row.Id, version, row.Status, row.AttemptCount, row.Error, row.ErrorCode, row.EventTime, row.LastUpdated);
+        return new Row(row.Id, SyncFixture.VersionOf(row.Payload), row.Status, row.AttemptCount, row.Error, row.ErrorCode, row.EventTime, row.LastUpdated);
     }
 
     private static async Task<(DateTime? NextAttemptAt, Guid? LockToken)> StateAsync(NpgsqlDataSource db, string entity)

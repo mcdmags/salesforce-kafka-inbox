@@ -200,6 +200,12 @@ public static class FakeSchema
         };
     }
 
+    /// <summary>The 18-character Id of the object's record type with this developer name.</summary>
+    public static string RecordTypeIdOf(string sobject, string developerName)
+    {
+        return RecordTypes[sobject].Single(r => r.DeveloperName == developerName).Id;
+    }
+
     /// <summary>Whether records of the object can be given the record type with this (15- or 18-character) Id.</summary>
     public static bool IsAssignableRecordType(string sobject, string id)
     {
@@ -269,7 +275,9 @@ public static class FakeSchema
                     ? (FormatDateTime(new DateTimeOffset(t.UtcTicks - (t.UtcTicks % TimeSpan.TicksPerSecond), TimeSpan.Zero)), null, null)
                     : Invalid(field, value);
             case "id" or "reference":
-                return text is { Length: 15 or 18 } ? (text, null, null) : (null, "MALFORMED_ID", $"{field.Name}: id value of incorrect type: {text}");
+                return text is { Length: 15 or 18 }
+                    ? (text, null, null)
+                    : (null, "MALFORMED_ID", $"{field.Name}: id value of incorrect type: {text}");
             default:
                 {
                     var s = text ?? value!.ToJsonString();

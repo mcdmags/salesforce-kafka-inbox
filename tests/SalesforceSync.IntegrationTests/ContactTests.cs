@@ -1,4 +1,3 @@
-using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 using SalesforceSync.FakeSalesforce;
 
@@ -25,7 +24,7 @@ public sealed class ContactTests(SyncFixture app)
         record.Should().NotBeNull();
         ((string?)record!["AccountId__c"]).Should().Be(acct);
         record["AccountId"].Should().BeNull("the standard lookup is left alone");
-        ((string?)record["RecordTypeId"]).Should().Be(FakeSchema.RecordTypes["Contact"].Single(r => r.DeveloperName == "Standard").Id);
+        ((string?)record["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Contact", "Standard"));
         var write = (await app.GetWriteRequestsAsync(contact)).Should().ContainSingle().Subject;
         ((string?)write["method"], (string?)write["url"]).Should().Be(("PATCH", "/services/data/v62.0/composite/sobjects/Contact/ExternalId__c"));
         write["body"]!["allOrNone"]!.GetValue<bool>().Should().BeFalse();
@@ -94,11 +93,7 @@ public sealed class ContactTests(SyncFixture app)
         var (acct, contact) = (SyncFixture.NewAccountId(), SyncFixture.NewContactId());
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, []);
         await app.WaitForInboxSettledAsync(acct, 1);
-        using (var lose = await app.Salesforce.PostAsJsonAsync("/__fake/lost-responses",
-                   new JsonObject { ["sObject"] = "Contact", ["externalId"] = contact, ["times"] = 1 }))
-        {
-            lose.EnsureSuccessStatusCode();
-        }
+        await app.LoseResponsesAsync("Contact", contact);
 
         await app.PublishContactAsync(contact, 1, acct, new JsonObject { ["lastName"] = "v1" });
         var held = (await Eventually.ValueAsync(() => app.GetInboxRowAsync(contact, SyncFixture.Contacts),

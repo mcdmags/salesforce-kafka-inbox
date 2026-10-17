@@ -30,8 +30,10 @@ public sealed class PostgresRetryStrategyTests
         new PostgresException("could not serialize access", "ERROR", "ERROR", "40001"),
         new PostgresException("deadlock detected", "ERROR", "ERROR", "40P01"),
         new PostgresException("terminating connection due to administrator command", "FATAL", "FATAL", "57P01"),
+        new PostgresException("terminating connection because of crash of another server process", "FATAL", "FATAL", "57P02"),
         new PostgresException("the database system is starting up", "FATAL", "FATAL", "57P03"),
         new PostgresException("connection failure", "FATAL", "FATAL", "08006"),
+        new PostgresException("protocol violation", "FATAL", "FATAL", "08P01"),
         new TimeoutException("timeout")
     ];
 
@@ -44,6 +46,7 @@ public sealed class PostgresRetryStrategyTests
 
         var result = await Strategy().ExecuteAsync(_ => ++attempts < 3 ? throw error : Task.FromResult(value), CancellationToken.None);
 
+        PostgresRetryStrategy.IsTransient(error).Should().BeTrue();
         result.Should().Be(value, "the unit's result is returned once an attempt succeeds");
         attempts.Should().Be(3);
     }

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Salesforce;
@@ -15,9 +16,7 @@ public sealed class WriteOutcomeTests
 {
     private const string SalesforceBody = /*lang=json,strict*/ """[{"errorCode":"SERVER_UNAVAILABLE","message":"Servers are temporarily unable to respond"}]""";
 
-    public static TheoryData<string, Exception, bool> Failures()
-    {
-        return new()
+    public static TheoryData<string, Exception, bool> Failures => new()
     {
         // Proven not applied
         { "400 from Salesforce", new SalesforceResponseException(HttpStatusCode.BadRequest, /*lang=json,strict*/ """[{"errorCode":"JSON_PARSER_ERROR","message":"x"}]"""), false },
@@ -40,10 +39,9 @@ public sealed class WriteOutcomeTests
         { "502 from a gateway", new SalesforceResponseException(HttpStatusCode.BadGateway, "<html>Bad Gateway</html>"), true },
         { "504 from a gateway", new SalesforceResponseException(HttpStatusCode.GatewayTimeout, ""), true },
         { "503 without a Salesforce body", new SalesforceResponseException(HttpStatusCode.ServiceUnavailable, "<html>Service Unavailable</html>"), true },
-        { "unreadable response", new System.Text.Json.JsonException("unexpected end of data"), true },
+        { "unreadable response", new JsonException("unexpected end of data"), true },
         { "empty response", new InvalidOperationException("Empty composite response"), true }
     };
-    }
 
     [Theory, MemberData(nameof(Failures))]
     public void A_failed_write_is_unknown_unless_the_failure_proves_it_was_not_applied(string what, Exception failure, bool unknown)
@@ -122,7 +120,7 @@ public sealed class WriteOutcomeTests
         var org = new FakeSalesforceStore(new FakeSalesforceOptions { EnforceDailyLimit = false });
         var options = Options.Create(new SalesforceOptions { CompressRequestsLargerThan = 0 });
         var failing = new FailingHandler { InnerHandler = new FakeSalesforceHandler(org) };
-        var http = new HttpClient(failing) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
+        var http = SalesforceStep.Http(failing);
         return (SalesforceStep.Service(http, options), org, failing);
     }
 

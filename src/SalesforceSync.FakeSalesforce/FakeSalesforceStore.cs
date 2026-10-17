@@ -1,5 +1,7 @@
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Web;
 using static SalesforceSync.FakeSalesforce.FakeJson;
 
 namespace SalesforceSync.FakeSalesforce;
@@ -22,9 +24,8 @@ public sealed partial class FakeSalesforceStore
 {
     public const string ExternalIdField = "ExternalId__c";
 
-    public const int MaxCompositeSubrequests = 25;
-    public const int MaxCompositeCollectionsAndQueries = 5;
-    public const int MaxCollectionRecords = FakeCollectionWriter.MaxRecords;
+    private const int MaxCompositeSubrequests = 25;
+    private const int MaxCompositeCollectionsAndQueries = 5;
 
     /// <summary>A call's URI and headers together, at most (a Composite subrequest's URL is held to it alone).</summary>
     public const int MaxUriAndHeadersBytes = 16_384;
@@ -337,6 +338,12 @@ public sealed partial class FakeSalesforceStore
         return lost ? throw new FakeResponseLostException() : results;
     }
 
+    /// <summary>The SOQL of a query call or subrequest (its <c>q</c> parameter).</summary>
+    internal static string QueryOf(Uri url)
+    {
+        return HttpUtility.ParseQueryString(url.Query)["q"] ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q");
+    }
+
     /// <summary>The object and external id field of an upsert's path (<c>.../composite/sobjects/{SObject}/{ExternalIdField}</c>), or null.</summary>
     public static (string SObject, string ExternalIdField)? UpsertTarget(string path)
     {
@@ -354,7 +361,8 @@ public sealed partial class FakeSalesforceStore
             ? throw new FakeSalesforceException(404, "NOT_FOUND", $"The requested resource does not exist: {sobject}")
             : FakeSchema.Find(sobject, externalIdField) is { Type: "string" } field
             ? field.Name
-            : throw new FakeSalesforceException(404, "NOT_FOUND", $"Provided external ID field does not exist or is not accessible: {externalIdField}");
+            : throw new FakeSalesforceException(404, "NOT_FOUND",
+                $"Provided external ID field does not exist or is not accessible: {externalIdField}");
     }
 
     private void RecordWriteRequest(JsonObject payload)
@@ -383,15 +391,14 @@ public sealed partial class FakeSalesforceStore
         var url = new Uri(new Uri("https://fake"), sub["url"]!.GetValue<string>());
         try
         {
-            if (System.Text.Encoding.UTF8.GetByteCount(url.PathAndQuery) > MaxUriAndHeadersBytes)
+            if (Encoding.UTF8.GetByteCount(url.PathAndQuery) > MaxUriAndHeadersBytes)
             {
                 throw new FakeSalesforceException(414, "URI_TOO_LONG", $"The URI exceeds the {MaxUriAndHeadersBytes:N0}-byte limit");
             }
 
             if (method == "GET" && IsQuery(sub))
             {
-                return (200, Query(System.Web.HttpUtility.ParseQueryString(url.Query)["q"]
-                                   ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q")));
+                return (200, Query(QueryOf(url)));
             }
 
             if (method == "PATCH" && UpsertTarget(url.AbsolutePath) is (var sobject, var externalIdField))

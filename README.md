@@ -1224,8 +1224,8 @@ Covered: create Account + linked Profile, a full record in which one field chang
 field that becomes null or absent being cleared, an event without a profile leaving the Profile alone, the diff
 being taken against the record in Salesforce (a direct edit in Salesforce is corrected by the next event),
 bursts coalesced to the newest full record, stale versions never written (left out of the row), unchanged events
-skip the write, exactly 3 API calls per batch of new Accounts and Profiles (the read, the Accounts' upsert, the
-Profiles'), a redelivered event of a synced entity changing nothing and not written, an older event stored after a newer one changing
+skip the write, exactly 2 API calls per batch of new Accounts and Profiles (the read, and one Composite request of
+the Accounts' upsert and the Profiles'), a redelivered event of a synced entity changing nothing and not written, an older event stored after a newer one changing
 nothing, A → B → A ending at A, one account's events under different or no Kafka keys
 ending at the newest `meta.time`, invalid events (no time offset, no or an unknown `meta.type`, another type's event,
 not JSON) skipped at ingest, an event waiting for its entity's lease, a newer event overwriting the row whatever its
@@ -1350,7 +1350,8 @@ workers in 1 pod; it still checks correctness on every iteration.
 
 Results, the SQL statement measurements and the before/after of this tuning: [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
-The micro benchmarks need no database: preparing a claim's rows (`PrepareTenEntities`), the typed mapping (`MapAccountEvent`: event JSON →
+The micro benchmarks need no database: preparing a claim's rows (`PrepareTenEntities`), the consumer's typed read of
+an event (`ReadAndValidateEvent`), the typed mapping (`MapAccountEvent`: event JSON →
 payload → sObjects → records; `MapPayloadToSObject` and `MapSObjectToRecord` for its two halves) and the type-aware
 diff.
 
@@ -1383,7 +1384,7 @@ is how little it calls, how many workers run, and Salesforce's own refusals:
 
 | Salesforce limit | How it's handled |
 |---|---|
-| **Total API requests per 24 hours**, shared by every user and integration of the org | A few calls per batch of up to 75 entities: the read, then one upsert per object (or one Composite request when a Lookup links new records), with Describe cached and revalidated, and nothing written when nothing changed. A call refused with `REQUEST_LIMIT_EXCEEDED` is a transient failure: nothing was written, so the batch's entities are retried with the normal backoff (`Sync:RetryBaseDelay` doubling up to `MaxRetryDelay`) and dead-lettered only after `Sync:MaxRetries`. |
+| **Total API requests per 24 hours**, shared by every user and integration of the org | A few calls per batch of up to 75 entities: the read, then each write request (an upsert on its own, or one Composite request of several: a batch of new Accounts and Profiles costs 2 calls in all), with Describe cached and revalidated, and nothing written when nothing changed. A call refused with `REQUEST_LIMIT_EXCEEDED` is a transient failure: nothing was written, so the batch's entities are retried with the normal backoff (`Sync:RetryBaseDelay` doubling up to `MaxRetryDelay`) and dead-lettered only after `Sync:MaxRetries`. |
 | **429 Too Many Requests** (not one of Salesforce's documented REST status codes, but sent by things in front of it) | The same: a 4xx means the write was not applied, so it is retried with backoff, never held. |
 | **Concurrent long-running requests** (20 s or longer): 25 for production and sandboxes, 5 for Developer Edition and trials | At most `Sync:Workers` × pods batches call Salesforce at once; keep that below the org's limit. A refusal (`REQUEST_LIMIT_EXCEEDED`, `ConcurrentPerOrgLongTxn`) is retried with backoff like any other. |
 | **API timeout**: 10 minutes for REST calls, for a composite request as a whole | `Salesforce:RequestTimeout` (HTTP client timeout per call, default 90 s) must be positive and at most 10 minutes, and `Sync:Lease` must be longer than it, or startup fails. The worker also gives up at 80% of its lease. A write that times out has an [unknown outcome](#unknown-outcomes) and is held. |
@@ -1661,9 +1662,9 @@ setup: the AppHost starts it and passes the connection string.
   a missing parent (below) and add it here, e.g. in `appsettings.json`:
   `"Salesforce": { "ParentMissingMessages": [ "Account not found" ] }` (or `Salesforce__ParentMissingMessages__0`).
   Empty, such a rejection is what its code says (`FIELD_CUSTOM_VALIDATION_EXCEPTION`: permanent, dead-lettered).
-  `Sync` values that can't work (no workers, `BatchSize` outside 1-100, ...), a row type's limits outside
-  Salesforce's (`MaxValuesPerQuery` 1-2,000, `MaxRecordsPerWrite` 1-200), a missing `Salesforce:InstanceUrl` and a
-  `Salesforce:RequestTimeout` above 10 minutes or not shorter than `Sync:Lease` fail startup.
+- Startup fails on `Sync` values that can't work (no workers, `BatchSize` outside 1-100, ...), on a row type's limits
+  outside Salesforce's (`MaxValuesPerQuery` 1-2,000, `MaxRecordsPerWrite` 1-200), on a missing
+  `Salesforce:InstanceUrl` and on a `Salesforce:RequestTimeout` above 10 minutes or not shorter than `Sync:Lease`.
 - The mock org was built from Salesforce's documentation. These behaviours are worth confirming in the sandbox:
   - an empty checkbox (`null`) is stored as `false`, and an empty text (`""`) as empty;
   - a number with more decimals than the field allows is rounded;

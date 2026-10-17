@@ -6,8 +6,8 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// Contact of an Account, named by the Account's external id (a Text foreign key). If the Account isn't in Salesforce
-/// yet, nothing is sent and the contact is retried until the account sync has created it. Like <see cref="AccountSync"/>, everything particular to contacts
-/// is in this file.
+/// yet, nothing is sent and the contact is retried until the account sync has created it. Like
+/// <see cref="AccountSync"/>, everything particular to contacts is in this file.
 /// </summary>
 public static class ContactSync
 {

@@ -1,4 +1,3 @@
-
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>

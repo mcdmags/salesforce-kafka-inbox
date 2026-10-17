@@ -28,8 +28,11 @@ public sealed class KafkaInboxConsumer(
         return Task.Run(() => RunAsync(stoppingToken), stoppingToken);
     }
 
-    /// <summary>Topic -> the entity type whose events it carries. Two types can't share a topic: a message says nothing but its topic about its type.</summary>
-    public static IReadOnlyDictionary<string, ISalesforceEntitySync> TopicsOf(IEnumerable<ISalesforceEntitySync> syncs, IConfiguration config)
+    /// <summary>
+    /// Topic -> the entity type whose events it carries. Two types can't share a topic: a message says nothing but its
+    /// topic about its type.
+    /// </summary>
+    private static IReadOnlyDictionary<string, ISalesforceEntitySync> TopicsOf(IEnumerable<ISalesforceEntitySync> syncs, IConfiguration config)
     {
         var byTopic = new Dictionary<string, ISalesforceEntitySync>(StringComparer.Ordinal);
         foreach (var sync in syncs)
@@ -38,7 +41,8 @@ public sealed class KafkaInboxConsumer(
             if (!byTopic.TryAdd(topic, sync))
             {
                 throw new InvalidOperationException(
-                    $"Topic '{topic}' is configured for both '{byTopic[topic].EntityType}' and '{sync.EntityType}'; each entity type needs its own topic.");
+                    $"Topic '{topic}' is configured for both '{byTopic[topic].EntityType}' and '{sync.EntityType}'; " +
+                    "each entity type needs its own topic.");
             }
         }
         return byTopic;
@@ -129,8 +133,9 @@ public sealed class KafkaInboxConsumer(
 
     /// <summary>
     /// Marks the message as handled; the client commits stored offsets in the background (EnableAutoOffsetStore=false
-    /// + auto commit, see Program.cs). If a rebalance revoked the partition since the message was consumed, the store
-    /// fails: harmless, its new owner re-reads from the last commit, and the event stored again changes nothing once synced.
+    /// with auto commit, set in AddKafkaIngest). If a rebalance revoked the partition since the message was consumed,
+    /// the store fails: harmless, its new owner re-reads from the last commit, and the event stored again changes
+    /// nothing once synced.
     /// </summary>
     private void StoreOffset(ConsumeResult<string, string> result)
     {

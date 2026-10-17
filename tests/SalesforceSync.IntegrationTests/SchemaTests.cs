@@ -75,7 +75,7 @@ public sealed class SchemaTests(SyncFixture app)
             "event_time", "next_attempt_at", "lock_token");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await Columns(SyncFixture.InboxTable(SyncFixture.Contacts))).Should().Equal(account);
-        (await conn.ExecuteScalarAsync<long>("SELECT count(*) FROM pg_proc WHERE proname LIKE 'sf\\_event\\_%'"))
+        (await conn.QuerySingleAsync<long>("SELECT count(*) FROM pg_proc WHERE proname LIKE 'sf\\_event\\_%'"))
             .Should().Be(0, "no SQL function reads inside an event");
     }
 
@@ -291,8 +291,8 @@ public sealed class SchemaTests(SyncFixture app)
         (await conn.QueryAsync<(string Type, string Entity, long? Synced)>(
                 "SELECT entity_type, entity_id, synced_time FROM sf_sync_state WHERE entity_id IN ('ACC-1', 'ACC-2')"))
             .Should().BeEquivalentTo(inboxes.SelectMany((inbox, n) => new[] { (inbox.Type, "ACC-1", n + 100), (inbox.Type, "ACC-2", (long?)(n + 200)) }));
-        (await conn.ExecuteScalarAsync<long>("SELECT count(*) FROM sf_sync_state")).Should().Be(5 * inboxes.Length);
-        (await conn.ExecuteScalarAsync<long>(
+        (await conn.QuerySingleAsync<long>("SELECT count(*) FROM sf_sync_state")).Should().Be(5 * inboxes.Length);
+        (await conn.QuerySingleAsync<long>(
                 "SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND column_name = 'synced_time'"))
             .Should().Be(1, "only sf_sync_state has the state again");
         await conn.ExecuteAsync($"DROP SCHEMA {schema} CASCADE");

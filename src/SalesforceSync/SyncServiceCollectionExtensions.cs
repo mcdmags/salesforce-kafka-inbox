@@ -180,8 +180,9 @@ public static class SyncServiceCollectionExtensions
 
         if (TRow.MaxRecordsPerWrite is < 1 or > SalesforceRestClient.MaxCollectionRecords)
         {
-            throw new InvalidOperationException($"{typeof(TRow).Name}.{nameof(IInboxRow.MaxRecordsPerWrite)} ({TRow.MaxRecordsPerWrite}) " +
-                                                $"must be 1 to {SalesforceRestClient.MaxCollectionRecords} (records per sObject Collections upsert).");
+            throw new InvalidOperationException(
+                $"{typeof(TRow).Name}.{nameof(IInboxRow.MaxRecordsPerWrite)} ({TRow.MaxRecordsPerWrite}) " +
+                $"must be 1 to {SalesforceRestClient.MaxCollectionRecords} (records per sObject Collections upsert).");
         }
     }
 }

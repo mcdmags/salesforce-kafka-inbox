@@ -1,26 +1,19 @@
-using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// A write whose answer never arrives: the mock org applies it and then drops the connection. The fixture's
-/// Sync:UnknownOutcomeHold is 4 seconds (10 minutes in production).
+/// Sync:UnknownOutcomeHold is <see cref="SyncFixture.UnknownOutcomeHold"/> (10 minutes in production).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class UnknownOutcomeTests(SyncFixture app)
 {
-    private static readonly TimeSpan Hold = TimeSpan.FromSeconds(4);
-
     [Fact]
     public async Task Entity_is_held_after_a_write_with_an_unknown_outcome_and_ends_at_the_newest_event()
     {
         var acct = SyncFixture.NewAccountId();
-        using (var lose = await app.Salesforce.PostAsJsonAsync("/__fake/lost-responses",
-                   new JsonObject { ["sObject"] = "Account", ["externalId"] = acct, ["times"] = 1 }))
-        {
-            lose.EnsureSuccessStatusCode();
-        }
+        await app.LoseResponsesAsync("Account", acct);
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "v1", ["description"] = "v1" }, new JsonObject { ["score"] = 1 });
 
@@ -31,7 +24,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         held.Status.Should().Be("pending");
         held.AttemptCount.Should().Be(0, "an unknown outcome doesn't spend an attempt");
         held.LockToken.Should().BeNull("the old worker can't record anything on it any more");
-        held.NextAttemptAt.Should().BeAfter(heldAt.AddSeconds(1)).And.BeBefore(heldAt + Hold + TimeSpan.FromSeconds(1));
+        held.NextAttemptAt.Should().BeAfter(heldAt.AddSeconds(1)).And.BeBefore(heldAt + SyncFixture.UnknownOutcomeHold + TimeSpan.FromSeconds(1));
         ((string?)(await app.GetRecordAsync("Account", acct))?["Description"]).Should().Be("v1", "Salesforce did apply the write");
 
         // A newer event arrives during the hold, overwrites the row and has to wait, although nobody is working on the account
@@ -40,7 +33,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         await Task.Delay(TimeSpan.FromSeconds(1.5));
         var during = (await app.GetInboxRowAsync(acct))!;
         DateTime.UtcNow.Should().BeBefore(held.NextAttemptAt!.Value, "the check must fall inside the hold");
-        during.Should().Match<InboxRow>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0,
+        during.Should().Match<InboxRowState>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0,
             "nothing of a held entity may be claimed");
         during.LockToken.Should().BeNull();
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v1");
@@ -59,16 +52,12 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
     public async Task Held_entity_whose_lost_write_was_the_newest_event_completes_without_writing_anything_twice()
     {
         var acct = SyncFixture.NewAccountId();
-        using (var lose = await app.Salesforce.PostAsJsonAsync("/__fake/lost-responses",
-                   new JsonObject { ["sObject"] = "Account", ["externalId"] = acct, ["times"] = 1 }))
-        {
-            lose.EnsureSuccessStatusCode();
-        }
+        await app.LoseResponsesAsync("Account", acct);
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "only" }, new JsonObject { ["tier"] = "Gold" });
 
-        // Held, then picked up again: Salesforce already has the Account, so the diff writes only the Profile (whose call
-        // never went out after the Account's answer was lost)
+        // Held, then picked up again: the lost Composite request had saved the Account and its Profile, so the retry's
+        // read finds nothing to change and writes nothing
         await Eventually.ValueAsync(() => app.GetInboxRowAsync(acct),
             row => row?.ErrorCode == "UNKNOWN_OUTCOME", "the hold");
         (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));

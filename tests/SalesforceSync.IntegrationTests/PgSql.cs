@@ -32,12 +32,6 @@ public static class PgSql
         return rows.Single();
     }
 
-    public static async Task<T?> ExecuteScalarAsync<T>(this NpgsqlConnection conn, string sql, object? args = null)
-    {
-        var rows = await conn.QueryAsync<T>(sql, args);
-        return rows.FirstOrDefault();
-    }
-
     /// <summary>
     /// One event into an inbox table as the consumer stores it, with its time, its entity made due (InboxSql.Store).
     /// </summary>

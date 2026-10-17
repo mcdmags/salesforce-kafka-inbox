@@ -265,15 +265,15 @@ public sealed class UpsertStepsTests
     [Fact]
     public void Units_that_need_the_same_collections_share_one_request_parents_first()
     {
-        var (Requests, TooLarge) = CompositeWrite.Pack(
+        var (requests, tooLarge) = CompositeWrite.Pack(
         [
             new PlannedUnit("NEW", [Write("Account", create: true), Write("Profile__c", create: true, depth: 1)]),
             new PlannedUnit("OLD", [Write("Account", create: false), Write("Profile__c", create: false, depth: 1)]),
             new PlannedUnit("NEW2", [Write("Account", create: true)])
         ], MaxRecordsPerWrite);
 
-        TooLarge.Should().BeEmpty();
-        var request = Requests.Should().ContainSingle().Subject;
+        tooLarge.Should().BeEmpty();
+        var request = requests.Should().ContainSingle().Subject;
         request.Units.Select(u => u.Key).Should().Equal("NEW", "OLD", "NEW2");
         request.BuildRequests().Select(r => (r.ReferenceId, r.Records.Count)).Should().Equal([("Account", 3), ("Profile__c", 2)],
             "one upsert per level and object, creates and updates together");
@@ -282,14 +282,14 @@ public sealed class UpsertStepsTests
     [Fact]
     public void A_unit_that_does_not_fit_the_requests_so_far_starts_another_and_stays_whole()
     {
-        var (Requests, TooLarge) = CompositeWrite.Pack(
+        var (requests, _) = CompositeWrite.Pack(
         [
             new PlannedUnit("A", [Write("Account", true), Write("Account", false, 1), Write("Profile__c", true, 1), Write("Profile__c", false, 2)]),
             new PlannedUnit("B", [Write("Account_Relationship__c", true), Write("Account_Relationship__c", false, 1)]),
             new PlannedUnit("C", [Write("Account", true)])
         ], MaxRecordsPerWrite);
 
-        Requests.Select(r => r.Units.Select(u => u.Key)).Should().BeEquivalentTo<string[]>([["A", "C"], ["B"]],
+        requests.Select(r => r.Units.Select(u => u.Key)).Should().BeEquivalentTo<string[]>([["A", "C"], ["B"]],
             "B would be a 5th and 6th collection; C still fits the first request");
     }
 
@@ -299,30 +299,30 @@ public sealed class UpsertStepsTests
         var units = Enumerable.Range(0, SalesforceRestClient.MaxCollectionRecords + 1)
             .Select(i => new PlannedUnit($"A{i}", [Write("Account", create: true)])).ToList();
 
-        var (Requests, TooLarge) = CompositeWrite.Pack(units, SalesforceRestClient.MaxCollectionRecords);
+        var (requests, _) = CompositeWrite.Pack(units, SalesforceRestClient.MaxCollectionRecords);
 
-        Requests.Select(r => r.Units.Count).Should().Equal(SalesforceRestClient.MaxCollectionRecords, 1);
+        requests.Select(r => r.Units.Count).Should().Equal(SalesforceRestClient.MaxCollectionRecords, 1);
     }
 
     [Fact]
     public void Writes_are_split_at_the_given_number_of_records_per_collection()
     {
-        var (Requests, TooLarge) = CompositeWrite.Pack(
+        var (requests, tooLarge) = CompositeWrite.Pack(
             [.. Enumerable.Range(0, 3).Select(i => new PlannedUnit($"A{i}", [Write("Account", create: true)]))], maxRecordsPerWrite: 2);
 
-        TooLarge.Should().BeEmpty();
-        Requests.Select(r => r.BuildRequests().Single().Records.Count).Should().Equal(2, 1);
+        tooLarge.Should().BeEmpty();
+        requests.Select(r => r.BuildRequests().Single().Records.Count).Should().Equal(2, 1);
     }
 
     [Fact]
     public void A_unit_with_more_records_of_an_object_than_a_collection_takes_fails_alone()
     {
-        var (Requests, TooLarge) = CompositeWrite.Pack(
+        var (requests, tooLarge) = CompositeWrite.Pack(
             [new PlannedUnit("BIG", [Write("Account", true), Write("Account", false)]), new PlannedUnit("OK", [Write("Account", true)])],
             maxRecordsPerWrite: 1);
 
-        TooLarge.Should().ContainSingle().Which.Key.Should().Be("BIG");
-        Requests.Should().ContainSingle().Which.Units.Should().ContainSingle().Which.Key.Should().Be("OK");
+        tooLarge.Should().ContainSingle().Which.Key.Should().Be("BIG");
+        requests.Should().ContainSingle().Which.Units.Should().ContainSingle().Which.Key.Should().Be("OK");
     }
 
     [Fact]
@@ -330,12 +330,12 @@ public sealed class UpsertStepsTests
     {
         var tooMany = Enumerable.Range(0, SalesforceRestClient.MaxCompositeCollections + 1).Select(depth => Write("Account", true, depth)).ToList();
 
-        var (Requests, TooLarge) = CompositeWrite.Pack([new PlannedUnit("BIG", tooMany), new PlannedUnit("OK", [Write("Account", true)])],
+        var (requests, tooLarge) = CompositeWrite.Pack([new PlannedUnit("BIG", tooMany), new PlannedUnit("OK", [Write("Account", true)])],
             MaxRecordsPerWrite);
 
-        var failed = TooLarge.Should().ContainSingle().Subject;
+        var failed = tooLarge.Should().ContainSingle().Subject;
         (failed.Key, failed.Outcome, failed.PrimaryError!.Code).Should().Be(("BIG", SyncOutcome.PermanentFailure, "LIMIT_EXCEEDED"));
-        Requests.Should().ContainSingle().Which.Units.Should().ContainSingle().Which.Key.Should().Be("OK");
+        requests.Should().ContainSingle().Which.Units.Should().ContainSingle().Which.Key.Should().Be("OK");
     }
 
     // ---------- Helpers ----------
