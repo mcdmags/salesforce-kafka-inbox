@@ -10,7 +10,7 @@ namespace SalesforceSync.Data.Migrations
     /// Adds event_time to every inbox: the event's meta.time, which InboxSql.Done moves the watermark to. Added
     /// nullable, filled from each existing row's payload, then made not null (a default would leave every row at year 1).
     /// <para>
-    /// The fill gives the microseconds C# gives (SyncStrategy.TryRead, then PreparedBatch.ToMicroseconds): .NET rounds
+    /// The fill gives the microseconds C# gives (UpsertStrategy.TryRead, then PreparedBatch.ToMicroseconds): .NET rounds
     /// the fraction to 100 ns ticks, then the ticks are cut to whole microseconds. A plain ::timestamptz would round to
     /// the microsecond instead, 1 µs later than C# for a time like 01:02:03.1234567Z, so the fraction is cut off before
     /// the cast and added back the C# way. A row whose meta.time C# can't read (no meta, no offset, not ISO 8601) gets
