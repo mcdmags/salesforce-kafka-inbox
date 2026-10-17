@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -16,14 +18,11 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class SalesforceBatchUpsertServiceTests
 {
-    private static readonly UpsertStrategy<AccountEvent> AccountStrategy =
-        AccountSync.Strategy;
+    private static readonly UpsertStrategy<AccountEvent> AccountStrategy = AccountSync.Strategy;
 
-    private static readonly UpsertStrategy<AccountRelationshipEvent> RelationshipStrategy =
-        AccountRelationshipSync.Strategy;
+    private static readonly UpsertStrategy<AccountRelationshipEvent> RelationshipStrategy = AccountRelationshipSync.Strategy;
 
-    private static readonly UpsertStrategy<ContactEvent> ContactStrategy =
-        ContactSync.Strategy;
+    private static readonly UpsertStrategy<ContactEvent> ContactStrategy = ContactSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly Fixture _any = new();
@@ -478,9 +477,9 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         using var direct = await http.GetAsync($"/services/data/v62.0/query?q={new string('a', FakeSalesforceStore.MaxUriAndHeadersBytes)}");
         using var composite = await http.PostAsync("/services/data/v62.0/composite",
-            new StringContent(subrequest.ToJsonString(), System.Text.Encoding.UTF8, "application/json"));
+            new StringContent(subrequest.ToJsonString(), Encoding.UTF8, "application/json"));
 
-        direct.StatusCode.Should().Be(System.Net.HttpStatusCode.RequestUriTooLong);
+        direct.StatusCode.Should().Be(HttpStatusCode.RequestUriTooLong);
         var answer = JsonNode.Parse(await composite.Content.ReadAsStringAsync())!["compositeResponse"]![0]!;
         ((int)answer["httpStatusCode"]!, (string?)answer["body"]![0]!["errorCode"]).Should().Be((414, "URI_TOO_LONG"));
     }
@@ -726,17 +725,16 @@ public sealed class SalesforceBatchUpsertServiceTests
         var result = await Account("A1", new() { ["name"] = "After" }, []);
 
         result.Outcome.Should().Be(SyncOutcome.Saved);
+        _org.WriteRequests.Should().HaveCount(before + 1, "either way one write request");
         if (exists)
         {
             // Only the Account changed: an upsert carrying what differs
-            _org.WriteRequests.Should().HaveCount(before + 1);
             Upserted(_org.WriteRequests[^1], "Account").Single().Select(kv => kv.Key)
                 .Should().BeEquivalentTo("attributes", "ExternalId__c", "Name", "Rating");
         }
         else
         {
             // A new Account and its new Profile: one Composite request, the Account's upsert first, then the Profile's
-            _org.WriteRequests.Should().HaveCount(before + 1);
             Upserted(_org.WriteRequests[^1], "Account").Single()["ExternalId__c"]!.GetValue<string>().Should().Be("A1");
             Upserted(_org.WriteRequests[^1], "Profile__c").Single()["AccountId__c"]!.GetValue<string>().Should().Be("A1");
         }
@@ -1017,7 +1015,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         (error.Code, error.Message).Should().Be(("REQUIRED_FIELD_MISSING", "Required fields are missing: [LastName]"));
         second.Single().Should().Match<RecordResult>(r => r.Success && r.Created == false && r.Id == IdOf("Contact", "C1"));
         var unknownField = () => Upsert(client, "Contact", "No_Such__c", [Record("C1", "Doe")], CancellationToken.None);
-        (await unknownField.Should().ThrowAsync<SalesforceResponseException>()).Which.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
+        (await unknownField.Should().ThrowAsync<SalesforceResponseException>()).Which.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 
     [Fact]

@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
@@ -13,8 +14,7 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class EngineFlowTests
 {
-    private static readonly UpsertStrategy<AccountEvent> Accounts =
-        AccountSync.Strategy;
+    private static readonly UpsertStrategy<AccountEvent> Accounts = AccountSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly RecordingInbox _inbox = new();
@@ -252,7 +252,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
         await engine.UpsertBatchAsync(Accounts, _inbox, CancellationToken.None); // describes are cached now
         _inbox.Calls.Clear();
-        _http.OnRead = request => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        _http.OnRead = request => new HttpResponseMessage(HttpStatusCode.OK)
         {
             RequestMessage = request,
             Content = new StringContent(/*lang=json,strict*/ """{"compositeResponse":[{"referenceId":"q0","httpStatusCode":400,"httpHeaders":{},"body":[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating'"}]}]}""")

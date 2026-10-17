@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -330,7 +331,7 @@ public class SyncFixture : IAsyncLifetime
     public async Task<JsonObject?> GetRecordAsync(string sobject, string externalId)
     {
         using var res = await Salesforce.GetAsync($"/__fake/records/{sobject}/{Uri.EscapeDataString(externalId)}");
-        if (res.StatusCode == System.Net.HttpStatusCode.NotFound)
+        if (res.StatusCode == HttpStatusCode.NotFound)
         {
             return null;
         }

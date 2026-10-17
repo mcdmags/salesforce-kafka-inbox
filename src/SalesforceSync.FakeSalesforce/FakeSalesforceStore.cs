@@ -1,5 +1,7 @@
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Web;
 using static SalesforceSync.FakeSalesforce.FakeJson;
 
 namespace SalesforceSync.FakeSalesforce;
@@ -382,14 +384,14 @@ public sealed partial class FakeSalesforceStore
         var url = new Uri(new Uri("https://fake"), sub["url"]!.GetValue<string>());
         try
         {
-            if (System.Text.Encoding.UTF8.GetByteCount(url.PathAndQuery) > MaxUriAndHeadersBytes)
+            if (Encoding.UTF8.GetByteCount(url.PathAndQuery) > MaxUriAndHeadersBytes)
             {
                 throw new FakeSalesforceException(414, "URI_TOO_LONG", $"The URI exceeds the {MaxUriAndHeadersBytes:N0}-byte limit");
             }
 
             if (method == "GET" && IsQuery(sub))
             {
-                return (200, Query(System.Web.HttpUtility.ParseQueryString(url.Query)["q"]
+                return (200, Query(HttpUtility.ParseQueryString(url.Query)["q"]
                                    ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q")));
             }
 
