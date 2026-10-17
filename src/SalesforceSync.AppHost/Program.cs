@@ -51,7 +51,8 @@ sync.WithEnvironment("Salesforce__ClientId", realOrg["ClientId"] ?? "fake-client
 if (useRealOrg)
 {
     sync.WithEnvironment("Salesforce__InstanceUrl", realOrg["InstanceUrl"])
-        .WithEnvironment("SalesforceLimits__DailyApiAllocation", builder.Configuration["SalesforceLimits:DailyApiAllocation"] ?? DefaultDailyApiAllocation);
+        .WithEnvironment("SalesforceLimits__DailyApiAllocation",
+            builder.Configuration["SalesforceLimits:DailyApiAllocation"] ?? DefaultDailyApiAllocation);
 }
 else
 {

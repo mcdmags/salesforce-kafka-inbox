@@ -361,7 +361,8 @@ public sealed partial class FakeSalesforceStore
             ? throw new FakeSalesforceException(404, "NOT_FOUND", $"The requested resource does not exist: {sobject}")
             : FakeSchema.Find(sobject, externalIdField) is { Type: "string" } field
             ? field.Name
-            : throw new FakeSalesforceException(404, "NOT_FOUND", $"Provided external ID field does not exist or is not accessible: {externalIdField}");
+            : throw new FakeSalesforceException(404, "NOT_FOUND",
+                $"Provided external ID field does not exist or is not accessible: {externalIdField}");
     }
 
     private void RecordWriteRequest(JsonObject payload)

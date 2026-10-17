@@ -87,7 +87,8 @@ internal static class WritePlanner
                 if (FindTarget(pointer, current, earlier) is not { } target)
                 {
                     missing.Add(new(record.ReferenceId, SalesforceErrors.DependencyNotSynced,
-                        $"{record.Schema.Name}.{pointer.Field}: {pointer.SObject} {pointer.ExternalIdField}={pointer.ExternalId} is not in Salesforce yet"));
+                        $"{record.Schema.Name}.{pointer.Field}: {pointer.SObject} {pointer.ExternalIdField}={pointer.ExternalId} " +
+                        "is not in Salesforce yet"));
                     return null;
                 }
 

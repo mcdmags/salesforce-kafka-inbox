@@ -121,8 +121,9 @@ public sealed class SalesforceBatchUpsertService(
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // A request failed that Salesforce provably did not apply (describe, the read or a write): every entity is
-            // retried. Records that earlier write requests of the batch saved are safe: the retry reads them and writes only what still differs. Shutdown (ct) is not caught:
-            // the failed request wrote nothing, and the lease simply expires.
+            // retried. Records that earlier write requests of the batch saved are safe: the retry reads them and writes
+            // only what still differs. Shutdown (ct) is not caught: the failed request wrote nothing, and the lease
+            // simply expires.
             log.LogError(ex, "{Type} batch failed", strategy.EntityType);
             await inbox.FailAllAsync(claim, ex.Message, ex is SalesforceQueryException q ? q.Errors.FirstOrDefault()?.Code : null, ct);
             return claim.Events.Count;

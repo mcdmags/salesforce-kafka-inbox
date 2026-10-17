@@ -79,7 +79,10 @@ public sealed class SalesforceRateLimiter(
             _opt.MaxRequestsPerSecond, _opt.BurstCapacity, _limits.ConcurrentLongRunningLimit);
     }
 
-    /// <summary>Takes a token for one call, waiting up to <see cref="RateLimitOptions.MaxWait"/> for it; then <see cref="RateLimitedException"/>.</summary>
+    /// <summary>
+    /// Takes a token for one call, waiting up to <see cref="RateLimitOptions.MaxWait"/> for it, else throws
+    /// <see cref="RateLimitedException"/>.
+    /// </summary>
     public async Task AcquireAsync(CancellationToken ct)
     {
         const int oneCall = 1;

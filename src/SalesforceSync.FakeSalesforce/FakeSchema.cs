@@ -275,7 +275,9 @@ public static class FakeSchema
                     ? (FormatDateTime(new DateTimeOffset(t.UtcTicks - (t.UtcTicks % TimeSpan.TicksPerSecond), TimeSpan.Zero)), null, null)
                     : Invalid(field, value);
             case "id" or "reference":
-                return text is { Length: 15 or 18 } ? (text, null, null) : (null, "MALFORMED_ID", $"{field.Name}: id value of incorrect type: {text}");
+                return text is { Length: 15 or 18 }
+                    ? (text, null, null)
+                    : (null, "MALFORMED_ID", $"{field.Name}: id value of incorrect type: {text}");
             default:
                 {
                     var s = text ?? value!.ToJsonString();

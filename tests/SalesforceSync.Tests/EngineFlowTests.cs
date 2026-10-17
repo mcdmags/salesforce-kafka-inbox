@@ -161,7 +161,7 @@ public sealed class EngineFlowTests
     private static InboxEvent Contact(long id, string contact, string account)
     {
         return new(id, contact,
-        $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""",
+            $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""",
             DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
     }
 

@@ -8,9 +8,10 @@ public static class WriteOutcome
     /// <summary>
     /// False only when the failure proves the write was not applied; everything else is unknown, the safe default.
     /// <list type="bullet">
-    /// <item>Not applied: a failure before the request left (<see cref="MarkNotSent"/>), Salesforce's own rejection (any 4xx, or a 5xx carrying a Salesforce error body), a rate limit
-    /// (no token before sending, 429, REQUEST_LIMIT_EXCEEDED, a 503 from Salesforce), or a connection that was never
-    /// established (refused, DNS, TLS handshake).</item>
+    /// <item>Not applied: a failure before the request left (<see cref="MarkNotSent"/>), Salesforce's own rejection
+    /// (any 4xx, or a 5xx carrying a Salesforce error body), a rate limit (no token before sending, 429,
+    /// REQUEST_LIMIT_EXCEEDED, a 503 from Salesforce), or a connection that was never established (refused, DNS, TLS
+    /// handshake).</item>
     /// <item>Unknown: a cancellation or timeout (the lease cutoff, the HTTP timeout, shutdown), a connection lost once
     /// the request may have left, 502/503/504 from something in front of Salesforce, or a response that can't be read.</item>
     /// </list>
