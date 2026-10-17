@@ -61,14 +61,14 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             FROM sf_claim_overlaps WHERE entity_id = ANY(@ids)
             """,
             new { ids })).ToList();
-        var (Claims, Unreleased, ReclaimedAccounts) = await conn.QuerySingleAsync<(long Claims, long Unreleased, long ReclaimedAccounts)>("""
+        var (claims, unreleased, reclaimedAccounts) = await conn.QuerySingleAsync<(long, long, long)>("""
             SELECT count(*),
                    count(*) FILTER (WHERE release_seq IS NULL),
                    (SELECT count(*) FROM (SELECT 1 FROM sf_claim_audit WHERE entity_id = ANY(@ids)
                                           GROUP BY entity_id HAVING count(*) > 1) x)
             FROM sf_claim_audit WHERE entity_id = ANY(@ids)
             """, new { ids });
-        output.WriteLine($"claims={Claims} unreleased={Unreleased} accountsClaimedMoreThanOnce={ReclaimedAccounts} overlaps={overlaps.Count}");
+        output.WriteLine($"claims={claims} unreleased={unreleased} accountsClaimedMoreThanOnce={reclaimedAccounts} overlaps={overlaps.Count}");
         overlaps.Should().BeEmpty("no two claims on the same account may overlap, e.g. {0}", string.Join(" | ", overlaps.Take(3)));
 
         // 2. Nothing in Salesforce prevents an out-of-order write, so it would show up in the write history:
@@ -79,9 +79,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         var regressions = new List<string>();
         foreach (var id in ids)
         {
-            var accountVersions = (await app.GetHistoryAsync("Account", id))
-                .Where(w => w.ContainsKey("Description"))
-                .Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+            var accountVersions = await app.GetWrittenVersionsAsync(id);
             var profileVersions = (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(id)))
                 .Where(w => w.ContainsKey("Score__c"))
                 .Select(w => (long)w["Score__c"]!).ToList();
@@ -97,8 +95,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         //    contention happened
         statuses.Should().Equal(new Dictionary<string, long> { ["done"] = Accounts },
             "each account's newest event is written: nothing may be left pending, dead-lettered or overwritten by an older one");
-        Unreleased.Should().Be(0, "every claim must be released");
-        ReclaimedAccounts.Should().BeGreaterThan(Accounts / 2,
+        unreleased.Should().Be(0, "every claim must be released");
+        reclaimedAccounts.Should().BeGreaterThan(Accounts / 2,
             "most of the {0} accounts should be claimed repeatedly (real contention)", Accounts);
 
         // 4. Every account and profile holds the newest values
@@ -152,13 +150,13 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         statuses.Should().Equal(new Dictionary<string, long> { ["done"] = accounts }, "the newest meta.time is in every row, written");
 
         await using var conn = await app.Db.OpenConnectionAsync();
-        (await conn.ExecuteScalarAsync<long>("SELECT count(*) FROM sf_claim_overlaps WHERE entity_id = ANY(@ids)", new { ids }))
+        (await conn.QuerySingleAsync<long>("SELECT count(*) FROM sf_claim_overlaps WHERE entity_id = ANY(@ids)", new { ids }))
             .Should().Be(0, "no two claims on the same account may overlap");
         foreach (var id in ids)
         {
             ((string?)(await app.GetRecordAsync("Account", id))!["Description"]).Should().Be($"v{versions}", "the newest meta.time wins");
             ((decimal?)(await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(id)))!["Score__c"]).Should().Be(versions);
-            var written = (await app.GetHistoryAsync("Account", id)).Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+            var written = await app.GetWrittenVersionsAsync(id);
             written.Should().BeInAscendingOrder().And.OnlyHaveUniqueItems("{0} must never receive an older record after a newer one", id);
         }
     }
@@ -183,7 +181,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             {
                 await using (var conn = await app.Db.OpenConnectionAsync())
                 {
-                    killed += await conn.ExecuteScalarAsync<long>("""
+                    killed += await conn.QuerySingleAsync<long>("""
                         SELECT count(*) FILTER (WHERE pg_terminate_backend(pid))
                         FROM pg_stat_activity
                         WHERE datname = current_database() AND pid <> pg_backend_pid()
@@ -191,7 +189,14 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
                         """, new { me = SyncFixture.TestsApplicationName });
                 }
 
-                try { await Task.Delay(200, chaos.Token); } catch (OperationCanceledException) { }
+                try
+                {
+                    await Task.Delay(200, chaos.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    // the chaos is over
+                }
             }
         });
 
@@ -226,14 +231,13 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         statuses.Values.Sum().Should().Be(ids.Length, "every account's row holds its newest event");
 
         await using var db = await app.Db.OpenConnectionAsync();
-        (await db.ExecuteScalarAsync<long>("SELECT count(*) FROM sf_claim_overlaps WHERE entity_id = ANY(@ids)", new { ids }))
+        (await db.QuerySingleAsync<long>("SELECT count(*) FROM sf_claim_overlaps WHERE entity_id = ANY(@ids)", new { ids }))
             .Should().Be(0, "no two claims on the same account may overlap");
         foreach (var id in ids)
         {
             var account = await app.GetRecordAsync("Account", id);
             ((string?)account?["Description"]).Should().Be($"v{versions}");
-            var written = (await app.GetHistoryAsync("Account", id))
-                .Where(w => w.ContainsKey("Description")).Select(w => long.Parse(((string)w["Description"]!)[1..])).ToList();
+            var written = await app.GetWrittenVersionsAsync(id);
             written.Should().BeInAscendingOrder().And.OnlyHaveUniqueItems(
                 "{0} must never receive an older version after a newer one", id);
         }
@@ -244,7 +248,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<(string Status, long Count)>(
-            "SELECT status, count(*) FROM sf_account_inbox WHERE entity_id = ANY(@ids) AND event_time = @time GROUP BY status",
+            $"SELECT status, count(*) FROM {SyncFixture.InboxTable()} WHERE entity_id = ANY(@ids) AND event_time = @time GROUP BY status",
             new { ids, time = SyncFixture.BaseTime.AddMilliseconds(newest).UtcDateTime });
         return rows.ToDictionary(r => r.Status, r => r.Count);
     }

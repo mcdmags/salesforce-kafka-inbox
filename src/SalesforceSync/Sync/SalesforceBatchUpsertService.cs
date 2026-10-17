@@ -121,8 +121,9 @@ public sealed class SalesforceBatchUpsertService(
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // A request failed that Salesforce provably did not apply (describe, the read or a write): every entity is
-            // retried. Records that earlier write requests of the batch saved are safe: the retry reads them and writes only what still differs. Shutdown (ct) is not caught:
-            // the failed request wrote nothing, and the lease simply expires.
+            // retried. Records that earlier write requests of the batch saved are safe: the retry reads them and writes
+            // only what still differs. Shutdown (ct) is not caught: the failed request wrote nothing, and the lease
+            // simply expires.
             log.LogError(ex, "{Type} batch failed", strategy.EntityType);
             await inbox.FailAllAsync(claim, ex.Message, ex is SalesforceQueryException q ? q.Errors.FirstOrDefault()?.Code : null, ct);
             return claim.Events.Count;
@@ -200,7 +201,18 @@ public sealed class SalesforceBatchUpsertService(
         foreach (var request in plan.Requests)
         {
             var collections = request.BuildRequests();
-            results.AddRange(_interpreter.Interpret(request, await WriteAsync(() => salesforce.UpsertAsync(collections, ct))));
+            IReadOnlyList<CollectionResult> answers;
+            try
+            {
+                answers = await salesforce.UpsertAsync(collections, ct);
+            }
+            catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
+            {
+                // Everything before the first write only read from Salesforce, so its failures are safe to retry. From
+                // here on Salesforce may have the write, and may still apply it after we stop waiting.
+                throw new UnknownOutcomeException(ex);
+            }
+            results.AddRange(_interpreter.Interpret(request, answers));
         }
 
         await InvalidateRecordTypesAsync(units, results, ct);
@@ -279,25 +291,11 @@ public sealed class SalesforceBatchUpsertService(
         }
     }
 
-    private static async Task<T> WriteAsync<T>(Func<Task<T>> write)
-    {
-        try
-        {
-            return await write();
-        }
-        catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
-        {
-            // Everything before this point only read from Salesforce, so its failures are safe to retry. From here
-            // on Salesforce may have the write, and may still apply it after we stop waiting.
-            throw new UnknownOutcomeException(ex);
-        }
-    }
-
     private void LogFailures(string entityType, PreparedBatch batch, IEnumerable<UpsertResult> results)
     {
-        foreach (var (id, error) in batch.Invalid)
+        foreach (var invalid in batch.Invalid)
         {
-            log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", id, SalesforceErrors.InvalidEvent, error);
+            log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", invalid.RowId, invalid.Code, invalid.Error);
         }
 
         foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure))

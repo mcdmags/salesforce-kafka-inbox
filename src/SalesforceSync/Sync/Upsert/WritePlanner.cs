@@ -87,7 +87,8 @@ internal static class WritePlanner
                 if (FindTarget(pointer, current, earlier) is not { } target)
                 {
                     missing.Add(new(record.ReferenceId, SalesforceErrors.DependencyNotSynced,
-                        $"{record.Schema.Name}.{pointer.Field}: {pointer.SObject} {pointer.ExternalIdField}={pointer.ExternalId} is not in Salesforce yet"));
+                        $"{record.Schema.Name}.{pointer.Field}: {pointer.SObject} {pointer.ExternalIdField}={pointer.ExternalId} " +
+                        "is not in Salesforce yet"));
                     return null;
                 }
 
@@ -222,7 +223,7 @@ internal static class WritePlanner
     }
 
     /// <summary>The problem with writing <paramref name="field"/>, if Salesforce doesn't allow it on a create / an update.</summary>
-    public static SalesforceError? NotWritable(NormalizedRecord record, SalesforceField field, CurrentRecord? existing)
+    private static SalesforceError? NotWritable(NormalizedRecord record, SalesforceField field, CurrentRecord? existing)
     {
         var creating = existing is null;
         return (creating ? field.Createable : field.Updateable)

@@ -36,10 +36,9 @@ public sealed record SObjectRecord(
 {
     /// <summary>
     /// The record for an sObject instance: the object, external id field, record type, field names, lookups and
-    /// foreign keys come
-    /// from the class's attributes (<see cref="SObjectMetadata{TSObject}"/>, cached per class). Every field is
-    /// included, nulls too: the instance is the complete desired state, so a null field is cleared if Salesforce has a
-    /// value.
+    /// foreign keys come from the class's attributes (<see cref="SObjectMetadata{TSObject}"/>, cached per class).
+    /// Every field is included, nulls too: the instance is the complete desired state, so a null field is cleared if
+    /// Salesforce has a value.
     /// </summary>
     /// <exception cref="ArgumentException">The external id or a lookup's target id is missing.</exception>
     public static SObjectRecord From<TSObject>(string referenceId, TSObject sobject) where TSObject : class

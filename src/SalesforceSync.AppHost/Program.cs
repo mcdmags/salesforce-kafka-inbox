@@ -42,6 +42,8 @@ var sync = builder.AddProject<Projects.SalesforceSync>("salesforce-sync")
 // (README: Using a real Salesforce org); otherwise the mock org, which accepts any credentials. Either way the worker
 // gets the same settings; only Salesforce:InstanceUrl differs.
 var realOrg = builder.Configuration.GetSection("Salesforce");
+// The worker's SalesforceLimits:DailyApiAllocation (appsettings.json), which the mock org reports as its limit
+const string DefaultDailyApiAllocation = "115000";
 var useRealOrg = !string.IsNullOrEmpty(realOrg["ClientSecret"]);
 sync.WithEnvironment("Salesforce__ClientId", realOrg["ClientId"] ?? "fake-client")
     .WithEnvironment("Salesforce__ClientSecret",
@@ -49,15 +51,15 @@ sync.WithEnvironment("Salesforce__ClientId", realOrg["ClientId"] ?? "fake-client
 if (useRealOrg)
 {
     sync.WithEnvironment("Salesforce__InstanceUrl", realOrg["InstanceUrl"])
-        .WithEnvironment("SalesforceLimits__DailyApiAllocation", builder.Configuration["SalesforceLimits:DailyApiAllocation"] ?? "115000");
+        .WithEnvironment("SalesforceLimits__DailyApiAllocation",
+            builder.Configuration["SalesforceLimits:DailyApiAllocation"] ?? DefaultDailyApiAllocation);
 }
 else
 {
     // Mock Salesforce org (HTTP service; inspect it at /__fake/stats and /__fake/records/{sobject})
     var salesforce = builder.AddProject<Projects.SalesforceSync_FakeSalesforce_Server>("fake-salesforce")
         .WithEnvironment("FakeSalesforce__Latency", testMode ? "00:00:00" : "00:00:00.050")
-        // Matches the worker's SalesforceLimits:DailyApiAllocation
-        .WithEnvironment("FakeSalesforce__DailyApiLimit", "115000")
+        .WithEnvironment("FakeSalesforce__DailyApiLimit", DefaultDailyApiAllocation)
         .WithHttpHealthCheck("/health");
     sync.WaitFor(salesforce)
         .WithEnvironment("Salesforce__InstanceUrl", salesforce.GetEndpoint("http"));

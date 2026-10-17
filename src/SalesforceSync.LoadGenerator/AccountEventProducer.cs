@@ -7,10 +7,10 @@ using Microsoft.Extensions.Options;
 namespace SalesforceSync.LoadGenerator;
 
 /// <summary>
-/// Publishes account change events keyed by account external id (so Kafka keeps per-account order),
-/// including rapid bursts to the same account to exercise the ordering/coalescing logic, relationship events between
-/// accounts (keyed by relationship id) and contact events of accounts (keyed by contact id), which can arrive before
-/// their accounts are synced. Events use the real envelope:
+/// Publishes account change events (keyed by account external id, like the real upstream, though the sync orders by
+/// meta.time and never reads the key), including rapid bursts to the same account to exercise the ordering and
+/// coalescing, relationship events between accounts (keyed by relationship id) and contact events of accounts (keyed
+/// by contact id), which can arrive before their accounts are synced. Events use the real envelope:
 /// <c>{ "meta": { "time": ... }, "account" | "accountRelationship" | "contact": { "externalId": ..., ... } }</c>,
 /// with the source system's camelCase field names. Every event carries the full record.
 /// </summary>

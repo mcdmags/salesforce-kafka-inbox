@@ -155,26 +155,24 @@ public sealed class SalesforceLimitsTests
     public void Concurrent_long_running_limit_error_is_recognised()
     {
         SalesforceRateLimitHandler.Classify(
-                                         /*lang=json,strict*/
-                                         """[{"message":"ConcurrentPerOrgLongTxn Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")
-                .Should().Be(SalesforceRateLimitHandler.LimitExceeded.ConcurrentLongRunning);
+                /*lang=json,strict*/ """[{"message":"ConcurrentPerOrgLongTxn Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")
+            .Should().Be(SalesforceRateLimitHandler.LimitExceeded.ConcurrentLongRunning);
     }
 
     [Fact]
     public void Total_requests_limit_error_is_recognised()
     {
         SalesforceRateLimitHandler.Classify(
-                                         /*lang=json,strict*/
-                                         """[{"message":"TotalRequests Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")
-                .Should().Be(SalesforceRateLimitHandler.LimitExceeded.TotalRequests);
+                /*lang=json,strict*/ """[{"message":"TotalRequests Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")
+            .Should().Be(SalesforceRateLimitHandler.LimitExceeded.TotalRequests);
     }
 
     [Theory, AutoData]
     public void Unknown_limit_error_is_treated_as_the_daily_limit(string message)
     {
         SalesforceRateLimitHandler.Classify(
-                    new JsonArray(new JsonObject { ["message"] = message, ["errorCode"] = "REQUEST_LIMIT_EXCEEDED" }).ToJsonString())
-                .Should().Be(SalesforceRateLimitHandler.LimitExceeded.TotalRequests, "the safer assumption for an unknown variant");
+                new JsonArray(new JsonObject { ["message"] = message, ["errorCode"] = "REQUEST_LIMIT_EXCEEDED" }).ToJsonString())
+            .Should().Be(SalesforceRateLimitHandler.LimitExceeded.TotalRequests, "the safer assumption for an unknown variant");
     }
 
     [Fact]

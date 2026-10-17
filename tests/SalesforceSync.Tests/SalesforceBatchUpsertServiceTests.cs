@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -16,14 +18,11 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class SalesforceBatchUpsertServiceTests
 {
-    private static readonly UpsertStrategy<AccountEvent> AccountStrategy =
-        AccountSync.Strategy;
+    private static readonly UpsertStrategy<AccountEvent> AccountStrategy = AccountSync.Strategy;
 
-    private static readonly UpsertStrategy<AccountRelationshipEvent> RelationshipStrategy =
-        AccountRelationshipSync.Strategy;
+    private static readonly UpsertStrategy<AccountRelationshipEvent> RelationshipStrategy = AccountRelationshipSync.Strategy;
 
-    private static readonly UpsertStrategy<ContactEvent> ContactStrategy =
-        ContactSync.Strategy;
+    private static readonly UpsertStrategy<ContactEvent> ContactStrategy = ContactSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly Fixture _any = new();
@@ -38,10 +37,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     private SalesforceBatchUpsertService Upserter(SalesforceOptions? salesforceOptions = null)
     {
         var options = Options.Create(salesforceOptions ?? new SalesforceOptions());
-        var http = new HttpClient(new GzipRequestHandler(options) { InnerHandler = new FakeSalesforceHandler(_org) })
-        {
-            BaseAddress = new Uri("https://fake.my.salesforce.com")
-        };
+        var http = SalesforceStep.Http(new GzipRequestHandler(options) { InnerHandler = new FakeSalesforceHandler(_org) });
         return SalesforceStep.Service(http, options);
     }
 
@@ -447,7 +443,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task A_query_URL_over_the_budget_is_refused_before_any_call_and_one_at_it_is_sent()
     {
-        var client = new SalesforceRestClient(new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") });
+        var client = new SalesforceRestClient(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
         static string Soql(int urlBytes)
         {
             var empty = SalesforceRestClient.Soql("Account", ["Id"], "ExternalId__c", [""]);
@@ -468,7 +464,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task The_mock_org_refuses_a_URI_over_16384_bytes_as_Salesforce_does()
     {
-        var http = new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
+        var http = SalesforceStep.Http(new FakeSalesforceHandler(_org));
         var subrequest = new JsonObject
         {
             ["compositeRequest"] = new JsonArray(new JsonObject
@@ -481,9 +477,9 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         using var direct = await http.GetAsync($"/services/data/v62.0/query?q={new string('a', FakeSalesforceStore.MaxUriAndHeadersBytes)}");
         using var composite = await http.PostAsync("/services/data/v62.0/composite",
-            new StringContent(subrequest.ToJsonString(), System.Text.Encoding.UTF8, "application/json"));
+            new StringContent(subrequest.ToJsonString(), Encoding.UTF8, "application/json"));
 
-        direct.StatusCode.Should().Be(System.Net.HttpStatusCode.RequestUriTooLong);
+        direct.StatusCode.Should().Be(HttpStatusCode.RequestUriTooLong);
         var answer = JsonNode.Parse(await composite.Content.ReadAsStringAsync())!["compositeResponse"]![0]!;
         ((int)answer["httpStatusCode"]!, (string?)answer["body"]![0]!["errorCode"]).Should().Be((414, "URI_TOO_LONG"));
     }
@@ -597,12 +593,12 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task Describe_returns_the_record_types_of_the_object()
     {
-        var http = new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
+        var http = SalesforceStep.Http(new FakeSalesforceHandler(_org));
 
         var schema = (await new SalesforceRestClient(http).DescribeAsync("Account", null, CancellationToken.None))!;
 
         schema.RecordTypes.Should().ContainKey("business").WhoseValue.Should().Be(
-            new SalesforceRecordType("Business", RecordTypeId("Account", "Business"), Active: true, Available: true));
+            new SalesforceRecordType("Business", FakeSchema.RecordTypeIdOf("Account", "Business"), Active: true, Available: true));
         schema.RecordTypes["Master"].Available.Should().BeFalse();
         schema.Find(SObjectSchema.RecordTypeIdField)!.Type.Should().Be("reference");
     }
@@ -615,10 +611,10 @@ public sealed class SalesforceBatchUpsertServiceTests
 
         (await Relationship("R1", "A1", "A2", [])).Outcome.Should().Be(SyncOutcome.Saved);
 
-        ((string?)_org.FindByExternalId("Account", "A1")!["RecordTypeId"]).Should().Be(RecordTypeId("Account", "Business"));
-        ((string?)_org.FindByExternalId("Profile__c", "P-A1")!["RecordTypeId"]).Should().Be(RecordTypeId("Profile__c", "Standard"));
+        ((string?)_org.FindByExternalId("Account", "A1")!["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Account", "Business"));
+        ((string?)_org.FindByExternalId("Profile__c", "P-A1")!["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Profile__c", "Standard"));
         ((string?)_org.FindByExternalId("Account_Relationship__c", "R1")!["RecordTypeId"])
-            .Should().Be(RecordTypeId("Account_Relationship__c", "Standard"));
+            .Should().Be(FakeSchema.RecordTypeIdOf("Account_Relationship__c", "Standard"));
     }
 
     [Fact]
@@ -627,11 +623,11 @@ public sealed class SalesforceBatchUpsertServiceTests
         await Account("A1", new() { ["name"] = "Acme" }, []);
         (await Account("A1", new() { ["name"] = "Acme" }, [])).Outcome.Should().Be(SyncOutcome.Unchanged, "the record type is the same");
 
-        _org.Edit("Account", "A1", new JsonObject { ["RecordTypeId"] = RecordTypeId("Account", "Master") });
+        _org.Edit("Account", "A1", new JsonObject { ["RecordTypeId"] = FakeSchema.RecordTypeIdOf("Account", "Master") });
         (await Account("A1", new() { ["name"] = "Acme" }, [])).Outcome.Should().Be(SyncOutcome.Saved);
 
         _org.History("Account", "A1")![^1].Select(kv => kv.Key).Should().Equal("RecordTypeId");
-        ((string?)_org.FindByExternalId("Account", "A1")!["RecordTypeId"]).Should().Be(RecordTypeId("Account", "Business"));
+        ((string?)_org.FindByExternalId("Account", "A1")!["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Account", "Business"));
     }
 
     [Fact]
@@ -697,11 +693,6 @@ public sealed class SalesforceBatchUpsertServiceTests
         [JsonPropertyName("ExternalId__c")] public string? ExternalId { get; set; }
     }
 
-    private static string RecordTypeId(string sobject, string developerName)
-    {
-        return FakeSchema.RecordTypes[sobject].Single(r => r.DeveloperName == developerName).Id;
-    }
-
     // ---------- Records that fail without a cause ----------
 
     [Fact]
@@ -734,17 +725,16 @@ public sealed class SalesforceBatchUpsertServiceTests
         var result = await Account("A1", new() { ["name"] = "After" }, []);
 
         result.Outcome.Should().Be(SyncOutcome.Saved);
+        _org.WriteRequests.Should().HaveCount(before + 1, "either way one write request");
         if (exists)
         {
             // Only the Account changed: an upsert carrying what differs
-            _org.WriteRequests.Should().HaveCount(before + 1);
             Upserted(_org.WriteRequests[^1], "Account").Single().Select(kv => kv.Key)
                 .Should().BeEquivalentTo("attributes", "ExternalId__c", "Name", "Rating");
         }
         else
         {
             // A new Account and its new Profile: one Composite request, the Account's upsert first, then the Profile's
-            _org.WriteRequests.Should().HaveCount(before + 1);
             Upserted(_org.WriteRequests[^1], "Account").Single()["ExternalId__c"]!.GetValue<string>().Should().Be("A1");
             Upserted(_org.WriteRequests[^1], "Profile__c").Single()["AccountId__c"]!.GetValue<string>().Should().Be("A1");
         }
@@ -851,7 +841,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task The_org_rejects_a_foreign_key_whose_parent_does_not_exist()
     {
-        var client = new SalesforceRestClient(new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") });
+        var client = new SalesforceRestClient(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
         var profile = new Dictionary<string, object?> { ["attributes"] = new { type = "Profile__c" }, ["ExternalId__c"] = "P1", ["AccountId__c"] = "NOPE" };
 
         var result = (await Upsert(client, "Profile__c", "ExternalId__c", [profile], CancellationToken.None)).Single();
@@ -900,9 +890,9 @@ public sealed class SalesforceBatchUpsertServiceTests
             ["LastName"] = last,
             ["Email"] = "ada@example.com",
             ["AccountId__c"] = "A1",
-            ["RecordTypeId"] = RecordTypeId("Contact", "Standard")
+            ["RecordTypeId"] = FakeSchema.RecordTypeIdOf("Contact", "Standard")
         }).Should().BeTrue("a new record's non-empty fields: {0}", record.ToJsonString());
-        ((string?)_org.FindByExternalId("Contact", "C1")!["RecordTypeId"]).Should().Be(RecordTypeId("Contact", "Standard"));
+        ((string?)_org.FindByExternalId("Contact", "C1")!["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Contact", "Standard"));
     }
 
     [Fact]
@@ -1004,7 +994,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     public async Task The_upsert_call_answers_per_record_in_order_with_created_or_updated()
     {
         await Account("A1", new() { ["name"] = "Acme" }, []);
-        var client = new SalesforceRestClient(new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") });
+        var client = new SalesforceRestClient(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
         static IReadOnlyDictionary<string, object?> Record(string key, string? lastName)
         {
             return new Dictionary<string, object?>
@@ -1025,7 +1015,7 @@ public sealed class SalesforceBatchUpsertServiceTests
         (error.Code, error.Message).Should().Be(("REQUIRED_FIELD_MISSING", "Required fields are missing: [LastName]"));
         second.Single().Should().Match<RecordResult>(r => r.Success && r.Created == false && r.Id == IdOf("Contact", "C1"));
         var unknownField = () => Upsert(client, "Contact", "No_Such__c", [Record("C1", "Doe")], CancellationToken.None);
-        (await unknownField.Should().ThrowAsync<SalesforceResponseException>()).Which.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
+        (await unknownField.Should().ThrowAsync<SalesforceResponseException>()).Which.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 
     [Fact]

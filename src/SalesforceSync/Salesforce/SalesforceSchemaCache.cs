@@ -29,13 +29,13 @@ public sealed class SalesforceSchemaCache(
     ILogger<SalesforceSchemaCache> log)
 {
     /// <summary>A shared-cache call that takes longer is abandoned and the pod describes on its own.</summary>
-    internal static readonly TimeSpan SharedCacheTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SharedCacheTimeout = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// How long a shared entry is kept. Much longer than the refresh interval: an entry too old to be trusted still
     /// gives If-Modified-Since its date, so a pod that starts after a quiet night gets a 304 rather than a download.
     /// </summary>
-    internal static readonly TimeSpan SharedEntryLifetime = TimeSpan.FromDays(1);
+    private static readonly TimeSpan SharedEntryLifetime = TimeSpan.FromDays(1);
 
     private static readonly TimeSpan WarningInterval = TimeSpan.FromMinutes(1);
 

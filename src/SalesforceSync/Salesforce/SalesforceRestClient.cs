@@ -197,7 +197,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     }
 
     /// <summary>The URL a query is sent with, as a Composite subrequest or a call of its own.</summary>
-    public static string QueryUrl(string soql)
+    internal static string QueryUrl(string soql)
     {
         return $"{DataPath}/query?q={Uri.EscapeDataString(soql)}";
     }
@@ -206,7 +206,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// Whether a URL is within <see cref="MaxUrlBytes"/>, counted in bytes as sent (UTF-8; an escaped query is ASCII,
     /// so its bytes are its characters).
     /// </summary>
-    public static bool FitsUrlLimit(string url)
+    internal static bool FitsUrlLimit(string url)
     {
         return Encoding.UTF8.GetByteCount(url) <= MaxUrlBytes;
     }
@@ -219,14 +219,14 @@ public sealed class SalesforceRestClient(HttpClient http)
                 $"({MaxUriAndHeadersBytes:N0} for the URI and headers together): {url[..Math.Min(url.Length, 200)]}...", nameof(url));
     }
 
-    public static string Soql(string sobject, IEnumerable<string> fields, string whereField, IEnumerable<string> values)
+    internal static string Soql(string sobject, IEnumerable<string> fields, string whereField, IEnumerable<string> values)
     {
         return $"SELECT {string.Join(",", fields)} FROM {sobject} WHERE {whereField} IN " +
                $"({string.Join(",", values.Select(SoqlLiteral))})";
     }
 
     /// <summary>A value as a SOQL string literal: quoted, with backslashes and quotes escaped.</summary>
-    public static string SoqlLiteral(string value)
+    internal static string SoqlLiteral(string value)
     {
         return $"'{value.Replace("\\", "\\\\").Replace("'", "\\'")}'";
     }
@@ -241,14 +241,14 @@ public sealed class SalesforceRestClient(HttpClient http)
     private static RecordResult ParseRecordResult(JsonElement record)
     {
         return new(
-        record.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True,
-        record.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
-        record.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
-            ? errors.EnumerateArray().Select(e => ParseError(null, e, "statusCode")).ToList()
-            : [],
-        record.TryGetProperty("created", out var created) && created.ValueKind is JsonValueKind.True or JsonValueKind.False
-            ? created.GetBoolean()
-            : null);
+            record.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True,
+            record.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
+            record.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
+                ? errors.EnumerateArray().Select(e => ParseError(null, e, "statusCode")).ToList()
+                : [],
+            record.TryGetProperty("created", out var created) && created.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? created.GetBoolean()
+                : null);
     }
 
     /// <param name="codeProperty">"errorCode" in an error response, "statusCode" in a collection's per-record errors.</param>
@@ -257,11 +257,12 @@ public sealed class SalesforceRestClient(HttpClient http)
     private static SalesforceError ParseError(string? referenceId, JsonElement e, string codeProperty)
     {
         return new(
-        referenceId,
-        StringProperty(e, codeProperty) ?? "UNKNOWN_ERROR",
-        StringProperty(e, "message"),
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty("fields", out var f) && f.ValueKind == JsonValueKind.Array
-            ? f.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList() : null);
+            referenceId,
+            StringProperty(e, codeProperty) ?? "UNKNOWN_ERROR",
+            StringProperty(e, "message"),
+            e.ValueKind == JsonValueKind.Object && e.TryGetProperty("fields", out var f) && f.ValueKind == JsonValueKind.Array
+                ? f.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList()
+                : null);
     }
 
     private static string? StringProperty(JsonElement e, string name)

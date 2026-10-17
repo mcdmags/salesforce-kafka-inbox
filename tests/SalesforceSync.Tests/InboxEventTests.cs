@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
@@ -13,11 +14,9 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class InboxEventTests
 {
-    private static readonly UpsertStrategy<AccountEvent> Accounts =
-        AccountSync.Strategy;
+    private static readonly UpsertStrategy<AccountEvent> Accounts = AccountSync.Strategy;
 
-    private static readonly UpsertStrategy<AccountRelationshipEvent> Relationships =
-        AccountRelationshipSync.Strategy;
+    private static readonly UpsertStrategy<AccountRelationshipEvent> Relationships = AccountRelationshipSync.Strategy;
 
     // ---------- Mapping ----------
 
@@ -221,7 +220,7 @@ public sealed class InboxEventTests
         var batch = PreparedBatch.Prepare(Relationships,
         [
             new InboxEvent(2, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""",
-                DateTimeOffset.Parse("2026-10-14T02:00:00Z", System.Globalization.CultureInfo.InvariantCulture))
+                DateTimeOffset.Parse("2026-10-14T02:00:00Z", CultureInfo.InvariantCulture))
         ]);
 
         batch.Invalid.Should().ContainSingle().Which.RowId.Should().Be(2);
@@ -247,11 +246,11 @@ public sealed class InboxEventTests
     [InlineData("2026-10-14T01:02:03.123456951Z", "2026-10-14T01:02:03.123457Z")]
     public void An_event_time_is_stored_cut_to_the_microsecond_in_UTC(string time, string stored)
     {
-        var read = DateTimeOffset.Parse(time, System.Globalization.CultureInfo.InvariantCulture);
+        var read = DateTimeOffset.Parse(time, CultureInfo.InvariantCulture);
 
         var cut = InboxRow.ToWholeMicroseconds(read);
 
-        cut.Should().Be(DateTimeOffset.Parse(stored, System.Globalization.CultureInfo.InvariantCulture), "not rounded up as Postgres would");
+        cut.Should().Be(DateTimeOffset.Parse(stored, CultureInfo.InvariantCulture), "not rounded up as Postgres would");
         cut.Offset.Should().Be(TimeSpan.Zero, "Npgsql writes only UTC times to timestamptz");
     }
 
@@ -329,8 +328,8 @@ public sealed class InboxEventTests
     [Fact]
     public void Every_change_to_the_model_has_its_migration()
     {
-        // Only the model and the migrations' snapshot are compared: nothing connects to this address
-        using var db = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
+        // Only the model and the migrations' snapshot are compared
+        using var db = SyncDbContext.ForModel();
 
         db.Database.HasPendingModelChanges().Should().BeFalse(
             "a change to SyncDbContext's model needs a migration: dotnet ef migrations add <Name> --project src/SalesforceSync --output-dir Data/Migrations");

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -40,6 +41,9 @@ public class SyncFixture : IAsyncLifetime
     /// </summary>
     public static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
+    /// <summary>Sync:UnknownOutcomeHold of every pod: seconds instead of the production 10 minutes, so a test can watch a hold end.</summary>
+    public static readonly TimeSpan UnknownOutcomeHold = TimeSpan.FromSeconds(4);
+
     /// <summary>The tests' own Postgres sessions, so chaos tests can drop everyone else's connections.</summary>
     public const string TestsApplicationName = "integration-tests";
 
@@ -63,6 +67,7 @@ public class SyncFixture : IAsyncLifetime
     private IProducer<string, string>? _producer;
     private NpgsqlDataSource? _db;
     private IDbContextFactory<SyncDbContext>? _contexts;
+    private readonly Dictionary<string, (NpgsqlDataSource Db, IDbContextFactory<SyncDbContext> Contexts)> _migratedSchemas = [];
 
     /// <param name="pods">Worker pods (replicas) sharing the inbox, the Kafka consumer group and the org.</param>
     protected SyncFixture(int pods)
@@ -93,8 +98,7 @@ public class SyncFixture : IAsyncLifetime
         ["Sync:Workers"] = "4",
         // Fast retries, so tests that wait for a transient failure to clear don't wait 30 s
         ["Sync:RetryBaseDelay"] = "00:00:01",
-        // Seconds instead of the production 10 minutes, so the unknown-outcome test can watch a hold end
-        ["Sync:UnknownOutcomeHold"] = "00:00:04",
+        ["Sync:UnknownOutcomeHold"] = UnknownOutcomeHold.ToString(),
         ["Logging:LogLevel:Default"] = "Warning"
     };
 
@@ -174,6 +178,11 @@ public class SyncFixture : IAsyncLifetime
         await Task.WhenAll(_pods.Select(p => p.DisposeAsync().AsTask()));
         _producer?.Dispose();
         Salesforce?.Dispose();
+        foreach (var (db, _) in _migratedSchemas.Values)
+        {
+            await db.DisposeAsync();
+        }
+
         if (_db is not null)
         {
             await _db.DisposeAsync();
@@ -330,7 +339,7 @@ public class SyncFixture : IAsyncLifetime
     public async Task<JsonObject?> GetRecordAsync(string sobject, string externalId)
     {
         using var res = await Salesforce.GetAsync($"/__fake/records/{sobject}/{Uri.EscapeDataString(externalId)}");
-        if (res.StatusCode == System.Net.HttpStatusCode.NotFound)
+        if (res.StatusCode == HttpStatusCode.NotFound)
         {
             return null;
         }
@@ -358,7 +367,21 @@ public class SyncFixture : IAsyncLifetime
     /// </summary>
     public async Task<List<JsonObject>> GetWriteRequestsAsync(params string[] texts)
     {
-        return [.. (await Salesforce.GetFromJsonAsync<List<JsonObject>>("/__fake/requests") ?? []).Where(r => r.ToJsonString() is var json && texts.Any(t => json.Contains(t, StringComparison.Ordinal)))];
+        var requests = await Salesforce.GetFromJsonAsync<List<JsonObject>>("/__fake/requests") ?? [];
+        return [.. requests.Where(r => Mentions(r.ToJsonString()))];
+
+        bool Mentions(string json)
+        {
+            return texts.Any(t => json.Contains(t, StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>The versions written to an Account, oldest first: the "vN" Descriptions in its write history.</summary>
+    public async Task<List<long>> GetWrittenVersionsAsync(string accountExtId)
+    {
+        var history = await GetHistoryAsync("Account", accountExtId);
+        return [.. history.Where(w => w.ContainsKey("Description"))
+            .Select(w => long.Parse(((string)w["Description"]!)[1..], CultureInfo.InvariantCulture))];
     }
 
     /// <summary>Makes the mock org reject the next <paramref name="times"/> writes of one record with a Salesforce error code.</summary>
@@ -369,16 +392,33 @@ public class SyncFixture : IAsyncLifetime
         res.EnsureSuccessStatusCode();
     }
 
+    /// <summary>
+    /// Makes the mock org apply the next <paramref name="times"/> writes of one record and then drop the connection,
+    /// so the worker never hears whether they landed.
+    /// </summary>
+    public async Task LoseResponsesAsync(string sobject, string externalId, int times = 1)
+    {
+        using var res = await Salesforce.PostAsJsonAsync("/__fake/lost-responses",
+            new JsonObject { ["sObject"] = sobject, ["externalId"] = externalId, ["times"] = times });
+        res.EnsureSuccessStatusCode();
+    }
+
+    private static readonly IReadOnlyDictionary<string, string> InboxTables = ReadInboxTables();
+
     /// <summary>The inbox table of an entity type, as the EF model names it.</summary>
     public static string InboxTable(string entityType = Accounts)
     {
-        // Only the model is read: nothing connects to this address
-        using var model = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
-        return entityType switch
+        return InboxTables[entityType];
+    }
+
+    private static Dictionary<string, string> ReadInboxTables()
+    {
+        using var model = SyncDbContext.ForModel();
+        return new()
         {
-            Relationships => model.TableOf<AccountRelationshipInboxRow>(),
-            Contacts => model.TableOf<ContactInboxRow>(),
-            _ => model.TableOf<AccountInboxRow>()
+            [Accounts] = model.TableOf<AccountInboxRow>(),
+            [Relationships] = model.TableOf<AccountRelationshipInboxRow>(),
+            [Contacts] = model.TableOf<ContactInboxRow>()
         };
     }
 
@@ -395,13 +435,13 @@ public class SyncFixture : IAsyncLifetime
     /// The entity's inbox row (it has one at most: a newer event overwrites it), or null. The version is read here from
     /// the stored payload, like the worker does (in C#, not in SQL).
     /// </summary>
-    public async Task<InboxRow?> GetInboxRowAsync(string key, string entityType = Accounts)
+    public async Task<InboxRowState?> GetInboxRowAsync(string key, string entityType = Accounts)
     {
         await using var conn = await Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<StoredRow>(
             $"SELECT id, payload::text, status, attempt_count, last_error_code, next_attempt_at, lock_token FROM {InboxTable(entityType)} WHERE entity_id = @key",
             new { key });
-        return rows.Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockToken))
+        return rows.Select(r => new InboxRowState(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockToken))
             .SingleOrDefault();
     }
 
@@ -409,7 +449,8 @@ public class SyncFixture : IAsyncLifetime
     private sealed record StoredRow(long Id, string Payload, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
         Guid? LockToken);
 
-    private static long VersionOf(string payload)
+    /// <summary>The version of a stored payload: its meta.time, BaseTime + N ms.</summary>
+    public static long VersionOf(string payload)
     {
         return (long)(TimeOf(JsonNode.Parse(payload)!.AsObject()) - BaseTime).TotalMilliseconds;
     }
@@ -450,6 +491,48 @@ public class SyncFixture : IAsyncLifetime
         }.ConnectionString);
     }
 
+    /// <summary>
+    /// <paramref name="schema"/>, migrated, with an empty account inbox, and contexts on it: for tests that drive the
+    /// worker's SQL by hand on rows the pods never see. Created on first use and only emptied after that: a data source
+    /// per test would cost EF a service provider each, and more than twenty fail the run.
+    /// </summary>
+    public async Task<(NpgsqlDataSource Db, IDbContextFactory<SyncDbContext> Contexts)> MigratedSchemaAsync(string schema)
+    {
+        if (!_migratedSchemas.TryGetValue(schema, out var migrated))
+        {
+            var db = await CreateSchemaAsync(schema);
+            var contexts = SyncDbContext.CreateFactory(db);
+            await SyncSchema.MigrateAsync(contexts);
+            _migratedSchemas[schema] = migrated = (db, contexts);
+        }
+
+        await using var conn = await migrated.Db.OpenConnectionAsync();
+        await conn.ExecuteAsync($"TRUNCATE {InboxTable()}");
+        return migrated;
+    }
+
+    /// <summary>Every kind of outcome a worker records for a claim (see <see cref="RecordOutcomeAsync"/>).</summary>
+    public static TheoryData<string> Outcomes => ["done", "failed", "dead", "released", "failed all", "deferred", "held"];
+
+    /// <summary>Records one of <see cref="Outcomes"/> for a claim of one row, through the worker's repository.</summary>
+    public static Task RecordOutcomeAsync(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
+    {
+        var row = claim.RowIds.Single();
+        var failure = new FailedEvent(row, "failed", "SOME_CODE");
+        var none = CancellationToken.None;
+        return outcome switch
+        {
+            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], []), none),
+            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
+            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
+            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
+            "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
+            "deferred" => inbox.DeferAsync(claim, TimeSpan.Zero, none),
+            "held" => inbox.HoldAsync(claim, "lost", none),
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+        };
+    }
+
     /// <summary>Polls until the entity's inbox row holds <paramref name="version"/> and is not pending, then returns it.</summary>
     public async Task<(long Version, string Status)> WaitForInboxSettledAsync(string key, long version, string entityType = Accounts)
     {
@@ -472,12 +555,8 @@ public class SyncFixture : IAsyncLifetime
         using var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = bootstrap }).Build();
         try
         {
-            await admin.CreateTopicsAsync(
-            [
-                new TopicSpecification { Name = Topic, NumPartitions = 6, ReplicationFactor = 1 },
-                new TopicSpecification { Name = RelationshipTopic, NumPartitions = 6, ReplicationFactor = 1 },
-                new TopicSpecification { Name = ContactTopic, NumPartitions = 6, ReplicationFactor = 1 }
-            ]);
+            string[] topics = [Topic, RelationshipTopic, ContactTopic];
+            await admin.CreateTopicsAsync(topics.Select(t => new TopicSpecification { Name = t, NumPartitions = 6, ReplicationFactor = 1 }));
         }
         catch (CreateTopicsException ex) when (ex.Results.All(r => r.Error.Code is ErrorCode.TopicAlreadyExists or ErrorCode.NoError))
         {
@@ -487,7 +566,7 @@ public class SyncFixture : IAsyncLifetime
 }
 
 /// <summary>An inbox row as the tests see it; <paramref name="Version"/> comes from the payload's meta.time.</summary>
-public sealed record InboxRow(long Id, long Version, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
+public sealed record InboxRowState(long Id, long Version, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
     Guid? LockToken);
 
 [CollectionDefinition(Name)]

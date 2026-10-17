@@ -30,7 +30,7 @@ public sealed class SalesforceRateLimitHandler(
     {
         try
         {
-            await limiter.AcquireAsync(1, ct);
+            await limiter.AcquireAsync(ct);
         }
         catch (Exception ex)
         {

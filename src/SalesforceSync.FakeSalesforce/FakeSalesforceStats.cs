@@ -31,9 +31,9 @@ public sealed record FakeSalesforceStats(
 {
     public override string ToString()
     {
-        return $"api={ApiCalls} composite={CompositeRequests} upserts={UpsertRequests} queries={Queries} writeRequests={WriteRequests} " +
-        $"recordsOk={RecordsSucceeded} recordsFailed={RecordsFailed} creates={Creates} " +
-        $"updates={Updates} describes={Describes} (notModified={DescribesNotModified}) " +
-        $"concurrencyRejected={ConcurrencyRejections} records={Records}";
+        return $"api={ApiCalls} composite={CompositeRequests} upserts={UpsertRequests} queries={Queries} " +
+               $"writeRequests={WriteRequests} recordsOk={RecordsSucceeded} recordsFailed={RecordsFailed} " +
+               $"creates={Creates} updates={Updates} describes={Describes} (notModified={DescribesNotModified}) " +
+               $"concurrencyRejected={ConcurrencyRejections} records={Records}";
     }
 }

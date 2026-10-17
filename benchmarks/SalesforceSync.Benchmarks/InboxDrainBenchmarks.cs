@@ -90,7 +90,7 @@ public abstract class DrainBenchmarkBase
 
     private static T FromModel<T>(Func<SyncDbContext, T> read)
     {
-        using var model = new SyncDbContext(new DbContextOptionsBuilder<SyncDbContext>().UseNpgsql("Host=unused").Options);
+        using var model = SyncDbContext.ForModel();
         return read(model);
     }
 
@@ -462,7 +462,8 @@ public abstract class DrainBenchmarkBase
             $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms] " +
             $"events={Events} relationshipEvents={relationshipEvents} {stats} entities={rows} " +
             $"coalescing={(double)Events / Math.Max(1, claims):F2} events/entity claim " +
-            $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} stale={stale} wrong={wrong.Count} regressions={regressions}");
+            $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} stale={stale} " +
+            $"wrong={wrong.Count} regressions={regressions}");
 
         if (wrong.Count > 0 || rows != _expected.Count || stale > 0 || notDone > 0 || overlaps > 0 || regressions > 0)
         {

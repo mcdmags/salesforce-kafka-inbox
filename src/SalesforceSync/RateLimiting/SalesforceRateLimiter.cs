@@ -79,8 +79,13 @@ public sealed class SalesforceRateLimiter(
             _opt.MaxRequestsPerSecond, _opt.BurstCapacity, _limits.ConcurrentLongRunningLimit);
     }
 
-    public async Task AcquireAsync(int permits, CancellationToken ct)
+    /// <summary>
+    /// Takes a token for one call, waiting up to <see cref="RateLimitOptions.MaxWait"/> for it, else throws
+    /// <see cref="RateLimitedException"/>.
+    /// </summary>
+    public async Task AcquireAsync(CancellationToken ct)
     {
+        const int oneCall = 1;
         var deadline = DateTime.UtcNow + _opt.MaxWait;
         while (true)
         {
@@ -103,15 +108,15 @@ public sealed class SalesforceRateLimiter(
                     })
                     .SingleOrDefaultAsync(t);
                 var used = usage?.Used ?? 0;
-                var decision = TokenBucket.Decide(row, now, used, usage?.Oldest, permits, _opt);
+                var decision = TokenBucket.Decide(row, now, used, usage?.Oldest, oneCall, _opt);
                 if (decision.Granted)
                 {
                     row.Tokens = decision.Tokens;
                     row.UpdatedAt = now;
-                    used += permits;
+                    used += oneCall;
                     // The row lock serializes every acquire in every process, so no one can insert this bucket
                     // between the read and the write: no ON CONFLICT needed. One SaveChanges, one batch.
-                    var counted = new ApiUsageBucket { Bucket = bucket, Calls = (usage?.Current ?? 0) + permits };
+                    var counted = new ApiUsageBucket { Bucket = bucket, Calls = (usage?.Current ?? 0) + oneCall };
                     if (usage?.Current is null)
                     {
                         db.Add(counted);

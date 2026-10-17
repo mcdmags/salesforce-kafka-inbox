@@ -45,7 +45,7 @@ public sealed partial class InboxSql
     /// Table names are spliced into SQL text (identifiers can't be parameters), so only plain identifiers are
     /// accepted. They come from code constants, never from configuration or events.
     /// </summary>
-    public static string RequireIdentifier(string table)
+    private static string RequireIdentifier(string table)
     {
         return PlainIdentifier().IsMatch(table)
                 ? table

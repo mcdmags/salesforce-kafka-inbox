@@ -3,7 +3,6 @@ using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using System.Web;
 
 namespace SalesforceSync.FakeSalesforce;
 
@@ -93,7 +92,7 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
                     res = request.Method == HttpMethod.Patch && FakeSalesforceStore.UpsertTarget(path) is (var sobject, var field)
                         ? Json(request, HttpStatusCode.OK, store.Upsert(sobject, field, path, await ReadJsonAsync(request, ct)))
                         : request.Method == HttpMethod.Get && path.EndsWith("/query", StringComparison.OrdinalIgnoreCase)
-                        ? Json(request, HttpStatusCode.OK, store.Query(QueryOf(uri)))
+                        ? Json(request, HttpStatusCode.OK, store.Query(FakeSalesforceStore.QueryOf(uri)))
                         : request.Method == HttpMethod.Post && path.EndsWith("/composite", StringComparison.OrdinalIgnoreCase)
                         ? Json(request, HttpStatusCode.OK, store.ExecuteComposite(await ReadJsonAsync(request, ct)))
                         : Json(request, HttpStatusCode.NotFound,
@@ -116,11 +115,6 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
         var headers = request.Headers.Concat(request.Content?.Headers ?? Enumerable.Empty<KeyValuePair<string, IEnumerable<string>>>())
             .Sum(h => Encoding.UTF8.GetByteCount($"{h.Key}: {string.Join(", ", h.Value)}\r\n"));
         return Encoding.UTF8.GetByteCount(request.RequestUri!.PathAndQuery) + headers;
-    }
-
-    private static string QueryOf(Uri uri)
-    {
-        return HttpUtility.ParseQueryString(uri.Query)["q"] ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q");
     }
 
     /// <summary>Request body as JSON; gzip bodies (Content-Encoding: gzip) are decompressed like Salesforce does.</summary>

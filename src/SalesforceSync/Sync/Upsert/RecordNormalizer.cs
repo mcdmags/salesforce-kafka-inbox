@@ -4,9 +4,9 @@ namespace SalesforceSync.Sync.Upsert;
 
 /// <summary>
 /// Checks a unit against the Describe metadata and normalizes its values (<see cref="FieldValues"/>), before any call:
-/// an unknown field, a value Salesforce would reject, a lookup that isn't one (or a foreign key that is one), or a record
-/// type the org doesn't offer
-/// is a problem of that unit alone. A record's record type becomes its RecordTypeId here, a field like any other.
+/// an unknown field, a value Salesforce would reject, a lookup that isn't one (or a foreign key that is one), or a
+/// record type the org doesn't offer is a problem of that unit alone. A record's record type becomes its RecordTypeId
+/// here, a field like any other.
 /// </summary>
 internal static class RecordNormalizer
 {

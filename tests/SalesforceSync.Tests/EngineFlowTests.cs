@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+using System.Net;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
@@ -14,8 +14,7 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class EngineFlowTests
 {
-    private static readonly UpsertStrategy<AccountEvent> Accounts =
-        AccountSync.Strategy;
+    private static readonly UpsertStrategy<AccountEvent> Accounts = AccountSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly RecordingInbox _inbox = new();
@@ -162,7 +161,7 @@ public sealed class EngineFlowTests
     private static InboxEvent Contact(long id, string contact, string account)
     {
         return new(id, contact,
-        $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""",
+            $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""",
             DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
     }
 
@@ -253,7 +252,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
         await engine.UpsertBatchAsync(Accounts, _inbox, CancellationToken.None); // describes are cached now
         _inbox.Calls.Clear();
-        _http.OnRead = request => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        _http.OnRead = request => new HttpResponseMessage(HttpStatusCode.OK)
         {
             RequestMessage = request,
             Content = new StringContent(/*lang=json,strict*/ """{"compositeResponse":[{"referenceId":"q0","httpStatusCode":400,"httpHeaders":{},"body":[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating'"}]}]}""")
@@ -291,7 +290,8 @@ public sealed class EngineFlowTests
             return new(id, new UpsertUnit([]), eventId);
         }
 
-        var batch = new PreparedBatch([Entity("A", 1), Entity("B", 2), Entity("C", 3), Entity("D", 4), Entity("E", 5)], [(8, "bad")]);
+        var batch = new PreparedBatch([Entity("A", 1), Entity("B", 2), Entity("C", 3), Entity("D", 4), Entity("E", 5)],
+            [new FailedEvent(8, "bad", SalesforceErrors.InvalidEvent)]);
         SalesforceError[] error = [new(null, "PROCESSING_HALTED", "x"), new("acct", "SOME_CODE", "why")];
 
         var outcomes = batch.Outcomes(new Dictionary<string, UpsertResult>
@@ -366,12 +366,8 @@ public sealed class EngineFlowTests
 
     private SalesforceBatchUpsertService Engine()
     {
-        var options = Options.Create(new SalesforceOptions());
         _http.InnerHandler ??= new FakeSalesforceHandler(_org);
-        var http = new HttpClient(_http) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
-        return new SalesforceBatchUpsertService(_gate, new SalesforceRestClient(http), SalesforceStep.SchemaCache(),
-            new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
-            NullLogger<SalesforceBatchUpsertService>.Instance);
+        return SalesforceStep.Service(SalesforceStep.Http(_http), Options.Create(new SalesforceOptions()), _gate);
     }
 
     /// <summary>An account event with its Profile (keyed like the account).</summary>

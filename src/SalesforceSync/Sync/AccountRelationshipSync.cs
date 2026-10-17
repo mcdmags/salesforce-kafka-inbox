@@ -6,8 +6,8 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// Account_Relationship__c between two Accounts, named by their external ids (Text foreign keys). If either Account
-/// isn't in Salesforce yet, nothing is sent and the relationship is retried until the account sync has created it. Like <see cref="AccountSync"/>,
-/// everything particular to relationships is in this file.
+/// isn't in Salesforce yet, nothing is sent and the relationship is retried until the account sync has created it.
+/// Like <see cref="AccountSync"/>, everything particular to relationships is in this file.
 /// </summary>
 public static class AccountRelationshipSync
 {

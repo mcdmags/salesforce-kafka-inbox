@@ -5,6 +5,7 @@ public sealed class SalesforceOptions
     public const string Section = "Salesforce";
 
     public string InstanceUrl { get; set; } = "";
+
     /// <summary>
     /// The OAuth token endpoint. Unset = <c>{InstanceUrl}/services/oauth2/token</c> (the org's My Domain, and the mock
     /// org's); set it only when the org issues tokens elsewhere, e.g. another My Domain host or

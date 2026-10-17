@@ -51,13 +51,13 @@ public sealed class WriteRulesTests
     public static TheoryData<string, object?, string, string[]> Diffs()
     {
         return new()
-    {
-        { "equal", "Acme", /*lang=json,strict*/ """{"Name":"Acme","Active__c":false}""", [] },
-        { "changed", "Globex", /*lang=json,strict*/ """{"Name":"Acme","Active__c":false}""", ["Name"] },
-        { "cleared to null", null, /*lang=json,strict*/ """{"Name":"Acme","Active__c":false}""", ["Name"] },
-        { "empty and null stay equal", null, /*lang=json,strict*/ """{"Name":null,"Active__c":false}""", [] },
-        { "a checkbox that is null is false", "Acme", /*lang=json,strict*/ """{"Name":"Acme","Active__c":true}""", ["Active__c"] }
-    };
+        {
+            { "equal", "Acme", /*lang=json,strict*/ """{"Name":"Acme","Active__c":false}""", [] },
+            { "changed", "Globex", /*lang=json,strict*/ """{"Name":"Acme","Active__c":false}""", ["Name"] },
+            { "cleared to null", null, /*lang=json,strict*/ """{"Name":"Acme","Active__c":false}""", ["Name"] },
+            { "empty and null stay equal", null, /*lang=json,strict*/ """{"Name":null,"Active__c":false}""", [] },
+            { "a checkbox that is null is false", "Acme", /*lang=json,strict*/ """{"Name":"Acme","Active__c":true}""", ["Active__c"] }
+        };
     }
 
     [Theory, MemberData(nameof(Diffs))]
@@ -256,13 +256,11 @@ public sealed class WriteRulesTests
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
         var request = Plan([Normalized(new UpsertUnit([Profile("P1", "Gold", "A1")]))], current).Requests.Single();
-        var errors = new SalesforceErrors(Options.Create(new SalesforceOptions { ParentMissingMessages = messages }));
+        var options = new SalesforceOptions { ParentMissingMessages = messages };
 
-        var result = new WriteResultInterpreter(errors).Interpret(request,
-        [
+        var result = Interpret(options, request,
             new CollectionResult("Profile__c", [new RecordResult(false, null,
-                [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Parent Account A1 does not exist")])], [])
-        ]).Single();
+                [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Parent Account A1 does not exist")])], [])).Single();
 
         (result.Outcome, result.PrimaryError!.Code).Should().Be((outcome, code), "any code, as long as the message matches (case-insensitive)");
     }
@@ -305,18 +303,18 @@ public sealed class WriteRulesTests
     public static TheoryData<string, CollectionResult[], SyncOutcome, string> SingleRecordResults()
     {
         return new()
-    {
-        { "no answer for the subrequest", [], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
-        { "the subrequest failed as a whole, even with a permanent code",
-            [new CollectionResult("Account", null, [new SalesforceError("Account", "INVALID_FIELD", "x")])],
-            SyncOutcome.TransientFailure, "INVALID_FIELD" },
-        { "fewer results than records", [new CollectionResult("Account", [], [])], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
-        { "a record failed without details", [new CollectionResult("Account", [new RecordResult(false, null, [])], [])],
-            SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
-        { "a validation rule", [Failed("Account", "FIELD_CUSTOM_VALIDATION_EXCEPTION")], SyncOutcome.PermanentFailure, "FIELD_CUSTOM_VALIDATION_EXCEPTION" },
-        { "a create that lost a race", [Failed("Account", "DUPLICATE_VALUE")], SyncOutcome.TransientFailure, "DUPLICATE_VALUE" },
-        { "only skipped, nobody says why", [Failed("Account", "PROCESSING_HALTED")], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" }
-    };
+        {
+            { "no answer for the subrequest", [], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
+            { "the subrequest failed as a whole, even with a permanent code",
+                [new CollectionResult("Account", null, [new SalesforceError("Account", "INVALID_FIELD", "x")])],
+                SyncOutcome.TransientFailure, "INVALID_FIELD" },
+            { "fewer results than records", [new CollectionResult("Account", [], [])], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
+            { "a record failed without details", [new CollectionResult("Account", [new RecordResult(false, null, [])], [])],
+                SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
+            { "a validation rule", [Failed("Account", "FIELD_CUSTOM_VALIDATION_EXCEPTION")], SyncOutcome.PermanentFailure, "FIELD_CUSTOM_VALIDATION_EXCEPTION" },
+            { "a create that lost a race", [Failed("Account", "DUPLICATE_VALUE")], SyncOutcome.TransientFailure, "DUPLICATE_VALUE" },
+            { "only skipped, nobody says why", [Failed("Account", "PROCESSING_HALTED")], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" }
+        };
     }
 
     [Theory, MemberData(nameof(SingleRecordResults))]

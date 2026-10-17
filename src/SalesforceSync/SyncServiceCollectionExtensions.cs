@@ -20,9 +20,10 @@ public static class SyncServiceCollectionExtensions
 {
     /// <summary>
     /// The worker: options (validated at startup), the Postgres data source (<c>ConnectionStrings:inboxdb</c>), the
-    /// database schema (migrated at startup), the rate-limited Salesforce client (OAuth and REST over HTTP to <c>Salesforce:InstanceUrl</c>, a real org or
-    /// the mock one) with its Describe cache shared through Redis (when <c>ConnectionStrings:redis</c> is
-    /// set), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the worker loops.
+    /// database schema (migrated at startup), the rate-limited Salesforce client (OAuth and REST over HTTP to
+    /// <c>Salesforce:InstanceUrl</c>, a real org or the mock one) with its Describe cache shared through Redis (when
+    /// <c>ConnectionStrings:redis</c> is set), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the
+    /// worker loops.
     /// </summary>
     public static IHostApplicationBuilder AddSalesforceSyncWorker(this IHostApplicationBuilder builder)
     {
@@ -217,8 +218,9 @@ public static class SyncServiceCollectionExtensions
 
         if (TRow.MaxRecordsPerWrite is < 1 or > SalesforceRestClient.MaxCollectionRecords)
         {
-            throw new InvalidOperationException($"{typeof(TRow).Name}.{nameof(IInboxRow.MaxRecordsPerWrite)} ({TRow.MaxRecordsPerWrite}) " +
-                                                $"must be 1 to {SalesforceRestClient.MaxCollectionRecords} (records per sObject Collections upsert).");
+            throw new InvalidOperationException(
+                $"{typeof(TRow).Name}.{nameof(IInboxRow.MaxRecordsPerWrite)} ({TRow.MaxRecordsPerWrite}) " +
+                $"must be 1 to {SalesforceRestClient.MaxCollectionRecords} (records per sObject Collections upsert).");
         }
     }
 }
