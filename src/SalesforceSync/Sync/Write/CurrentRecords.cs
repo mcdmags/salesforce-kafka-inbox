@@ -1,7 +1,7 @@
 using System.Text.Json;
 using SalesforceSync.Salesforce;
 
-namespace SalesforceSync.Sync.Upsert;
+namespace SalesforceSync.Sync.Write;
 
 /// <summary>A query of the batch's read and the object its rows belong to.</summary>
 internal sealed record ReadQuery(CompositeQuery Query, string SObject);

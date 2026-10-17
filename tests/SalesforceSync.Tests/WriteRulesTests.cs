@@ -2,7 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
-using SalesforceSync.Sync.Upsert;
+using SalesforceSync.Sync.Write;
 
 namespace SalesforceSync.Tests;
 
@@ -107,7 +107,7 @@ public sealed class WriteRulesTests
             [Normalized(Account("NEW", "New")), Normalized(Account("OLD", "Changed")), Normalized(Account("SAME", "Same"))],
             current);
 
-        plan.NotSent.Should().ContainSingle().Which.Should().Match<UpsertResult>(r => r.Key == "SAME" && r.Outcome == SyncOutcome.Unchanged);
+        plan.NotSent.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "SAME" && r.Outcome == SyncOutcome.Unchanged);
         var upsert = plan.Requests.Should().ContainSingle().Subject.BuildRequests().Should().ContainSingle().Subject;
         upsert.ReferenceId.Should().Be("Account");
         upsert.Records.Select(r => r["ExternalId__c"]).Should().Equal("NEW", "OLD");
@@ -148,7 +148,7 @@ public sealed class WriteRulesTests
     [InlineData("a foreign key")]
     public void A_parent_that_is_neither_in_the_unit_nor_in_Salesforce_waits_and_nothing_is_sent(string what)
     {
-        var orphan = new UpsertUnit([what == "a lookup" ? Contact("C1", "MISSING") : Profile("P1", "Gold", "MISSING")]);
+        var orphan = new SyncUnit([what == "a lookup" ? Contact("C1", "MISSING") : Profile("P1", "Gold", "MISSING")]);
 
         var plan = Plan([Normalized(orphan)], CurrentRecords.None);
 
@@ -185,9 +185,9 @@ public sealed class WriteRulesTests
         var gadget = new SObjectRecord("gadget", "Gadget__c", "Key__c", "G1", new Dictionary<string, object?> { ["Widget__c"] = "W1" },
             ForeignKeys: [new SObjectLookup("Widget__c", "Widget__c", "Key__c", "W1")]);
 
-        var widgetsOnly = Plan([Normalized(new UpsertUnit([widget])), Normalized(new UpsertUnit([Widget("W2")]))],
+        var widgetsOnly = Plan([Normalized(new SyncUnit([widget])), Normalized(new SyncUnit([Widget("W2")]))],
             CurrentRecords.None).Requests.Should().ContainSingle().Subject;
-        var both = Plan([Normalized(new UpsertUnit([widget, gadget]))], CurrentRecords.None).Requests.Should().ContainSingle().Subject;
+        var both = Plan([Normalized(new SyncUnit([widget, gadget]))], CurrentRecords.None).Requests.Should().ContainSingle().Subject;
 
         widgetsOnly.BuildRequests().Select(u => (u.ReferenceId, u.Url, u.Records.Count)).Should().Equal(
             [("Widget__c", "/services/data/v62.0/composite/sobjects/Widget__c/Key__c", 2)], "one object: one upsert, a call of its own");
@@ -255,7 +255,7 @@ public sealed class WriteRulesTests
     public void The_orgs_message_for_a_missing_parent_can_be_configured_to_mean_wait_for_it(string[] messages, SyncOutcome outcome, string code)
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
-        var request = Plan([Normalized(new UpsertUnit([Profile("P1", "Gold", "A1")]))], current).Requests.Single();
+        var request = Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "A1")]))], current).Requests.Single();
         var options = new SalesforceOptions { ParentMissingMessages = messages };
 
         var result = Interpret(options, request,
@@ -396,7 +396,7 @@ public sealed class WriteRulesTests
     public void Salesforce_rejecting_a_lookup_target_that_is_gone_means_wait_for_it()
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
-        var request = Plan([Normalized(new UpsertUnit([Contact("C1", "A1")]))], current).Requests.Single();
+        var request = Plan([Normalized(new SyncUnit([Contact("C1", "A1")]))], current).Requests.Single();
 
         var result = Interpret(request, new CollectionResult("Contact",
             [new RecordResult(false, null, [new SalesforceError(null, "INVALID_CROSS_REFERENCE_KEY", "invalid cross reference id", ["AccountId"])])], [])).Single();
@@ -523,7 +523,7 @@ public sealed class WriteRulesTests
         return new(name, type, 255, 0, 0, createable, updateable, nillable);
     }
 
-    private static UpsertUnit Account(string key, object? name, bool? active = false, string? locked = null)
+    private static SyncUnit Account(string key, object? name, bool? active = false, string? locked = null)
     {
         var fields = new Dictionary<string, object?> { ["Name"] = name, ["Active__c"] = active };
         if (locked is not null)
@@ -531,7 +531,7 @@ public sealed class WriteRulesTests
             fields["Locked__c"] = locked;
         }
 
-        return new UpsertUnit([new SObjectRecord("acct", "Account", "ExternalId__c", key, fields)]);
+        return new SyncUnit([new SObjectRecord("acct", "Account", "ExternalId__c", key, fields)]);
     }
 
     /// <summary>A Profile naming its Account by a foreign key.</summary>
@@ -548,17 +548,17 @@ public sealed class WriteRulesTests
                 [new SObjectLookup("AccountId", "Account", "ExternalId__c", accountKey)]);
     }
 
-    private static UpsertUnit AccountWithProfile(string key)
+    private static SyncUnit AccountWithProfile(string key)
     {
         return new([Account(key, "Acme").Records[0], Profile($"P-{key}", "Gold", key)]);
     }
 
-    private static UpsertUnit AccountWithContact(string key)
+    private static SyncUnit AccountWithContact(string key)
     {
         return new([Account(key, "Acme").Records[0], Contact($"C-{key}", key)]);
     }
 
-    private static NormalizedUnit Normalized(UpsertUnit unit)
+    private static NormalizedUnit Normalized(SyncUnit unit)
     {
         var normalized = RecordNormalizer.Normalize(unit.Records[0].ExternalId, unit, Schemas, out var problems);
         problems.Should().BeEmpty();
@@ -583,17 +583,17 @@ public sealed class WriteRulesTests
     }
 
     /// <summary>The one request for these new units.</summary>
-    private static CompositeWrite Request(params UpsertUnit[] units)
+    private static CompositeWrite Request(params SyncUnit[] units)
     {
         return Plan([.. units.Select(Normalized)], CurrentRecords.None).Requests.Single();
     }
 
-    private static List<UpsertResult> Interpret(CompositeWrite request, params CollectionResult[] answers)
+    private static List<SyncResult> Interpret(CompositeWrite request, params CollectionResult[] answers)
     {
         return Interpret(new SalesforceOptions(), request, answers);
     }
 
-    private static List<UpsertResult> Interpret(SalesforceOptions options, CompositeWrite request, params CollectionResult[] answers)
+    private static List<SyncResult> Interpret(SalesforceOptions options, CompositeWrite request, params CollectionResult[] answers)
     {
         return new WriteResultInterpreter(new SalesforceErrors(Options.Create(options))).Interpret(request, answers);
     }

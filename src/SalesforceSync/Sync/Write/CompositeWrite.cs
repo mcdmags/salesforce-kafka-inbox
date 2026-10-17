@@ -1,7 +1,7 @@
 using System.Text.RegularExpressions;
 using SalesforceSync.Salesforce;
 
-namespace SalesforceSync.Sync.Upsert;
+namespace SalesforceSync.Sync.Write;
 
 /// <summary>
 /// One write request, one API call: its units and their writes by collection, each collection an sObject Collections
@@ -35,11 +35,11 @@ internal sealed partial class CompositeWrite
     /// <param name="units">The units with writes, in order.</param>
     /// <param name="maxRecordsPerWrite">The row type's <see cref="Inbox.IInboxRow.MaxRecordsPerWrite"/>: records per collection.</param>
     /// <returns>The requests, and a permanent failure for each unit that can't fit any request.</returns>
-    public static (List<CompositeWrite> Requests, List<UpsertResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units,
+    public static (List<CompositeWrite> Requests, List<SyncResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units,
         int maxRecordsPerWrite)
     {
         var requests = new List<CompositeWrite>();
-        var tooLarge = new List<UpsertResult>();
+        var tooLarge = new List<SyncResult>();
 
         foreach (var unit in units)
         {

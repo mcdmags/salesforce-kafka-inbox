@@ -15,19 +15,19 @@ public static class ContactSync
     public const string DefaultTopic = "contact-changes";
 
     /// <summary>The strategy the engine runs (the contact's key is in the event itself, so Map doesn't take it).</summary>
-    public static readonly UpsertStrategy<ContactEvent> Strategy =
+    public static readonly SyncStrategy<ContactEvent> Strategy =
         new(Type, e => e.Contact?.ExternalId, e => e.Meta, (_, e) => Map(e), Queries);
 
-    public static UpsertUnit Map(ContactEvent e)
+    public static SyncUnit Map(ContactEvent e)
     {
         var payload = e.Contact;
         return string.IsNullOrWhiteSpace(payload?.AccountExternalId)
             ? throw new ArgumentException("accountExternalId is required")
-            : new UpsertUnit([SObjectRecord.From("contact", ToContact(payload))]);
+            : new SyncUnit([SObjectRecord.From("contact", ToContact(payload))]);
     }
 
     // What to read: the contacts themselves (to diff) and the Accounts they point at (to know they exist)
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<ContactSObject>(units), SoqlQuery.LookupTargetsOf<AccountSObject>(units)];
     }

@@ -1,5 +1,5 @@
 using Microsoft.Extensions.Options;
-using SalesforceSync.Sync.Upsert;
+using SalesforceSync.Sync.Write;
 
 namespace SalesforceSync.Inbox;
 

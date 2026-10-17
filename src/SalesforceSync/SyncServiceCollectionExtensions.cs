@@ -156,7 +156,7 @@ public static class SyncServiceCollectionExtensions
     /// <see cref="SyncOptions.MaxConcurrentRequests"/> batches across all pods) and <see cref="SalesforceRateLimitHandler"/>,
     /// inserted as the outermost handler whatever else is added, so every attempt costs a token:
     /// rate limiter -> gzip -> auth. Register it after <see cref="SyncSchemaInitializer"/> and before the worker loops
-    /// (hosted services start in registration order). <see cref="SalesforceBatchUpsertService"/> needs it.
+    /// (hosted services start in registration order). <see cref="SalesforceBatchSyncService"/> needs it.
     /// </summary>
     public static IHttpClientBuilder AddSalesforceRateLimiting(this IHttpClientBuilder salesforce)
     {
@@ -188,7 +188,7 @@ public static class SyncServiceCollectionExtensions
         services.AddPooledDbContextFactory<SyncDbContext>((sp, o) => SyncDbContext.Configure(o,
             sp.GetRequiredService<NpgsqlDataSource>(), sp.GetRequiredService<IOptions<PostgresRetryOptions>>().Value));
         services.AddSingleton(typeof(IRepository<>), typeof(InboxRepository<>)); // one per inbox row type
-        services.AddTransient<SalesforceBatchUpsertService>();
+        services.AddTransient<SalesforceBatchSyncService>();
 
         // The synced objects
         AddEntitySync<AccountEvent, AccountInboxRow>(services, AccountSync.Strategy, AccountSync.DefaultTopic);
@@ -198,12 +198,12 @@ public static class SyncServiceCollectionExtensions
         return services;
     }
 
-    private static void AddEntitySync<TEvent, TRow>(IServiceCollection services, UpsertStrategy<TEvent> strategy, string defaultTopic)
+    private static void AddEntitySync<TEvent, TRow>(IServiceCollection services, SyncStrategy<TEvent> strategy, string defaultTopic)
         where TRow : InboxRow, IInboxRow, new()
     {
         ValidateLimits<TRow>();
         services.AddTransient<ISalesforceEntitySync>(sp => new EntitySyncService<TEvent, TRow>(
-            sp.GetRequiredService<SalesforceBatchUpsertService>(), sp.GetRequiredService<IRepository<TRow>>(), strategy, defaultTopic));
+            sp.GetRequiredService<SalesforceBatchSyncService>(), sp.GetRequiredService<IRepository<TRow>>(), strategy, defaultTopic));
     }
 
     /// <summary>A row type's query and write limits are within Salesforce's (<see cref="IInboxRow"/>).</summary>

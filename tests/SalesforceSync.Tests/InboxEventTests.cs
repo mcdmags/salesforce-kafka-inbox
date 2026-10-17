@@ -14,9 +14,9 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class InboxEventTests
 {
-    private static readonly UpsertStrategy<AccountEvent> Accounts = AccountSync.Strategy;
+    private static readonly SyncStrategy<AccountEvent> Accounts = AccountSync.Strategy;
 
-    private static readonly UpsertStrategy<AccountRelationshipEvent> Relationships = AccountRelationshipSync.Strategy;
+    private static readonly SyncStrategy<AccountRelationshipEvent> Relationships = AccountRelationshipSync.Strategy;
 
     // ---------- Mapping ----------
 
@@ -373,11 +373,11 @@ public sealed class InboxEventTests
 
     private static TEvent Read<TEvent>(string json)
     {
-        return JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchUpsertService.EventJson)!;
+        return JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchSyncService.EventJson)!;
     }
 
     private static TEvent Read<TEvent>(JsonObject json)
     {
-        return json.Deserialize<TEvent>(SalesforceBatchUpsertService.EventJson)!;
+        return json.Deserialize<TEvent>(SalesforceBatchSyncService.EventJson)!;
     }
 }

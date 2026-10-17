@@ -36,9 +36,9 @@ public interface ISalesforceEntitySync
 /// type, which selects the inbox table; it is registered in <c>AddInboxSync</c>.
 /// </summary>
 public sealed class EntitySyncService<TEvent, TRow>(
-    SalesforceBatchUpsertService engine,
+    SalesforceBatchSyncService engine,
     IRepository<TRow> inbox,
-    UpsertStrategy<TEvent> strategy,
+    SyncStrategy<TEvent> strategy,
     string defaultTopic) : ISalesforceEntitySync
     where TRow : InboxRow, IInboxRow, new()
 {
@@ -61,6 +61,6 @@ public sealed class EntitySyncService<TEvent, TRow>(
 
     public Task<int> SyncBatchAsync(CancellationToken ct)
     {
-        return engine.UpsertBatchAsync(strategy, inbox, ct);
+        return engine.SyncBatchAsync(strategy, inbox, ct);
     }
 }

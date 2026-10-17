@@ -1,6 +1,6 @@
 using SalesforceSync.Salesforce;
 
-namespace SalesforceSync.Sync.Upsert;
+namespace SalesforceSync.Sync.Write;
 
 /// <summary>
 /// Turns Salesforce's per-record results into one outcome per unit: saved only if every record is; permanent if
@@ -9,7 +9,7 @@ namespace SalesforceSync.Sync.Upsert;
 internal sealed class WriteResultInterpreter(SalesforceErrors errors)
 {
     /// <summary>One outcome per unit of the request, from its upserts' answers by reference id.</summary>
-    public List<UpsertResult> Interpret(CompositeWrite request, IReadOnlyList<CollectionResult> answers)
+    public List<SyncResult> Interpret(CompositeWrite request, IReadOnlyList<CollectionResult> answers)
     {
         // Parents were sent first, so a child is classified after its parent
         foreach (var (referenceId, _, writes) in request.Collections)
@@ -21,7 +21,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     }
 
     /// <summary>One outcome per unit, from its records' statuses (every collection with its writes classified).</summary>
-    private List<UpsertResult> Results(IReadOnlyList<PlannedUnit> units)
+    private List<SyncResult> Results(IReadOnlyList<PlannedUnit> units)
     {
         // Records failed, but none says why (every one of them reports being skipped because of another, or has no
         // answer): handing the units straight back would repeat the same request forever, so they spend a retry and
@@ -111,7 +111,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
             : WriteStatus.Transient;
     }
 
-    private UpsertResult UnitResult(PlannedUnit unit, bool causeUnknown)
+    private SyncResult UnitResult(PlannedUnit unit, bool causeUnknown)
     {
         // Most significant first: the record that decided the outcome, and within it the permanent error
         var unitErrors = unit.Writes.Where(w => w.Status != WriteStatus.ParentNotSaved).OrderByDescending(w => w.Status)
@@ -130,7 +130,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
             unitErrors.Insert(0, new SalesforceError(null, "UNKNOWN_ERROR",
                 "Records of the request failed without any of them reporting the cause"));
         }
-        return new UpsertResult(unit.Key, outcome, unitErrors);
+        return new SyncResult(unit.Key, outcome, unitErrors);
     }
 
     /// <summary>

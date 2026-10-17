@@ -1,15 +1,15 @@
 using Microsoft.Extensions.Options;
 using SalesforceSync.Salesforce;
 using SalesforceSync.Sync;
-using SalesforceSync.Sync.Upsert;
+using SalesforceSync.Sync.Write;
 
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The pure steps of <see cref="SalesforceBatchUpsertService"/>'s Salesforce step on their own: normalizing against the schema, building the
+/// The pure steps of <see cref="SalesforceBatchSyncService"/>'s Salesforce step on their own: normalizing against the schema, building the
 /// read and packing writes into Composite requests. No org, no HTTP.
 /// </summary>
-public sealed class UpsertStepsTests
+public sealed class WriteStepsTests
 {
     private static readonly SObjectSchema Account = new("Account",
     [
@@ -46,7 +46,7 @@ public sealed class UpsertStepsTests
     [Fact]
     public void A_unit_Salesforce_would_accept_has_no_problems()
     {
-        var unit = new UpsertUnit([AccountRecord("A1", "Acme")]);
+        var unit = new SyncUnit([AccountRecord("A1", "Acme")]);
 
         var normalized = RecordNormalizer.Normalize("A1", unit, Schemas, out var problems);
 
@@ -59,7 +59,7 @@ public sealed class UpsertStepsTests
     [Fact]
     public void Every_problem_of_a_unit_is_reported_with_its_records_reference_id()
     {
-        var unit = new UpsertUnit(
+        var unit = new SyncUnit(
         [
             new SObjectRecord("acct", "Account", "ExternalId__c", "A1",
                 new Dictionary<string, object?> { ["Name"] = "too long", ["Nope__c"] = 1 }),
@@ -82,7 +82,7 @@ public sealed class UpsertStepsTests
     [Fact]
     public void A_foreign_key_is_normalized_and_compared_like_any_text_field()
     {
-        var unit = new UpsertUnit([new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1",
+        var unit = new SyncUnit([new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1",
             new Dictionary<string, object?> { ["AccountId__c"] = "A1" }, ForeignKeys: [new SObjectLookup("AccountId__c", "Account", "ExternalId__c", "A1")])]);
 
         var normalized = RecordNormalizer.Normalize("P1", unit, Schemas, out var problems);
@@ -114,7 +114,7 @@ public sealed class UpsertStepsTests
     [Fact]
     public void The_record_type_becomes_RecordTypeId_a_field_like_any_other()
     {
-        var unit = new UpsertUnit([AccountRecord("A1", "Acme") with { RecordType = "business" }]);
+        var unit = new SyncUnit([AccountRecord("A1", "Acme") with { RecordType = "business" }]);
 
         var normalized = RecordNormalizer.Normalize("A1", unit, WithRecordTypes, out var problems);
 
@@ -127,7 +127,7 @@ public sealed class UpsertStepsTests
     [Fact]
     public void A_record_without_a_record_type_leaves_RecordTypeId_alone()
     {
-        var normalized = RecordNormalizer.Normalize("A1", new UpsertUnit([AccountRecord("A1", "Acme")]), WithRecordTypes, out var problems);
+        var normalized = RecordNormalizer.Normalize("A1", new SyncUnit([AccountRecord("A1", "Acme")]), WithRecordTypes, out var problems);
 
         problems.Should().BeEmpty();
         normalized.Records[0].Fields.Keys.Select(f => f.Name).Should().Equal("Name");
@@ -139,7 +139,7 @@ public sealed class UpsertStepsTests
     [InlineData("Master", "is not available to the running user")]
     public void A_record_type_the_org_does_not_offer_is_a_problem(string developerName, string why)
     {
-        var unit = new UpsertUnit([AccountRecord("A1", "Acme") with { RecordType = developerName }]);
+        var unit = new SyncUnit([AccountRecord("A1", "Acme") with { RecordType = developerName }]);
 
         RecordNormalizer.Normalize("A1", unit, WithRecordTypes, out var problems);
 
@@ -152,10 +152,10 @@ public sealed class UpsertStepsTests
     public void A_record_type_problem_alone_is_transient_with_another_problem_permanent()
     {
         var errors = new SalesforceErrors(Options.Create(new SalesforceOptions()));
-        (string, UpsertUnit)[] units =
+        (string, SyncUnit)[] units =
         [
-            ("A1", new UpsertUnit([AccountRecord("A1", "Acme") with { RecordType = "Nope" }])),
-            ("A2", new UpsertUnit([AccountRecord("A2", "too long") with { RecordType = "Nope" }]))
+            ("A1", new SyncUnit([AccountRecord("A1", "Acme") with { RecordType = "Nope" }])),
+            ("A2", new SyncUnit([AccountRecord("A2", "too long") with { RecordType = "Nope" }]))
         ];
 
         var (normalized, rejected) = RecordNormalizer.Normalize(units, WithRecordTypes, errors);
@@ -171,7 +171,7 @@ public sealed class UpsertStepsTests
     [Fact]
     public void A_query_selects_what_the_diff_and_the_lookups_need_and_is_chunked_by_100_values()
     {
-        var units = Normalized(new UpsertUnit(
+        var units = Normalized(new SyncUnit(
         [
             AccountRecord("A1", "Acme"),
             new SObjectRecord("contact", "Contact", "ExternalId__c", "C1", new Dictionary<string, object?>(),
@@ -350,11 +350,11 @@ public sealed class UpsertStepsTests
     /// <summary>The read of Accounts by external id, selecting Name, ExternalId__c and Id.</summary>
     private static List<ReadQuery> BuildAccountRead(IReadOnlyList<string> ids, int maxValuesPerQuery)
     {
-        return ReadQueryBuilder.Build(Normalized(new UpsertUnit([AccountRecord("A1", "Acme")])),
+        return ReadQueryBuilder.Build(Normalized(new SyncUnit([AccountRecord("A1", "Acme")])),
             [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas, maxValuesPerQuery);
     }
 
-    private static List<NormalizedUnit> Normalized(UpsertUnit unit)
+    private static List<NormalizedUnit> Normalized(SyncUnit unit)
     {
         var normalized = RecordNormalizer.Normalize(unit.Records[0].ExternalId, unit, Schemas, out var problems);
         problems.Should().BeEmpty();

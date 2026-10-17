@@ -8,7 +8,7 @@ namespace SalesforceSync.Salesforce;
 /// <summary>
 /// Salesforce REST transport, and the only class that talks to Salesforce. Every method is exactly one API call: it
 /// takes requests and returns the raw results per subrequest and per record. It decides nothing (what to write, what
-/// a result means); that is <see cref="Sync.SalesforceBatchUpsertService"/>'s.
+/// a result means); that is <see cref="Sync.SalesforceBatchSyncService"/>'s.
 /// </summary>
 public sealed class SalesforceRestClient(HttpClient http)
 {

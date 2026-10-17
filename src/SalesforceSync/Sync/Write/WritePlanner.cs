@@ -1,7 +1,7 @@
 using System.Text.Json;
 using SalesforceSync.Salesforce;
 
-namespace SalesforceSync.Sync.Upsert;
+namespace SalesforceSync.Sync.Write;
 
 /// <summary>What to do with a batch after the read.</summary>
 /// <param name="Requests">
@@ -9,7 +9,7 @@ namespace SalesforceSync.Sync.Upsert;
 /// Collections upsert, or one Composite request of several (<see cref="CompositeWrite"/>).
 /// </param>
 /// <param name="NotSent">The units that won't be sent, with their outcome: unchanged, rejected, too large, or waiting for a lookup target.</param>
-internal sealed record WritePlan(IReadOnlyList<CompositeWrite> Requests, IReadOnlyList<UpsertResult> NotSent);
+internal sealed record WritePlan(IReadOnlyList<CompositeWrite> Requests, IReadOnlyList<SyncResult> NotSent);
 
 /// <summary>
 /// Turns units and Salesforce's current records into the collection requests to send. Whether a record is created or
@@ -25,7 +25,7 @@ internal static class WritePlanner
     public static WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current, int maxRecordsPerWrite)
     {
         var planned = new List<PlannedUnit>();
-        var decided = new List<UpsertResult>();
+        var decided = new List<SyncResult>();
 
         foreach (var unit in units)
         {

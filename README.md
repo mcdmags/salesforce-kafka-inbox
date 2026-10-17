@@ -63,7 +63,7 @@ Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per 
                                 AccountRelationshipSync ─┤                 sObject → records, + queries)
                                 ContactSync ─┤
                                                                 ▼
-                              SalesforceBatchUpsertService.UpsertBatchAsync<TEvent, TRow>(strategy, IRepository<TRow>)
+                              SalesforceBatchSyncService.SyncBatchAsync<TEvent, TRow>(strategy, IRepository<TRow>)
                                 claim → each entity's newest event → map
                                 → describe → normalize → 1 composite read → decide (diff + parents)
                                 → write: 1 collections upsert per level and object, parents first:
@@ -82,8 +82,8 @@ The sync is three layers, each with one job:
 | Layer | Classes | Does |
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `QueryAsync`, `UpsertAsync`); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
-| **Business flow** | `SalesforceBatchUpsertService` | `UpsertBatchAsync` is the sync as a list of steps: claim → map each entity's event → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | `PreparedBatch.Prepare` (read, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Upsert/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, parents first, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (one Collections upsert per level and object, the row type's `MaxRecordsPerWrite` records each, 5 per request: one alone, several as one Composite request), `WriteResultInterpreter` (per-record results → outcome per entity, for Composite subrequests and upserts alike) | Pure and deterministic; unit-tested without a database or HTTP. |
+| **Business flow** | `SalesforceBatchSyncService` | `SyncBatchAsync` is the sync as a list of steps: claim → map each entity's event → `WriteToSalesforceAsync` (describe → normalize → read → decide → send → interpret) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
+| **Rules, no I/O** | `PreparedBatch.Prepare` (read, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and in `Sync/Write/`: `RecordNormalizer` (values against Describe, via `FieldValues`), `ReadQueryBuilder` (the read's SOQL), `CurrentRecords` (what the read found), `WritePlanner` (changed fields, create / update / unchanged, parents first, lookups by Id or reference, `DEPENDENCY_NOT_SYNCED`) with `CompositeWrite.Pack` (one Collections upsert per level and object, the row type's `MaxRecordsPerWrite` records each, 5 per request: one alone, several as one Composite request), `WriteResultInterpreter` (per-record results → outcome per entity, for Composite subrequests and upserts alike) | Pure and deterministic; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`). The
 model defines every table in `OnModelCreating` (partial indexes with `HasFilter`, autovacuum settings with
@@ -187,7 +187,7 @@ JSON with the source system's own field names (nothing in an event is a Salesfor
   `account-relationship-changes` → accountRelationship, `contact-changes` → contact; `Kafka:Topics:<entityType>` overrides a type's topic). Each
   type has its own typed event class, its own inbox table and its own worker pass.
 - **Entity id**: `<object>.externalId`, the record's Salesforce external id (`ExternalId__c`). It is read from the
-  deserialized event (`UpsertStrategy.EntityId`) and stored in the inbox row's `entity_id` column.
+  deserialized event (`SyncStrategy.EntityId`) and stored in the inbox row's `entity_id` column.
 - **Order**: `meta.time`, an ISO-8601 time with an offset or `Z`. **The Kafka message key is not used, and neither is
   arrival order**: an entity's events may come over any partition, through any consumer, in any order. The event with
   the newest `meta.time` wins; an event that is not newer than what was already synced is not stored. This relies on
@@ -261,7 +261,7 @@ serves each object's record types and which rejects an unknown `RecordTypeId` li
 ## The inbox
 
 **Ingest.** `KafkaInboxConsumer` reads each message with the typed event of its topic's entity type
-(`UpsertStrategy.TryRead`, the same read the engine uses) and stores it only if it is valid: valid JSON for that
+(`SyncStrategy.TryRead`, the same read the engine uses) and stores it only if it is valid: valid JSON for that
 type, the entity object with a non-empty id, a `meta.time` with an explicit offset, and a `meta.type` of `inserted`
 or `updated`. Anything else is logged with its topic, partition and offset and skipped. The row gets
 `entity_id` = the id from the event, `event_time` = its `meta.time` and `payload` = the message value, unchanged.
@@ -958,7 +958,7 @@ before anything is sent.
 
 ## Adding a Salesforce object
 
-The engine (`SalesforceBatchUpsertService.UpsertBatchAsync<TEvent, TRow>`) owns claiming, ordering, coalescing, rate
+The engine (`SalesforceBatchSyncService.SyncBatchAsync<TEvent, TRow>`) owns claiming, ordering, coalescing, rate
 limits, batching, normalization, diffing, parents first, retries and dead-lettering. Nothing in the engine, the consumer or
 the worker loops names an object. An object supplies, in one file: a payload class, an sObject class, an inbox row
 class (which selects the object's inbox table) and a static class with the mapping and the strategy, which says how an
@@ -1016,24 +1016,24 @@ public static class AccountRelationshipSync
     public const string Type = "accountRelationship";
     public const string DefaultTopic = "account-relationship-changes";  // Kafka:Topics:accountRelationship overrides
 
-    public static readonly UpsertStrategy<AccountRelationshipEvent> Strategy = new(Type,
+    public static readonly SyncStrategy<AccountRelationshipEvent> Strategy = new(Type,
         EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id
         Meta: e => e.Meta,                                  // and the meta (time and type) are in the event
         Map: (_, e) => Map(e),
         Queries: Queries);
 
     // Throwing dead-letters the event (INVALID_EVENT)
-    public static UpsertUnit Map(AccountRelationshipEvent e)
+    public static SyncUnit Map(AccountRelationshipEvent e)
     {
         var payload = e.AccountRelationship;
         if (string.IsNullOrWhiteSpace(payload?.AccountExternalId) || string.IsNullOrWhiteSpace(payload.RelatedAccountExternalId))
             throw new ArgumentException("accountExternalId and relatedAccountExternalId are required");
 
-        return new UpsertUnit([SObjectRecord.From("rel", ToRelationship(payload))]);
+        return new SyncUnit([SObjectRecord.From("rel", ToRelationship(payload))]);
     }
 
     // The relationships themselves (to diff) and the Accounts they point at (to know they exist)
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units) =>
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units) =>
     [
         SoqlQuery.RecordsOf<AccountRelationshipSObject>(units),
         SoqlQuery.LookupTargetsOf<AccountSObject>(units)
@@ -1086,11 +1086,11 @@ public static class ContactSync
     public const string Type = "contact";
     public const string DefaultTopic = "contact-changes";
 
-    public static readonly UpsertStrategy<ContactEvent> Strategy =
+    public static readonly SyncStrategy<ContactEvent> Strategy =
         new(Type, e => e.Contact?.ExternalId, e => e.Meta, (_, e) => Map(e), Queries);
 
     // The contacts themselves (to diff) and the Accounts they point at (to know they exist)
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units) =>
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units) =>
     [
         SoqlQuery.RecordsOf<ContactSObject>(units),
         SoqlQuery.LookupTargetsOf<AccountSObject>(units)
@@ -1120,11 +1120,11 @@ src/
   SalesforceSync/                 Worker:
     Inbox/                        Kafka consumer, worker loops, InboxSql, InboxRow, IRepository (and the
                                   claim and outcome types), InboxRepository
-    Sync/                         The engine (SalesforceBatchUpsertService), PreparedBatch, EntitySyncService, the
+    Sync/                         The engine (SalesforceBatchSyncService), PreparedBatch, EntitySyncService, the
                                   strategy and event meta, the engine's model types, and one file per synced object
                                   (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy,
                                   inbox row)
-    Sync/Upsert/                  The write path's rules, no I/O: normalize, read queries, diff, plan (parents first),
+    Sync/Write/                  The write path's rules, no I/O: normalize, read queries, diff, plan (parents first),
                                   pack (one upsert per level and object; 2+ in a request → Composite), interpret
     Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors,
                                   SObjectMetadata and the attributes the sObject classes are read by

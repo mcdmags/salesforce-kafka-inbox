@@ -7,7 +7,7 @@ namespace SalesforceSync.Sync;
 /// <param name="EntityId">The entity: the Kafka message key.</param>
 /// <param name="Unit">The records to upsert for it.</param>
 /// <param name="RowId">The entity's inbox row id.</param>
-internal sealed record Work(string EntityId, UpsertUnit Unit, long RowId);
+internal sealed record Work(string EntityId, SyncUnit Unit, long RowId);
 
 /// <summary>
 /// What to do with a claim's rows: entities to write, and rows that are invalid on their own. Decided
@@ -25,7 +25,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
     /// </summary>
     /// <param name="strategy">Reads, keys and maps the object's events.</param>
     /// <param name="rows">The claimed rows, one per entity.</param>
-    public static PreparedBatch Prepare<TEvent>(UpsertStrategy<TEvent> strategy, IReadOnlyList<InboxEvent> rows)
+    public static PreparedBatch Prepare<TEvent>(SyncStrategy<TEvent> strategy, IReadOnlyList<InboxEvent> rows)
     {
         var batch = new PreparedBatch([], []);
 
@@ -62,7 +62,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
     }
 
     /// <summary>The units to write, keyed by entity id, as the Salesforce step takes them.</summary>
-    public List<(string Key, UpsertUnit Unit)> Units => [.. Work.Select(w => (w.EntityId, w.Unit))];
+    public List<(string Key, SyncUnit Unit)> Units => [.. Work.Select(w => (w.EntityId, w.Unit))];
 
     /// <summary>
     /// What to record in the inbox once Salesforce has answered: saved or unchanged entities are done, permanent
@@ -70,7 +70,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
     /// leases end and they are due again, with no attempt spent.
     /// </summary>
     /// <param name="results">The outcome of every entity in <see cref="Work"/>, by entity id.</param>
-    public BatchOutcomes Outcomes(IReadOnlyDictionary<string, UpsertResult> results)
+    public BatchOutcomes Outcomes(IReadOnlyDictionary<string, SyncResult> results)
     {
         var synced = new List<long>();
         var dead = new List<FailedEvent>(Invalid);
@@ -90,7 +90,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
         return new BatchOutcomes(synced, dead, failed);
     }
 
-    private static FailedEvent Failure(Work work, UpsertResult result)
+    private static FailedEvent Failure(Work work, SyncResult result)
     {
         return new(work.RowId, string.Join("; ", result.Errors), result.PrimaryError?.Code);
     }

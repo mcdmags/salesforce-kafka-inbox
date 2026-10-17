@@ -4,12 +4,12 @@ using SalesforceSync.Data;
 using SalesforceSync.Inbox;
 using SalesforceSync.RateLimiting;
 using SalesforceSync.Salesforce;
-using SalesforceSync.Sync.Upsert;
+using SalesforceSync.Sync.Write;
 
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// The one sync engine for every Salesforce object. <see cref="UpsertBatchAsync{TEvent, TRow}"/>
+/// The one sync engine for every Salesforce object. <see cref="SyncBatchAsync{TEvent, TRow}"/>
 /// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds each entity's newest
 /// event, and the strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
@@ -31,17 +31,17 @@ namespace SalesforceSync.Sync;
 /// row a newer event overwrote meanwhile gets no outcome: its row stays pending and due.</item>
 /// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="PreparedBatch"/> and the
-/// ones in <c>Sync/Upsert</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
+/// ones in <c>Sync/Write</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
 /// through <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
 /// </summary>
-public sealed class SalesforceBatchUpsertService(
+public sealed class SalesforceBatchSyncService(
     ISalesforceBatchGate gate,
     SalesforceRestClient salesforce,
     SalesforceSchemaCache schemaCache,
     SalesforceErrors errors,
     IOptions<SalesforceOptions> salesforceOptions,
     IOptions<SyncOptions> options,
-    ILogger<SalesforceBatchUpsertService> log)
+    ILogger<SalesforceBatchSyncService> log)
 {
     /// <summary>
     /// How inbox payloads (whole event envelopes) are deserialized into a strategy's event type: camelCase JSON,
@@ -64,7 +64,7 @@ public sealed class SalesforceBatchUpsertService(
 
     /// <summary>Claims, upserts and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
-    public async Task<int> UpsertBatchAsync<TEvent, TRow>(UpsertStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
+    public async Task<int> SyncBatchAsync<TEvent, TRow>(SyncStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
         where TRow : InboxRow, IInboxRow, new()
     {
         await using var admission = await gate.TryEnterAsync(ct);
@@ -95,7 +95,7 @@ public sealed class SalesforceBatchUpsertService(
         // transaction held for up to the request timeout keeps locks, a pooled connection per worker and autovacuum's
         // horizon on a high-churn table. A crash between here and step 4 leaves the rows pending under an expiring
         // lease; the retry reads Salesforce and writes only what still differs.
-        Dictionary<string, UpsertResult> results;
+        Dictionary<string, SyncResult> results;
         try
         {
             results = (await WriteToSalesforceAsync(batch.Units, [.. strategy.Queries([.. batch.Work.Select(w => w.Unit)])],
@@ -157,7 +157,7 @@ public sealed class SalesforceBatchUpsertService(
     /// <param name="maxRecordsPerWrite">The row type's <see cref="IInboxRow.MaxRecordsPerWrite"/>.</param>
     /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
     /// <param name="ct">Cancels the calls; shutdown, not a failure.</param>
-    internal async Task<List<UpsertResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
+    internal async Task<List<SyncResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, SyncUnit Unit)> units,
         IReadOnlyList<SoqlQuery> queries, int maxValuesPerQuery, int maxRecordsPerWrite, CancellationToken ct)
     {
         if (units.Count > ReadQueryBuilder.MaxEntitiesPerBatch)
@@ -165,7 +165,7 @@ public sealed class SalesforceBatchUpsertService(
             throw new ArgumentOutOfRangeException(nameof(units), $"At most {ReadQueryBuilder.MaxEntitiesPerBatch} units per call");
         }
 
-        var results = new List<UpsertResult>(units.Count);
+        var results = new List<SyncResult>(units.Count);
         if (units.Count == 0)
         {
             return results;
@@ -223,7 +223,7 @@ public sealed class SalesforceBatchUpsertService(
     /// A record type the cached describe doesn't have (or not as active and available), or whose Id Salesforce
     /// rejected, may just have been created, activated or assigned: its object is described again next time.
     /// </summary>
-    private async Task InvalidateRecordTypesAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units, IEnumerable<UpsertResult> results,
+    private async Task InvalidateRecordTypesAsync(IReadOnlyList<(string Key, SyncUnit Unit)> units, IEnumerable<SyncResult> results,
         CancellationToken ct)
     {
         var failed = results
@@ -239,7 +239,7 @@ public sealed class SalesforceBatchUpsertService(
         }
     }
 
-    private async Task<Dictionary<string, SObjectSchema>> DescribeAsync(IReadOnlyList<(string Key, UpsertUnit Unit)> units,
+    private async Task<Dictionary<string, SObjectSchema>> DescribeAsync(IReadOnlyList<(string Key, SyncUnit Unit)> units,
         IReadOnlyList<SoqlQuery> queries, CancellationToken ct)
     {
         var sobjects = units.SelectMany(u => u.Unit.Records)
@@ -291,7 +291,7 @@ public sealed class SalesforceBatchUpsertService(
         }
     }
 
-    private void LogFailures(string entityType, PreparedBatch batch, IEnumerable<UpsertResult> results)
+    private void LogFailures(string entityType, PreparedBatch batch, IEnumerable<SyncResult> results)
     {
         foreach (var invalid in batch.Invalid)
         {

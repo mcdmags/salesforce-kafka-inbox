@@ -7,7 +7,7 @@ namespace SalesforceSync.Sync;
 /// atomic); the entity counts as synced only when all of them are. A record must come after the records it looks up
 /// (by a lookup or a foreign key).
 /// </summary>
-public sealed record UpsertUnit(IReadOnlyList<SObjectRecord> Records);
+public sealed record SyncUnit(IReadOnlyList<SObjectRecord> Records);
 
 /// <summary>A Salesforce record to create or update, identified by an external id.</summary>
 /// <param name="ReferenceId">Unique within its unit; other records of the unit can point at it before it exists.</param>
@@ -88,7 +88,7 @@ public sealed record SObjectRecord(
 public sealed record SObjectLookup(string Field, string SObject, string ExternalIdField, string ExternalId);
 
 /// <summary>The outcome for one entity (one unit).</summary>
-public sealed record UpsertResult(string Key, SyncOutcome Outcome, IReadOnlyList<SalesforceError> Errors)
+public sealed record SyncResult(string Key, SyncOutcome Outcome, IReadOnlyList<SalesforceError> Errors)
 {
     /// <summary>The error that decided the outcome (errors are ordered most significant first).</summary>
     public SalesforceError? PrimaryError =>

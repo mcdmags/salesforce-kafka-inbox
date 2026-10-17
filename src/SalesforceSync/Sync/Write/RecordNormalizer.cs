@@ -1,6 +1,6 @@
 using SalesforceSync.Salesforce;
 
-namespace SalesforceSync.Sync.Upsert;
+namespace SalesforceSync.Sync.Write;
 
 /// <summary>
 /// Checks a unit against the Describe metadata and normalizes its values (<see cref="FieldValues"/>), before any call:
@@ -14,12 +14,12 @@ internal static class RecordNormalizer
     /// The units that can be written, and a failure for each of the others: permanent if any of its problems is
     /// (<see cref="SalesforceErrors.IsPermanent"/>), else transient (a record type the org doesn't offer yet).
     /// </summary>
-    public static (List<NormalizedUnit> Normalized, List<UpsertResult> Rejected) Normalize(
-        IReadOnlyList<(string Key, UpsertUnit Unit)> units, IReadOnlyDictionary<string, SObjectSchema> schemas,
+    public static (List<NormalizedUnit> Normalized, List<SyncResult> Rejected) Normalize(
+        IReadOnlyList<(string Key, SyncUnit Unit)> units, IReadOnlyDictionary<string, SObjectSchema> schemas,
         SalesforceErrors errors)
     {
         var normalized = new List<NormalizedUnit>(units.Count);
-        var rejected = new List<UpsertResult>();
+        var rejected = new List<SyncResult>();
         foreach (var (key, unit) in units)
         {
             var candidate = Normalize(key, unit, schemas, out var problems);
@@ -41,7 +41,7 @@ internal static class RecordNormalizer
     /// <param name="key">The entity's key, for the errors.</param>
     /// <param name="unit">The records the strategy mapped.</param>
     /// <param name="schemas">Describe of every object in the unit, by API name.</param>
-    public static NormalizedUnit Normalize(string key, UpsertUnit unit, IReadOnlyDictionary<string, SObjectSchema> schemas,
+    public static NormalizedUnit Normalize(string key, SyncUnit unit, IReadOnlyDictionary<string, SObjectSchema> schemas,
         out List<SalesforceError> problems)
     {
         var found = problems = [];

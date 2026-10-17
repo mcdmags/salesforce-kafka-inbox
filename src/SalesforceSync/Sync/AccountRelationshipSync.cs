@@ -15,19 +15,19 @@ public static class AccountRelationshipSync
     public const string DefaultTopic = "account-relationship-changes";
 
     /// <summary>The strategy the engine runs (the relationship's key is in the event itself, so Map doesn't take it).</summary>
-    public static readonly UpsertStrategy<AccountRelationshipEvent> Strategy =
+    public static readonly SyncStrategy<AccountRelationshipEvent> Strategy =
         new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta, (_, e) => Map(e), Queries);
 
-    public static UpsertUnit Map(AccountRelationshipEvent e)
+    public static SyncUnit Map(AccountRelationshipEvent e)
     {
         var payload = e.AccountRelationship;
         return string.IsNullOrWhiteSpace(payload?.AccountExternalId) || string.IsNullOrWhiteSpace(payload.RelatedAccountExternalId)
             ? throw new ArgumentException("accountExternalId and relatedAccountExternalId are required")
-            : new UpsertUnit([SObjectRecord.From("rel", ToRelationship(payload))]);
+            : new SyncUnit([SObjectRecord.From("rel", ToRelationship(payload))]);
     }
 
     // What to read: the relationships themselves (to diff) and the Accounts they point at (to know they exist)
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<AccountRelationshipSObject>(units), SoqlQuery.LookupTargetsOf<AccountSObject>(units)];
     }

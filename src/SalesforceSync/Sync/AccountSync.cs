@@ -17,9 +17,9 @@ public static class AccountSync
     public const string DefaultTopic = "account-changes";
 
     /// <summary>The strategy the engine runs.</summary>
-    public static readonly UpsertStrategy<AccountEvent> Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries);
+    public static readonly SyncStrategy<AccountEvent> Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries);
 
-    public static UpsertUnit Map(string accountKey, AccountEvent e)
+    public static SyncUnit Map(string accountKey, AccountEvent e)
     {
         var payload = e.Account ?? throw new ArgumentException("account is required");
         var records = new List<SObjectRecord> { SObjectRecord.From("acct", ToAccount(payload)) };
@@ -32,10 +32,10 @@ public static class AccountSync
             profile.AccountId = accountKey;
             records.Add(SObjectRecord.From("prof", profile));
         }
-        return new UpsertUnit(records);
+        return new SyncUnit(records);
     }
 
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
+    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<AccountSObject>(units), SoqlQuery.RecordsOf<ProfileSObject>(units)];
     }

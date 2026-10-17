@@ -11,7 +11,7 @@ namespace SalesforceSync.Sync;
 /// event becomes Salesforce records, and what to read from Salesforce to diff them, resolve their lookups and find
 /// their parents.
 /// Everything else (claiming, ordering, coalescing, rate limits, batching, retries, dead-lettering) is
-/// <see cref="SalesforceBatchUpsertService"/>'s. The engine, the Kafka consumer and the SQL never name an event
+/// <see cref="SalesforceBatchSyncService"/>'s. The engine, the Kafka consumer and the SQL never name an event
 /// field: they go through <paramref name="EntityId"/> and <paramref name="Meta"/>.
 /// </summary>
 /// <typeparam name="TEvent">The inbox payload (the whole event envelope).</typeparam>
@@ -22,12 +22,12 @@ namespace SalesforceSync.Sync;
 /// ingest, so a delete is never synced; whether a record is created or updated is decided by what Salesforce has.</param>
 /// <param name="Map">Inbox event (with its entity id) -> the records to upsert together.</param>
 /// <param name="Queries">The batch's units -> the reads (at most 5 after chunking) the diff and lookups need.</param>
-public sealed record UpsertStrategy<TEvent>(
+public sealed record SyncStrategy<TEvent>(
     string EntityType,
     Func<TEvent, string?> EntityId,
     Func<TEvent, EventMeta?> Meta,
-    Func<string, TEvent, UpsertUnit> Map,
-    Func<IReadOnlyCollection<UpsertUnit>, IEnumerable<SoqlQuery>> Queries)
+    Func<string, TEvent, SyncUnit> Map,
+    Func<IReadOnlyCollection<SyncUnit>, IEnumerable<SoqlQuery>> Queries)
 {
     /// <summary>
     /// Reads and validates a raw event: valid JSON for <typeparamref name="TEvent"/>, an entity with a non-empty id,
@@ -41,7 +41,7 @@ public sealed record UpsertStrategy<TEvent>(
         TEvent? e;
         try
         {
-            e = JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchUpsertService.EventJson);
+            e = JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchSyncService.EventJson);
         }
         catch (JsonException ex)
         {
@@ -75,14 +75,14 @@ public sealed record UpsertStrategy<TEvent>(
     }
 }
 
-/// <summary>An inbox event that passed <see cref="UpsertStrategy{TEvent}.TryRead"/>: the typed event, whose it is and when.</summary>
+/// <summary>An inbox event that passed <see cref="SyncStrategy{TEvent}.TryRead"/>: the typed event, whose it is and when.</summary>
 public sealed record ReadEvent<TEvent>(TEvent Event, string EntityId, DateTimeOffset Time);
 
 /// <summary>Records of one sObject to read from Salesforce, by a field (normally a unique external id).</summary>
 public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyCollection<string> Values)
 {
     /// <summary>Reads the units' records of <typeparamref name="TSObject"/> by external id (to diff them).</summary>
-    public static SoqlQuery RecordsOf<TSObject>(IEnumerable<UpsertUnit> units) where TSObject : class
+    public static SoqlQuery RecordsOf<TSObject>(IEnumerable<SyncUnit> units) where TSObject : class
     {
         var meta = SObjectMetadata<TSObject>.Instance;
         return new SoqlQuery(meta.SObject, meta.ExternalIdField, ExternalIdsOf(units, meta.SObject));
@@ -92,14 +92,14 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
     /// Reads the <typeparamref name="TSObject"/> records the units' lookups and foreign keys point at: for a lookup's
     /// Id, and to know that a parent exists before its child is sent.
     /// </summary>
-    public static SoqlQuery LookupTargetsOf<TSObject>(IEnumerable<UpsertUnit> units) where TSObject : class
+    public static SoqlQuery LookupTargetsOf<TSObject>(IEnumerable<SyncUnit> units) where TSObject : class
     {
         var meta = SObjectMetadata<TSObject>.Instance;
         return new SoqlQuery(meta.SObject, meta.ExternalIdField, LookupIdsOf(units, meta.SObject));
     }
 
     /// <summary>The external ids of every record of <paramref name="sobject"/> in the units.</summary>
-    public static IReadOnlyCollection<string> ExternalIdsOf(IEnumerable<UpsertUnit> units, string sobject)
+    public static IReadOnlyCollection<string> ExternalIdsOf(IEnumerable<SyncUnit> units, string sobject)
     {
         return [.. units.SelectMany(u => u.Records)
                 .Where(r => r.SObject.Equals(sobject, StringComparison.OrdinalIgnoreCase))
@@ -108,7 +108,7 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
     }
 
     /// <summary>The external ids every lookup and foreign key of the units points at in <paramref name="sobject"/>.</summary>
-    public static IReadOnlyCollection<string> LookupIdsOf(IEnumerable<UpsertUnit> units, string sobject)
+    public static IReadOnlyCollection<string> LookupIdsOf(IEnumerable<SyncUnit> units, string sobject)
     {
         return [.. units.SelectMany(u => u.Records)
                 .SelectMany(r => r.Parents)
