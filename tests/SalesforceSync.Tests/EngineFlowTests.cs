@@ -24,7 +24,7 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task The_consumer_stores_an_event_with_the_time_it_read_from_meta_time()
     {
-        var sync = new EntitySyncService<AccountEvent, AccountInboxRow>(Engine(), _inbox, Accounts, "topic");
+        var sync = new EntitySyncService<AccountEvent, AccountInboxRow>(Engine(), _inbox, Accounts);
         var json = Row(1, "ACC-1", "2026-10-14T03:02:03.1234567+02:00").Payload;
 
         sync.TryReadEvent(json, out var entityId, out var eventTime, out var problem).Should().BeTrue("the event is valid, but: {0}", problem);

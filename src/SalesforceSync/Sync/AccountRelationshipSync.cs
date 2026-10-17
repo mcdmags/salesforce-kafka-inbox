@@ -12,14 +12,21 @@ namespace SalesforceSync.Sync;
 public static class AccountRelationshipSync
 {
     public const string Type = "accountRelationship";
-    public const string DefaultTopic = "account-relationship-changes";
 
-    /// <summary>The strategy the engine runs (the relationship's key is in the event itself, so Map doesn't take it).</summary>
+    /// <summary>The strategy the engine runs.</summary>
     public static readonly SyncStrategy<AccountRelationshipEvent> Strategy =
-        new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta, (_, e) => Map(e), Queries);
+        new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta, Map, Queries);
 
-    public static SyncUnit Map(AccountRelationshipEvent e)
+    /// <summary>
+    /// A deleted event deletes the relationship, by its key alone; any other upserts it, which needs both Accounts' keys.
+    /// </summary>
+    public static SyncUnit Map(string relationshipKey, AccountRelationshipEvent e)
     {
+        if (e.Meta?.IsDelete() == true)
+        {
+            return new SyncUnit([SObjectRecord.Deleting<AccountRelationshipSObject>("rel", relationshipKey)]);
+        }
+
         var payload = e.AccountRelationship;
         return string.IsNullOrWhiteSpace(payload?.AccountExternalId) || string.IsNullOrWhiteSpace(payload.RelatedAccountExternalId)
             ? throw new ArgumentException("accountExternalId and relatedAccountExternalId are required")
@@ -50,10 +57,12 @@ public static class AccountRelationshipSync
 
 /// <summary>
 /// Inbox event for an account-to-account relationship (entity type "accountRelationship", key =
-/// accountRelationship.externalId), as the source system sends it (camelCase JSON, full record).
-/// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z" },
+/// accountRelationship.externalId), as <see cref="AccountAggregate"/> splits it out of its first Account's aggregate:
+/// the relationship as the source system sends it (camelCase JSON, full record), or a delete of it (its key only).
+/// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" },
 ///   "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-1", "relatedAccountExternalId": "ACC-2",
-///                            "type": "Parent", "isActive": true } }</code>
+///                            "type": "Parent", "isActive": true } }
+/// { "meta": { "time": "2026-10-15T01:02:03.456Z", "type": "deleted" }, "accountRelationship": { "externalId": "REL-1" } }</code>
 /// </summary>
 public sealed record AccountRelationshipEvent(EventMeta? Meta, AccountRelationshipPayload? AccountRelationship);
 
