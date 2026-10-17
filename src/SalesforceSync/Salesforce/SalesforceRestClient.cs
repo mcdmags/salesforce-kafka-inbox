@@ -58,9 +58,9 @@ public sealed class SalesforceRestClient(HttpClient http)
 
     /// <summary>
     /// sObject Describe: the fields and the record types (<c>recordTypeInfos</c>); with
-    /// <paramref name="ifModifiedSince"/>, returns a null schema on 304 Not Modified.
+    /// <paramref name="ifModifiedSince"/>, returns null on 304 Not Modified.
     /// </summary>
-    public async Task<DescribeResult> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct)
+    public async Task<SObjectSchema?> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, EnsureFits($"{DataPath}/sobjects/{sobject}/describe"));
         if (ifModifiedSince is { } since)
@@ -71,14 +71,14 @@ public sealed class SalesforceRestClient(HttpClient http)
         using var res = await http.SendAsync(request, ct);
         if (res.StatusCode == HttpStatusCode.NotModified)
         {
-            return new DescribeResult(null);
+            return null;
         }
 
         await EnsureSuccessAsync(res, ct);
 
         var body = await res.Content.ReadFromJsonAsync<DescribeBody>(Json, ct)
                    ?? throw new InvalidOperationException($"Empty describe response for {sobject}");
-        return new DescribeResult(new SObjectSchema(body.Name, body.Fields, body.RecordTypeInfos));
+        return new SObjectSchema(body.Name, body.Fields, body.RecordTypeInfos);
     }
 
     /// <summary>

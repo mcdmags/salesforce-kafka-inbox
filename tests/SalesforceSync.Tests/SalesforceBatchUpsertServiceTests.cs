@@ -599,7 +599,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     {
         var http = new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
 
-        var schema = (await new SalesforceRestClient(http).DescribeAsync("Account", null, CancellationToken.None)).Schema!;
+        var schema = (await new SalesforceRestClient(http).DescribeAsync("Account", null, CancellationToken.None))!;
 
         schema.RecordTypes.Should().ContainKey("business").WhoseValue.Should().Be(
             new SalesforceRecordType("Business", RecordTypeId("Account", "Business"), Active: true, Available: true));

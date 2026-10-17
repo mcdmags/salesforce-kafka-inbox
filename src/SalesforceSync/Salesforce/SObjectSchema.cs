@@ -55,6 +55,3 @@ public sealed class SObjectSchema(string name, IEnumerable<SalesforceField> fiel
         return Fields.GetValueOrDefault(field);
     }
 }
-
-/// <summary>Result of a (conditional) describe call: the schema, or null when Salesforce answered 304 Not Modified.</summary>
-public sealed record DescribeResult(SObjectSchema? Schema);
