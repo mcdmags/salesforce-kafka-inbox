@@ -5,8 +5,9 @@ Salesforce client and rate limiter real; only the Salesforce HTTP endpoint mocke
 [main README](../../README.md#benchmarks).
 
 These numbers come from the claim and outcome tuning merged in PR #13, re-measured after the move to EF Core
-(PR #12). [Latest run](#latest-run-main-at-2d20c16) re-measures everything on `main` at 2d20c16 (PR #35 to #46);
-the [run before it](#latest-run-main-at-7a145b0-after-the-simplification) measured `main` at 7a145b0 (PR #20 to #24).
+(PR #12). [Latest run](#latest-run-main-at-b5950c1) re-measures everything on `main` at b5950c1 (PR #47 to #65);
+the [run before it](#latest-run-main-at-2d20c16) measured `main` at 2d20c16 (PR #35 to #46);
+the [run before that](#latest-run-main-at-7a145b0-after-the-simplification) measured `main` at 7a145b0 (PR #20 to #24).
 
 **Every number on this page describes an earlier design**, kept as its record. Since it was measured:
 
@@ -348,6 +349,78 @@ A claim of 75 entities locks them (LockHeads) in about 2 ms (median over the 108
 median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest single run 21.5 ms, under load. Leasing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
+
+## Latest run: main at b5950c1
+
+The quick run (`--run quick`) and all 36 benchmarks (`--run full`) on `main` at b5950c1 (PR #65, account aggregates and
+deletes), on 2026-10-18. It is the first full run on the inbox with one row per entity, the lease in `next_attempt_at`
+and no `Sync:CoalesceDelay`. The environment differs from the table above: macOS 26.2 (Darwin 25.2.0), .NET SDK
+10.0.102, runtime .NET 8.0.11, and PostgreSQL 17 in a fresh Docker container with its defaults (`shared_buffers`
+128MB, `max_connections` 100), not the tuned one. The load average was 6 to 9. The full run took 6 minutes, the quick
+run 27 seconds.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures: 0 overlapping claims, 0 entities not `done`, 0 stale
+rows, 0 wrong values, 0 write-history regressions, 0 failed records.
+
+Quick run (3 iterations, 100 accounts, 0 ms):
+
+| Case | Mean |
+|---|--:|
+| Drain, 1 worker x 1 pod | 211.6 ms |
+| Drain, 4 workers x 1 pod | 108.5 ms |
+| Drain, 1 worker x 3 pods | 102.3 ms |
+| Drain, 4 workers x 3 pods | 209.4 ms |
+| Drain while ingesting, 4 workers x 1 pod | 2.359 s |
+
+Preloaded drain, 5,000 events, 718 (100 accounts) or 1,618 (1,000 accounts) entities. The medians are
+BenchmarkDotNet's; the work counts are the medians of the iterations without a Describe, at 0 ms latency:
+
+| W | P | Accounts | Median 0 ms | Median 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 195.22 ms | 842.06 ms | 27.71 MB | 22 | 11 | 6.65 | 752 | 34 |
+| 1 | 1 | 1,000 | 528.90 ms | 2,906.95 ms | 81.72 MB | 56 | 25 | 2.17 | 2,299 | 681 |
+| 1 | 3 | 100 | 119.01 ms | 277.10 ms | 30.16 MB | 23 | 11 | 6.31 | 793 | 75 |
+| 1 | 3 | 1,000 | 266.80 ms | 786.92 ms | 83.15 MB | 58 | 27 | 2.19 | 2,278 | 660 |
+| 4 | 1 | 100 | 95.30 ms | 262.76 ms | 31.42 MB | 24 | 11 | 5.76 | 868 | 150 |
+| 4 | 1 | 1,000 | 253.33 ms | 572.41 ms | 84.43 MB | 56 | 25 | 2.20 | 2,271 | 653 |
+| 4 | 3 | 100 | 258.94 ms | 314.68 ms | 69.91 MB | 30 | 13 | 4.49 | 1,123 | 405 |
+| 4 | 3 | 1,000 | 308.52 ms | 380.17 ms | 95.74 MB | 64 | 30 | 2.38 | 2,096 | 478 |
+| 8 | 1 | 100 | 129.70 ms | 277.50 ms | 42.93 MB | 28 | 11 | 4.28 | 1,168 | 450 |
+| 8 | 1 | 1,000 | 241.94 ms | 384.02 ms | 90.6 MB | 59 | 26 | 2.23 | 2,242 | 624 |
+| 8 | 3 | 100 | 458.61 ms | 439.19 ms | 114.73 MB | 37 | 13 | 3.03 | 1,657 | 939 |
+| 8 | 3 | 1,000 | 681.87 ms | 692.52 ms | 187.51 MB | 69 | 28 | 1.78 | 2,810 | 1192 |
+
+Streaming (50 accounts, 5 ms latency, 600 entities):
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 2.243 s | 321.0 MB | 893 | 445 | 1.65 | 3,017 | 8 |
+| 4 | 3 | 3.557 s | 794.9 MB | 2,268 | 1,133 | 1.42 | 3,519 | 7 |
+| 8 | 1 | 3.270 s | 641.7 MB | 2,080 | 1,039 | 1.37 | 3,647 | 8 |
+| 8 | 3 | 4.120 s | 949.9 MB | 2,340 | 1,164 | 1.78 | 2,818 | 19 |
+
+- **Streaming makes several times the calls of the [2d20c16 run](#latest-run-main-at-2d20c16)** (893 to 2,340, against
+  216 to 332) with coalescing 1.4 to 1.8 (against 3.6 to 5.1). That is `Sync:CoalesceDelay` gone: an event makes its
+  entity due at once, so a worker claims it before the next events for the same account arrive. The
+  [realistic-ingest sweep](#realistic-ingest-sweep-2026-10-16-main-at-85d1de7) measured this trade.
+- **Preloaded drains** have the work counts of the earlier runs (22 to 69 calls) and finish in 95 to 682 ms (median,
+  0 ms). More workers or pods help up to 4 workers x 1 pod and then cost: 8 workers x 3 pods makes more claims and
+  retries (939 to 1,192) than 1 x 1 (34 to 681), because the workers contend for the same few entities.
+- Times are not comparable with the 2d20c16 run (different machine state, Postgres settings and design); compare work
+  counts first.
+
+Micro benchmarks:
+
+| Method | Mean | Allocated |
+|---|--:|--:|
+| ParseLimitHeader | 637.48 ns | 2832 B |
+| PrepareTenEntities | 18,504.78 ns | 41472 B |
+| ReadAndValidateEvent | 1,198.87 ns | 1616 B |
+| MapAccountEvent | 1,656.39 ns | 4016 B |
+| MapPayloadToSObject | 20.55 ns | 200 B |
+| MapSObjectToRecord | 266.32 ns | 1008 B |
+| DiffNumber | 126.46 ns | 32 B |
+| DiffDateTime | 247.01 ns | 192 B |
 
 ## Latest run: main at 2d20c16
 
