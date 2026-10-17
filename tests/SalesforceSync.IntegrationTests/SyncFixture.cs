@@ -64,6 +64,7 @@ public class SyncFixture : IAsyncLifetime
     private IProducer<string, string>? _producer;
     private NpgsqlDataSource? _db;
     private IDbContextFactory<SyncDbContext>? _contexts;
+    private readonly Dictionary<string, (NpgsqlDataSource Db, IDbContextFactory<SyncDbContext> Contexts)> _migratedSchemas = [];
 
     /// <param name="pods">Worker pods (replicas) sharing the inbox, the Kafka consumer group and the org.</param>
     protected SyncFixture(int pods)
@@ -175,6 +176,11 @@ public class SyncFixture : IAsyncLifetime
         await Task.WhenAll(_pods.Select(p => p.DisposeAsync().AsTask()));
         _producer?.Dispose();
         Salesforce?.Dispose();
+        foreach (var (db, _) in _migratedSchemas.Values)
+        {
+            await db.DisposeAsync();
+        }
+
         if (_db is not null)
         {
             await _db.DisposeAsync();
@@ -416,7 +422,8 @@ public class SyncFixture : IAsyncLifetime
     private sealed record StoredRow(long Id, string Payload, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
         Guid? LockToken);
 
-    private static long VersionOf(string payload)
+    /// <summary>The version of a stored payload: its meta.time, BaseTime + N ms.</summary>
+    public static long VersionOf(string payload)
     {
         return (long)(TimeOf(JsonNode.Parse(payload)!.AsObject()) - BaseTime).TotalMilliseconds;
     }
@@ -455,6 +462,48 @@ public class SyncFixture : IAsyncLifetime
             SearchPath = schema,
             ApplicationName = TestsApplicationName
         }.ConnectionString);
+    }
+
+    /// <summary>
+    /// <paramref name="schema"/>, migrated, with an empty account inbox, and contexts on it: for tests that drive the
+    /// worker's SQL by hand on rows the pods never see. Created on first use and only emptied after that: a data source
+    /// per test would cost EF a service provider each, and more than twenty fail the run.
+    /// </summary>
+    public async Task<(NpgsqlDataSource Db, IDbContextFactory<SyncDbContext> Contexts)> MigratedSchemaAsync(string schema)
+    {
+        if (!_migratedSchemas.TryGetValue(schema, out var migrated))
+        {
+            var db = await CreateSchemaAsync(schema);
+            var contexts = SyncDbContext.CreateFactory(db);
+            await SyncSchema.MigrateAsync(contexts);
+            _migratedSchemas[schema] = migrated = (db, contexts);
+        }
+
+        await using var conn = await migrated.Db.OpenConnectionAsync();
+        await conn.ExecuteAsync($"TRUNCATE {InboxTable()}");
+        return migrated;
+    }
+
+    /// <summary>Every kind of outcome a worker records for a claim (see <see cref="RecordOutcomeAsync"/>).</summary>
+    public static TheoryData<string> Outcomes => ["done", "failed", "dead", "released", "failed all", "deferred", "held"];
+
+    /// <summary>Records one of <see cref="Outcomes"/> for a claim of one row, through the worker's repository.</summary>
+    public static Task RecordOutcomeAsync(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
+    {
+        var row = claim.RowIds.Single();
+        var failure = new FailedEvent(row, "failed", "SOME_CODE");
+        var none = CancellationToken.None;
+        return outcome switch
+        {
+            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], []), none),
+            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
+            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
+            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
+            "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
+            "deferred" => inbox.DeferAsync(claim, TimeSpan.Zero, none),
+            "held" => inbox.HoldAsync(claim, "lost", none),
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+        };
     }
 
     /// <summary>Polls until the entity's inbox row holds <paramref name="version"/> and is not pending, then returns it.</summary>
