@@ -195,12 +195,12 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// Publishes a raw message value as it is, under any Kafka key (or none) and on either topic. The sync must not
+    /// Publishes a raw message value as it is, under any Kafka key (or none). The sync must not
     /// depend on the key, so tests use this to scatter one entity's events over partitions.
     /// </summary>
-    public async Task PublishRawAsync(string? key, string value, string topic = Topic)
+    public async Task PublishRawAsync(string? key, string value)
     {
-        await _producer!.ProduceAsync(topic, new Message<string, string> { Key = key!, Value = value });
+        await _producer!.ProduceAsync(Topic, new Message<string, string> { Key = key!, Value = value });
     }
 
     /// <summary>Fire-and-forget produce for bulk loads; call <see cref="Flush"/> afterwards.</summary>
