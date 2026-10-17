@@ -21,14 +21,14 @@ public sealed class SalesforceRestClient(HttpClient http)
 
     /// <summary>
     /// sObject Collections: max records in one create, update or upsert; the ceiling of a row type's
-    /// <see cref="Data.Inbox.IInboxRow.MaxRecordsPerWrite"/>.
+    /// <c>IInboxRow.MaxRecordsPerWrite</c>.
     /// </summary>
     public const int MaxCollectionRecords = 200;
 
     /// <summary>
     /// External ids per query, at most, for its records to come back in one page: a query returns up to 2,000 records
     /// per page and each external id matches at most one record. The ceiling of a row type's
-    /// <see cref="Data.Inbox.IInboxRow.MaxValuesPerQuery"/>.
+    /// <c>IInboxRow.MaxValuesPerQuery</c>.
     /// </summary>
     public const int MaxQueryValues = 2_000;
 

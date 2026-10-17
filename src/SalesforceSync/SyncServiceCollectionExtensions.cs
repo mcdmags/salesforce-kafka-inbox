@@ -4,6 +4,8 @@ using Microsoft.Extensions.Options;
 using Npgsql;
 using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
+using SalesforceSync.Data.RateLimiting;
+using SalesforceSync.Hosting;
 using SalesforceSync.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
@@ -163,6 +165,7 @@ public static class SyncServiceCollectionExtensions
     {
         var services = salesforce.Services;
         services.AddSingleton<SalesforceRateLimiter>();
+        services.AddSingleton<ISalesforceRateLimiter>(sp => sp.GetRequiredService<SalesforceRateLimiter>());
         services.AddHostedService<RateLimitInitializer>();
         services.AddSingleton(sp => new SalesforceConcurrencySlots(
             sp.GetRequiredService<IDbContextFactory<SyncDbContext>>(),

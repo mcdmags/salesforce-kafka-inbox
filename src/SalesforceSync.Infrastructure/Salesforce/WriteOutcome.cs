@@ -1,4 +1,3 @@
-using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
 
 namespace SalesforceSync.Infrastructure.Salesforce;
@@ -68,5 +67,5 @@ public sealed class UnknownOutcomeException(Exception inner)
     : Exception($"The outcome of the Salesforce write is unknown: {inner.Message}", inner)
 {
     /// <summary>Stored as <c>last_error_code</c> on the held rows.</summary>
-    public const string Code = InboxRow.UnknownOutcomeCode;
+    public const string Code = "UNKNOWN_OUTCOME";
 }

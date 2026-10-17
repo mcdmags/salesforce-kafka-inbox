@@ -1,7 +1,7 @@
 using Microsoft.EntityFrameworkCore;
-using SalesforceSync.Data;
+using Microsoft.Extensions.Logging;
 
-namespace SalesforceSync.Infrastructure.RateLimiting;
+namespace SalesforceSync.Data.RateLimiting;
 
 /// <summary>
 /// Global cap on in-flight Salesforce batches using session-level advisory locks: a slot is a connection holding

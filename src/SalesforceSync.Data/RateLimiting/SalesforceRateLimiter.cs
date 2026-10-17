@@ -1,9 +1,9 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using SalesforceSync.Data;
-using SalesforceSync.Data.RateLimiting;
+using SalesforceSync.Infrastructure.RateLimiting;
 
-namespace SalesforceSync.Infrastructure.RateLimiting;
+namespace SalesforceSync.Data.RateLimiting;
 
 /// <summary>
 /// Token bucket + limit guard stored in Postgres, shared by every worker in every process.
@@ -24,7 +24,7 @@ public sealed class SalesforceRateLimiter(
     IDbContextFactory<SyncDbContext> contexts,
     IOptions<RateLimitOptions> options,
     IOptions<SalesforceLimitsOptions> limits,
-    ILogger<SalesforceRateLimiter> log)
+    ILogger<SalesforceRateLimiter> log) : ISalesforceRateLimiter
 {
     /// <summary>The least wait between attempts to acquire.</summary>
     private static readonly TimeSpan MinWait = TimeSpan.FromMilliseconds(50);

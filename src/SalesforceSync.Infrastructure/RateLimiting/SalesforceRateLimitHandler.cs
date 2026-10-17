@@ -10,7 +10,7 @@ namespace SalesforceSync.Infrastructure.RateLimiting;
 /// response feeds back into the bucket's speed; limit errors pause all workers.
 /// </summary>
 public sealed class SalesforceRateLimitHandler(
-    SalesforceRateLimiter limiter,
+    ISalesforceRateLimiter limiter,
     IOptions<RateLimitOptions> options,
     IOptions<SalesforceLimitsOptions> limits,
     ILogger<SalesforceRateLimitHandler> log) : DelegatingHandler
