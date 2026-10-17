@@ -399,7 +399,7 @@ public class SyncFixture : IAsyncLifetime
     {
         await using var conn = await Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<StoredRow>(
-            $"select id, payload::text, status, attempt_count, last_error_code, next_attempt_at, lock_token from {InboxTable(entityType)} where entity_id = @key",
+            $"SELECT id, payload::text, status, attempt_count, last_error_code, next_attempt_at, lock_token FROM {InboxTable(entityType)} WHERE entity_id = @key",
             new { key });
         return rows.Select(r => new InboxRow(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockToken))
             .SingleOrDefault();
@@ -442,7 +442,7 @@ public class SyncFixture : IAsyncLifetime
     /// </summary>
     public async Task<NpgsqlDataSource> CreateSchemaAsync(string schema)
     {
-        await ExecuteSqlAsync($"drop schema if exists {schema} cascade; create schema {schema}");
+        await ExecuteSqlAsync($"DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}");
         return NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(ConnectionString)
         {
             SearchPath = schema,

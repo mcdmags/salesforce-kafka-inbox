@@ -221,7 +221,7 @@ public abstract class DrainBenchmarkBase
     {
         await using var db = await _contexts.CreateDbContextAsync(ct);
         return await db.Database.QuerySingleAsync<bool>(
-            "select " + string.Join(" or ", InboxTables.Select(t => $"exists (select 1 from {t} where status = 'pending')")), ct);
+            "SELECT " + string.Join(" OR ", InboxTables.Select(t => $"EXISTS (SELECT 1 FROM {t} WHERE status = 'pending')")), ct);
     }
 
     // ---------- Setup ----------
@@ -269,15 +269,15 @@ public abstract class DrainBenchmarkBase
         await db.Database.OpenConnectionAsync();
         foreach (var table in InboxTables)
         {
-            await db.Database.ExecuteAsync($"truncate {table} restart identity", default);
+            await db.Database.ExecuteAsync($"TRUNCATE {table} RESTART IDENTITY", default);
         }
-        await db.Database.ExecuteAsync("truncate sf_api_usage; truncate sf_claim_audit", default);
+        await db.Database.ExecuteAsync("TRUNCATE sf_api_usage; TRUNCATE sf_claim_audit", default);
         // Effectively unlimited bucket and no daily budget: measure the pipeline, not the throttle
         await db.Database.ExecuteAsync("""
-            update sf_rate_limit
-            set tokens = 1e9, capacity = 1e9, base_refill_per_sec = 1e9, refill_per_sec = 1e9,
-                daily_budget = null, paused_until = null, updated_at = clock_timestamp()
-            where name = 'salesforce'
+            UPDATE sf_rate_limit
+            SET tokens = 1e9, capacity = 1e9, base_refill_per_sec = 1e9, refill_per_sec = 1e9,
+                daily_budget = NULL, paused_until = NULL, updated_at = clock_timestamp()
+            WHERE name = 'salesforce'
             """, default);
 
         (_events, _expected) = Generate();
@@ -371,12 +371,12 @@ public abstract class DrainBenchmarkBase
         foreach (var inbox in _events.GroupBy(e => e.Table))
         {
             await using (var stage = new NpgsqlCommand(
-                             "create temp table preload (seq bigserial, entity_id text, event_time timestamptz, payload jsonb)", conn))
+                             "CREATE TEMP TABLE preload (seq bigserial, entity_id text, event_time timestamptz, payload jsonb)", conn))
             {
                 await stage.ExecuteNonQueryAsync();
             }
             await using (var importer = await conn.BeginBinaryImportAsync(
-                             "copy preload (entity_id, event_time, payload) from stdin (format binary)"))
+                             "COPY preload (entity_id, event_time, payload) FROM STDIN (FORMAT binary)"))
             {
                 foreach (var e in inbox)
                 {
@@ -388,9 +388,9 @@ public abstract class DrainBenchmarkBase
                 await importer.CompleteAsync();
             }
             await using var store = new NpgsqlCommand($"""
-                insert into {inbox.Key} (entity_id, event_time, payload, next_attempt_at)
-                select distinct on (entity_id) entity_id, event_time, payload, now() from preload order by entity_id, event_time desc, seq desc;
-                drop table preload;
+                INSERT INTO {inbox.Key} (entity_id, event_time, payload, next_attempt_at)
+                SELECT DISTINCT ON (entity_id) entity_id, event_time, payload, now() FROM preload ORDER BY entity_id, event_time DESC, seq DESC;
+                DROP TABLE preload;
                 """, conn);
             await store.ExecuteNonQueryAsync();
         }
@@ -439,22 +439,22 @@ public abstract class DrainBenchmarkBase
             return await db.Database.QuerySingleAsync<long>(sql, default);
         }
         // One query over both inbox tables, one row per entity
-        var inbox = string.Join(" union all ", InboxTables.Select(t => $"select entity_id, event_time, status, attempt_count from {t}"));
-        var rows = await Count($"select count(*) from ({inbox}) i");
-        var notDone = await Count($"select count(*) from ({inbox}) i where status <> 'done'");
+        var inbox = string.Join(" UNION ALL ", InboxTables.Select(t => $"SELECT entity_id, event_time, status, attempt_count FROM {t}"));
+        var rows = await Count($"SELECT count(*) FROM ({inbox}) i");
+        var notDone = await Count($"SELECT count(*) FROM ({inbox}) i WHERE status <> 'done'");
         // Every entity's row holds its newest event (the entity ids of the two types never collide: ACC- and REL-)
         var newest = _expected.ToDictionary(e => e.Key.Key, e => Time(e.Value), StringComparer.Ordinal);
-        var stale = (await db.Database.QueryAsync<StoredEvent>($"select entity_id as EntityId, event_time as EventTime from ({inbox}) i", default))
+        var stale = (await db.Database.QueryAsync<StoredEvent>($"SELECT entity_id AS EntityId, event_time AS EventTime FROM ({inbox}) i", default))
             .Count(r => newest.GetValueOrDefault(r.EntityId) != r.EventTime);
         // An entity claim takes the entity's row once its newest events have overwritten it, so events per claim is the
         // coalescing (claims also count retries and deferrals). Counting records written instead would mix in that an
         // account event writes two records (Account, Profile).
-        var claims = await Count("select count(*) from sf_claim_audit");
-        var overlaps = await Count("select count(*) from sf_claim_overlaps");
+        var claims = await Count("SELECT count(*) FROM sf_claim_audit");
+        var overlaps = await Count("SELECT count(*) FROM sf_claim_overlaps");
         // attempt_count counts the failures of the row's event, so retries = attempt_count (of the last event
         // only: a newer event starts again at 0). Mostly relationships claimed before their Accounts were in the org
         // (DEPENDENCY_NOT_SYNCED).
-        var retries = await Count($"select coalesce(sum(attempt_count), 0) from ({inbox}) i");
+        var retries = await Count($"SELECT coalesce(sum(attempt_count), 0) FROM ({inbox}) i");
         var relationshipEvents = _events.Count(e => e.Table == RelationshipTable);
 
         var stats = _store.GetStats();

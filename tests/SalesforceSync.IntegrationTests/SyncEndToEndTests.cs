@@ -237,7 +237,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.PublishRawAsync(acct, v1.ToJsonString());
         await app.WaitForInboxSettledAsync(acct, version: 1);
         await using var conn = await app.Db.OpenConnectionAsync();
-        var storedTime = $"select (extract(epoch from event_time) * 1000000)::bigint from {SyncFixture.InboxTable()} where entity_id = @acct";
+        var storedTime = $"SELECT (extract(epoch FROM event_time) * 1000000)::bigint FROM {SyncFixture.InboxTable()} WHERE entity_id = @acct";
         (await conn.QuerySingleAsync<long>(storedTime, new { acct }))
             .Should().Be(micros + 1_000, "the consumer stores meta.time, cut to the microsecond");
 

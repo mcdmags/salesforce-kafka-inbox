@@ -22,14 +22,14 @@ public static class SyncSchema
     /// the migrations create their tables (EF's own check for the history table looks in public).
     /// </summary>
     private const string ExistingShape = """
-        select case
-          when exists (select 1 from information_schema.tables
-                       where table_schema = current_schema() and table_name::text = @history) then 'migrated'
-          when exists (select 1 from information_schema.columns
-                       where table_schema = current_schema() and table_name = 'sf_sync_state' and column_name = 'lock_token') then 'initial'
-          when exists (select 1 from information_schema.tables
-                       where table_schema = current_schema() and table_name::text = any(@tables)) then 'older'
-          else 'none' end
+        SELECT CASE
+          WHEN EXISTS (SELECT 1 FROM information_schema.tables
+                       WHERE table_schema = current_schema() AND table_name::text = @history) THEN 'migrated'
+          WHEN EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_schema = current_schema() AND table_name = 'sf_sync_state' AND column_name = 'lock_token') THEN 'initial'
+          WHEN EXISTS (SELECT 1 FROM information_schema.tables
+                       WHERE table_schema = current_schema() AND table_name::text = ANY(@tables)) THEN 'older'
+          ELSE 'none' END
         """;
 
     /// <summary>
@@ -46,14 +46,14 @@ public static class SyncSchema
             await db.Database.OpenConnectionAsync(t); // stays open: the lock is the session's
             try
             {
-                await db.Database.ExecuteAsync("select pg_advisory_lock(@key)", t, new { key = MigrationLockKey });
+                await db.Database.ExecuteAsync("SELECT pg_advisory_lock(@key)", t, new { key = MigrationLockKey });
                 await BaselineAsync(db, t);
                 await db.Database.MigrateAsync(t);
             }
             finally
             {
                 // Explicitly: closing only returns the session to the pool, lock and all
-                await db.Database.ExecuteAsync("select pg_advisory_unlock(@key)", CancellationToken.None, new { key = MigrationLockKey });
+                await db.Database.ExecuteAsync("SELECT pg_advisory_unlock(@key)", CancellationToken.None, new { key = MigrationLockKey });
                 await db.Database.CloseConnectionAsync();
             }
         }, ct);

@@ -103,13 +103,13 @@ public sealed partial class InboxSql
         /// </para>
         /// </summary>
         public const string Store = """
-            insert into {inbox} as i (entity_id, event_time, payload, next_attempt_at)
-            values (@entityId, @eventTime, @payload::jsonb, now())
-            on conflict (entity_id) do update
-            set payload = excluded.payload, event_time = excluded.event_time, status = 'pending', attempt_count = 0,
-                last_error = null, last_error_code = null, last_updated = now(),
+            INSERT INTO {inbox} AS i (entity_id, event_time, payload, next_attempt_at)
+            VALUES (@entityId, @eventTime, @payload::jsonb, now())
+            ON CONFLICT (entity_id) DO UPDATE
+            SET payload = excluded.payload, event_time = excluded.event_time, status = 'pending', attempt_count = 0,
+                last_error = NULL, last_error_code = NULL, last_updated = now(),
                 next_attempt_at = coalesce(i.next_attempt_at, excluded.next_attempt_at)
-            where i.event_time < excluded.event_time or (i.event_time = excluded.event_time and i.status <> 'done')
+            WHERE i.event_time < excluded.event_time OR (i.event_time = excluded.event_time AND i.status <> 'done')
             """;
 
         /// <summary>
@@ -125,15 +125,15 @@ public sealed partial class InboxSql
         /// a hash join over a scan of the whole table.
         /// </summary>
         public const string Claim = """
-            update {inbox} i
-            set next_attempt_at = now() + @lease, lock_token = @token, last_updated = now()
-            where i.id = any(array(
-              select d.id from {inbox} d
-              where d.next_attempt_at <= now()
-              order by d.next_attempt_at
-              limit @batchSize
-              for update skip locked))
-            returning i.id as RowId, i.entity_id as EntityId, i.payload::text as Payload, i.event_time as EventTime
+            UPDATE {inbox} i
+            SET next_attempt_at = now() + @lease, lock_token = @token, last_updated = now()
+            WHERE i.id = ANY(ARRAY(
+              SELECT d.id FROM {inbox} d
+              WHERE d.next_attempt_at <= now()
+              ORDER BY d.next_attempt_at
+              LIMIT @batchSize
+              FOR UPDATE SKIP LOCKED))
+            RETURNING i.id AS RowId, i.entity_id AS EntityId, i.payload::text AS Payload, i.event_time AS EventTime
             """;
 
         /// <summary>
@@ -153,8 +153,8 @@ public sealed partial class InboxSql
         /// </para>
         /// </summary>
         public const string StillClaimed = """
-            i.id = any(@ids) and i.lock_token = @token
-              and exists (select 1 from unnest(@ids, @times) as c(id, event_time) where c.id = i.id and c.event_time = i.event_time)
+            i.id = ANY(@ids) AND i.lock_token = @token
+              AND EXISTS (SELECT 1 FROM unnest(@ids, @times) AS c(id, event_time) WHERE c.id = i.id AND c.event_time = i.event_time)
             """;
 
         /// <summary>
@@ -162,10 +162,10 @@ public sealed partial class InboxSql
         /// The lease ends and the entity is idle until a consumer stores its next event.
         /// </summary>
         public const string Done = $$"""
-            update {inbox} i
-            set status = 'done', last_updated = now(), last_error = null, last_error_code = null,
-                next_attempt_at = null, lock_token = null
-            where {{StillClaimed}}
+            UPDATE {inbox} i
+            SET status = 'done', last_updated = now(), last_error = NULL, last_error_code = NULL,
+                next_attempt_at = NULL, lock_token = NULL
+            WHERE {{StillClaimed}}
             """;
 
         /// <summary>
@@ -177,15 +177,15 @@ public sealed partial class InboxSql
         /// 230 ms for 5,000 rows.)
         /// </summary>
         public const string Fail = $$"""
-            update {inbox} i
-            set last_updated = now(), attempt_count = i.attempt_count + 1,
-                last_error = (select @errors::jsonb) -> i.id::text ->> 0,
-                last_error_code = (select @errors::jsonb) -> i.id::text ->> 1,
-                status = case when i.attempt_count + 1 >= @maxRetries then 'dead' else 'pending' end,
-                next_attempt_at = case when i.attempt_count + 1 < @maxRetries
-                                       then now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) end,
-                lock_token = null
-            where {{StillClaimed}}
+            UPDATE {inbox} i
+            SET last_updated = now(), attempt_count = i.attempt_count + 1,
+                last_error = (SELECT @errors::jsonb) -> i.id::text ->> 0,
+                last_error_code = (SELECT @errors::jsonb) -> i.id::text ->> 1,
+                status = CASE WHEN i.attempt_count + 1 >= @maxRetries THEN 'dead' ELSE 'pending' END,
+                next_attempt_at = CASE WHEN i.attempt_count + 1 < @maxRetries
+                                       THEN now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) END,
+                lock_token = NULL
+            WHERE {{StillClaimed}}
             """;
 
         /// <summary>
@@ -193,10 +193,10 @@ public sealed partial class InboxSql
         /// due before @hold has passed; the lease ends, so the old worker can't record anything on them either.
         /// </summary>
         public const string Hold = $$"""
-            update {inbox} i
-            set last_updated = now(), last_error = @error, last_error_code = @code,
-                next_attempt_at = now() + @hold, lock_token = null
-            where {{StillClaimed}}
+            UPDATE {inbox} i
+            SET last_updated = now(), last_error = @error, last_error_code = @code,
+                next_attempt_at = now() + @hold, lock_token = NULL
+            WHERE {{StillClaimed}}
             """;
 
         /// <summary>
@@ -211,9 +211,9 @@ public sealed partial class InboxSql
         /// the same way, all their tokens at once. The rows are looked up by @ids: lock_token has no index.
         /// </summary>
         public const string EndLease = """
-            update {inbox} i
-            set lock_token = null, next_attempt_at = now() + @delay, last_updated = now()
-            where i.id = any(@ids) and i.lock_token = any(@tokens)
+            UPDATE {inbox} i
+            SET lock_token = NULL, next_attempt_at = now() + @delay, last_updated = now()
+            WHERE i.id = ANY(@ids) AND i.lock_token = ANY(@tokens)
             """;
     }
 }

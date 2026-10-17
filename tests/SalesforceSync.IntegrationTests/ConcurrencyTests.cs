@@ -55,18 +55,18 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         await using var conn = await app.Db.OpenConnectionAsync();
         var overlaps = (await conn.QueryAsync<string>(
             """
-            select format('%s: claim %s (seq %s) while claim %s (seq %s..%s) was open',
+            SELECT format('%s: claim %s (seq %s) while claim %s (seq %s..%s) was open',
                           entity_id, second_token, second_claim_seq,
                           first_token, first_claim_seq, coalesce(first_release_seq::text, 'never'))
-            from sf_claim_overlaps where entity_id = any(@ids)
+            FROM sf_claim_overlaps WHERE entity_id = ANY(@ids)
             """,
             new { ids })).ToList();
         var (Claims, Unreleased, ReclaimedAccounts) = await conn.QuerySingleAsync<(long Claims, long Unreleased, long ReclaimedAccounts)>("""
-            select count(*),
-                   count(*) filter (where release_seq is null),
-                   (select count(*) from (select 1 from sf_claim_audit where entity_id = any(@ids)
-                                          group by entity_id having count(*) > 1) x)
-            from sf_claim_audit where entity_id = any(@ids)
+            SELECT count(*),
+                   count(*) FILTER (WHERE release_seq IS NULL),
+                   (SELECT count(*) FROM (SELECT 1 FROM sf_claim_audit WHERE entity_id = ANY(@ids)
+                                          GROUP BY entity_id HAVING count(*) > 1) x)
+            FROM sf_claim_audit WHERE entity_id = ANY(@ids)
             """, new { ids });
         output.WriteLine($"claims={Claims} unreleased={Unreleased} accountsClaimedMoreThanOnce={ReclaimedAccounts} overlaps={overlaps.Count}");
         overlaps.Should().BeEmpty("no two claims on the same account may overlap, e.g. {0}", string.Join(" | ", overlaps.Take(3)));
@@ -152,7 +152,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         statuses.Should().Equal(new Dictionary<string, long> { ["done"] = accounts }, "the newest meta.time is in every row, written");
 
         await using var conn = await app.Db.OpenConnectionAsync();
-        (await conn.ExecuteScalarAsync<long>("select count(*) from sf_claim_overlaps where entity_id = any(@ids)", new { ids }))
+        (await conn.ExecuteScalarAsync<long>("SELECT count(*) FROM sf_claim_overlaps WHERE entity_id = ANY(@ids)", new { ids }))
             .Should().Be(0, "no two claims on the same account may overlap");
         foreach (var id in ids)
         {
@@ -184,10 +184,10 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
                 await using (var conn = await app.Db.OpenConnectionAsync())
                 {
                     killed += await conn.ExecuteScalarAsync<long>("""
-                        select count(*) filter (where pg_terminate_backend(pid))
-                        from pg_stat_activity
-                        where datname = current_database() and pid <> pg_backend_pid()
-                          and backend_type = 'client backend' and application_name <> @me
+                        SELECT count(*) FILTER (WHERE pg_terminate_backend(pid))
+                        FROM pg_stat_activity
+                        WHERE datname = current_database() AND pid <> pg_backend_pid()
+                          AND backend_type = 'client backend' AND application_name <> @me
                         """, new { me = SyncFixture.TestsApplicationName });
                 }
 
@@ -226,7 +226,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         statuses.Values.Sum().Should().Be(ids.Length, "every account's row holds its newest event");
 
         await using var db = await app.Db.OpenConnectionAsync();
-        (await db.ExecuteScalarAsync<long>("select count(*) from sf_claim_overlaps where entity_id = any(@ids)", new { ids }))
+        (await db.ExecuteScalarAsync<long>("SELECT count(*) FROM sf_claim_overlaps WHERE entity_id = ANY(@ids)", new { ids }))
             .Should().Be(0, "no two claims on the same account may overlap");
         foreach (var id in ids)
         {
@@ -244,7 +244,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<(string Status, long Count)>(
-            "select status, count(*) from sf_account_inbox where entity_id = any(@ids) and event_time = @time group by status",
+            "SELECT status, count(*) FROM sf_account_inbox WHERE entity_id = ANY(@ids) AND event_time = @time GROUP BY status",
             new { ids, time = SyncFixture.BaseTime.AddMilliseconds(newest).UtcDateTime });
         return rows.ToDictionary(r => r.Status, r => r.Count);
     }
