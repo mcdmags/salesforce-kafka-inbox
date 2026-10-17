@@ -234,7 +234,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         public async Task WaitUntilBlockedByAsync(NpgsqlConnection holder, Task statement)
         {
             var deadline = DateTime.UtcNow.AddSeconds(10);
-            while (!await observer.ExecuteScalarAsync<bool>(
+            while (!await observer.QuerySingleAsync<bool>(
                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE @pid = ANY(pg_blocking_pids(pid)))", new { pid = holder.ProcessID }))
             {
                 statement.IsCompleted.Should().BeFalse("the statement should be waiting for a lock");

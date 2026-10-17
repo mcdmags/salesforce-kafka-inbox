@@ -68,9 +68,7 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
         // Work that didn't fit is deferred, not failed: still pending, retries not spent, nothing dead-lettered
         await using var conn = await app.Db.OpenConnectionAsync();
         var rows = (await conn.QueryAsync<(string Status, int AttemptCount, DateTime? NextAttempt)>(
-            """
-            SELECT status, attempt_count, next_attempt_at FROM sf_account_inbox WHERE entity_id = ANY(@ids)
-            """,
+            $"SELECT status, attempt_count, next_attempt_at FROM {SyncFixture.InboxTable()} WHERE entity_id = ANY(@ids)",
             new { ids })).ToList();
         var pending = rows.Where(r => r.Status == "pending").ToList();
         output.WriteLine($"done={rows.Count(r => r.Status == "done")} pending={pending.Count}");
@@ -84,7 +82,7 @@ public sealed class DailyBudgetTests(DailyBudgetFixture app, ITestOutputHelper o
     private async Task<long> OwnCallsAsync()
     {
         await using var conn = await app.Db.OpenConnectionAsync();
-        return await conn.ExecuteScalarAsync<long>("SELECT coalesce(sum(calls), 0) FROM sf_api_usage");
+        return await conn.QuerySingleAsync<long>("SELECT coalesce(sum(calls), 0) FROM sf_api_usage");
     }
 }
 
@@ -143,15 +141,15 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
 
         // Rate-limited attempts are handed back without spending a retry
         await using var conn = await app.Db.OpenConnectionAsync();
-        var maxRetry = await conn.ExecuteScalarAsync<int>(
-            "SELECT max(attempt_count) FROM sf_account_inbox WHERE entity_id = ANY(@ids)", new { ids });
+        var maxRetry = await conn.QuerySingleAsync<int>(
+            $"SELECT max(attempt_count) FROM {SyncFixture.InboxTable()} WHERE entity_id = ANY(@ids)", new { ids });
         maxRetry.Should().Be(0, "rate-limited attempts are handed back without spending a retry");
 
         async Task<long> DoneAsync()
         {
             await using var c = await app.Db.OpenConnectionAsync();
-            return await c.ExecuteScalarAsync<long>(
-                "SELECT count(*) FROM sf_account_inbox WHERE status = 'done' AND entity_id = ANY(@ids)", new { ids });
+            return await c.QuerySingleAsync<long>(
+                $"SELECT count(*) FROM {SyncFixture.InboxTable()} WHERE status = 'done' AND entity_id = ANY(@ids)", new { ids });
         }
     }
 }
