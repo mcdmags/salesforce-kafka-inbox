@@ -1270,6 +1270,7 @@ does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers
 src/
   SalesforceSync/                 The entry project, the worker (Program, DI wiring):
     Inbox/                        Kafka consumer, worker loops
+    Hosting/                      The startup hosted services: SyncSchemaInitializer (migrates), RateLimitInitializer
     Sync/                         The engine (SalesforceBatchSyncService), PreparedBatch, EntitySyncService, the
                                   strategy and event meta, the engine's model types, AccountAggregate (a Kafka
                                   aggregate → the changed entities' events), and one file per synced object

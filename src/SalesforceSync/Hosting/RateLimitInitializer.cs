@@ -1,8 +1,10 @@
-namespace SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.Infrastructure.RateLimiting;
+
+namespace SalesforceSync.Hosting;
 
 /// <summary>
 /// Applies the configured Salesforce limits to the shared rate-limit row. Registered after
-/// <see cref="Data.SyncSchemaInitializer"/> and before the workers (hosted services start in registration order).
+/// <see cref="SyncSchemaInitializer"/> and before the workers (hosted services start in registration order).
 /// </summary>
 public sealed class RateLimitInitializer(SalesforceRateLimiter limiter) : IHostedService
 {

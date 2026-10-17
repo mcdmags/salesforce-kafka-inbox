@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using Npgsql;
 using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
+using SalesforceSync.Hosting;
 using SalesforceSync.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;

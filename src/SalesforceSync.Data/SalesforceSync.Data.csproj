@@ -14,7 +14,6 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.1" PrivateAssets="all" />
     <!-- The version the design package compiles this project against, passed on to the projects that reference it -->
     <PackageReference Include="System.Text.Json" Version="9.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
   </ItemGroup>
 
   <ItemGroup>
