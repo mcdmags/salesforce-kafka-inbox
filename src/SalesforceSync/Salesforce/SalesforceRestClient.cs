@@ -231,12 +231,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// <summary>A value as a SOQL string literal: quoted, with backslashes and quotes escaped.</summary>
     public static string SoqlLiteral(string value)
     {
-        return $"'{EscapeSoql(value)}'";
-    }
-
-    private static string EscapeSoql(string s)
-    {
-        return s.Replace("\\", "\\\\").Replace("'", "\\'");
+        return $"'{value.Replace("\\", "\\\\").Replace("'", "\\'")}'";
     }
 
     private static List<SalesforceError> ParseErrors(string? referenceId, JsonElement body)
