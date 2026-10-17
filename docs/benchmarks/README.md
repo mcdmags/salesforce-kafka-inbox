@@ -4,34 +4,29 @@ Measurements of the Postgres inbox (claim and outcome SQL) and of the whole sync
 Salesforce client and rate limiter real; only the Salesforce HTTP endpoint mocked). How to run them is in the
 [main README](../../README.md#benchmarks).
 
-These numbers come from the claim and outcome tuning merged in PR #13 and re-measured after the move to EF Core
-(PR #12). Later changes (PR #14 formatting, PR #15 simplification of the write path) do not touch the inbox SQL;
-they can change the API call counts of the drain benchmarks, so re-run them before comparing call counts.
+These numbers come from the claim and outcome tuning merged in PR #13, re-measured after the move to EF Core
+(PR #12). [Latest run](#latest-run-main-at-2d20c16) re-measures everything on `main` at 2d20c16 (PR #35 to #46);
+the [run before it](#latest-run-main-at-7a145b0-after-the-simplification) measured `main` at 7a145b0 (PR #20 to #24).
 
-[Latest run](#latest-run-main-at-2d20c16) re-measures everything on `main` at 2d20c16, with the `sf_sync_state`
-claim, the rate limiter in C# and `Sync:CoalesceDelay` (PR #35 to #46). The
-[run before it](#latest-run-main-at-7a145b0-after-the-simplification) measured `main` at 7a145b0, after the record
-types, the shared Describe cache and the simplification into fewer files (PR #20 to #24).
+**Every number on this page describes an earlier design**, kept as its record. Since it was measured:
 
-**Since then the claim has changed.** Entities were then claimed by locking and leasing their row in one
-`sf_sync_state` table (`FOR UPDATE SKIP LOCKED`), the inboxes holding only events. Every number on this page was
-measured with `sf_sync_state` or before it: it is gone now (migration `StateInInboxRow`), and an entity is claimed
-by locking and leasing its own inbox row, which holds its due time, lease and watermark (see the
-[main README](../../README.md#the-inbox)). The claim statements measured below (LockHeads, the claim lock, the
-inbox's lease, due-time and `synced_time` columns and their indexes, `InboxSql.PinPlans`) no longer exist; their
-numbers are kept as the record of that design, not as a description of the current one.
+- **The claim moved into the inbox row.** Entities were claimed by locking and leasing their row in one
+  `sf_sync_state` table; that table is gone (migration `StateInInboxRow`), and an entity is claimed by locking and
+  leasing its own inbox row (see the [main README](../../README.md#the-inbox)). The claim statements measured below
+  (LockHeads, the claim lock, `InboxSql.PinPlans`, the lease and due-time columns of `sf_sync_state` and their
+  indexes) no longer exist.
+- **One row per entity, not per event** (migration `InboxOneRowPerRecord`): a newer event overwrites the entity's row
+  and `Sync:MaxEventsPerEntity` is gone. The counts of `done` and `superseded` rows, the coalescing as events per done
+  row, the [leasing cost by rows leased](#leasing-cost-by-rows-leased) and the preloaded drains of 5,000 rows describe
+  the old design. The drain benchmarks now preload each entity's newest event only (100 or 1,000 account rows, plus
+  relationships) and print `entities` (inbox rows) and the coalescing as events per entity claim.
+- **The lease is the row's `next_attempt_at`** (migration `LeaseInNextAttemptAt`, no `locked_until`).
+- **No watermark and no `superseded` status** (migration `DropSyncedTime`, no `synced_time`): an event not newer
+  than a synced one is never stored, so every row of a drained inbox ends `done`.
+- **No `Sync:CoalesceDelay`**: a stored event makes its entity due at once (see the
+  [realistic-ingest sweep](#realistic-ingest-sweep-2026-10-16-main-at-85d1de7)).
 
-**And the inbox has changed since.** Every number on this page was measured with one inbox row per event. The
-inboxes now keep one row per entity (migration `InboxOneRowPerRecord`): a newer event overwrites the entity's row, a
-claim takes at most one row per entity, and `Sync:MaxEventsPerEntity` is gone (see the
-[main README](../../README.md#the-inbox)). So the counts of `done` and `superseded` rows, the coalescing as events per
-done row, the [leasing cost by rows leased](#leasing-cost-by-rows-leased) and the preloaded drains of 5,000 rows
-describe that design. The drain benchmarks now preload each entity's newest event only (100 or 1,000 account rows,
-plus relationships) and print `entities` (inbox rows) and the coalescing as events per entity claim. Since then the
-lease is the row's `next_attempt_at` (migration `LeaseInNextAttemptAt`, no `locked_until`), and there is no
-watermark and no `superseded` status (migration `DropSyncedTime`): an event not newer than a synced one is never
-stored, so every row of a drained inbox ends `done`. And `Sync:CoalesceDelay` is gone: a stored event makes its entity
-due at once (see the [realistic-ingest sweep](#realistic-ingest-sweep-2026-10-16-main-at-85d1de7)).
+Re-run the benchmarks before comparing any of these numbers with the current code.
 
 [Sequential, limiter-only vs full](#sequential-limiter-only-vs-full) compares this version with one that has no parallel
 processing or race-condition handling, measured on `main` at 01b53b3.
@@ -100,12 +95,11 @@ What changed, and why:
 - **ReleaseLostClaims** finds the claim's rows by `entity_id = ANY(@entityIds)` on the leased index instead of
   scanning the ready index.
 - **MarkSynced** probes one lease per entity (`ORDER BY l.entity_id, l.locked_until LIMIT 1`).
-- **Watermark in the inbox** (after these measurements). The shared `sf_sync_state` table is gone, so every table
-  holds one type of event. `InboxSql.Done` completes the synced rows and sets their `synced_time` in one statement,
-  found by primary key under the lease token like Fail and Dead (it replaces MarkSynced and the done Complete);
-  `SyncedTimes` reads each claimed entity's watermark, its newest `synced_time`, with one backward probe of the
-  partial index `(entity_id, synced_time) WHERE status = 'done'`. The MarkSynced, Complete and SyncedTimes rows
-  below were measured before this change and have not been re-measured.
+- **Watermark in the inbox** (after these measurements, and since removed with `synced_time`). `InboxSql.Done`
+  completed the synced rows and set their `synced_time` in one statement, found by primary key under the lease token
+  like Fail and Dead (it replaced MarkSynced and the done Complete); `SyncedTimes` read each claimed entity's
+  watermark with one backward probe of a partial index. The MarkSynced, Complete and SyncedTimes rows below were
+  measured before this change.
 - **Autovacuum** on the inbox tables: `autovacuum_vacuum_scale_factor` 0.02, threshold 1000. On 200,000 rows the
   first claim after 150,000 rows finished took 187 ms before vacuum, 5 to 7 ms once vacuum ran (2 ms fully
   vacuumed).
@@ -684,6 +678,9 @@ saved about 15%, at half a second of added sync latency. **Decision: `Sync:Coale
 makes its entity due at once.
 
 ## Micro benchmarks
+
+Measured with the earlier design: `CoalesceTenEvents` no longer exists (an inbox holds one event per entity), and
+`PrepareTenEvents` is now `PrepareTenEntities`.
 
 | Method               | Mean         | Error        | StdDev       | Gen0   | Gen1   | Allocated |
 |---|---|---|---|---|---|---|

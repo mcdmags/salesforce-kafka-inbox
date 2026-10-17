@@ -1235,8 +1235,8 @@ Covered: create Account + linked Profile, a full record in which one field chang
 field that becomes null or absent being cleared, an event without a profile leaving the Profile alone, the diff
 being taken against the record in Salesforce (a direct edit in Salesforce is corrected by the next event),
 bursts coalesced to the newest full record, stale versions never written (left out of the row), unchanged events
-skip the write, exactly 3 API calls per batch of new Accounts and Profiles (the read, the Accounts' upsert, the
-Profiles'), a redelivered event of a synced entity changing nothing and not written, an older event stored after a newer one changing
+skip the write, exactly 2 API calls per batch of new Accounts and Profiles (the read, and one Composite request of
+the Accounts' upsert and the Profiles'), a redelivered event of a synced entity changing nothing and not written, an older event stored after a newer one changing
 nothing, A → B → A ending at A, one account's events under different or no Kafka keys
 ending at the newest `meta.time`, invalid events (no time offset, no or an unknown `meta.type`, another type's event,
 not JSON) skipped at ingest, an event waiting for its entity's lease, a newer event overwriting the row whatever its
@@ -1372,7 +1372,8 @@ workers in 1 pod; it still checks correctness on every iteration.
 
 Results, the SQL statement measurements and the before/after of this tuning: [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
-The micro benchmarks need no database: header parsing, preparing a claim's rows (`PrepareTenEntities`), the typed mapping (`MapAccountEvent`: event JSON →
+The micro benchmarks need no database: header parsing, preparing a claim's rows (`PrepareTenEntities`), the
+consumer's typed read of an event (`ReadAndValidateEvent`), the typed mapping (`MapAccountEvent`: event JSON →
 payload → sObjects → records; `MapPayloadToSObject` and `MapSObjectToRecord` for its two halves) and the type-aware
 diff.
 
@@ -1443,7 +1444,7 @@ budget on the configuration.
 | Salesforce limit | How it's applied |
 |---|---|
 | **Total API requests per 24 hours**: depends on the edition, licenses and add-ons (e.g. 115,000 for an Enterprise org with 15 Salesforce licenses); Setup shows the org's number | `SalesforceLimits:DailyApiAllocation` (required) as the maximum, lowered to the limit in `Sforce-Limit-Info: api-usage` when Salesforce reports less. The allocation is shared by every user and integration of the org, so this integration gets `DailyBudgetShare` of it. Every call is counted in `sf_api_usage` (`UsageBucket`, 10-minute buckets) and checked under the shared row lock, so all pods together never exceed the budget over any rolling `BudgetWindow` (24 hours). When it's used up, events are deferred until the oldest calls leave the window. Usage is rolling, not reset at midnight. |
-| **What a call is**: each HTTP request; a Composite request (and an sObject Collections request) counts as one call however many subrequests it holds | One token per HTTP request: a describe (cached), each query page, each Composite write and each upsert (one per object of a request without references). Every call goes through the same `SalesforceRateLimitHandler`; a batch's calls are sent one after another under its one concurrency slot. |
+| **What a call is**: each HTTP request; a Composite request (and an sObject Collections request) counts as one call however many subrequests it holds | One token per HTTP request: a describe (cached), each read call, and each write request (an upsert on its own, or a Composite request of several). Every call goes through the same `SalesforceRateLimitHandler`; a batch's calls are sent one after another under its one concurrency slot. |
 | **Org-wide usage** (also other integrations): `Sforce-Limit-Info: api-usage=used/limit` on every REST response | `api-usage` and, when Salesforce sends it, `per-app-api-usage` (the connected app's quota): slow down at `DailySoftRatio`, pause at `DailyHardRatio`. The allocation Salesforce reports, the configured maximum and the resulting budget are logged when first seen and whenever Salesforce's changes. `api-bursts` appears in Salesforce's example of the header but isn't defined, so it is recorded in `sf_limit_status` and not acted on. |
 | **Requests per second**: Salesforce publishes no such limit, and none on concurrent requests shorter than 20 s | `MaxRequestsPerSecond` and `BurstCapacity` are this integration's own pacing, so it spreads its share of the daily allocation instead of spending it in bursts. |
 | **Concurrent long-running requests** (20 s or longer): 25 for production and sandboxes, 5 for Developer Edition and trials | `SalesforceLimits:ConcurrentLongRunningLimit` (default 25). `Sync:MaxConcurrentRequests` (global advisory-lock slots) must not exceed it, or startup fails. Calls that take `LongRunningThreshold` or longer are logged. `REQUEST_LIMIT_EXCEEDED` with `ConcurrentPerOrgLongTxn` pauses all workers for `ConcurrentLimitPause`. |
@@ -1860,8 +1861,10 @@ passes the connection string.
   parent the read didn't find), whatever its code. Find the message your org returns for a child whose Text key names
   a missing parent (below) and add it here, e.g. in `appsettings.json`:
   `"Salesforce": { "ParentMissingMessages": [ "Account not found" ] }` (or `Salesforce__ParentMissingMessages__0`).
-  Empty, such a rejection is what its code says (`FIELD_CUSTOM_VALIDATION_EXCEPTION`: permanent, dead-lettered). `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-100, ...), a row type's limits outside
-  Salesforce's (`MaxValuesPerQuery` 1-2,000, `MaxRecordsPerWrite` 1-200) and a missing `Salesforce:InstanceUrl` fail startup.
+  Empty, such a rejection is what its code says (`FIELD_CUSTOM_VALIDATION_EXCEPTION`: permanent, dead-lettered).
+- Startup fails on `Sync` values that can't work (no workers or slots, `BatchSize` outside 1-100, ...), on a row
+  type's limits outside Salesforce's (`MaxValuesPerQuery` 1-2,000, `MaxRecordsPerWrite` 1-200) and on a missing
+  `Salesforce:InstanceUrl`.
 - The mock org was built from Salesforce's documentation. These behaviours are worth confirming in the sandbox:
   - an empty checkbox (`null`) is stored as `false`, and an empty text (`""`) as empty;
   - a number with more decimals than the field allows is rounded;
