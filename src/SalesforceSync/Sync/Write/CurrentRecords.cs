@@ -14,14 +14,6 @@ internal sealed record ReadQuery(CompositeQuery Query, string SObject);
 internal static class ReadQueryBuilder
 {
     /// <summary>
-    /// Entities per batch. Not a Salesforce limit of its own: with the row types' 100 external ids per query, it keeps
-    /// a batch's read to one Composite request while the ids are short: 5 queries of 100 ids, where an entity can need
-    /// up to 3 ids (a relationship: itself and two Accounts). Ids long enough to split the queries further cost more
-    /// read calls, not a failure. The write side would allow more (5 collections of the row types' 180 records).
-    /// </summary>
-    internal const int MaxEntitiesPerBatch = 100;
-
-    /// <summary>
     /// One query per chunk of at most <paramref name="maxValuesPerQuery"/> values (the row type's), named q0, q1, ...;
     /// more than one Composite request takes (5) are sent as several.
     /// </summary>

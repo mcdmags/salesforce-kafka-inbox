@@ -153,7 +153,7 @@ public sealed class SalesforceBatchSyncService(
     /// nothing needs to be: every write is matched by external id, so the retry reads Salesforce, finds what they saved
     /// and writes only what still differs. A Composite subrequest that fails as a whole fails only its records (retried).
     /// </remarks>
-    /// <param name="units">At most <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
+    /// <param name="units">At most <see cref="SyncOptions.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
     /// <param name="queries">The strategy's reads: the units' records and the records their lookups and foreign keys point at.</param>
     /// <param name="maxValuesPerQuery">The row type's <see cref="IInboxRow.MaxValuesPerQuery"/>.</param>
     /// <param name="maxRecordsPerWrite">The row type's <see cref="IInboxRow.MaxRecordsPerWrite"/>.</param>
@@ -162,9 +162,9 @@ public sealed class SalesforceBatchSyncService(
     internal async Task<List<SyncResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, SyncUnit Unit)> units,
         IReadOnlyList<SoqlQuery> queries, int maxValuesPerQuery, int maxRecordsPerWrite, CancellationToken ct)
     {
-        if (units.Count > ReadQueryBuilder.MaxEntitiesPerBatch)
+        if (units.Count > _opt.MaxEntitiesPerBatch)
         {
-            throw new ArgumentOutOfRangeException(nameof(units), $"At most {ReadQueryBuilder.MaxEntitiesPerBatch} units per call");
+            throw new ArgumentOutOfRangeException(nameof(units), $"At most {_opt.MaxEntitiesPerBatch} units per call");
         }
 
         var results = new List<SyncResult>(units.Count);

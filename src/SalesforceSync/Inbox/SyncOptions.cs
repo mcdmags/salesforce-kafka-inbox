@@ -14,10 +14,19 @@ public sealed class SyncOptions
     public int MaxConcurrentRequests { get; set; } = 6;
 
     /// <summary>
-    /// Entities per batch, 1 to <see cref="ReadQueryBuilder.MaxEntitiesPerBatch"/> (100): a batch is read with one
+    /// Entities per batch, 1 to <see cref="MaxEntitiesPerBatch"/>: with the default cap a batch is read with one
     /// Composite request, which carries 5 queries of up to 100 external ids (very long ids split the read over more).
     /// </summary>
     public int BatchSize { get; set; } = 75;
+
+    /// <summary>
+    /// The most entities one batch may hold, the ceiling of <see cref="BatchSize"/>. Not a Salesforce limit of its own:
+    /// with the row types' 100 external ids per query, 100 keeps a batch's read to one Composite request while the ids
+    /// are short (5 queries of 100 ids, where an entity can need up to 3 ids: a relationship, itself and two Accounts).
+    /// Raise it to batch more entities per claim: ids then split the read over more calls, not a failure, and the write
+    /// side would allow more (5 collections of the row types' 180 records).
+    /// </summary>
+    public int MaxEntitiesPerBatch { get; set; } = 100;
 
     /// <summary>
     /// How long a claim owns its entities (until its inbox row's next_attempt_at; lock_token says who). Between the claim
@@ -78,10 +87,11 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
 
         AtLeastOne(nameof(o.Workers), o.Workers);
         AtLeastOne(nameof(o.MaxConcurrentRequests), o.MaxConcurrentRequests);
-        if (o.BatchSize is < 1 or > ReadQueryBuilder.MaxEntitiesPerBatch)
+        AtLeastOne(nameof(o.MaxEntitiesPerBatch), o.MaxEntitiesPerBatch);
+        if (o.BatchSize < 1 || o.BatchSize > o.MaxEntitiesPerBatch)
         {
-            errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {ReadQueryBuilder.MaxEntitiesPerBatch} " +
-                       "(a batch is read with one Composite request: 5 queries of up to 100 external ids).");
+            errors.Add($"{SyncOptions.Section}:BatchSize ({o.BatchSize}) must be 1 to {SyncOptions.Section}:MaxEntitiesPerBatch " +
+                       $"({o.MaxEntitiesPerBatch}).");
         }
 
         Positive(nameof(o.Lease), o.Lease);

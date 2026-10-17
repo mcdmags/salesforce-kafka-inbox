@@ -848,7 +848,7 @@ batch is held), deferred if it was rate limited. What earlier requests answered 
 though they may have saved their records: every write is matched by external id, so the retry reads Salesforce again
 and writes only what still differs, and those entities end `done` without being written twice.
 
-**`Sync:BatchSize`** is 1 to 100 entities (default 75). The bound comes from the read, not the write: the built-in row types query
+**`Sync:BatchSize`** is 1 to `Sync:MaxEntitiesPerBatch` entities (default 75; the cap defaults to 100). The bound comes from the read, not the write: the built-in row types query
 100 external ids at a time (`MaxValuesPerQuery`) and a Composite request takes 5 queries, and a relationship needs up to three ids per entity (itself and
 two Accounts).
 
