@@ -411,8 +411,7 @@ public class SyncFixture : IAsyncLifetime
 
     private static long VersionOf(string payload)
     {
-        var time = DateTimeOffset.Parse((string)JsonNode.Parse(payload)!["meta"]!["time"]!, CultureInfo.InvariantCulture);
-        return (long)(time - BaseTime).TotalMilliseconds;
+        return (long)(TimeOf(JsonNode.Parse(payload)!.AsObject()) - BaseTime).TotalMilliseconds;
     }
 
     /// <summary>
@@ -423,9 +422,10 @@ public class SyncFixture : IAsyncLifetime
     {
         await using var conn = await Db.OpenConnectionAsync();
         await using var tx = await conn.BeginTransactionAsync();
+        var table = InboxTable();
         foreach (var e in events)
         {
-            await conn.StoreAsync(InboxTable(), entityId, TimeOf(e), e.ToJsonString(), tx);
+            await conn.StoreAsync(table, entityId, TimeOf(e), e.ToJsonString(), tx);
         }
         await tx.CommitAsync();
     }
