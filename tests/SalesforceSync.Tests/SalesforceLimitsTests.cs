@@ -3,8 +3,10 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using SalesforceSync.Data.RateLimiting;
 using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
+using SalesforceSync.Hosting;
 using SalesforceSync.Infrastructure.RateLimiting;
 
 namespace SalesforceSync.Tests;

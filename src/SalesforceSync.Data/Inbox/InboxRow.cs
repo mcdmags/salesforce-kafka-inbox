@@ -31,9 +31,6 @@ public abstract class InboxRow
 
     public string? LastError { get; set; }
 
-    /// <summary>The <see cref="LastErrorCode"/> of rows held after a write whose outcome is unknown.</summary>
-    public const string UnknownOutcomeCode = "UNKNOWN_OUTCOME";
-
     /// <summary>E.g. FIELD_CUSTOM_VALIDATION_EXCEPTION, to query dead letters by cause.</summary>
     public string? LastErrorCode { get; set; }
 

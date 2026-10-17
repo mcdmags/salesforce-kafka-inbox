@@ -1,6 +1,6 @@
-using SalesforceSync.Data.RateLimiting;
+using SalesforceSync.Infrastructure.RateLimiting;
 
-namespace SalesforceSync.Infrastructure.RateLimiting;
+namespace SalesforceSync.Data.RateLimiting;
 
 /// <summary>
 /// The arithmetic of the shared <c>sf_rate_limit</c> row, without I/O: <see cref="SalesforceRateLimiter"/> locks the

@@ -1,4 +1,4 @@
-using SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.Data.RateLimiting;
 
 namespace SalesforceSync.Hosting;
 

@@ -1270,23 +1270,28 @@ does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers
 src/
   SalesforceSync/                 The entry project, the worker (Program, DI wiring):
     Inbox/                        Kafka consumer, worker loops
-    Hosting/                      The startup hosted services: SyncSchemaInitializer (migrates), RateLimitInitializer
+    Hosting/                      The startup hosted services (SyncSchemaInitializer migrates, RateLimitInitializer) and
+                                  the options validators
     Sync/                         The engine (SalesforceBatchSyncService), PreparedBatch, EntitySyncService, the
                                   strategy and event meta, the engine's model types, AccountAggregate (a Kafka
                                   aggregate → the changed entities' events), and one file per synced object
                                   (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy)
     Sync/Write/                   The write path's rules, no I/O: normalize, read queries, diff, plan (parents first),
                                   pack (one upsert per level and object, one delete; 2+ in a request → Composite), interpret
-  SalesforceSync.Infrastructure/  The Salesforce side (references Data):
+  SalesforceSync.Infrastructure/  The Salesforce API calls (references nothing of ours):
     Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors,
                                   SObjectMetadata and the attributes the sObject classes are read by
-    RateLimiting/                 Token bucket, daily budget, pause, concurrency slots, the batch gate
-  SalesforceSync.Data/            Postgres (no reference to the other two):
+    RateLimiting/                 The HTTP side of rate limiting: SalesforceRateLimitHandler, the limits header,
+                                  options, and the ports the Data project implements (ISalesforceRateLimiter,
+                                  ISalesforceBatchGate)
+  SalesforceSync.Data/            Everything that touches Postgres (references Infrastructure for those ports):
     (root)                        SyncDbContext (the EF model: every table), SyncSchema (migrates at startup),
                                   PostgresRetryStrategy, raw-SQL helpers
     Inbox/                        InboxRow and one row type per object, IRepository (and the claim and outcome
                                   types), InboxRepository, InboxSql, SyncOptions
-    RateLimiting/                 The rate limiter's tables (RateLimitState, ApiUsageBucket) and RateLimitSql
+    RateLimiting/                 The rate limiter's state in Postgres: SalesforceRateLimiter (token bucket, daily
+                                  budget, pause), SalesforceConcurrencySlots, SalesforceBatchGate, TokenBucket, and
+                                  its tables (RateLimitState, ApiUsageBucket) and RateLimitSql
     Migrations/                   EF migrations (InitialSchema: the tables, and the sf_limit_status view)
   SalesforceSync.FakeSalesforce/  In-memory Salesforce (OAuth sessions, describe, query pages, composite, sObject
                                   Collections upsert and delete, allOrNone, a Recycle Bin, Salesforce-like value
