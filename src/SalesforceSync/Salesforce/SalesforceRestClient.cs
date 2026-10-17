@@ -138,7 +138,7 @@ public sealed class SalesforceRestClient(HttpClient http)
     /// request, in the given order, where a later one may refer to an earlier one's results
     /// (<c>@{referenceId[i].id}</c>). An upserted record is created or updated by its external id, a deleted one is
     /// deleted by its Id. <c>allOrNone: false</c> is sent on the Composite request and on every collection: every
-    /// record succeeds or fails on its own.
+    /// record succeeds or fails on its own; <c>collateSubrequests: false</c> keeps the subrequests in order.
     /// </summary>
     /// <returns>
     /// One result per collection Salesforce answered (HTTP 200 does not mean any record was saved or deleted), each
@@ -177,6 +177,11 @@ public sealed class SalesforceRestClient(HttpClient http)
         var payload = new
         {
             allOrNone = false,
+            // Run in the order sent. From API version 49.0 Composite collates (bulkifies) unrelated subrequests by default,
+            // and then "the order of execution is not guaranteed (unless there is an explicit dependency)": a Text
+            // foreign key is no explicit dependency, yet the org's automation needs the parents' upserts first and the
+            // delete last (REST API Developer Guide, "Composite", collateSubrequests)
+            collateSubrequests = false,
             compositeRequest = collections.Select((c, i) =>
             {
                 // A delete has no body: its ids are in its URL

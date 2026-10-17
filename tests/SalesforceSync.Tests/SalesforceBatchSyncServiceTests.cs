@@ -275,6 +275,7 @@ public sealed class SalesforceBatchSyncServiceTests
         results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
         var write = _org.WriteRequests.Should().ContainSingle("two objects: one Composite request").Subject;
         write["allOrNone"]!.GetValue<bool>().Should().BeFalse("allOrNone is sent explicitly");
+        write["collateSubrequests"]!.GetValue<bool>().Should().BeFalse("in the order sent: parents first, Text keys being no explicit dependency");
         write["compositeRequest"]!.AsArray().Select(s => (string?)s!["referenceId"]).Should().Equal("Account", "Profile__c");
         Upserted(write, "Account").Select(r => ((string?)r["ExternalId__c"], (string?)r["Name"]))
             .Should().Equal(("A1", "One"), ("A2", "Two"));
