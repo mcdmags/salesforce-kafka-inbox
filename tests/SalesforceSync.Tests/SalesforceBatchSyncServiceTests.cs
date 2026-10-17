@@ -1121,6 +1121,7 @@ public sealed class SalesforceBatchSyncServiceTests
     [Fact]
     public async Task An_Account_delete_refused_while_its_contacts_exist_waits_for_their_deletes_then_deletes_its_Profile_and_itself()
     {
+        _org.Options.RefuseDeletingReferencedRecords = true; // an org whose automation refuses it
         await Account("A1", new() { ["name"] = "Acme" }, new() { ["tier"] = "Gold" });
         await Contact("C1", "A1", new() { ["lastName"] = "Child" });
         var account = new SyncUnit([SObjectRecord.Deleting<ProfileSObject>("prof", "P-A1"), SObjectRecord.Deleting<AccountSObject>("acct", "A1")]);
@@ -1135,6 +1136,19 @@ public sealed class SalesforceBatchSyncServiceTests
         (await DeleteContacts("C1")).Single().Outcome.Should().Be(SyncOutcome.Saved);
         (await Write(AccountStrategy, [("A1", account)])).Single().Outcome.Should().Be(SyncOutcome.Saved);
         _org.FindByExternalId("Account", "A1").Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Salesforce_itself_deletes_an_Account_that_Text_keys_still_name_and_leaves_those_records_alone()
+    {
+        await Account("A1", new() { ["name"] = "Acme" }, []);
+        await Contact("C1", "A1", new() { ["lastName"] = "Child" });
+
+        (await Write(AccountStrategy, [("A1", new SyncUnit([SObjectRecord.Deleting<AccountSObject>("acct", "A1")]))])).Single()
+            .Outcome.Should().Be(SyncOutcome.Saved, "a Text field is no relationship: nothing refuses the delete");
+
+        _org.FindByExternalId("Account", "A1").Should().BeNull();
+        ((string?)_org.FindByExternalId("Contact", "C1")!["AccountId__c"]).Should().Be("A1", "and nothing cascades: the contact's own delete does it");
     }
 
     // ---------- Helpers ----------

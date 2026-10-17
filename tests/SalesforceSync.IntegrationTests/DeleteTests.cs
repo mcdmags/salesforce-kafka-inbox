@@ -5,7 +5,8 @@ namespace SalesforceSync.IntegrationTests;
 /// <summary>
 /// Deletes end to end: an aggregate whose after no longer has a child (or no longer has the Account) -> a delete
 /// event in the child's inbox -> the read finds the record's Id -> one sObject Collections delete. The mock org keeps
-/// deleted records in its Recycle Bin and refuses to delete an Account that records still name.
+/// deleted records in its Recycle Bin and, set up so by <see cref="SyncFixture"/> (its automation, simulated),
+/// refuses to delete an Account that records still name.
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class DeleteTests(SyncFixture app)

@@ -7,9 +7,10 @@ using static SalesforceSync.FakeSalesforce.FakeJson;
 namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
-/// In-memory Salesforce org: sObject Describe, SOQL "WHERE field IN (...)" queries, and sObject Collections upserts
-/// by external id and deletes by Id, as calls of their own or as Composite subrequests (per-record results with allOrNone false,
-/// references between subrequests). Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
+/// In-memory Salesforce org: OAuth tokens, sObject Describe, SOQL "WHERE field IN (...)" queries (in pages of 2,000),
+/// and sObject Collections upserts by external id and deletes by Id, as calls of their own or as Composite subrequests
+/// (per-record results, allOrNone false or true, references between subrequests), modelled on the REST API Developer
+/// Guide (and, for per-record codes, the SOAP API Developer Guide). Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
 /// values are stored the way Salesforce stores them. Every committed create/update is kept in a per-record write
 /// history (stored values), so tests can check what reached the org and in which order. Errors can be injected per
 /// record. Thread-safe (single lock), which also mimics Salesforce serializing writes to the same rows.
@@ -38,15 +39,33 @@ public sealed partial class FakeSalesforceStore
     private readonly FakeCounters _counters = new();
     private readonly FakeCollectionWriter _collections;
     private readonly List<JsonObject> _recordedWrites = [];
+    private readonly Dictionary<string, (List<JsonObject> Rows, int Offset)> _queryLocators = new(StringComparer.Ordinal);
     private int _longRunningInFlight;
+    private int _tokens;
+    private long _queryCursors;
 
     public FakeSalesforceStore(FakeSalesforceOptions options)
     {
         Options = options;
-        _collections = new FakeCollectionWriter(_records, _faults, _counters);
+        _collections = new FakeCollectionWriter(_records, _faults, _counters, options);
     }
 
     public FakeSalesforceOptions Options { get; }
+
+    /// <summary>The access token the org issues first, and again after <see cref="Reset"/>.</summary>
+    public const string FirstAccessToken = "fake-token";
+
+    /// <summary>The access token the OAuth endpoint issues and API calls must send (<see cref="FakeSalesforceOptions.RequireAccessToken"/>).</summary>
+    public string AccessToken { get; private set; } = FirstAccessToken;
+
+    /// <summary>Ends the session (an admin revoking it, or its timeout): the current token is refused from now on, 401.</summary>
+    public void ExpireAccessToken()
+    {
+        lock (_gate)
+        {
+            AccessToken = $"{FirstAccessToken}-{++_tokens}";
+        }
+    }
 
     /// <summary>When the metadata last changed, for Describe's If-Modified-Since (HTTP dates have second precision).</summary>
     public DateTimeOffset SchemaLastModified { get; } = DateTimeOffset.FromUnixTimeSeconds(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
@@ -99,7 +118,9 @@ public sealed partial class FakeSalesforceStore
             _records.Clear();
             _faults.Clear();
             _recordedWrites.Clear();
+            _queryLocators.Clear();
             _counters.Reset();
+            AccessToken = FirstAccessToken;
         }
     }
 
@@ -228,14 +249,32 @@ public sealed partial class FakeSalesforceStore
 
     // ---------- Query ----------
 
-    public JsonObject Query(string soql)
-    {
-        var query = FakeSoql.Parse(soql);
+    /// <summary>Records per query page, at most (REST API Developer Guide, "Query": up to 2,000 at a time).</summary>
+    public const int QueryPageSize = 2_000;
 
-        var rows = new JsonArray();
+    /// <summary>
+    /// A query (<c>GET .../query?q=</c>) or its next page (<c>GET .../query/{locator}</c>, its <c>nextRecordsUrl</c>):
+    /// up to <see cref="QueryPageSize"/> rows, <c>totalSize</c> (the whole query's), <c>done</c>, and
+    /// <c>nextRecordsUrl</c> while rows are left. Each row has <c>attributes</c> (<c>type</c>, <c>url</c>) and the
+    /// fields asked for. Deleted records (in the Recycle Bin) are not returned, as Query filters them (queryAll would
+    /// return them; it isn't modelled).
+    /// </summary>
+    public JsonObject Query(Uri url)
+    {
+        var match = QueryUrl().Match(url.AbsolutePath);
+        var dataPath = match.Groups["base"].Value;
         lock (_gate)
         {
+            if (match.Groups["locator"].Success)
+            {
+                return _queryLocators.Remove(match.Groups["locator"].Value, out var rest)
+                    ? Page(dataPath, rest.Rows, rest.Offset)
+                    : throw new FakeSalesforceException(400, "INVALID_QUERY_LOCATOR", "invalid query locator");
+            }
+
+            var query = FakeSoql.Parse(QueryOf(url));
             _counters.Queries++;
+            var rows = new List<JsonObject>();
             foreach (var record in _records.Table(query.SObject).Values)
             {
                 var key = Str(record[query.WhereField]);
@@ -244,7 +283,14 @@ public sealed partial class FakeSalesforceStore
                     continue;
                 }
 
-                var row = new JsonObject { ["attributes"] = new JsonObject { ["type"] = query.SObject } };
+                var row = new JsonObject
+                {
+                    ["attributes"] = new JsonObject
+                    {
+                        ["type"] = query.SObject,
+                        ["url"] = $"{dataPath}/sobjects/{query.SObject}/{Str(record["Id"])}"
+                    }
+                };
                 foreach (var f in query.Fields)
                 {
                     var actual = record.FirstOrDefault(kv => string.Equals(kv.Key, f, StringComparison.OrdinalIgnoreCase));
@@ -252,15 +298,39 @@ public sealed partial class FakeSalesforceStore
                 }
                 rows.Add(row);
             }
-        }
 
-        return new JsonObject
+            return Page(dataPath, rows, 0);
+        }
+    }
+
+    /// <summary>The page of <paramref name="rows"/> from <paramref name="offset"/>; the rest is kept under a new locator.</summary>
+    private JsonObject Page(string dataPath, List<JsonObject> rows, int offset)
+    {
+        var page = new JsonObject
         {
             ["totalSize"] = rows.Count,
-            ["done"] = true,
-            ["records"] = rows
+            ["done"] = offset + QueryPageSize >= rows.Count
         };
+        if (offset + QueryPageSize < rows.Count)
+        {
+            // Like Salesforce's: a cursor id and the offset of the next page's first row
+            var locator = $"01gFAKE{++_queryCursors:D8}-{offset + QueryPageSize}";
+            _queryLocators[locator] = (rows, offset + QueryPageSize);
+            page["nextRecordsUrl"] = $"{dataPath}/query/{locator}";
+        }
+
+        page["records"] = new JsonArray([.. rows.Skip(offset).Take(QueryPageSize)]);
+        return page;
     }
+
+    /// <summary>Whether a call or subrequest is a query or a query's next page (<c>GET .../query</c>, <c>.../query/{locator}</c>).</summary>
+    public static bool IsQuery(string path)
+    {
+        return QueryUrl().IsMatch(path);
+    }
+
+    [GeneratedRegex(@"^(?<base>/services/data/v\d+\.\d+)/query(?:/(?<locator>[^/]+))?/?$", RegexOptions.IgnoreCase)]
+    private static partial Regex QueryUrl();
 
     // ---------- Composite ----------
 
@@ -268,8 +338,12 @@ public sealed partial class FakeSalesforceStore
     /// Composite: the subrequests run one after another and the whole request is one API call. Supported subrequests:
     /// SOQL queries (GET .../query), sObject Collections upserts (PATCH .../composite/sobjects/{SObject}/{ExternalIdField},
     /// as <see cref="Upsert"/>) and deletes (DELETE .../composite/sobjects?ids=, as <see cref="Delete"/>). A later subrequest can use an earlier one's result as
-    /// <c>@{referenceId.field}</c> or <c>@{referenceId[i].field}</c> (case-sensitive). Every record succeeds or fails
-    /// on its own (allOrNone false: the sync never sends true, so that mode is not modelled).
+    /// <c>@{referenceId.field}</c> or <c>@{referenceId[i].field}</c> (case-sensitive); a reference id may hold only
+    /// letters, digits and underscores (from API version 52.0 another fails the whole request, 400 JSON_PARSER_ERROR).
+    /// Subrequests always run in the order sent, as with collateSubrequests false: Salesforce may reorder unrelated
+    /// subrequests when it is true (the default), which the fake doesn't model. allOrNone true on the Composite request
+    /// is refused, not modelled (the sync never sends it); a collection's own allOrNone is.
+    /// (REST API Developer Guide, "Composite".)
     /// </summary>
     public JsonObject ExecuteComposite(JsonObject payload)
     {
@@ -284,6 +358,17 @@ public sealed partial class FakeSalesforceStore
         {
             throw new FakeSalesforceException(400, "LIMIT_EXCEEDED",
                 $"A maximum of {MaxCompositeCollectionsAndQueries} query and sObject Collections subrequests is allowed");
+        }
+
+        if (subrequests.Select(r => r?["referenceId"]?.GetValue<string>() ?? "").FirstOrDefault(id => !ReferenceId().IsMatch(id)) is { } invalid)
+        {
+            throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", $"Provided referenceId ('{invalid}') must start with a letter or " +
+                "a number, and it can contain only letters, numbers and underscores ('_').");
+        }
+
+        if (FakeCollectionWriter.IsTrue(payload["allOrNone"]))
+        {
+            throw new FakeSalesforceException(400, "NOT_SUPPORTED", "The fake does not model a Composite request with allOrNone true");
         }
 
         var responses = new JsonArray();
@@ -314,6 +399,9 @@ public sealed partial class FakeSalesforceStore
         return lost ? throw new FakeResponseLostException() : new JsonObject { ["compositeResponse"] = responses };
     }
 
+    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9_]*$")]
+    private static partial Regex ReferenceId();
+
     // ---------- sObject Collections upsert ----------
 
     /// <summary>
@@ -341,18 +429,19 @@ public sealed partial class FakeSalesforceStore
 
     /// <summary>
     /// sObject Collections delete (<c>DELETE /composite/sobjects?ids=...&amp;allOrNone=false</c>): one API call of its own,
-    /// up to 200 records of any objects by Id. Answers <c>[{ "id", "success", "errors" }]</c> in request order.
+    /// up to 200 records of any objects by Id. Answers 200 <c>[{ "id", "success", "errors" }]</c> in request order,
+    /// with allOrNone true or false (REST API Developer Guide, "Delete Records Using sObject Collections").
     /// </summary>
     public JsonArray Delete(Uri url)
     {
-        var ids = DeleteIdsOf(url);
+        var (ids, allOrNone) = DeleteIdsOf(url);
         JsonArray results;
         bool lost;
         lock (_gate)
         {
             _faults.LoseResponse = false;
             RecordWriteRequest(new JsonObject { ["method"] = "DELETE", ["url"] = url.PathAndQuery });
-            results = DeleteLocked(ids);
+            results = DeleteLocked(ids, allOrNone);
             lost = _faults.LoseResponse;
         }
 
@@ -366,19 +455,18 @@ public sealed partial class FakeSalesforceStore
                && path.TrimEnd('/').EndsWith("/composite/sobjects", StringComparison.OrdinalIgnoreCase);
     }
 
-    private JsonArray DeleteLocked(IReadOnlyList<string> ids)
+    private JsonArray DeleteLocked(IReadOnlyList<string> ids, bool allOrNone)
     {
         _counters.DeleteRequests++;
-        return _collections.Delete(ids);
+        return _collections.Delete(ids, allOrNone);
     }
 
-    /// <summary>The ids of a delete; only allOrNone false is modelled (the only mode the sync uses).</summary>
-    private static List<string> DeleteIdsOf(Uri url)
+    /// <summary>The Ids of a delete (<c>ids</c>, comma-separated) and its <c>allOrNone</c> (false when absent).</summary>
+    private static (List<string> Ids, bool AllOrNone) DeleteIdsOf(Uri url)
     {
         var query = HttpUtility.ParseQueryString(url.Query);
-        return "false".Equals(query["allOrNone"] ?? "false", StringComparison.OrdinalIgnoreCase)
-            ? [.. (query["ids"] ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)]
-            : throw new FakeSalesforceException(400, "NOT_SUPPORTED", "The fake models allOrNone=false only");
+        return ([.. (query["ids"] ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)],
+            FakeCollectionWriter.IsTrue(query["allOrNone"]));
     }
 
     /// <summary>The SOQL of a query call or subrequest (its <c>q</c> parameter).</summary>
@@ -420,7 +508,7 @@ public sealed partial class FakeSalesforceStore
 
     private static bool IsQuery(JsonNode? sub)
     {
-        return (sub?["url"]?.GetValue<string>() ?? "").Contains("/query", StringComparison.OrdinalIgnoreCase);
+        return IsQuery(new Uri(new Uri("https://fake"), sub?["url"]?.GetValue<string>() ?? "/").AbsolutePath);
     }
 
     private static bool IsCollection(JsonNode? sub)
@@ -439,9 +527,9 @@ public sealed partial class FakeSalesforceStore
                 throw new FakeSalesforceException(414, "URI_TOO_LONG", $"The URI exceeds the {MaxUriAndHeadersBytes:N0}-byte limit");
             }
 
-            if (method == "GET" && IsQuery(sub))
+            if (method == "GET" && IsQuery(url.AbsolutePath))
             {
-                return (200, Query(QueryOf(url)));
+                return (200, Query(url));
             }
 
             if (method == "PATCH" && UpsertTarget(url.AbsolutePath) is (var sobject, var externalIdField))
@@ -451,15 +539,16 @@ public sealed partial class FakeSalesforceStore
                 body = body.DeepClone().AsObject();
                 if (CompositeReferences.Resolve(body, results) is { } unresolved)
                 {
-                    // Closest to what Composite answers for a reference it can't resolve; verify against a real org
-                    return (400, Errors("PROCESSING_HALTED", $"Invalid reference specified. No value for {unresolved} found."));
+                    // As the guide shows a reference without a value answered ("Composite", illegal reference ids)
+                    return (400, Errors("PROCESSING_HALTED",
+                        $"Invalid reference specified. No value for {unresolved} found in {unresolved.Split('.', '[')[0]}."));
                 }
 
                 return (200, _collections.Upsert(sobject, field, body));
             }
 
-            return IsDelete(method, url.AbsolutePath)
-                ? (200, DeleteLocked(DeleteIdsOf(url)))
+            return IsDelete(method, url.AbsolutePath) && DeleteIdsOf(url) is var (ids, allOrNone)
+                ? (200, DeleteLocked(ids, allOrNone))
                 : throw new FakeSalesforceException(400, "NOT_SUPPORTED", $"Fake composite does not support {method} {url.AbsolutePath}");
         }
         catch (FakeSalesforceException ex)

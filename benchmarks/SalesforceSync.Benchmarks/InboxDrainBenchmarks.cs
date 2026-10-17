@@ -135,7 +135,9 @@ public abstract class DrainBenchmarkBase
         _store = new FakeSalesforceStore(new FakeSalesforceOptions
         {
             Latency = TimeSpan.FromMilliseconds(LatencyMs),
-            EnforceDailyLimit = false
+            EnforceDailyLimit = false,
+            // The pods have no OAuth step (no auth handler): not what is measured
+            RequireAccessToken = false
         });
 
         _pods = [.. Enumerable.Range(0, Pods).Select(_ => BuildPod())];

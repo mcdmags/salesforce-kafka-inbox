@@ -978,35 +978,52 @@ by the same code. Each strategy's `Map` decides the action: for a `deleted` even
 (`SObjectRecord.Deleting<ContactSObject>("contact", key)`), otherwise as upserts; the engine has no delete path of its
 own.
 
-**What Salesforce documents** (REST API, v62.0):
+**What Salesforce documents.** The [REST API Developer Guide](https://resources.docs.salesforce.com/latest/latest/en-us/sfdc/pdf/api_rest.pdf)
+and the [SOAP API Developer Guide](https://resources.docs.salesforce.com/latest/latest/en-us/sfdc/pdf/apex_api.pdf)
+(both version 68.0, Winter '27, as PDFs: the developer.salesforce.com pages refuse automated reads; the HTML of the
+same chapters is linked where it is cited):
 
 - [Delete Records Using sObject Collections](https://developer.salesforce.com/docs/platform/api-rest/guide/resources-composite-sobjects-collections-delete.html):
   `DELETE /services/data/vXX.X/composite/sobjects?ids=<id>,<id>&allOrNone=false`, up to **200 Ids**, of any objects,
-  **in the URL**, no body. `allOrNone` defaults to false; the answer is `200 OK` with one result per Id in the order
-  sent (`id`, `success`, `errors`), and `400` for a malformed request. It may be a Composite subrequest (sObject
-  Collections can be, within Composite's 5 collections or queries), and is one API call like any Composite or
-  Collections request ([limits](#salesforce-api-limits)).
+  **in the URL**, no body. `allOrNone` defaults to false. A well-formed request answers **`200 OK`** with one
+  DeleteResult per Id (`id`, `success`, `errors` of `statusCode`, `message`, `fields`), "in the order in which the IDs
+  ... were specified"; a request that isn't well formed `400`. A **malformed Id fails alone**, as one of the results,
+  without an `id` (`MALFORMED_ID`, the guide's example). With `allOrNone=true` the answer is still `200`, the other
+  records failing with `ALL_OR_NONE_OPERATION_ROLLED_BACK`.
+- [Composite](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_composite_composite.htm): the
+  sObject Collections resource can be a subrequest (API version 43.0 and later); at most 25 subrequests, of which 5
+  collections or queries; a subrequest's result is `{ body, httpHeaders, httpStatusCode, referenceId }`, a collection's
+  `200` with its per-record results even when records failed. Unrelated subrequests are **collated** by default from
+  version 49.0 ("the order of execution is not guaranteed"), unless
+  [`collateSubrequests`](https://developer.salesforce.com/docs/platform/api-rest/guide/requests-composite.html) is false; a reference id
+  holds only letters, digits and underscores (from 52.0 anything else fails the whole request, `400 JSON_PARSER_ERROR`).
 - [Delete by external id](https://developer.salesforce.com/docs/platform/api-rest/guide/resources-sobject-upsert-delete.html)
   (`DELETE /sobjects/{SObject}/{ExternalIdField}/{value}`) and
   [by Id](https://developer.salesforce.com/docs/platform/api-rest/guide/resources-sobject-retrieve-delete.html) delete
   **one record per call**. No collection deletes by external id.
-- A deleted record goes to the **Recycle Bin** for about 15 days and can be undeleted
-  ([getDeleted](https://developer.salesforce.com/docs/atlas.en-us.264.0.api.meta/api/sforce_api_calls_getdeleted.htm));
-  SOQL `query` doesn't return it (only `queryAll` would).
+- A deleted record goes to the **Recycle Bin** for 15 days and can be undeleted (SOAP API, `emptyRecycleBin()`,
+  `undelete()`); [Query](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_query.htm)
+  "automatically filter[s] out items that have been deleted", only `queryAll` returns them.
+- **Children** (SOAP API, "Referential Integrity" and `undelete()`): a delete takes along the children of a
+  relationship whose `cascadeDelete` is true ("deleting an account deletes all the contacts associated with that
+  account", by the standard `Contact.AccountId`), and fails if one of them can't be deleted. A Text field is no
+  relationship.
 - [Considerations for Deleting Contacts](https://help.salesforce.com/s/articleView?language=en_US&id=contacts_del.htm&type=0):
   a contact with cases, contracts, service contracts, assets with cases, a partner user or an active portal user
   can't be deleted.
-- Per-record errors seen for this call (from client libraries and API mirrors rather than the guide:
-  [active_force #119](https://github.com/Beyond-Finance/active_force/pull/119),
-  [a mirror of the reference](https://www.withone.ai/knowledge/salesforce/conn_mod_def::GLcnp-sUxIg::r49y34cKRYGmW-tXoriZIg)):
-  an Id deleted already or unknown gives `ENTITY_IS_DELETED` or `INVALID_CROSS_REFERENCE_KEY` (or `DELETE_FAILED`
-  with the message "entity is deleted"); a malformed Id fails the whole request.
+- Per-record codes (SOAP API, Core Data Types, StatusCode): `ENTITY_IS_DELETED` "You can't reference an object that
+  has been deleted", `INVALID_CROSS_REFERENCE_KEY` "A record with the specified ID does not exist", `DELETE_FAILED`
+  "You can't delete a record because it is in use by another object", `MALFORMED_ID` "15 characters, or 18 characters
+  with a valid case-insensitive extension". Client libraries and API mirrors report an Id deleted already or unknown
+  as `ENTITY_IS_DELETED` or `INVALID_CROSS_REFERENCE_KEY` (or `DELETE_FAILED` "entity is deleted")
+  ([active_force #119](https://github.com/Beyond-Finance/active_force/pull/119),
+  [a mirror of the reference](https://www.withone.ai/knowledge/salesforce/conn_mod_def::GLcnp-sUxIg::r49y34cKRYGmW-tXoriZIg)).
 
 **Decisions:**
 
 | Question | Decision | Why |
 |---|---|---|
-| Which call | One **Collections delete by Id** per write request, alone, or as the **last subrequest** of the Composite request with the batch's upserts | 1–200 records in one call. The batch's read already finds each record's Id by its external id, so no call is spent on looking it up, and a batch of upserts and deletes stays one write call. Last, so children's upserts and deletes both come after their parents' upserts. |
+| Which call | One **Collections delete by Id** per write request, alone, or as the **last subrequest** of the Composite request with the batch's upserts, sent with `collateSubrequests: false` | 1–200 records in one call. The batch's read already finds each record's Id by its external id, so no call is spent on looking it up, and a batch of upserts and deletes stays one write call. Last, so children's upserts and deletes both come after their parents' upserts; not collated, so Salesforce keeps that order (a Text key is no dependency it can see). |
 | `allOrNone` | `false`, in the URL, as on every upsert | One record that can't be deleted fails alone. |
 | Size | ≤ the row type's `MaxRecordsPerWrite` (180) Ids, and the URL checked against the 16,384-byte limit like a query's (200 Ids of 18 characters are about 3,900 bytes) | Same margin as the upserts. |
 | A record Salesforce doesn't have | No call, `done` | The read decides, as for create or update: never synced, or deleted (in the Recycle Bin, which SOQL doesn't return). |
@@ -1018,37 +1035,47 @@ own.
 
 **A deleted account.** The account's event deletes its Profile and its Account, in that order in one Collections
 delete (children before parents), and the split stores a delete for every relationship and contact `before` has,
-each in its own inbox. Those inboxes sync on their own, so the Account's delete may come first. Then the org refuses
-it while records still name the Account (in this org a validation, as for creates; the mock org does the same with
-`DELETE_FAILED` "... is associated with the following records: ..."), and the account is retried as
+each in its own inbox. Those inboxes sync on their own, so the Account's delete may come first. In this org the
+foreign keys are **Text fields**, so Salesforce knows no relationship: it deletes the Account while children still
+name it, and deletes or clears nothing of theirs; every child is deleted by its own event. The mock org does the
+same. An org whose automation refuses to delete an Account that records still name (as it refuses a child whose
+parent is missing) answers `DELETE_FAILED` "... is associated with the following records: ..." (the mock org with
+`FakeSalesforce:RefuseDeletingReferencedRecords`, set by the integration tests), and the account is retried as
 `DEPENDENCY_NOT_SYNCED`, the existing backoff, until its children are gone. The Profile, deleted in the same call,
 isn't found by the retry's read and costs nothing.
 
-**What Salesforce does to children by itself.** In this org the foreign keys are **Text fields**, so Salesforce
-knows no relationship and deletes or clears nothing: every child is deleted explicitly. With real relationship fields
-(unconfirmed: the official help pages couldn't be fetched, so this comes from
-[secondary](https://www.asagarwal.com/?p=29136) [sources](https://www.xappex.com/glossary/master-detail-relationship-salesforce/)):
-a **master-detail** child is deleted with its master (cascade); a **lookup** is cleared by default, or blocks the
-parent's delete if the field is set to restrict, or cascades if Salesforce Support enables it; and standard Contacts
-linked by the standard `AccountId` are deleted with their Account. A cascade would make the children's own deletes
-find nothing (no call); a restrict would refuse the Account like the validation above.
+**What Salesforce does to children by itself.** Nothing, with Text keys. With real relationship fields: a child whose
+relationship cascades is deleted with its parent (documented above; standard Contacts linked by `AccountId` are, and
+the mock org models that one); for a custom **lookup**, the help pages couldn't be read automatically, so from
+[secondary](https://www.asagarwal.com/?p=29136) [sources](https://www.xappex.com/glossary/master-detail-relationship-salesforce/):
+it is cleared by default, or blocks the parent's delete if set to restrict; a **master-detail** child is deleted
+with its master. A cascade would make the children's own deletes find nothing (no call); a restrict would refuse the
+Account like the automation above.
 
 **Not touched:** a relationship in **another** account's aggregate whose `relatedAccountExternalId` is the deleted
 account. It belongs to that aggregate, which hasn't removed it. In an org that refuses to delete an Account still
-named by records (like the mock org), that relationship keeps the Account's delete waiting: retried as
-`DEPENDENCY_NOT_SYNCED` until `Sync:MaxRetries`, then dead-lettered, until the other aggregate removes it.
+named by records, that relationship keeps the Account's delete waiting: retried as `DEPENDENCY_NOT_SYNCED` until
+`Sync:MaxRetries`, then dead-lettered, until the other aggregate removes it.
 
-**Unconfirmed** (not checked in a real org; the mock org implements the documented shape):
+**Confirmed from the guides** (above): the call, its limits and its `200` per-Id answer in Id order, a malformed Id
+failing alone, `allOrNone=true`, a Collections delete as a Composite subrequest and its result, the Recycle Bin left
+out of queries, what cascades.
 
-- the exact error for an Id already deleted or unknown (all the codes above are treated as success);
-- that Ids of one Collections delete are processed in the order sent (the Profile before its Account); if not, the
-  Account is retried and deleted on the next round;
-- a Collections delete as a Composite subrequest, as it behaves in a real org;
-- the wording of the "still referenced" refusal: `Salesforce:ParentMissingMessages` decides for creates; for deletes
-  `DELETE_FAILED` with "associated with" means wait. Another contact refusal with those words (a contact with cases)
-  also waits, until `Sync:MaxRetries`;
-- whether a record in the Recycle Bin keeps its unique external id from being used by a recreate (a
-  `DUPLICATE_VALUE` would be retried, not lost).
+**Unconfirmed** (not checked in a real org; the mock org does what is said here):
+
+- which code a delete answers for an Id deleted already or one that never existed (the mock org:
+  `ENTITY_IS_DELETED`, `INVALID_CROSS_REFERENCE_KEY`; the sync treats every code above as success);
+- that the Ids of one Collections delete are **processed** in the order sent (the guide promises the order of the
+  results only; the Profile before its Account); if not, the Account is retried and deleted on the next round;
+- the same Id twice in one delete (the sync never sends that; the mock org answers the second `ENTITY_IS_DELETED`);
+- the code for more than 200 Ids or records (the mock org: `EXCEEDED_ID_LIMIT`, the SOAP API's code for too many Ids,
+  "record limit reached" as client libraries report it); the sync never sends more than 180;
+- the wording of the "still referenced" refusal, in an org whose automation refuses it: `Salesforce:ParentMissingMessages`
+  decides for creates; for deletes `DELETE_FAILED` with "associated with" means wait. Another contact refusal with
+  those words (a contact with cases) also waits, until `Sync:MaxRetries`;
+- that upserting the external id of a record in the Recycle Bin creates a new record rather than failing with
+  `DUPLICATE_VALUE` because of the deleted one (no guide says; the mock org creates it, and a `DUPLICATE_VALUE` would
+  be retried, not lost). An upsert matches only one record, so it can't update the deleted one.
 
 ### Lookup fields: Composite and `referenceId`
 
@@ -1087,9 +1114,10 @@ before anything is sent.
 
 > **Verify in a sandbox (only with Lookup fields).** Salesforce documents `@{referenceId.field}` references between
 > Composite subrequests, with `[]` indexing into arrays, and that sObject Collections can be Composite subrequests.
-> That a reference may index into a collection's *response array* (`@{Account[0].id}`) is not spelled out, and
-> neither is what Composite answers for a reference without a value. The mock org implements both the way this client
-> expects. If a real org rejects such a subrequest, nothing is lost: a subrequest-level failure is retried, never
+> That a reference may index into a collection's *response array* (`@{Account[0].id}`) is not spelled out; for a
+> reference without a value the guide shows only the case of an illegal reference id in version 51.0 and earlier
+> (`400 PROCESSING_HALTED` "Invalid reference specified. No value for ... found in ..."). The mock org implements
+> both the way this client expects. If a real org rejects such a subrequest, nothing is lost: a subrequest-level failure is retried, never
 > dead-lettered, and the retry links the child by the Id it now reads; but every new parent would then take two rounds.
 
 ## Adding a Salesforce object
@@ -1272,10 +1300,10 @@ src/
     Data/                         SyncDbContext (the EF model: every table), SyncSchema (migrates at startup),
                                   PostgresRetryStrategy, raw-SQL helpers
     Data/Migrations/              EF migrations (InitialSchema: the tables, and the sf_limit_status view)
-  SalesforceSync.FakeSalesforce/  In-memory Salesforce (describe, query, composite, sObject Collections upsert and delete,
-                                  a Recycle Bin, Salesforce-like value storage, Text foreign keys checked like the
-                                  org's automation on write and on delete, error injection,
-                                  write history, Sforce-Limit-Info): FakeSalesforceStore
+  SalesforceSync.FakeSalesforce/  In-memory Salesforce (OAuth sessions, describe, query pages, composite, sObject
+                                  Collections upsert and delete, allOrNone, a Recycle Bin, Salesforce-like value
+                                  storage, Text foreign keys checked like the org's automation on write (and, opted
+                                  in, on delete), error injection, write history, Sforce-Limit-Info): FakeSalesforceStore
                                   is the org's surface and lock; FakeRecords, FakeSoql, FakeCollectionWriter,
                                   CompositeReferences, FakeFaults and FakeCounters are its parts
   SalesforceSync.FakeSalesforce.Server/  The in-memory org as an HTTP service (+ /__fake inspection API); the worker
@@ -1480,11 +1508,22 @@ registered row type's query and write limits) and throttle decisions. Deletes: o
 read found, a record Salesforce doesn't have costing the read only, upserts and deletes in one Composite request with
 the delete last and no body, a refused delete permanent or transient by its code, an already deleted record as
 success, a lost answer as an unknown outcome, an Account's delete waiting (`DEPENDENCY_NOT_SYNCED`) while a contact
-still names it, its Profile deleted first; as pure rules, the planner (a delete only for what the read found), the
+still names it in an org that refuses that, its Profile deleted first, and Salesforce itself deleting it and leaving
+the contact alone; as pure rules, the planner (a delete only for what the read found), the
 packing (the delete last, split by `MaxRecordsPerWrite`) and the URL of 200 Ids fitting, 201 refused. The aggregate
 split (`AccountAggregateTests`): an insert, an unchanged aggregate storing nothing, a child added, changed, unchanged
 or removed (in both lists), an account or Profile change, a deleted account in its three forms (Profile before
-Account, every child deleted), property order not counting, invalid messages, and a child without an id.
+Account, every child deleted), property order not counting, invalid messages, and a child without an id. The mock
+org against the REST and SOAP API guides (`FakeSalesforceTests`): a Collections delete answering 200 per Id in order,
+a malformed Id failing alone without an `id`, an Id in the Recycle Bin, one never seen and one with a wrong suffix
+told apart, a 15-character Id, `allOrNone=true` rolling back (`ALL_OR_NONE_OPERATION_ROLLED_BACK`), more than 200
+Ids or records failing as a whole, a deleted record left out of queries and its external id upserted again as a new
+record, an Account's delete cascading to the contacts of the standard lookup but not to those a Text key names, the
+opt-in refusal, a delete as a Composite subrequest; upsert records sharing an external id all failing, a failed
+update without an `id`, an upsert with `allOrNone` true writing nothing; reference ids of other than letters,
+digits and underscores, and a Composite `allOrNone` true, refused; query pages of 2,000 followed by the client
+through `nextRecordsUrl`; a call without the current token answered 401 `INVALID_SESSION_ID`, and the client
+getting a new token after the session expired.
 
 ### Concurrency: many threads, many pods, same accounts
 

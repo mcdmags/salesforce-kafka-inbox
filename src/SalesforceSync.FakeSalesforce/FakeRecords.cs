@@ -63,6 +63,21 @@ internal sealed class FakeRecords
         return id + new string(suffix);
     }
 
+    /// <summary>
+    /// The 18-character form of a well-formed Id, or null: 15 letters and digits, or 18 whose last 3 are the suffix of
+    /// the first 15, compared case-insensitively (SOAP API Developer Guide, StatusCode MALFORMED_ID).
+    /// </summary>
+    public static string? WellFormedId(string id)
+    {
+        if (id.Length is not (15 or 18) || !id.All(char.IsAsciiLetterOrDigit))
+        {
+            return null;
+        }
+
+        var full = Id18(id[..15]);
+        return id.Length == 15 || full[15..].Equals(id[15..], StringComparison.OrdinalIgnoreCase) ? full : null;
+    }
+
     public void Insert(string sobject, string id, JsonObject record, JsonObject storedValues)
     {
         Table(sobject)[id] = record;
@@ -116,4 +131,39 @@ internal sealed class FakeRecords
         _deleted.Clear();
         _idCounter = 0;
     }
+
+    /// <summary>A deep copy of the data, for a write that may have to roll back (allOrNone true): see <see cref="Restore"/>.</summary>
+    public Saved Save()
+    {
+        return new Saved(
+            _tables.ToDictionary(t => t.Key, t => t.Value.ToDictionary(r => r.Key, r => r.Value.DeepClone().AsObject())),
+            _history.ToDictionary(h => h.Key, h => h.Value.Select(w => w.DeepClone().AsObject()).ToList()),
+            [.. _deleted]);
+    }
+
+    /// <summary>
+    /// Puts back the data as <see cref="Save"/> copied it: every write since is undone. Ids are not handed out again,
+    /// as Salesforce never reuses one.
+    /// </summary>
+    public void Restore(Saved s)
+    {
+        _tables.Clear();
+        _history.Clear();
+        _deleted.Clear();
+        foreach (var (sobject, table) in s.Tables)
+        {
+            _tables[sobject] = new Dictionary<string, JsonObject>(table, StringComparer.Ordinal);
+        }
+
+        foreach (var (id, writes) in s.History)
+        {
+            _history[id] = writes;
+        }
+
+        _deleted.UnionWith(s.Deleted);
+    }
+
+    /// <summary>The data at a <see cref="Save"/>.</summary>
+    public sealed record Saved(Dictionary<string, Dictionary<string, JsonObject>> Tables, Dictionary<string, List<JsonObject>> History,
+        List<string> Deleted);
 }

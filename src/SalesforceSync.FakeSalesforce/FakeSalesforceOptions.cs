@@ -24,4 +24,18 @@ public sealed class FakeSalesforceOptions
     /// (Salesforce: 25 for production and sandboxes, 5 for Developer Edition and trials).
     /// </summary>
     public int ConcurrentLongRunningLimit { get; set; } = 25;
+
+    /// <summary>
+    /// When true (the default, as Salesforce), an API call without the access token the org last issued
+    /// (<c>Authorization: Bearer ...</c>) fails with 401 INVALID_SESSION_ID. False for callers that skip OAuth.
+    /// </summary>
+    public bool RequireAccessToken { get; set; } = true;
+
+    /// <summary>
+    /// The org's automation, simulated: refuse (<c>DELETE_FAILED</c> "... is associated with the following records")
+    /// to delete a record while others' foreign keys (Text fields) name it, as the org refuses a child whose parent
+    /// is missing. False (the default) is what Salesforce itself does with Text fields: it knows no relationship, so it
+    /// neither refuses nor cascades.
+    /// </summary>
+    public bool RefuseDeletingReferencedRecords { get; set; }
 }
