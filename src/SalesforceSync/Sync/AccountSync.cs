@@ -37,10 +37,7 @@ public static class AccountSync
 
     public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<UpsertUnit> units)
     {
-        return [
-        SoqlQuery.RecordsOf<AccountSObject>(units),
-        SoqlQuery.RecordsOf<ProfileSObject>(units)
-    ];
+        return [SoqlQuery.RecordsOf<AccountSObject>(units), SoqlQuery.RecordsOf<ProfileSObject>(units)];
     }
 
     /// <summary>
