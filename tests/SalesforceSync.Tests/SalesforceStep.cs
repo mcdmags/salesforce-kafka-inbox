@@ -15,9 +15,15 @@ namespace SalesforceSync.Tests;
 /// </summary>
 internal static class SalesforceStep
 {
-    public static SalesforceBatchUpsertService Service(HttpClient http, IOptions<SalesforceOptions> options)
+    private const string OrgUrl = "https://fake.my.salesforce.com";
+
+    /// <param name="http">The HTTP stack to the org (see <see cref="Http"/>).</param>
+    /// <param name="options">The Salesforce options of the engine and its error classification.</param>
+    /// <param name="gate">The concurrency gate, for tests that run whole batches; the Salesforce step needs none.</param>
+    public static SalesforceBatchUpsertService Service(HttpClient http, IOptions<SalesforceOptions> options,
+        ISalesforceBatchGate? gate = null)
     {
-        return new(new NoDatabase(), new SalesforceRestClient(http), SchemaCache(),
+        return new(gate ?? new NoDatabase(), new SalesforceRestClient(http), SchemaCache(),
                 new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
                 NullLogger<SalesforceBatchUpsertService>.Instance);
     }
@@ -26,8 +32,14 @@ internal static class SalesforceStep
     public static SalesforceSchemaCache SchemaCache(IDistributedCache? shared = null, TimeProvider? clock = null)
     {
         return new(clock ?? TimeProvider.System, shared ?? new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())),
-            Options.Create(new SalesforceOptions { InstanceUrl = "https://fake.my.salesforce.com" }),
+            Options.Create(new SalesforceOptions { InstanceUrl = OrgUrl }),
             NullLogger<SalesforceSchemaCache>.Instance);
+    }
+
+    /// <summary>A client of the org through <paramref name="handler"/>, at the address the caches are keyed by.</summary>
+    public static HttpClient Http(HttpMessageHandler handler)
+    {
+        return new(handler) { BaseAddress = new Uri(OrgUrl) };
     }
 
     /// <summary>The Salesforce step never takes a slot.</summary>

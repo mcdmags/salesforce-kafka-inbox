@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
@@ -367,12 +366,8 @@ public sealed class EngineFlowTests
 
     private SalesforceBatchUpsertService Engine()
     {
-        var options = Options.Create(new SalesforceOptions());
         _http.InnerHandler ??= new FakeSalesforceHandler(_org);
-        var http = new HttpClient(_http) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
-        return new SalesforceBatchUpsertService(_gate, new SalesforceRestClient(http), SalesforceStep.SchemaCache(),
-            new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
-            NullLogger<SalesforceBatchUpsertService>.Instance);
+        return SalesforceStep.Service(SalesforceStep.Http(_http), Options.Create(new SalesforceOptions()), _gate);
     }
 
     /// <summary>An account event with its Profile (keyed like the account).</summary>

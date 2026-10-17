@@ -38,10 +38,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     private SalesforceBatchUpsertService Upserter(SalesforceOptions? salesforceOptions = null)
     {
         var options = Options.Create(salesforceOptions ?? new SalesforceOptions());
-        var http = new HttpClient(new GzipRequestHandler(options) { InnerHandler = new FakeSalesforceHandler(_org) })
-        {
-            BaseAddress = new Uri("https://fake.my.salesforce.com")
-        };
+        var http = SalesforceStep.Http(new GzipRequestHandler(options) { InnerHandler = new FakeSalesforceHandler(_org) });
         return SalesforceStep.Service(http, options);
     }
 
@@ -447,7 +444,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task A_query_URL_over_the_budget_is_refused_before_any_call_and_one_at_it_is_sent()
     {
-        var client = new SalesforceRestClient(new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") });
+        var client = new SalesforceRestClient(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
         static string Soql(int urlBytes)
         {
             var empty = SalesforceRestClient.Soql("Account", ["Id"], "ExternalId__c", [""]);
@@ -468,7 +465,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task The_mock_org_refuses_a_URI_over_16384_bytes_as_Salesforce_does()
     {
-        var http = new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
+        var http = SalesforceStep.Http(new FakeSalesforceHandler(_org));
         var subrequest = new JsonObject
         {
             ["compositeRequest"] = new JsonArray(new JsonObject
@@ -597,7 +594,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task Describe_returns_the_record_types_of_the_object()
     {
-        var http = new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
+        var http = SalesforceStep.Http(new FakeSalesforceHandler(_org));
 
         var schema = (await new SalesforceRestClient(http).DescribeAsync("Account", null, CancellationToken.None))!;
 
@@ -851,7 +848,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     [Fact]
     public async Task The_org_rejects_a_foreign_key_whose_parent_does_not_exist()
     {
-        var client = new SalesforceRestClient(new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") });
+        var client = new SalesforceRestClient(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
         var profile = new Dictionary<string, object?> { ["attributes"] = new { type = "Profile__c" }, ["ExternalId__c"] = "P1", ["AccountId__c"] = "NOPE" };
 
         var result = (await Upsert(client, "Profile__c", "ExternalId__c", [profile], CancellationToken.None)).Single();
@@ -1004,7 +1001,7 @@ public sealed class SalesforceBatchUpsertServiceTests
     public async Task The_upsert_call_answers_per_record_in_order_with_created_or_updated()
     {
         await Account("A1", new() { ["name"] = "Acme" }, []);
-        var client = new SalesforceRestClient(new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = new Uri("https://fake.my.salesforce.com") });
+        var client = new SalesforceRestClient(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
         static IReadOnlyDictionary<string, object?> Record(string key, string? lastName)
         {
             return new Dictionary<string, object?>

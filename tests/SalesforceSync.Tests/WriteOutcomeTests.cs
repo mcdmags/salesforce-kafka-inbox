@@ -124,7 +124,7 @@ public sealed class WriteOutcomeTests
         var org = new FakeSalesforceStore(new FakeSalesforceOptions { EnforceDailyLimit = false });
         var options = Options.Create(new SalesforceOptions { CompressRequestsLargerThan = 0 });
         var failing = new FailingHandler { InnerHandler = new FakeSalesforceHandler(org) };
-        var http = new HttpClient(failing) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
+        var http = SalesforceStep.Http(failing);
         return (SalesforceStep.Service(http, options), org, failing);
     }
 
