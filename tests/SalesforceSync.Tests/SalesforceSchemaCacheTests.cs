@@ -2,7 +2,7 @@ using System.Text;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Tests;
 

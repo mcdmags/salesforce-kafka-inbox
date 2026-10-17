@@ -2,7 +2,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync;
 

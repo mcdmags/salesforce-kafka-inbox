@@ -3,9 +3,10 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using SalesforceSync.Data;
+using SalesforceSync.Data.Inbox;
 using SalesforceSync.Inbox;
-using SalesforceSync.RateLimiting;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync;

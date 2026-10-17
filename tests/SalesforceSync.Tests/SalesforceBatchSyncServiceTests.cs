@@ -4,8 +4,9 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
+using SalesforceSync.Data.Inbox;
 using SalesforceSync.FakeSalesforce;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Tests;

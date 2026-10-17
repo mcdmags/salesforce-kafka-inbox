@@ -1,5 +1,5 @@
 using System.Text.Json;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync.Write;
 
@@ -9,7 +9,7 @@ internal sealed record ReadQuery(CompositeQuery Query, string SObject);
 /// <summary>
 /// Builds the batch's read: the strategy's queries as SOQL, each selecting every field the diff compares and the Ids
 /// the lookups need (or the external ids that show a parent exists), split into chunks of at most the row type's
-/// <see cref="Inbox.IInboxRow.MaxValuesPerQuery"/> values whose URL fits a call (<see cref="SalesforceRestClient.MaxUrlBytes"/>).
+/// <see cref="Data.Inbox.IInboxRow.MaxValuesPerQuery"/> values whose URL fits a call (<see cref="SalesforceRestClient.MaxUrlBytes"/>).
 /// </summary>
 internal static class ReadQueryBuilder
 {

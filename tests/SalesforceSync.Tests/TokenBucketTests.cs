@@ -1,4 +1,5 @@
-using SalesforceSync.RateLimiting;
+using SalesforceSync.Data.RateLimiting;
+using SalesforceSync.Infrastructure.RateLimiting;
 
 namespace SalesforceSync.Tests;
 

@@ -1,5 +1,5 @@
 using System.Text.Json;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync.Write;
 
@@ -21,7 +21,7 @@ internal static class WritePlanner
 {
     /// <param name="units">The batch's units, normalized against Describe.</param>
     /// <param name="current">What the read found.</param>
-    /// <param name="maxRecordsPerWrite">The row type's <see cref="Inbox.IInboxRow.MaxRecordsPerWrite"/>: records per collection.</param>
+    /// <param name="maxRecordsPerWrite">The row type's <see cref="Data.Inbox.IInboxRow.MaxRecordsPerWrite"/>: records per collection.</param>
     public static WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current, int maxRecordsPerWrite)
     {
         var planned = new List<PlannedUnit>();

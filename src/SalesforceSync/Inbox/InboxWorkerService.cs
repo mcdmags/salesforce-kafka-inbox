@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using SalesforceSync.Data.Inbox;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Inbox;

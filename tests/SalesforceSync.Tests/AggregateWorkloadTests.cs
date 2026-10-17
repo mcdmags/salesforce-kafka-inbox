@@ -1,8 +1,9 @@
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Options;
+using SalesforceSync.Data.Inbox;
 using SalesforceSync.Benchmarks;
 using SalesforceSync.FakeSalesforce;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Tests;

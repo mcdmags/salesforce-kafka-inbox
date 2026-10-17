@@ -1,5 +1,5 @@
 using System.Text.Json.Nodes;
-using SalesforceSync.Inbox;
+using SalesforceSync.Data.Inbox;
 
 namespace SalesforceSync.IntegrationTests;
 

@@ -4,8 +4,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using SalesforceSync.Data;
-using SalesforceSync.Inbox;
-using SalesforceSync.RateLimiting;
+using SalesforceSync.Data.Inbox;
+using SalesforceSync.Infrastructure.RateLimiting;
 
 namespace SalesforceSync.Tests;
 

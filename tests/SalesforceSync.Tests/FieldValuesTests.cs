@@ -1,5 +1,5 @@
 using System.Text.Json;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Tests;
 

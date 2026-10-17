@@ -1,5 +1,5 @@
 using System.Text.RegularExpressions;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync.Write;
 
@@ -34,7 +34,7 @@ internal sealed partial class CompositeWrite
     /// outcome is read from that request's answers alone.
     /// </summary>
     /// <param name="units">The units with writes, in order.</param>
-    /// <param name="maxRecordsPerWrite">The row type's <see cref="Inbox.IInboxRow.MaxRecordsPerWrite"/>: records per collection.</param>
+    /// <param name="maxRecordsPerWrite">The row type's <see cref="Data.Inbox.IInboxRow.MaxRecordsPerWrite"/>: records per collection.</param>
     /// <returns>The requests, and a permanent failure for each unit that can't fit any request.</returns>
     public static (List<CompositeWrite> Requests, List<SyncResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units,
         int maxRecordsPerWrite)

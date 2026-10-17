@@ -8,9 +8,10 @@ using Npgsql;
 using NpgsqlTypes;
 using SalesforceSync.Data;
 using SalesforceSync.FakeSalesforce;
+using SalesforceSync.Data.Inbox;
 using SalesforceSync.Inbox;
-using SalesforceSync.RateLimiting;
-using SalesforceSync.Salesforce;
+using SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Benchmarks;
