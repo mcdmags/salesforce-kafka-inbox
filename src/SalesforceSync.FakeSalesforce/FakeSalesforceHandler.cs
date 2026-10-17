@@ -52,7 +52,7 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
         {
             return Json(request, HttpStatusCode.OK, new JsonObject
             {
-                ["access_token"] = "fake-token",
+                ["access_token"] = store.AccessToken,
                 ["instance_url"] = $"{uri.Scheme}://{uri.Authority}",
                 ["token_type"] = "Bearer"
             });
@@ -65,6 +65,12 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
                 ? Json(request, HttpStatusCode.RequestUriTooLong, FakeJson.Errors("URI_TOO_LONG", "The URI is too long"))
                 : Json(request, HttpStatusCode.RequestHeaderFieldsTooLarge,
                     FakeJson.Errors("REQUEST_HEADER_FIELDS_TOO_LARGE", $"URI and headers are {size:N0} bytes"));
+        }
+
+        // A session that has expired, been revoked or was never opened: the client must get a new token
+        if (options.RequireAccessToken && request.Headers.Authorization?.ToString() != $"Bearer {store.AccessToken}")
+        {
+            return Json(request, HttpStatusCode.Unauthorized, FakeJson.Errors("INVALID_SESSION_ID", "Session expired or invalid"));
         }
 
         var calls = store.CountApiCall();
@@ -93,8 +99,8 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
                         ? Json(request, HttpStatusCode.OK, store.Upsert(sobject, field, path, await ReadJsonAsync(request, ct)))
                         : FakeSalesforceStore.IsDelete(request.Method.Method, path)
                         ? Json(request, HttpStatusCode.OK, store.Delete(uri))
-                        : request.Method == HttpMethod.Get && path.EndsWith("/query", StringComparison.OrdinalIgnoreCase)
-                        ? Json(request, HttpStatusCode.OK, store.Query(FakeSalesforceStore.QueryOf(uri)))
+                        : request.Method == HttpMethod.Get && FakeSalesforceStore.IsQuery(path)
+                        ? Json(request, HttpStatusCode.OK, store.Query(uri))
                         : request.Method == HttpMethod.Post && path.EndsWith("/composite", StringComparison.OrdinalIgnoreCase)
                         ? Json(request, HttpStatusCode.OK, store.ExecuteComposite(await ReadJsonAsync(request, ct)))
                         : Json(request, HttpStatusCode.NotFound,

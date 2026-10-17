@@ -6,10 +6,10 @@ namespace SalesforceSync.FakeSalesforce;
 /// <summary>
 /// sObject Collections upsert by external id (PATCH .../composite/sobjects/{SObject}/{field}): each record is checked
 /// the way Salesforce checks it (type, fields, lookups, foreign keys, uniqueness, injected faults) and gets a result of
-/// its own (allOrNone false, the only mode the sync uses); and delete by Id (<see cref="Delete"/>). Not thread-safe;
-/// <see cref="FakeSalesforceStore"/> holds its lock.
+/// its own; and delete by Id (<see cref="Delete"/>). With allOrNone true, one failed record rolls back the others.
+/// Not thread-safe; <see cref="FakeSalesforceStore"/> holds its lock.
 /// </summary>
-internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults faults, FakeCounters counters)
+internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults faults, FakeCounters counters, FakeSalesforceOptions options)
 {
     public const int MaxRecords = 200;
 
@@ -17,26 +17,94 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
 
     /// <summary>
     /// Upsert: each record is matched by <paramref name="externalIdField"/>, updated if it exists and created if not.
-    /// One result per record, in request order, with <c>created</c>.
+    /// One result per record, in request order, with <c>created</c>. Records of one request that share an external id
+    /// all fail and none of them is written (SOAP API Developer Guide, upsert(): "those records are marked as errors").
     /// </summary>
     public JsonArray Upsert(string sobject, string externalIdField, JsonObject body)
     {
         var sent = body["records"]?.AsArray() ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing 'records'");
         if (sent.Count > MaxRecords)
         {
-            throw new FakeSalesforceException(400, "LIMIT_EXCEEDED", $"A maximum of {MaxRecords} records is allowed per request");
+            throw TooMany();
         }
 
-        var results = new JsonArray();
-        foreach (var record in sent)
+        var shared = sent.Select(r => Str(r?[externalIdField])).OfType<string>()
+            .GroupBy(id => id, StringComparer.Ordinal).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
+        return Write(IsTrue(body["allOrNone"]), () => new JsonArray([.. sent.Select(record =>
+            Str(record?[externalIdField]) is { } id && shared.Contains(id)
+                ? Upserted(Result((400, Errors("DUPLICATE_VALUE", $"Duplicate external id specified: {id}", externalIdField)), null), false)
+                : UpsertOne(sobject, externalIdField, record!.DeepClone().AsObject()))]));
+    }
+
+    /// <summary>
+    /// Delete by Id (DELETE .../composite/sobjects?ids=...): the records may be of any objects, and each gets a result of
+    /// its own, in request order; a malformed Id is one of them, without an <c>id</c> (REST API Developer Guide,
+    /// "Delete Records Using sObject Collections"). A deleted record goes to the Recycle Bin; deleting it again is
+    /// <c>ENTITY_IS_DELETED</c>, an Id no record ever had <c>INVALID_CROSS_REFERENCE_KEY</c>. Injected faults apply
+    /// (e.g. <c>DELETE_FAILED</c>, a Contact with cases), and so do lost responses.
+    /// </summary>
+    public JsonArray Delete(IReadOnlyList<string> ids, bool allOrNone)
+    {
+        return ids.Count == 0
+            ? throw new FakeSalesforceException(400, "MISSING_ARGUMENT", "ids not specified")
+            : ids.Count > MaxRecords
+            ? throw TooMany()
+            : Write(allOrNone, () => new JsonArray([.. ids.Select(id => FakeRecords.WellFormedId(id) is { } valid
+                ? Result(DeleteOne(valid), valid)
+                : Result((400, Errors("MALFORMED_ID", $"malformed id {id}")), null))]));
+    }
+
+    /// <summary>A Collections allOrNone: a JSON boolean in a body, "true" or "false" in a URL; absent is false.</summary>
+    public static bool IsTrue(JsonNode? allOrNone)
+    {
+        return allOrNone is JsonValue v && (v.TryGetValue<bool>(out var b) ? b : v.TryGetValue<string>(out var s) && bool.TryParse(s, out b) && b);
+    }
+
+    /// <summary>
+    /// Runs a collection's writes. With <paramref name="allOrNone"/>, a failed record undoes the others, which then fail
+    /// with <c>ALL_OR_NONE_OPERATION_ROLLED_BACK</c>; the answer is still 200 with one result per record (REST API
+    /// Developer Guide, "Some Items Failed and allOrNone is true").
+    /// </summary>
+    private JsonArray Write(bool allOrNone, Func<JsonArray> write)
+    {
+        var saved = allOrNone ? records.Save() : null;
+        var (creates, updates, deletes) = (counters.Creates, counters.Updates, counters.Deletes);
+        var results = write();
+        if (saved is not null && results.Any(Failed))
         {
-            results.Add(UpsertOne(sobject, externalIdField, record!.DeepClone().AsObject()));
+            records.Restore(saved);
+            (counters.Creates, counters.Updates, counters.Deletes) = (creates, updates, deletes);
+            foreach (var result in results.Where(r => !Failed(r)))
+            {
+                result!["success"] = false;
+                result["errors"] = new JsonArray(ToRecordError(Errors("ALL_OR_NONE_OPERATION_ROLLED_BACK",
+                    "Record rolled back because not all records were valid and the request was using AllOrNone header")[0]));
+                if (result.AsObject().ContainsKey("created"))
+                {
+                    result["created"] = false;
+                }
+            }
         }
 
-        var failed = results.Count(r => !r!["success"]!.GetValue<bool>());
+        var failed = results.Count(Failed);
         counters.RecordsSucceeded += results.Count - failed;
         counters.RecordsFailed += failed;
         return results;
+    }
+
+    private static bool Failed(JsonNode? result)
+    {
+        return !result!["success"]!.GetValue<bool>();
+    }
+
+    /// <summary>
+    /// More than 200 records or Ids fail the whole request. The code is the SOAP API's for too many Ids in a call
+    /// (Core Data Types, StatusCode), which client libraries report for sObject Collections too.
+    /// </summary>
+    private static FakeSalesforceException TooMany()
+    {
+        return new FakeSalesforceException(400, "EXCEEDED_ID_LIMIT",
+            $"record limit reached. cannot submit more than {MaxRecords} records into this call");
     }
 
     private JsonObject UpsertOne(string sobject, string externalIdField, JsonObject record)
@@ -59,40 +127,15 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             ? (400, Errors("MISSING_ARGUMENT", $"{externalIdField} not specified", externalIdField))
             : existing is null ? Create(sobject, record) : Update(sobject, id!, record);
 
-        var result = Result(outcome, id);
-        result["created"] = existing is null && result["success"]!.GetValue<bool>();
-        return result;
+        // A failed upsert has no id, even for a record that exists (SOAP API, UpsertResult: "If there was an error, the field is null")
+        var result = Result(outcome, outcome.Item1 < 400 ? id : null);
+        return Upserted(result, existing is null && !Failed(result));
     }
 
-    /// <summary>
-    /// Delete by Id (DELETE .../composite/sobjects?ids=...): the records may be of any objects, and each gets a result of
-    /// its own, in request order. A deleted record goes to the Recycle Bin; deleting it again is
-    /// <c>ENTITY_IS_DELETED</c>, an Id no record ever had <c>INVALID_CROSS_REFERENCE_KEY</c>. Injected faults apply
-    /// (e.g. <c>DELETE_FAILED</c>, a Contact with cases), and so do lost responses.
-    /// </summary>
-    public JsonArray Delete(IReadOnlyList<string> ids)
+    private static JsonObject Upserted(JsonObject result, bool created)
     {
-        if (ids.Count is 0 or > MaxRecords)
-        {
-            throw new FakeSalesforceException(400, "LIMIT_EXCEEDED", $"Between 1 and {MaxRecords} ids are allowed per request");
-        }
-
-        // A malformed id fails the whole request, not just its record
-        if (ids.FirstOrDefault(id => id.Length is not (15 or 18) || !id.All(char.IsAsciiLetterOrDigit)) is { } malformed)
-        {
-            throw new FakeSalesforceException(400, "MALFORMED_ID", $"malformed id {malformed}");
-        }
-
-        var results = new JsonArray();
-        foreach (var id in ids)
-        {
-            results.Add(Result(DeleteOne(id), id));
-        }
-
-        var failed = results.Count(r => !r!["success"]!.GetValue<bool>());
-        counters.RecordsSucceeded += results.Count - failed;
-        counters.RecordsFailed += failed;
-        return results;
+        result["created"] = created;
+        return result;
     }
 
     private (int Status, JsonNode? Body) DeleteOne(string id)
@@ -110,7 +153,7 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             return (400, Errors(fault.Code, fault.Message));
         }
 
-        if (Dependents(sobject, extId) is { Count: > 0 } dependents)
+        if (options.RefuseDeletingReferencedRecords && Dependents(sobject, extId) is { Count: > 0 } dependents)
         {
             return (400, Errors("DELETE_FAILED", $"Your attempt to delete {extId} could not be completed because it is associated " +
                 $"with the following records: {string.Join(", ", dependents)}"));
@@ -119,13 +162,25 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         faults.NoteWrite(sobject, extId);
         records.Delete(sobject, id);
         counters.Deletes++;
+        // A lookup that cascades takes its records along (a Text foreign key never does)
+        foreach (var (child, lookup) in FakeSchema.Objects.SelectMany(o => o.Value
+                     .Where(f => f.CascadeDelete && sobject.Equals(f.ReferenceTo, StringComparison.OrdinalIgnoreCase)).Select(f => (o.Key, f.Name))))
+        {
+            foreach (var childId in records.Table(child).Where(r => Str(r.Value[lookup]) == id).Select(r => r.Key).ToList())
+            {
+                records.Delete(child, childId);
+                counters.Deletes++;
+            }
+        }
+
         return (204, null);
     }
 
     /// <summary>
-    /// The records whose foreign keys (Text fields holding a parent's external id) name this one: the org's automation,
-    /// simulated, refuses to delete a parent while they exist, as it refuses a child whose parent is missing
-    /// (<see cref="MissingParent"/>). A Text field is no relationship to Salesforce, so nothing cascades.
+    /// The records whose foreign keys (Text fields holding a parent's external id) name this one. With
+    /// <see cref="FakeSalesforceOptions.RefuseDeletingReferencedRecords"/> the org's automation, simulated, refuses to
+    /// delete a parent while they exist, as it refuses a child whose parent is missing (<see cref="MissingParent"/>).
+    /// A Text field is no relationship to Salesforce, so nothing cascades either way.
     /// </summary>
     private List<string> Dependents(string sobject, string? externalId)
     {
@@ -138,22 +193,33 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
                 .Distinct()];
     }
 
-    /// <summary>A record's result: <c>{ "id", "success", "errors" }</c>, errors as Collections lists them.</summary>
+    /// <summary>
+    /// A record's result: <c>{ "id", "success", "errors" }</c>, errors as Collections lists them. Without an Id (a failed
+    /// upsert, a malformed Id) it has no <c>id</c>, as in the guide's examples; a failed delete keeps the Id it was for.
+    /// </summary>
     private static JsonObject Result((int Status, JsonNode? Body) outcome, string? id)
     {
         var ok = outcome.Status < 400;
+        var result = new JsonObject();
+        var recordId = ok ? outcome.Body?["id"]?.GetValue<string>() ?? id : id;
+        if (recordId is not null)
+        {
+            result["id"] = recordId;
+        }
+
+        result["success"] = ok;
+        result["errors"] = ok ? [] : new JsonArray([.. outcome.Body!.AsArray().Select(ToRecordError)]);
+        return result;
+    }
+
+    /// <summary>An error of an error response (<c>errorCode</c>) as a record's error in a collection (<c>statusCode</c>).</summary>
+    private static JsonNode ToRecordError(JsonNode? e)
+    {
         return new JsonObject
         {
-            ["id"] = ok ? (outcome.Body?["id"]?.GetValue<string>() ?? id) : null,
-            ["success"] = ok,
-            ["errors"] = ok
-                ? []
-                : new JsonArray([.. outcome.Body!.AsArray().Select(e => (JsonNode)new JsonObject
-                {
-                    ["statusCode"] = e!["errorCode"]!.GetValue<string>(),
-                    ["message"] = e["message"]?.GetValue<string>(),
-                    ["fields"] = e["fields"]?.DeepClone() ?? new JsonArray()
-                })])
+            ["statusCode"] = e!["errorCode"]!.GetValue<string>(),
+            ["message"] = e["message"]?.GetValue<string>(),
+            ["fields"] = e["fields"]?.DeepClone() ?? new JsonArray()
         };
     }
 
