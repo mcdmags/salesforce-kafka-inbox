@@ -88,7 +88,7 @@ The sync is three layers, each with one job:
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `SelectAsync`, and `UpsertAsync` and `DeleteAsync` for Collections upserts and deletes); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
 | **Business flow** | `SalesforceBatchSyncService` | `SyncBatchAsync` is the sync as a list of steps: claim → map each entity's event → `WriteToSalesforceAsync` (describe → normalize → read → diff → send) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | in `Sync/SalesforceBatchSyncService.cs`, after the service, one class per step, in file order: `PreparedBatch` (`Prepare`: read and map; `Outcomes`: entity results → inbox outcomes), `Describer` (field metadata, cached), `Normalizer` (values against Describe, via `FieldValues`), `Reader` (the read's SOQL and what it found), `Differ` (the diff: changed fields, create / update / delete / unchanged, `DEPENDENCY_NOT_SYNCED`), `Sender` (one upsert per object, parents first, then the delete; an entity that failed is not sent again) and `Interpreter` (one record's answer → saved, retry or dead-letter); and `AccountAggregate` (a Kafka aggregate → the changed entities' events) | Pure and deterministic, except `Describer`, `Reader` and `Sender`, which call the client; unit-tested without a database or HTTP. |
+| **Rules, no I/O** | in `Sync/`, one file per step, in the order a batch runs them: `PreparedBatch` (`Prepare`: read and map; `Outcomes`: entity results → inbox outcomes), then `Describer` (field metadata, cached), `Normalizer` (values against Describe, via `FieldValues`), `Reader` (the read's SOQL and what it found), `Differ` (the diff: changed fields, create / update / delete / unchanged, `DEPENDENCY_NOT_SYNCED`), `Sender` (one upsert per object, parents first, then the delete; an entity that failed is not sent again) and `Interpreter` (one record's answer → saved, retry or dead-letter); and `AccountAggregate` (a Kafka aggregate → the changed entities' events) | Pure and deterministic, except `Describer`, `Reader` and `Sender`, which call the client; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`). The
 model defines every table in `OnModelCreating` (partial indexes with `HasFilter`, autovacuum settings with
@@ -749,7 +749,7 @@ has no migration.
 A batch is written with plain, bulk calls: **one sObject Collections upsert per object**
 (`PATCH /composite/sobjects/{SObject}/{ExternalIdFieldName}`, parents first), then **one sObject Collections delete** by
 Id for the records to delete (`DELETE /composite/sobjects?ids=...`, [Deletes](#deletes)). Each is one call and takes up
-to 200 records; there is no Composite request. The steps, in the order the code reads (`Sync/SalesforceBatchSyncService.cs`, top to bottom, one class per step):
+to 200 records; there is no Composite request. The steps, in the order the code reads (one file per step in `Sync/`):
 
 1. **Normalize** (`Normalizer`): each record is checked against Describe and its values put in the form Salesforce
    stores. A record Salesforce would reject fails its entity here, before any call.
@@ -1289,7 +1289,7 @@ src/
     RateLimiting/                 The rate limiter's decisions: SalesforceRateLimiter (token bucket, daily budget,
                                   throttle, pause), TokenBucket, SalesforceBatchGate; it reads and writes its state
                                   through Data's RateLimitRepository and serves Infrastructure's ports
-    Sync/                         The engine (SalesforceBatchSyncService.cs: the flow, PreparedBatch and a class per step of the write path), EntitySyncService, the
+    Sync/                         The engine (SalesforceBatchSyncService.cs: the flow), PreparedBatch and one file per step of the write path (Describer, Normalizer, Reader, Differ, Sender, Interpreter), EntitySyncService, the
                                   strategy and event meta, the engine's model types, AccountAggregate (a Kafka
                                   aggregate → the changed entities' events), and one file per synced object
                                   (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy)
