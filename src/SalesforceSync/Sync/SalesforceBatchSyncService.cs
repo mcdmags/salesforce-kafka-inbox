@@ -123,7 +123,7 @@ public sealed class SalesforceBatchSyncService(
             // first), the lease is what still protects the entities.
             log.LogWarning(ex, "{Type} batch: holding {Count} events for {Hold}", strategy.EntityType, claim.Events.Count, _opt.UnknownOutcomeHold);
             using var recording = new CancellationTokenSource(HoldRecordingTimeout);
-            await inbox.HoldAsync(claim, ex.Message, recording.Token);
+            await inbox.ReleaseAsync(claim, new Release(_opt.UnknownOutcomeHold, $"UNKNOWN_OUTCOME: {ex.Message}"), recording.Token);
             ct.ThrowIfCancellationRequested();
             return claim.Events.Count;
         }
@@ -135,15 +135,17 @@ public sealed class SalesforceBatchSyncService(
             log.LogError(ex, "{Type} inbox stopped for {Hold} by {Count} mapping error(s), fix the mapping or add the field: {Errors}",
                 strategy.EntityType, _opt.MappingErrorHold, ex.Errors.Count,
                 string.Join("; ", ex.Errors.Select(e => $"{e.Key}: {e.Error.Code} {e.Error.Message}")));
-            await inbox.HaltAsync(claim, [.. ex.Errors.GroupBy(e => e.Key).Select(g => new FailedEvent(g.Key,
-                string.Join("; ", g.Select(e => $"{e.Error.Code}: {e.Error.Message}")), InboxRow.MappingErrorCode))],
-                $"Held: the {strategy.EntityType} inbox is stopped by a mapping error ({ex.Message})", ct);
+            await inbox.ReleaseAsync(claim, new Release(_opt.MappingErrorHold,
+                $"MAPPING_ERROR: the {strategy.EntityType} inbox is stopped by a mapping error ({ex.Message})",
+                [.. ex.Errors.GroupBy(e => e.Key).Select(g => new FailedEvent(g.Key,
+                    string.Join("; ", g.Select(e => $"{e.Error.Code}: {e.Error.Message}"))))],
+                StopInbox: true), ct);
             return claim.Events.Count;
         }
         catch (RateLimitedException ex)
         {
             log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}", claim.Events.Count, strategy.EntityType, ex.RetryAfter);
-            await inbox.DeferAsync(claim, ex.RetryAfter, ct);
+            await inbox.ReleaseAsync(claim, new Release(ex.RetryAfter), ct);
             return 0;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -153,7 +155,7 @@ public sealed class SalesforceBatchSyncService(
             // only what still differs. Shutdown (ct) is not caught: the failed request wrote nothing, and the lease
             // simply expires.
             log.LogError(ex, "{Type} batch failed", strategy.EntityType);
-            await inbox.FailAllAsync(claim, ex.Message, (ex as SalesforceResponseException)?.ErrorCode, ct);
+            await inbox.FailAllAsync(claim, ex.Message, ct);
             return claim.Events.Count;
         }
 
@@ -255,7 +257,7 @@ public sealed class SalesforceBatchSyncService(
     {
         foreach (var invalid in batch.Invalid)
         {
-            log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", invalid.EntityId, invalid.Code, invalid.Error);
+            log.LogWarning("Dead-lettered event {Id}: {Error}", invalid.EntityId, invalid.Error);
         }
 
         foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure))

@@ -42,10 +42,10 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         await Eventually.ValueAsync(() => app.GetRecordAsync("Account", acct), a => a is not null, "the Account to be created");
         await using (var conn = await app.Db.OpenConnectionAsync())
         {
-            var (status, code) = await conn.QuerySingleAsync<(string, string?)>(
-                $"SELECT {SyncFixture.StatusSql}, last_error_code FROM {SyncFixture.InboxTable()} WHERE entity_id = @acct", new { acct });
+            var (status, error) = await conn.QuerySingleAsync<(string, string?)>(
+                $"SELECT {SyncFixture.StatusSql}, last_error FROM {SyncFixture.InboxTable()} WHERE entity_id = @acct", new { acct });
             status.Should().Be("pending", "the entity is not synced while one of its records is missing");
-            code.Should().BeOneOf("UNABLE_TO_LOCK_ROW", null);
+            (error is null || error.Contains("UNABLE_TO_LOCK_ROW")).Should().BeTrue();
         }
         (await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().BeNull();
 
@@ -65,7 +65,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         await app.PublishAsync(good, 1, new JsonObject { ["name"] = Any.String("Good ") }, new JsonObject { ["tier"] = "Silver" });
 
         (await app.WaitForInboxSettledAsync(bad, version: 1)).Should().Be((1L, "dead"));
-        (await app.GetInboxRowAsync(bad))!.ErrorCode.Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION",
+        (await app.GetInboxRowAsync(bad))!.Error.Should().Contain("FIELD_CUSTOM_VALIDATION_EXCEPTION",
             "the Account's own error, not the Profile's missing parent");
         (await app.GetRecordAsync("Account", bad)).Should().BeNull();
         (await app.GetRecordAsync("Profile__c", SyncFixture.ProfileIdFor(bad))).Should().BeNull();

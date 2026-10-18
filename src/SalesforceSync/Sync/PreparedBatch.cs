@@ -56,7 +56,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
 
         void Reject(InboxEvent row, string why)
         {
-            batch.Invalid.Add(new FailedEvent(row.EntityId, $"{strategy.EntityType} {row.EntityId}: {why}", SalesforceErrors.InvalidEvent));
+            batch.Invalid.Add(new FailedEvent(row.EntityId, $"{SalesforceErrors.InvalidEvent}: {strategy.EntityType} {row.EntityId}: {why}"));
         }
     }
 
@@ -89,6 +89,6 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
 
     private static FailedEvent Failure(Work work, SyncResult result)
     {
-        return new(work.EntityId, string.Join("; ", result.Errors), result.PrimaryError?.Code);
+        return new(work.EntityId, string.Join("; ", result.Errors));
     }
 }

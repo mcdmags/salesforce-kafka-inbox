@@ -42,10 +42,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("last_error");
 
-                    b.Property<string>("LastErrorCode")
-                        .HasColumnType("text")
-                        .HasColumnName("last_error_code");
-
                     b.Property<DateTimeOffset>("LastUpdated")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp with time zone")
@@ -99,10 +95,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("last_error");
 
-                    b.Property<string>("LastErrorCode")
-                        .HasColumnType("text")
-                        .HasColumnName("last_error_code");
-
                     b.Property<DateTimeOffset>("LastUpdated")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp with time zone")
@@ -155,10 +147,6 @@ namespace SalesforceSync.Data.Migrations
                     b.Property<string>("LastError")
                         .HasColumnType("text")
                         .HasColumnName("last_error");
-
-                    b.Property<string>("LastErrorCode")
-                        .HasColumnType("text")
-                        .HasColumnName("last_error_code");
 
                     b.Property<DateTimeOffset>("LastUpdated")
                         .ValueGeneratedOnAdd()

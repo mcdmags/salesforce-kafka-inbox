@@ -67,7 +67,7 @@ public sealed class EngineFlowTests
         _inbox.Calls.Should().Equal("claim", "record");
         var outcomes = _inbox.Recorded!;
         outcomes.Synced.Should().Equal(["ACC-1"]);
-        outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.EntityId == "ACC-2" && f.Code == SalesforceErrors.InvalidEvent);
+        outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.EntityId == "ACC-2" && f.Error.StartsWith(SalesforceErrors.InvalidEvent));
         outcomes.Failed.Should().BeEmpty();
     }
 
@@ -101,7 +101,7 @@ public sealed class EngineFlowTests
 
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
 
-        _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: refused ()");
+        _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: refused");
     }
 
     [Fact]
@@ -129,7 +129,7 @@ public sealed class EngineFlowTests
 
         _inbox.Calls.Should().Equal("claim", "record");
         _inbox.Recorded!.Synced.Should().Equal(["C-1"], "C-1's row");
-        _inbox.Recorded.Dead.Should().ContainSingle().Which.Code.Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION");
+        _inbox.Recorded.Dead.Should().ContainSingle().Which.Error.Should().Contain("FIELD_CUSTOM_VALIDATION_EXCEPTION");
         _http.Writes.Should().Be(1, "both contacts in one upsert call");
         (_org.GetStats().UpsertRequests - before.UpsertRequests).Should().Be(1, "a new Contact on an existing Account needs no reference");
     }
@@ -173,7 +173,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal(["claim", "fail all: refused ()"],
+        _inbox.Calls.Should().Equal(["claim", "fail all: refused"],
             "every event is retried and none is marked done, not even NEW's, whose call succeeded");
     }
 
@@ -267,7 +267,7 @@ public sealed class EngineFlowTests
 
         await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None);
 
-        _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: The lease cutoff ()");
+        _inbox.Calls.Should().HaveCount(2).And.HaveElementAt(1, "fail all: The lease cutoff");
     }
 
     // ---------- Grouping ----------
@@ -281,7 +281,7 @@ public sealed class EngineFlowTests
         }
 
         var batch = new PreparedBatch([Entity("A"), Entity("B"), Entity("D"), Entity("E")],
-            [new FailedEvent("BAD", "bad", SalesforceErrors.InvalidEvent)]);
+            [new FailedEvent("BAD", "bad")]);
         SalesforceError[] error = [new("acct", "SOME_CODE", "why")];
 
         var outcomes = batch.Outcomes(new Dictionary<string, SyncResult>
@@ -293,9 +293,9 @@ public sealed class EngineFlowTests
         });
 
         outcomes.Synced.Should().Equal("A", "B");
-        outcomes.Dead.Should().Equal(new FailedEvent("BAD", "bad", SalesforceErrors.InvalidEvent),
-            new FailedEvent("D", "acct: SOME_CODE why", "SOME_CODE"));
-        outcomes.Failed.Should().Equal(new FailedEvent("E", "acct: SOME_CODE why", "SOME_CODE"));
+        outcomes.Dead.Should().Equal(new FailedEvent("BAD", "bad"),
+            new FailedEvent("D", "acct: SOME_CODE why"));
+        outcomes.Failed.Should().Equal(new FailedEvent("E", "acct: SOME_CODE why"));
     }
 
     // ---------- Helpers ----------
@@ -427,24 +427,14 @@ public sealed class EngineFlowTests
             return Task.CompletedTask;
         }
 
-        public Task HoldAsync(InboxClaim claim, string error, CancellationToken ct)
+        public Task ReleaseAsync(InboxClaim claim, Release release, CancellationToken ct)
         {
-            return Call("hold");
+            return Call(release.StopInbox ? "halt" : release.Error is not null ? "hold" : $"defer {release.Delay}");
         }
 
-        public Task HaltAsync(InboxClaim claim, IReadOnlyList<FailedEvent> broken, string error, CancellationToken ct)
+        public Task FailAllAsync(InboxClaim claim, string error, CancellationToken ct)
         {
-            return Call("halt");
-        }
-
-        public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
-        {
-            return Call($"defer {delay}");
-        }
-
-        public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
-        {
-            return Call($"fail all: {error} ({code})");
+            return Call($"fail all: {error}");
         }
 
         private Task Call(string what)

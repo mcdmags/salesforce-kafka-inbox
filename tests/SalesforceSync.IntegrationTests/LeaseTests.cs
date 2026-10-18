@@ -65,7 +65,7 @@ public sealed class LeaseTests(SyncFixture app)
             await conn.StoreAsync(Sql.Table, acct, SyncFixture.TimeOf(v2), v2.ToJsonString());
         }
         (await app.GetInboxRowAsync(acct)).Should().Match<InboxRowState>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0);
-        var failure = new FailedEvent(row, "failed", "SOME_CODE");
+        var failure = new FailedEvent(row, "failed");
         await app.AccountInbox.RecordAsync(claim, outcome switch
         {
             "done" => Synced(row),
@@ -99,7 +99,7 @@ public sealed class LeaseTests(SyncFixture app)
         var rowBefore = await app.GetInboxRowAsync(acct);
 
         // The first worker comes back and tries everything it could do with its old token
-        var errors = $$"""{ "{{claimed[0]}}": ["late failure", "UNABLE_TO_LOCK_ROW"] }""";
+        var errors = $$"""{ "{{claimed[0]}}": "late failure: UNABLE_TO_LOCK_ROW" }""";
         (await ExecuteAsync(Sql.Done, new { entityIds = claimed, times, token = stale }))
             .Should().Be(0, "only the worker that holds the lease records anything");
         (await ExecuteAsync(Sql.Fail, new
@@ -115,11 +115,11 @@ public sealed class LeaseTests(SyncFixture app)
 
         // Every outcome the repository records is conditional on the token as well: none of them touches the row
         var inbox = app.AccountInbox;
-        var failed = new FailedEvent(claimed[0], "x", "UNKNOWN_OUTCOME");
+        var failed = new FailedEvent(claimed[0], "x");
         await inbox.RecordAsync(claim, new BatchOutcomes(claimed, [failed], [failed]), CancellationToken.None);
-        await inbox.HoldAsync(claim, "x", CancellationToken.None);
-        await inbox.DeferAsync(claim, TimeSpan.FromHours(1), CancellationToken.None);
-        await inbox.FailAllAsync(claim, "x", "UNKNOWN_OUTCOME", CancellationToken.None);
+        await inbox.ReleaseAsync(claim, new Release(TimeSpan.FromMinutes(10), "x"), CancellationToken.None);
+        await inbox.ReleaseAsync(claim, new Release(TimeSpan.FromHours(1)), CancellationToken.None);
+        await inbox.FailAllAsync(claim, "x", CancellationToken.None);
 
         (await app.GetInboxAsync(acct)).Should().Be((1L, "done"));
         (await app.GetInboxRowAsync(acct)).Should().Be(rowBefore, "the row is exactly as the worker that took over left it");

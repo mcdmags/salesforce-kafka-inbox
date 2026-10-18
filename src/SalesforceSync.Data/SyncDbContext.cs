@@ -83,15 +83,15 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         // index, where the dead index entries those updates leave behind collect. The default lets that grow with the table.
         entity.HasStorageParameter("autovacuum_vacuum_scale_factor", 0.02);
         entity.HasStorageParameter("autovacuum_vacuum_threshold", 1000);
-        // The entity id is the key: one row per entity (InboxRepository.StoreSql's on conflict), so no surrogate id and no second
+        // The entity id is the key: one row per entity (InboxRepository.AddAsync's on conflict), so no surrogate id and no second
         // unique index. Every claim and outcome finds its rows by it.
         entity.HasKey(r => r.EntityId).HasName($"{table}_pkey");
         entity.Property(r => r.Payload).HasColumnType("jsonb");
-        // No default: every insert sets it from the event (InboxRepository.StoreSql)
+        // No default: every insert sets it from the event (InboxRepository.AddAsync)
         entity.Property(r => r.EventTime).IsRequired();
         entity.Property(r => r.AttemptCount).HasDefaultValue(0);
         entity.Property(r => r.LastUpdated).HasDefaultValueSql("now()");
-        // The claim (InboxRepository.ClaimSql): the due rows, the longest-waiting first. Idle rows (null) are not in the index.
+        // The claim (InboxRepository.ClaimAsync): the due rows, the longest-waiting first. Idle rows (null) are not in the index.
         entity.HasIndex(r => r.NextAttemptAt).HasDatabaseName($"{table}_ready").HasFilter("next_attempt_at is not null");
     }
 }

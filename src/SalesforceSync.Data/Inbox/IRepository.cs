@@ -21,27 +21,24 @@ public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
     Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct);
 
     /// <summary>
-    /// The write's outcome is unknown: holds every claimed entity for <see cref="SyncOptions.UnknownOutcomeHold"/>, with
-    /// no token and no attempt spent.
+    /// Hands every claimed entity back without spending an attempt, due again after <see cref="Release.Delay"/>: rate
+    /// limited (no error), the write's outcome unknown (held, with the error), or a mapping error (the inbox stopped).
     /// </summary>
-    Task HoldAsync(InboxClaim claim, string error, CancellationToken ct);
-
-    /// <summary>
-    /// A mapping error stops the inbox for <see cref="SyncOptions.MappingErrorHold"/>: every claimed entity is held with
-    /// no attempt spent, the ones in <paramref name="broken"/> with their own error and the rest with
-    /// <paramref name="error"/>, and so is every other row that is due. Nothing is dead-lettered.
-    /// </summary>
-    Task HaltAsync(InboxClaim claim, IReadOnlyList<FailedEvent> broken, string error, CancellationToken ct);
-
-    /// <summary>Rate limited: hands every claimed entity back for <paramref name="delay"/> without spending an attempt.</summary>
-    Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct);
+    Task ReleaseAsync(InboxClaim claim, Release release, CancellationToken ct);
 
     /// <summary>
     /// The batch failed as a whole (a Salesforce call failed that provably wasn't applied): every claimed row is
     /// retried with backoff.
     /// </summary>
-    Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct);
+    Task FailAllAsync(InboxClaim claim, string error, CancellationToken ct);
 }
+
+/// <summary>How a claim is handed back without an attempt spent (<see cref="IRepository{TEntity}.ReleaseAsync"/>).</summary>
+/// <param name="Delay">How long the entities wait: the rate limiter's delay, the hold for an unknown outcome, the stop for a mapping error.</param>
+/// <param name="Error">The error to leave on every released row, or null to leave the row's error alone (rate limited).</param>
+/// <param name="OwnErrors">Entities with an error of their own, which replaces <paramref name="Error"/> on their rows.</param>
+/// <param name="StopInbox">Every other row of the inbox that is due waits <paramref name="Delay"/> too (a mapping error is wrong for all of them).</param>
+public sealed record Release(TimeSpan Delay, string? Error = null, IReadOnlyList<FailedEvent>? OwnErrors = null, bool StopInbox = false);
 
 /// <summary>A batch of entities leased to this worker: their claimed rows.</summary>
 /// <param name="Token">Identifies the lease; every outcome statement is conditional on it.</param>
@@ -67,15 +64,14 @@ public sealed record InboxClaim(Guid Token, IReadOnlyList<InboxEvent> Events)
 /// <param name="Payload">The event as received, JSON.</param>
 /// <param name="EventTime">
 /// The row's event_time as the claim read it: every outcome is recorded only while the row still has it (a newer event
-/// stored meanwhile has overwritten the row; see <c>InboxRepository.StillClaimedSql</c>).
+/// stored meanwhile has overwritten the row; see <c>InboxRepository.StillClaimed</c>).
 /// </param>
 public sealed record InboxEvent(string EntityId, string Payload, DateTimeOffset EventTime);
 
 /// <summary>An inbox row with the error to store on it.</summary>
 /// <param name="EntityId">The entity whose row it is: its primary key.</param>
-/// <param name="Error">The error to store.</param>
-/// <param name="Code">The Salesforce (or sync) error code, if any.</param>
-public sealed record FailedEvent(string EntityId, string Error, string? Code);
+/// <param name="Error">The error to store; it names the Salesforce (or sync) error code, e.g. <c>acct: DEPENDENCY_NOT_SYNCED …</c>.</param>
+public sealed record FailedEvent(string EntityId, string Error);
 
 /// <summary>What to record for the rows of a claim, by kind of outcome: the entities' ids, which are their rows' keys.</summary>
 /// <param name="Synced">In Salesforce: done.</param>

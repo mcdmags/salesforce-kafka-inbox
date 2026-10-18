@@ -79,7 +79,7 @@ public sealed class DeleteTests(SyncFixture app)
             SyncFixture.Snapshot(acct, []));
 
         (await app.WaitForInboxSettledAsync(contact, 2, SyncFixture.Contacts)).Should().Be((2L, "done"), "not in Salesforce: nothing to delete");
-        (await app.GetInboxRowAsync(contact, SyncFixture.Contacts))!.ErrorCode.Should().BeNull();
+        (await app.GetInboxRowAsync(contact, SyncFixture.Contacts))!.Error.Should().BeNull();
         (await DeleteRequestsAsync()).Should().Be(before, "the read found nothing, so no delete was sent");
     }
 
@@ -96,7 +96,7 @@ public sealed class DeleteTests(SyncFixture app)
         await app.PublishAggregateAsync(acct, 2, withContact, SyncFixture.Snapshot(acct, new JsonObject { ["name"] = withContact["name"]!.DeepClone() }));
 
         (await app.WaitForInboxSettledAsync(contact, 2, SyncFixture.Contacts)).Should().Be((2L, "dead"));
-        (await app.GetInboxRowAsync(contact, SyncFixture.Contacts))!.ErrorCode.Should().Be("INSUFFICIENT_ACCESS_OR_READONLY");
+        (await app.GetInboxRowAsync(contact, SyncFixture.Contacts))!.Error.Should().Contain("INSUFFICIENT_ACCESS_OR_READONLY");
         (await app.GetRecordAsync("Contact", contact)).Should().NotBeNull();
     }
 
@@ -113,7 +113,7 @@ public sealed class DeleteTests(SyncFixture app)
         await app.PublishAggregateAsync(acct, 2, withContact, SyncFixture.Snapshot(acct, account));
 
         var held = (await Eventually.ValueAsync(() => app.GetInboxRowAsync(contact, SyncFixture.Contacts),
-            row => row?.ErrorCode == "UNKNOWN_OUTCOME", "the delete's outcome to be recorded as unknown"))!;
+            row => row?.Error?.Contains("UNKNOWN_OUTCOME") == true, "the delete's outcome to be recorded as unknown"))!;
         (held.Status, held.AttemptCount, held.LockToken).Should().Be(("pending", 0, null),
             "held like an unknown upsert: a late delete must not remove a record a newer event recreated");
         (await app.GetRecordAsync("Contact", contact)).Should().BeNull("the org did delete it");

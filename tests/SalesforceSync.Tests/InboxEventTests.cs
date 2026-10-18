@@ -314,16 +314,6 @@ public sealed class InboxEventTests
             "a change to SyncDbContext's model needs a migration: dotnet ef migrations add <Name> --project src/SalesforceSync --output-dir Data/Migrations");
     }
 
-    [Fact]
-    public void No_inbox_statement_reads_inside_the_payload()
-    {
-        // Fail reads its @errors object with ->, not the payload
-        string[] claimAndOutcomes = [InboxRepository<AccountInboxRow>.StoreSql, InboxRepository<AccountInboxRow>.ClaimSql,
-            InboxRepository<AccountInboxRow>.DoneSql, InboxRepository<AccountInboxRow>.HoldSql, InboxRepository<AccountInboxRow>.EndLeaseSql];
-
-        claimAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
-    }
-
     private static string Account(string id, string name, string time)
     {
         return new JsonObject

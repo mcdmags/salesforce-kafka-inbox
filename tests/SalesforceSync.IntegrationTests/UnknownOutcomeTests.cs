@@ -19,7 +19,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
 
         // The org applied v1, but the worker never heard back: the row is held, not retried and not failed
         var held = (await Eventually.ValueAsync(() => app.GetInboxRowAsync(acct),
-            row => row?.ErrorCode == "UNKNOWN_OUTCOME", "the write's outcome to be recorded as unknown"))!;
+            row => row?.Error?.Contains("UNKNOWN_OUTCOME") == true, "the write's outcome to be recorded as unknown"))!;
         var heldAt = DateTime.UtcNow;
         held.Status.Should().Be("pending");
         held.AttemptCount.Should().Be(0, "an unknown outcome doesn't spend an attempt");
@@ -59,9 +59,9 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         // Held, then picked up again: the lost upserts had saved the Account and its Profile, so the retry's
         // read finds nothing to change and writes nothing
         await Eventually.ValueAsync(() => app.GetInboxRowAsync(acct),
-            row => row?.ErrorCode == "UNKNOWN_OUTCOME", "the hold");
+            row => row?.Error?.Contains("UNKNOWN_OUTCOME") == true, "the hold");
         (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
-        (await app.GetInboxRowAsync(acct))!.ErrorCode.Should().BeNull("the error is cleared once the event is done");
+        (await app.GetInboxRowAsync(acct))!.Error.Should().BeNull("the error is cleared once the event is done");
         (await app.GetHistoryAsync("Account", acct)).Should().ContainSingle("the lost write had landed; nothing is written twice");
         (await app.GetHistoryAsync("Profile__c", SyncFixture.ProfileIdFor(acct))).Should().ContainSingle();
     }

@@ -33,7 +33,7 @@ public sealed class DeadLetterTests(FewRetriesFixture app)
 
         (await app.WaitForInboxSettledAsync(rel, version: 1, SyncFixture.Relationships)).Should().Be((1L, "dead"));
         var dead = (await app.GetInboxRowAsync(rel, SyncFixture.Relationships))!;
-        dead.ErrorCode.Should().Be("DEPENDENCY_NOT_SYNCED", "the cause stays on the dead letter");
+        dead.Error.Should().Contain("DEPENDENCY_NOT_SYNCED", "the cause stays on the dead letter");
         dead.AttemptCount.Should().Be(FewRetriesFixture.MaxRetries);
         (await app.GetRecordAsync("Account_Relationship__c", rel)).Should().BeNull();
 
@@ -44,7 +44,7 @@ public sealed class DeadLetterTests(FewRetriesFixture app)
         await app.WaitForInboxSettledAsync(child, 1);
         await app.ExecuteSqlAsync("""
             UPDATE sf_account_relationship_inbox SET attempt_count = 0, next_attempt_at = now()
-            WHERE next_attempt_at IS NULL AND last_error IS NOT NULL AND last_error_code = 'DEPENDENCY_NOT_SYNCED'
+            WHERE next_attempt_at IS NULL AND last_error IS NOT NULL AND last_error LIKE '%DEPENDENCY_NOT_SYNCED%'
             """);
 
         (await app.WaitForInboxSettledAsync(rel, version: 1, SyncFixture.Relationships)).Should().Be((1L, "done"));

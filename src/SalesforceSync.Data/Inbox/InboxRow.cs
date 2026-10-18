@@ -27,16 +27,12 @@ public abstract class InboxRow
     /// </summary>
     public int AttemptCount { get; set; }
 
+    /// <summary>
+    /// The latest failure of the event, naming the Salesforce (or sync) error code, e.g. <c>FIELD_CUSTOM_VALIDATION_EXCEPTION</c>
+    /// (query dead letters by cause with <c>LIKE</c>). Null once the event is done. An idle row (no <see cref="NextAttemptAt"/>)
+    /// with an error is dead.
+    /// </summary>
     public string? LastError { get; set; }
-
-    /// <summary>The <see cref="LastErrorCode"/> of rows held after a write whose outcome is unknown.</summary>
-    public const string UnknownOutcomeCode = "UNKNOWN_OUTCOME";
-
-    /// <summary>The <see cref="LastErrorCode"/> of rows held because the code maps a field Salesforce doesn't have (or won't take).</summary>
-    public const string MappingErrorCode = "MAPPING_ERROR";
-
-    /// <summary>E.g. FIELD_CUSTOM_VALIDATION_EXCEPTION, to query dead letters by cause.</summary>
-    public string? LastErrorCode { get; set; }
 
     public DateTimeOffset LastUpdated { get; set; }
 

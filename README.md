@@ -38,7 +38,7 @@ account, is deleted in Salesforce. Several things make this harder than "consume
 | Durable, replayable intake | One topic (`account-changes`) of **account aggregates** (the Account with its Profile, relationships and contacts, `before` and `after`). The Kafka consumer splits each one (`AccountAggregate.TrySplit`) into the events of the entities that changed, deletes included (an unchanged child or Account is not stored: no row, no claim, no Salesforce read), and writes each event's **JSON** to its object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, marking the entity due on that row in the same statement, before storing the message's offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. An inbox keeps **one row per entity**, holding its newest event: a newer event overwrites it, an older one changes nothing, and neither does a redelivery of an event that is synced already, so a crash halfway through a message is safe (the redelivery stores its events again). A message that isn't a valid aggregate (see below) is logged with its offset and skipped, rather than blocking its partition. |
 | Ordering across parallel batches | Workers claim **entities, not events**: every entity has one inbox row, which holds its sync state too (due time, lease), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due rows, which it then leases (`lock_token`, and `next_attempt_at` moved to the lease's end, so a leased row is not due until then) and reads, in one statement. Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
 | Bursts of updates to one entity | Pending events for an entity are **coalesced** in the inbox: every event carries the full record, so an event with a newer `meta.time` (or the same, stored later) overwrites the entity's row, and what a claim writes is the newest event stored before it. Five updates in five seconds become one Salesforce write with the newest data. An event that overwrites a row while a worker writes the event it claimed is not lost: that worker's outcome is recorded only on rows that still hold the event time it claimed, and the newer event is claimed next. |
-| Late or replayed older events | **Never stored**: the entity's row is overwritten only by an event newer than the one it holds, or as new while that one is not `done` yet (`InboxRepository.StoreSql`, by `event_time`). An older event, or a redelivery of an event already in Salesforce, changes nothing and is never claimed, so it can't be written. Nothing is stored in Salesforce for this. |
+| Late or replayed older events | **Never stored**: the entity's row is overwritten only by an event newer than the one it holds, or as new while that one is not `done` yet (`InboxRepository.AddAsync`, by `event_time`). An older event, or a redelivery of an event already in Salesforce, changes nothing and is never claimed, so it can't be written. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement is conditional on its `lock_token` on the entity's row. |
 | Mapping errors | A field the code sends that Salesforce doesn't have (`INVALID_FIELD`) or won't let us set (`INVALID_FIELD_FOR_INSERT_UPDATE`) is wrong for every event of that kind, so it **stops the inbox** instead of dead-lettering one entity at a time. Salesforce itself finds it: `INVALID_FIELD` on the read (the read selects every field the code sends, so a field missing in the org shows before anything is written) or `INVALID_FIELD_FOR_INSERT_UPDATE` / `INVALID_FIELD` in a write's answer (the other entities of that write are saved already and are read as unchanged next time). The batch's rows and every other due row of that inbox are then held (`MAPPING_ERROR`) for `Sync:MappingErrorHold` (5 minutes), with the error on the row (`last_error`: the field and the object) and an ERROR in the log. Nothing is dead-lettered and no attempt is spent, so after the fix is deployed (or the field added) the rows go on with no replay. The rows named are those whose records send the column Salesforce names (all of the object's when it names none). Nothing is cached about the org's fields, so a field that was only just added is found at once. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
@@ -307,7 +307,6 @@ CREATE TABLE sf_account_inbox (                 -- and sf_account_relationship_i
   payload         jsonb       NOT NULL,          -- the entity's event, split from the Kafka message; never read by SQL
   attempt_count   int         NOT NULL DEFAULT 0,          -- times this event failed (a newer event starts at 0)
   last_error      text,
-  last_error_code text,
   last_updated    timestamptz NOT NULL DEFAULT now(),
   event_time      timestamptz NOT NULL,                    -- the event's meta.time, read by the consumer
   next_attempt_at timestamptz,            -- null: idle (done, or dead with last_error); else claimable from then on (backoff and lease included)
@@ -337,14 +336,14 @@ bookkeeping is in the row's own columns.
 consumer, which two events count as equally new (the store compares their times) is decided the same way for every
 event, never by how a time is rounded on its way in.
 
-**Store** (`InboxRepository.StoreSql`, one statement): insert the event into the entity's row (`ON CONFLICT (entity_id) DO
+**Store** (`InboxRepository.AddAsync`, one statement): insert the event into the entity's row (`ON CONFLICT (entity_id) DO
 UPDATE ... WHERE event_time < excluded.event_time OR (event_time = excluded.event_time AND (next_attempt_at IS NOT NULL OR last_error IS NOT NULL))`),
 keeping any lease on it. A new entity, or an idle one (`next_attempt_at` null), becomes due at once, and one that
 is already due, backing off, deferred, held or leased keeps its time (a leased row's is the lease's end). The events
 of an entity that arrive before it is claimed overwrite its row one after the other, and only the last is written.
 The lock the store takes on the existing row is what orders it against a claim or an outcome of the same entity.
 
-**Claim** (`InboxRepository.ClaimSql`, the same statement for every type), in a transaction of its own, so the rows are read
+**Claim** (`InboxRepository.ClaimAsync`, the same statement for every type), in a transaction of its own, so the rows are read
 before the commit is sent: lock up to `Sync:BatchSize` of the inbox's rows that are due (`next_attempt_at <= now()`),
 longest-waiting first, off the ready index, `FOR UPDATE SKIP LOCKED`; lease them (`lock_token`, `next_attempt_at =
 now() + Sync:Lease`), and return them with their payloads and their `event_time`. Only pending rows are due: every
@@ -370,27 +369,27 @@ rows `done`). An event that can't be read is dead-lettered on its own (`INVALID_
 set-based and conditional on the `lock_token` of the entity's row, and each ends the lease of the rows it records
 by setting `next_attempt_at`: done and dead-lettered rows are idle (null), retried ones due again when their backoff
 ends, held ones when the hold ends. A row with no outcome (not attempted, or the whole claim deferred) only has its
-lease ended (`EndLease`): due again at once, or when the deferral ends, with no attempt spent.
+lease ended (`EndLeasesAsync`): due again at once, or when the deferral ends, with no attempt spent.
 
 **Overwritten while claimed** (explained step by step in
 [A newer event while an entity is being synced](#a-newer-event-while-an-entity-is-being-synced)). The lease keeps other
 workers away from an entity, not the consumer: a newer event can overwrite the row while the worker writes the event it
 claimed. So every outcome statement updates only the claimed rows that still hold the `event_time` the claim read
-(`InboxRepository.StillClaimedSql`, part of each statement's WHERE: the claim's entity ids and times, `unnest(@entityIds, @times)`, each
+(`InboxRepository.StillClaimed`, part of each statement's WHERE: the claim's entity ids and times, `unnest(@entityIds, @times)`, each
 row looked up by primary key and compared timestamptz to timestamptz, exactly: the times are the microseconds read
 back from the column) and records outcomes on those only: done, retried, dead, held. An overwritten row stays
-pending with the newer event, not marked done, and the transaction's last statement (`EndLease`, run only if the
+pending with the newer event, not marked done, and the transaction's last statement (`EndLeasesAsync`, run only if the
 outcomes left a claimed row under the lease) ends its lease and makes it due now (held: when the hold ends), not when
 the lease would have ended, so the next claim writes it. The consumer and the outcome update the same row, so
 Postgres's row lock orders them (see below).
 
 ```sql
 -- Dead letters of one type, by cause
-SELECT entity_id, payload -> 'meta' ->> 'time' AS time, last_error_code, last_error
+SELECT entity_id, payload -> 'meta' ->> 'time' AS time, last_error
 FROM sf_account_inbox WHERE next_attempt_at IS NULL AND last_error IS NOT NULL ORDER BY last_updated DESC;
 
 -- What an inbox holds for one entity: its newest event
-SELECT entity_id, next_attempt_at, attempt_count, last_error_code, payload
+SELECT entity_id, next_attempt_at, attempt_count, last_error, payload
 FROM sf_account_inbox WHERE entity_id = 'ACC-000001';
 
 -- Its state: due when, leased by whom
@@ -465,7 +464,7 @@ that time.
    `WHERE lock_token = @token`, so a worker whose lease expired and was claimed by another changes nothing, and only
    rows that still hold the event the claim read (see [Overwritten while claimed](#the-inbox)). Each statement also
    ends the lease of its rows and sets `next_attempt_at`: null for a finished row, else when it is due again (the end
-   of the backoff or hold). Its last statement (`EndLease`) ends the lease of the rows left, those not attempted and
+   of the backoff or hold). Its last statement (`EndLeasesAsync`) ends the lease of the rows left, those not attempted and
    those a newer event overwrote meanwhile (a store keeps a leased row's `next_attempt_at`, the lease's end), and
    makes them due now (held: when the hold ends). A deferral is that statement alone, due when the deferral ends.
    An event stored at the same moment is never left behind: the store and the outcome update the same row, so either
@@ -507,7 +506,7 @@ coming back after that.
   worker cancels its Salesforce call at 80% of the lease, but a pause or an outage doesn't respect either.
 - **A claim retried after a lost commit.** The claim's commit succeeds, but the connection drops before the answer
   arrives, and the claim is retried. The lost attempts' leases exist, but no running code owns them; the retry
-  releases them, by their `lock_token`s, in one statement (`EndLease`).
+  releases them, by their `lock_token`s, in one statement (`EndLeasesAsync`).
 
 In both cases the stale claim and the new one hold the same `event_time`, so only a value that is new on every claim
 can tell them apart: that is the lock token. (`attempt_count` can't: it counts failures, not claims, so two claims of
@@ -588,7 +587,7 @@ with exponential backoff of the entity: `Sync:RetryBaseDelay` (30 s) doubling pe
 `attempt_count`, which only a failure increments) up to `Sync:MaxRetryDelay` (1 h); an event is dead-lettered once
 it failed `Sync:MaxRetries` (8) times (`attempt_count`; a newer event of the entity starts again at 0). With the defaults the attempts come about 30 s, 1 min, 2 min,
 4 min, 8 min, 16 min and 32 min apart: roughly an hour from the first failure to the dead letter. Permanent errors
-are dead-lettered at once. The error code that caused it stays in `last_error_code`. Rate limits, rows left without an outcome
+are dead-lettered at once. The error that caused it stays in `last_error`, naming the code (query by cause with `last_error LIKE '%CODE%'`). Rate limits, rows left without an outcome
 (a newer event overwrote them meanwhile) and unknown outcomes don't spend an attempt.
 
 **A relationship that arrives before its Accounts** waits this way: the read doesn't find the Account, the event
@@ -613,7 +612,7 @@ To re-queue dead letters once the cause is fixed (e.g. the missing Account now e
 
 ```sql
 UPDATE sf_account_relationship_inbox SET attempt_count = 0, next_attempt_at = now()
-WHERE next_attempt_at IS NULL AND last_error IS NOT NULL AND last_error_code = 'DEPENDENCY_NOT_SYNCED';
+WHERE next_attempt_at IS NULL AND last_error IS NOT NULL AND last_error LIKE '%DEPENDENCY_NOT_SYNCED%';
 ```
 
 (`sf_account_inbox` and `sf_contact_inbox` the same way. Setting `next_attempt_at` is what makes the rows due again;
@@ -636,7 +635,7 @@ the entity were released and a newer event synced in the meantime, the late writ
   record type query or the read are never unknown: nothing was written. These follow the normal rules at once.
 - **What happens**: every entity of that batch is held: its row gets `next_attempt_at = now() +
   Sync:UnknownOutcomeHold` and loses its lease (no `lock_token`: the old worker can't record anything on it); it stays
-  `pending` with `last_error_code = 'UNKNOWN_OUTCOME'`, and the attempt doesn't count. A
+  waiting with a `last_error` that starts `UNKNOWN_OUTCOME:`, and the attempt doesn't count. A
   row a newer event overwrote during the write is held the same way. The claim takes a row only once its
   `next_attempt_at` has passed, and storing an event keeps a row's due time, so an event arriving meanwhile (which
   overwrites the row, error included) waits too. After the hold, normal processing (read, diff,
@@ -654,10 +653,10 @@ the entity were released and a newer event synced in the meantime, the late writ
 | Guarantee | How | Test |
 |---|---|---|
 | Two workers or pods never hold the same entity at once | the entity's one inbox row: locked `FOR UPDATE SKIP LOCKED` and leased, its lease re-checked when it is locked | `ConcurrencyTests.Parallel_pods_never_process_the_same_account_concurrently_and_end_at_the_newest_version` (3 pods × 8 loops, claim audit: 0 overlaps); `ClaimRaceTests` (claims while another claim or a store of the entity is open, events stored concurrently) |
-| An event stored while its entity's lease ends is not left behind | storing and ending a lease update the same row, so its lock orders them; a store keeps a due row's time and makes an idle row due, and the lease of an overwritten row ends with it due now (`EndLease`), not at the lease's end | `ClaimRaceTests.An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due` |
+| An event stored while its entity's lease ends is not left behind | storing and ending a lease update the same row, so its lock orders them; a store keeps a due row's time and makes an idle row due, and the lease of an overwritten row ends with it due now (`EndLeasesAsync`), not at the lease's end | `ClaimRaceTests.An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due` |
 | An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | a leased row is not due until its lease ends (its `next_attempt_at`) | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
 | Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | a row is overwritten only by a newer event, or one as new while its event is not done | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
-| An event stored while its entity's older event is being written is not lost: the older one's outcome isn't recorded on it, and it is written next | every outcome statement updates only claimed rows whose `event_time` is still the one the claim read (`InboxRepository.StillClaimedSql`, in its WHERE); storing updates the same row, so the row lock orders the two, and an outcome that waited for a store re-checks its WHERE on the row the store left (READ COMMITTED); `EndLease` ends the overwritten row's lease and leaves it due | `OneRowPerEntityTests.An_outcome_for_a_claimed_event_is_not_recorded_on_the_newer_event_that_overwrote_it` and `ClaimRaceTests.An_outcome_that_waits_for_a_store_of_a_newer_event_is_not_recorded_on_it` (done, failed, dead, released, failed all, deferred, held), `LeaseTests.A_newer_event_stored_while_the_claimed_one_is_written_is_written_next_whatever_the_claimed_ones_outcome`, `ClaimRaceTests.An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due` |
+| An event stored while its entity's older event is being written is not lost: the older one's outcome isn't recorded on it, and it is written next | every outcome statement updates only claimed rows whose `event_time` is still the one the claim read (`InboxRepository.StillClaimed`, in its WHERE); storing updates the same row, so the row lock orders the two, and an outcome that waited for a store re-checks its WHERE on the row the store left (READ COMMITTED); `EndLease` ends the overwritten row's lease and leaves it due | `OneRowPerEntityTests.An_outcome_for_a_claimed_event_is_not_recorded_on_the_newer_event_that_overwrote_it` and `ClaimRaceTests.An_outcome_that_waits_for_a_store_of_a_newer_event_is_not_recorded_on_it` (done, failed, dead, released, failed all, deferred, held), `LeaseTests.A_newer_event_stored_while_the_claimed_one_is_written_is_written_next_whatever_the_claimed_ones_outcome`, `ClaimRaceTests.An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due` |
 | A worker whose lease expired can't record outcomes | every statement is conditional on the `lock_token` of the entity's row | `LeaseTests.Worker_whose_lease_expired_can_record_nothing`, `LeaseTests.Done_completes_an_event_only_under_its_lease_and_only_once` |
 | Dropped Postgres connections cause no overlap, loss or regression | `PostgresRetryStrategy` (EF execution strategy), idempotent statements | `ConcurrencyTests.Pods_survive_their_Postgres_connections_being_dropped` |
 | A write with an unknown outcome can't be overtaken by a newer write | the hold | `UnknownOutcomeTests.Entity_is_held_after_a_write_with_an_unknown_outcome_and_ends_at_the_newest_event` |

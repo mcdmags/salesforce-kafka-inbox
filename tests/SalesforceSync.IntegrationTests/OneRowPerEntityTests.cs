@@ -30,13 +30,13 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var inbox = Inbox();
         var entity = SyncFixture.NewAccountId();
         await StoreAsync(inbox, entity, 1);
-        await ExecuteAsync(db, $"UPDATE {Table} SET attempt_count = 3, {InState(status)}, last_error_code = 'SOME_CODE'");
+        await ExecuteAsync(db, $"UPDATE {Table} SET attempt_count = 3, {InState(status)}");
         var before = await RowAsync(db, entity);
 
         await StoreAsync(inbox, entity, 2);
 
         var after = await RowAsync(db, entity);
-        after.Should().Be(new Row(2, "pending", 0, null, null, SyncFixture.TimeOf(Event(entity, 2)), after.LastUpdated),
+        after.Should().Be(new Row(2, "pending", 0, null, SyncFixture.TimeOf(Event(entity, 2)), after.LastUpdated),
             "the entity's one row now holds the newer event, as a new event");
         after.LastUpdated.Should().BeAfter(before.LastUpdated);
     }
@@ -55,7 +55,8 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         // The worker claims two of the three (the batch size), and finds the mapping wrong on the first
         var claim = await new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions { BatchSize = 2 })).ClaimAsync(CancellationToken.None);
         var broken = claim.Events[0].EntityId;
-        await inbox.HaltAsync(claim, [new FailedEvent(broken, "INVALID_FIELD: No such column 'Rating'", InboxRow.MappingErrorCode)], "stopped", CancellationToken.None);
+        await inbox.ReleaseAsync(claim, new Release(TimeSpan.FromMinutes(5), "stopped",
+            [new FailedEvent(broken, "INVALID_FIELD: No such column 'Rating'")], StopInbox: true), CancellationToken.None);
 
         var rows = new List<(string Entity, Row Row, DateTime? NextAttemptAt, Guid? LockToken)>();
         foreach (var entity in entities)
@@ -66,7 +67,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
         rows.Should().OnlyContain(r => r.Row.Status == "pending" && r.Row.AttemptCount == 0 && r.LockToken == null,
             "nothing is dead-lettered, no attempt is spent");
-        rows.Single(r => r.Entity == broken).Row.Should().Match<Row>(r => r.Error == "INVALID_FIELD: No such column 'Rating'" && r.ErrorCode == InboxRow.MappingErrorCode);
+        rows.Single(r => r.Entity == broken).Row.Should().Match<Row>(r => r.Error == "INVALID_FIELD: No such column 'Rating'");
         rows.Where(r => r.Entity == claim.Events[1].EntityId).Should().ContainSingle().Which.Row.Error.Should().Be("stopped");
         rows.Where(r => r.Entity == entities.Except(claim.EntityIds).Single()).Should().ContainSingle().Which.Row.Error.Should().BeNull("a row nobody claimed is only made to wait");
         rows.Should().OnlyContain(r => r.NextAttemptAt > DateTime.UtcNow + TimeSpan.FromMinutes(4), "the default MappingErrorHold is 5 minutes");
@@ -79,7 +80,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var inbox = Inbox();
         var entity = SyncFixture.NewAccountId();
         await StoreAsync(inbox, entity, 2);
-        await ExecuteAsync(db, $"UPDATE {Table} SET next_attempt_at = NULL, last_error = NULL, last_error_code = NULL");
+        await ExecuteAsync(db, $"UPDATE {Table} SET next_attempt_at = NULL, last_error = NULL");
         var before = await RowAsync(db, entity);
 
         await StoreAsync(inbox, entity, 1);
@@ -142,7 +143,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         await SyncFixture.RecordOutcomeAsync(inbox, claim, outcome);
 
         (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0
-                                                             && r.Error == null && r.ErrorCode == null, "nothing of v1's outcome lands on v2");
+                                                             && r.Error == null, "nothing of v1's outcome lands on v2");
         var (nextAttemptAt, lockToken) = await StateAsync(db, entity);
         lockToken.Should().BeNull();
         nextAttemptAt.Should().NotBeNull("v2 is pending, so its entity must be due");
@@ -193,9 +194,9 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     {
         await using var conn = await db.OpenConnectionAsync();
         var row = await conn.QuerySingleAsync<StoredRow>(
-            $"SELECT payload::text, {SyncFixture.StatusSql} AS status, attempt_count, last_error, last_error_code, event_time, last_updated FROM {Table} WHERE entity_id = @entity",
+            $"SELECT payload::text, {SyncFixture.StatusSql} AS status, attempt_count, last_error, event_time, last_updated FROM {Table} WHERE entity_id = @entity",
             new { entity });
-        return new Row(SyncFixture.VersionOf(row.Payload), row.Status, row.AttemptCount, row.Error, row.ErrorCode, row.EventTime, row.LastUpdated);
+        return new Row(SyncFixture.VersionOf(row.Payload), row.Status, row.AttemptCount, row.Error, row.EventTime, row.LastUpdated);
     }
 
     private static async Task<(DateTime? NextAttemptAt, Guid? LockToken)> StateAsync(NpgsqlDataSource db, string entity)
@@ -212,10 +213,10 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     }
 
     /// <summary>An inbox row as read, its payload as stored.</summary>
-    private sealed record StoredRow(string Payload, string Status, int AttemptCount, string? Error, string? ErrorCode,
+    private sealed record StoredRow(string Payload, string Status, int AttemptCount, string? Error,
         DateTimeOffset EventTime, DateTimeOffset LastUpdated);
 
     /// <summary>An inbox row as these tests compare it; the version is read from its payload.</summary>
-    private sealed record Row(long Version, string Status, int AttemptCount, string? Error, string? ErrorCode,
+    private sealed record Row(long Version, string Status, int AttemptCount, string? Error,
         DateTimeOffset EventTime, DateTimeOffset LastUpdated);
 }

@@ -499,14 +499,14 @@ public class SyncFixture : IAsyncLifetime
     {
         await using var conn = await Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<StoredRow>(
-            $"SELECT payload::text, {StatusSql} AS status, attempt_count, last_error_code, next_attempt_at, lock_token FROM {InboxTable(entityType)} WHERE entity_id = @key",
+            $"SELECT payload::text, {StatusSql} AS status, attempt_count, last_error, next_attempt_at, lock_token FROM {InboxTable(entityType)} WHERE entity_id = @key",
             new { key });
-        return rows.Select(r => new InboxRowState(VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockToken))
+        return rows.Select(r => new InboxRowState(VersionOf(r.Payload), r.Status, r.AttemptCount, r.Error, r.NextAttemptAt, r.LockToken))
             .SingleOrDefault();
     }
 
     /// <summary>An inbox row as read, its payload as stored.</summary>
-    private sealed record StoredRow(string Payload, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
+    private sealed record StoredRow(string Payload, string Status, int AttemptCount, string? Error, DateTime? NextAttemptAt,
         Guid? LockToken);
 
     /// <summary>The version of a stored payload: its meta.time, BaseTime + N ms.</summary>
@@ -578,7 +578,7 @@ public class SyncFixture : IAsyncLifetime
     public static Task RecordOutcomeAsync(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
     {
         var row = claim.EntityIds.Single();
-        var failure = new FailedEvent(row, "failed", "SOME_CODE");
+        var failure = new FailedEvent(row, "failed");
         var none = CancellationToken.None;
         return outcome switch
         {
@@ -586,9 +586,9 @@ public class SyncFixture : IAsyncLifetime
             "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
             "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
             "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
-            "failed all" => inbox.FailAllAsync(claim, "failed", "SOME_CODE", none),
-            "deferred" => inbox.DeferAsync(claim, TimeSpan.Zero, none),
-            "held" => inbox.HoldAsync(claim, "lost", none),
+            "failed all" => inbox.FailAllAsync(claim, "failed", none),
+            "deferred" => inbox.ReleaseAsync(claim, new Release(TimeSpan.Zero), none),
+            "held" => inbox.ReleaseAsync(claim, new Release(UnknownOutcomeHold, "lost"), none),
             _ => throw new ArgumentOutOfRangeException(nameof(outcome))
         };
     }
@@ -625,7 +625,7 @@ public class SyncFixture : IAsyncLifetime
 }
 
 /// <summary>An inbox row as the tests see it; <paramref name="Version"/> comes from the payload's meta.time.</summary>
-public sealed record InboxRowState(long Version, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
+public sealed record InboxRowState(long Version, string Status, int AttemptCount, string? Error, DateTime? NextAttemptAt,
     Guid? LockToken);
 
 [CollectionDefinition(Name)]
