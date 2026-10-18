@@ -108,7 +108,7 @@ public sealed class SalesforceResponseException(HttpStatusCode status, string re
     /// True when Salesforce itself produced the response (<c>[{ "errorCode": ..., "message": ... }]</c>), as opposed to a
     /// gateway or load balancer in front of it, which can't know whether the request was processed.
     /// </summary>
-    public bool IsSalesforceError { get; } = responseBody.Contains("\"errorCode\"", StringComparison.Ordinal);
+    public bool IsSalesforceError => Body.Contains("\"errorCode\"", StringComparison.Ordinal);
 
     /// <summary>The response's body, Salesforce's error list when <see cref="IsSalesforceError"/>.</summary>
     public string Body { get; } = responseBody;
@@ -120,7 +120,7 @@ public sealed class SalesforceResponseException(HttpStatusCode status, string re
         {
             try
             {
-                using var json = System.Text.Json.JsonDocument.Parse(responseBody);
+                using var json = System.Text.Json.JsonDocument.Parse(Body);
                 return json.RootElement is { ValueKind: System.Text.Json.JsonValueKind.Array } list && list.GetArrayLength() > 0
                     ? SalesforceResponseParser.StringProperty(list[0], "errorCode")
                     : null;
