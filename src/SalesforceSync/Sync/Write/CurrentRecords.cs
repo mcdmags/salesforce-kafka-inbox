@@ -14,12 +14,12 @@ internal sealed record ReadQuery(CompositeQuery Query, string SObject);
 internal static class ReadQueryBuilder
 {
     /// <summary>
-    /// One query per chunk of at most <paramref name="maxValuesPerQuery"/> values (the row type's), named q0, q1, ...;
+    /// One query per chunk of at most <paramref name="maxValuesPerQuery"/> values (the row type's), under <paramref name="dataPath"/>, named q0, q1, ...;
     /// more than one Composite request takes (5) are sent as several.
     /// </summary>
     /// <exception cref="InvalidOperationException">A query's URL is too long even with a single value.</exception>
     public static List<ReadQuery> Build(IReadOnlyList<NormalizedUnit> units, IReadOnlyList<SoqlQuery> queries,
-        IReadOnlyDictionary<string, SObjectSchema> schemas, int maxValuesPerQuery)
+        IReadOnlyDictionary<string, SObjectSchema> schemas, int maxValuesPerQuery, string dataPath)
     {
         var records = units.SelectMany(u => u.Records).ToList();
         var composite = new List<ReadQuery>();
@@ -29,7 +29,7 @@ internal static class ReadQueryBuilder
             var target = schemas[query.SObject];
             var fields = FieldsToSelect(target, query, records);
 
-            foreach (var soql in Chunked(target.Name, fields, query.WhereField, query.Values.Distinct(StringComparer.Ordinal), maxValuesPerQuery))
+            foreach (var soql in Chunked(target.Name, fields, query.WhereField, query.Values.Distinct(StringComparer.Ordinal), maxValuesPerQuery, dataPath))
             {
                 composite.Add(new ReadQuery(new CompositeQuery($"q{composite.Count}", soql), target.Name));
             }
@@ -44,9 +44,9 @@ internal static class ReadQueryBuilder
     /// length is the empty query's plus each value's encoded literal and separator: counted per value, not rebuilt.
     /// </summary>
     private static IEnumerable<string> Chunked(string sobject, List<string> fields, string whereField, IEnumerable<string> values,
-        int maxValues)
+        int maxValues, string dataPath)
     {
-        var empty = SalesforceRestClient.QueryUrl(SalesforceRestClient.Soql(sobject, fields, whereField, [])).Length;
+        var empty = SalesforceRestClient.QueryUrl(dataPath, SalesforceRestClient.Soql(sobject, fields, whereField, [])).Length;
         var separator = Uri.EscapeDataString(",").Length;
         var chunk = new List<string>();
         var length = empty;

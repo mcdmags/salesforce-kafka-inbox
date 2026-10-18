@@ -445,12 +445,12 @@ public sealed class SalesforceBatchSyncServiceTests
     [Fact]
     public async Task A_query_URL_over_the_budget_is_refused_before_any_call_and_one_at_it_is_sent()
     {
-        var client = new SalesforceRestClient(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
+        var client = SalesforceStep.Client(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
         static string Soql(int urlBytes)
         {
             var empty = SalesforceRestClient.Soql("Account", ["Id"], "ExternalId__c", [""]);
             return SalesforceRestClient.Soql("Account", ["Id"], "ExternalId__c",
-                [new string('a', urlBytes - SalesforceRestClient.QueryUrl(empty).Length)]);
+                [new string('a', urlBytes - SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, empty).Length)]);
         }
 
         var before = _org.GetStats();
@@ -459,7 +459,7 @@ public sealed class SalesforceBatchSyncServiceTests
         _org.GetStats().ApiCalls.Should().Be(before.ApiCalls);
 
         var atBudget = Soql(SalesforceRestClient.MaxUrlBytes);
-        SalesforceRestClient.QueryUrl(atBudget).Length.Should().Be(SalesforceRestClient.MaxUrlBytes);
+        SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, atBudget).Length.Should().Be(SalesforceRestClient.MaxUrlBytes);
         (await client.QueryAsync([new CompositeQuery("q0", atBudget)], CancellationToken.None))["q0"].Should().BeEmpty();
     }
 
@@ -597,7 +597,7 @@ public sealed class SalesforceBatchSyncServiceTests
     {
         var http = SalesforceStep.Http(new FakeSalesforceHandler(_org));
 
-        var schema = (await new SalesforceRestClient(http).DescribeAsync("Account", null, CancellationToken.None))!;
+        var schema = (await SalesforceStep.Client(http).DescribeAsync("Account", null, CancellationToken.None))!;
 
         schema.RecordTypes.Should().ContainKey("business").WhoseValue.Should().Be(
             new SalesforceRecordType("Business", FakeSchema.RecordTypeIdOf("Account", "Business"), Active: true, Available: true));
@@ -843,7 +843,7 @@ public sealed class SalesforceBatchSyncServiceTests
     [Fact]
     public async Task The_org_rejects_a_foreign_key_whose_parent_does_not_exist()
     {
-        var client = new SalesforceRestClient(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
+        var client = SalesforceStep.Client(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
         var profile = new Dictionary<string, object?> { ["attributes"] = new { type = "Profile__c" }, ["ExternalId__c"] = "P1", ["AccountId__c"] = "NOPE" };
 
         var result = (await Upsert(client, "Profile__c", "ExternalId__c", [profile], CancellationToken.None)).Single();
@@ -996,7 +996,7 @@ public sealed class SalesforceBatchSyncServiceTests
     public async Task The_upsert_call_answers_per_record_in_order_with_created_or_updated()
     {
         await Account("A1", new() { ["name"] = "Acme" }, []);
-        var client = new SalesforceRestClient(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
+        var client = SalesforceStep.Client(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
         static IReadOnlyDictionary<string, object?> Record(string key, string? lastName)
         {
             return new Dictionary<string, object?>

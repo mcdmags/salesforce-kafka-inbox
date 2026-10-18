@@ -222,7 +222,12 @@ public abstract class DrainBenchmarkBase
         services.AddSingleton(_ => NpgsqlDataSource.Create(BenchmarkDb.ConnectionString));
         services.AddSingleton(_store);
 
-        services.Configure<SalesforceOptions>(o => o.InstanceUrl = "https://fake.my.salesforce.com");
+        services.Configure<SalesforceOptions>(o =>
+        {
+            o.InstanceUrl = "https://fake.my.salesforce.com";
+            o.BaseApiPath = "/services/data";
+            o.ApiVersion = "v62.0";
+        });
         services.Configure<SyncOptions>(o =>
         {
             o.Workers = Workers;

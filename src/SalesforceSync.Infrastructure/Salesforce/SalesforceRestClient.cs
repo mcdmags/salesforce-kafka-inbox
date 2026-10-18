@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 
 namespace SalesforceSync.Infrastructure.Salesforce;
 
@@ -9,11 +10,31 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// Salesforce REST transport, and the only class that talks to Salesforce. Every method is exactly one API call: it
 /// takes requests and returns the raw results per subrequest and per record. It decides nothing (what to write, what
 /// a result means); that is <c>SalesforceBatchSyncService</c>'s.
+/// <para>
+/// There are deliberately no single-record methods (get, update, delete or upsert one record by id): each costs one API
+/// call per record, and the integration lives on a daily call budget (<c>SalesforceLimits:DailyApiAllocation</c>). The
+/// client is bulk-only: up to 5 queries per call, and up to 200 records per collection with up to 5 collections per call.
+/// Writing 200 records one by one would spend 200 calls where <see cref="WriteAsync"/> spends one.
+/// </para>
 /// </summary>
-public sealed class SalesforceRestClient(HttpClient http)
+public sealed class SalesforceRestClient
 {
-    public const string ApiVersion = "v62.0";
-    public const string DataPath = $"/services/data/{ApiVersion}";
+    private readonly HttpClient http;
+
+    // The API path and version come from configuration (Salesforce:BaseApiPath, Salesforce:ApiVersion) rather than a
+    // constant, so moving to another API version is a settings change. One constructor, so the typed HttpClient's
+    // dependency injection has nothing to choose between (two made it throw when the pods started).
+    public SalesforceRestClient(HttpClient http, IOptions<SalesforceOptions> options)
+    {
+        this.http = http;
+        DataPath = options.Value.DataPath;
+    }
+
+    /// <summary>The path every call starts with (<see cref="SalesforceOptions.DataPath"/>).</summary>
+    public string DataPath { get; }
+
+    // The limits below are Salesforce's. They are the call-saving ceilings: the engine packs each call up to them, and the
+    // client refuses anything over them before sending (a rejected call is still a call).
 
     /// <summary>Composite: at most 5 of its (25) subrequests may be queries or sObject Collections operations.</summary>
     public const int MaxCompositeQueries = 5;
@@ -65,6 +86,8 @@ public sealed class SalesforceRestClient(HttpClient http)
         using var request = new HttpRequestMessage(HttpMethod.Get, EnsureFits($"{DataPath}/sobjects/{sobject}/describe"));
         if (ifModifiedSince is { } since)
         {
+            // A 304 still counts as an API call but skips the large Describe download. The schema cache (in-memory and
+            // shared through Redis) is what saves the calls: it asks at most once per refresh interval, across all pods.
             request.Headers.IfModifiedSince = since;
         }
 
@@ -93,12 +116,16 @@ public sealed class SalesforceRestClient(HttpClient http)
             throw new ArgumentOutOfRangeException(nameof(queries), $"1 to {MaxCompositeQueries} queries per request");
         }
 
+        // One Composite call carries up to 5 queries: 5 reads for the price of 1 API call. allOrNone=false so one failed
+        // query doesn't discard the other four answers (each subresponse carries its own status)
         var payload = new
         {
             allOrNone = false,
             compositeRequest = queries.Select(q => new
             {
                 method = "GET",
+                // Checked here, before anything is sent: an over-long URL is rejected by Salesforce (414/431) but the
+                // rejected call is still counted against the budget
                 url = EnsureFits(QueryUrl(q.Soql)),
                 referenceId = q.ReferenceId
             }).ToList() // checked before anything is sent
@@ -111,14 +138,15 @@ public sealed class SalesforceRestClient(HttpClient http)
         {
             if (sub.HttpStatusCode >= 400)
             {
-                throw new SalesforceQueryException(sub.ReferenceId, ParseErrors(sub.ReferenceId, sub.Body));
+                throw new SalesforceQueryException(sub.ReferenceId, SalesforceResponseParser.ParseErrors(sub.ReferenceId, sub.Body));
             }
 
             var page = sub.Body.Deserialize<QueryPage>(Json)
                        ?? throw new InvalidOperationException($"Empty query result {sub.ReferenceId}");
             var records = page.Records;
-            // Lookups by unique external id return at most one row per id, far below a query page (2,000), but
-            // follow nextRecordsUrl anyway rather than silently dropping rows
+            // Lookups by unique external id return at most one row per id, far below a query page (2,000), so this loop
+            // normally never runs a second call. It follows nextRecordsUrl anyway: dropping rows silently would be worse
+            // than one extra call, and the engine would then treat a record that exists as missing and create a duplicate
             for (var next = page.NextRecordsUrl; next is not null;)
             {
                 var more = await http.GetFromJsonAsync<QueryPage>(EnsureFits(next), Json, ct)
@@ -159,7 +187,13 @@ public sealed class SalesforceRestClient(HttpClient http)
                 $"{tooLarge.ReferenceId}: {tooLarge.Count} records; a collection takes 1 to {MaxCollectionRecords}");
         }
 
-        var urls = collections.Select(c => EnsureFits(c.Url)).ToList(); // checked before anything is sent
+        // Every URL is checked before anything is sent, so a bad request fails locally and costs no call (a Composite
+        // with one over-long subrequest would otherwise spend the call and fail that subrequest)
+        var urls = collections.Select(c => EnsureFits(DataPath + c.Path)).ToList();
+
+        // A single collection goes as a call of its own: the Composite wrapper would add nothing, and a failure of the
+        // whole call then surfaces as an exception instead of a subresponse. 2 to 5 collections share one Composite
+        // call, which is the saving: a batch's parent and child upserts and its delete are one API call, not several.
         if (collections is [var single])
         {
             using var request = new HttpRequestMessage(single.Method, urls[0])
@@ -170,7 +204,7 @@ public sealed class SalesforceRestClient(HttpClient http)
             await EnsureSuccessAsync(res, ct);
             var body = await res.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
             return body.ValueKind == JsonValueKind.Array
-                ? [new CollectionResult(single.ReferenceId, [.. body.EnumerateArray().Select(ParseRecordResult)], [])]
+                ? [new CollectionResult(single.ReferenceId, [.. body.EnumerateArray().Select(SalesforceResponseParser.ParseRecordResult)], [])]
                 : throw new InvalidOperationException($"{single.ReferenceId} answered without per-record results");
         }
 
@@ -204,11 +238,12 @@ public sealed class SalesforceRestClient(HttpClient http)
 
         // A subrequest that failed as a whole answers with an error list instead of one result per record
         return [.. subresponses.Select(sub => sub.HttpStatusCode >= 400 || sub.Body.ValueKind != JsonValueKind.Array
-            ? new CollectionResult(sub.ReferenceId, null, ParseErrors(sub.ReferenceId, sub.Body))
-            : new CollectionResult(sub.ReferenceId, [.. sub.Body.EnumerateArray().Select(ParseRecordResult)], []))];
+            ? new CollectionResult(sub.ReferenceId, null, SalesforceResponseParser.ParseErrors(sub.ReferenceId, sub.Body))
+            : new CollectionResult(sub.ReferenceId, [.. sub.Body.EnumerateArray().Select(SalesforceResponseParser.ParseRecordResult)], []))];
     }
 
-    /// <summary>Posts a Composite request and returns its subresponses, in request order.</summary>
+    // The one place a Composite request is posted, for queries and writes alike, so both get the same success check and
+    // the same parsing of the answer.
     private async Task<List<SubResponse>> PostCompositeAsync(object payload, CancellationToken ct)
     {
         using var res = await http.PostAsJsonAsync($"{DataPath}/composite", payload, Json, ct);
@@ -219,9 +254,15 @@ public sealed class SalesforceRestClient(HttpClient http)
     }
 
     /// <summary>The URL a query is sent with, as a Composite subrequest or a call of its own.</summary>
-    internal static string QueryUrl(string soql)
+    internal string QueryUrl(string soql)
     {
-        return $"{DataPath}/query?q={Uri.EscapeDataString(soql)}";
+        return QueryUrl(DataPath, soql);
+    }
+
+    /// <summary>The URL of a query under <paramref name="dataPath"/> (<see cref="SalesforceOptions.DataPath"/>).</summary>
+    internal static string QueryUrl(string dataPath, string soql)
+    {
+        return $"{dataPath}/query?q={Uri.EscapeDataString(soql)}";
     }
 
     /// <summary>
@@ -253,47 +294,6 @@ public sealed class SalesforceRestClient(HttpClient http)
         return $"'{value.Replace("\\", "\\\\").Replace("'", "\\'")}'";
     }
 
-    private static List<SalesforceError> ParseErrors(string? referenceId, JsonElement body)
-    {
-        return body.ValueKind != JsonValueKind.Array
-            ? [new SalesforceError(referenceId, "UNKNOWN_ERROR", body.ValueKind == JsonValueKind.Undefined ? null : body.GetRawText())]
-            : [.. body.EnumerateArray().Select(e => ParseError(referenceId, e, "errorCode"))];
-    }
-
-    private static RecordResult ParseRecordResult(JsonElement record)
-    {
-        return new(
-            record.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True,
-            record.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
-            record.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
-                ? errors.EnumerateArray().Select(e => ParseError(null, e, "statusCode")).ToList()
-                : [],
-            record.TryGetProperty("created", out var created) && created.ValueKind is JsonValueKind.True or JsonValueKind.False
-                ? created.GetBoolean()
-                : null);
-    }
-
-    /// <param name="codeProperty">"errorCode" in an error response, "statusCode" in a collection's per-record errors.</param>
-    /// <param name="referenceId">The subrequest the error belongs to, null for a call of its own.</param>
-    /// <param name="e">One error object of the response.</param>
-    private static SalesforceError ParseError(string? referenceId, JsonElement e, string codeProperty)
-    {
-        return new(
-            referenceId,
-            StringProperty(e, codeProperty) ?? "UNKNOWN_ERROR",
-            StringProperty(e, "message"),
-            e.ValueKind == JsonValueKind.Object && e.TryGetProperty("fields", out var f) && f.ValueKind == JsonValueKind.Array
-                ? f.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList()
-                : null);
-    }
-
-    private static string? StringProperty(JsonElement e, string name)
-    {
-        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
-                ? value.GetString()
-                : null;
-    }
-
     private static async Task EnsureSuccessAsync(HttpResponseMessage res, CancellationToken ct)
     {
         if (res.IsSuccessStatusCode)
@@ -311,64 +311,3 @@ public sealed class SalesforceRestClient(HttpClient http)
     private sealed record QueryPage(List<JsonElement> Records, string? NextRecordsUrl);
     private sealed record SubResponse(string ReferenceId, int HttpStatusCode, JsonElement Body);
 }
-
-/// <summary>A SOQL query to run as one subrequest of a Composite request.</summary>
-public sealed record CompositeQuery(string ReferenceId, string Soql);
-
-/// <summary>
-/// One sObject Collections operation of a write request (<see cref="SalesforceRestClient.WriteAsync"/>): a call of its
-/// own, or a Composite subrequest named <paramref name="ReferenceId"/>.
-/// </summary>
-public abstract record CollectionRequest(string ReferenceId)
-{
-    public abstract HttpMethod Method { get; }
-    public abstract string Url { get; }
-
-    /// <summary>Its records: 1 to 200.</summary>
-    public abstract int Count { get; }
-
-    /// <summary>The JSON body, or null when it has none.</summary>
-    public abstract object? Body { get; }
-}
-
-/// <summary>
-/// An sObject Collections upsert: up to 200 records of <paramref name="SObject"/>, each
-/// <c>{ "attributes": { "type": ... }, externalIdField: ..., field: value, ... }</c>, created or updated by
-/// <paramref name="ExternalIdField"/>. A lookup can be set by the parent's external id through the field's
-/// relationship, <c>"Account": { "ExternalId__c": "A1" }</c>.
-/// </summary>
-public sealed record CollectionUpsert(string ReferenceId, string SObject, string ExternalIdField,
-    IReadOnlyList<IReadOnlyDictionary<string, object?>> Records) : CollectionRequest(ReferenceId)
-{
-    public override HttpMethod Method => HttpMethod.Patch;
-    public override string Url => $"{SalesforceRestClient.DataPath}/composite/sobjects/{SObject}/{ExternalIdField}";
-    public override int Count => Records.Count;
-    public override object Body => new { allOrNone = false, records = Records };
-}
-
-/// <summary>
-/// An sObject Collections delete: up to 200 records, of any objects, by their Salesforce Ids (it takes no external
-/// ids), in the URL: <c>DELETE /composite/sobjects?ids=001...,003...&amp;allOrNone=false</c>. Deleted records go to the
-/// Recycle Bin. 200 Ids of 18 characters make a URL of under 4 KB, well within <see cref="SalesforceRestClient.MaxUrlBytes"/>.
-/// </summary>
-public sealed record CollectionDelete(string ReferenceId, IReadOnlyList<string> Ids) : CollectionRequest(ReferenceId)
-{
-    public override HttpMethod Method => HttpMethod.Delete;
-
-    // Ids are letters and digits: nothing to escape
-    public override string Url => $"{SalesforceRestClient.DataPath}/composite/sobjects?ids={string.Join(",", Ids)}&allOrNone=false";
-    public override int Count => Ids.Count;
-    public override object? Body => null;
-}
-
-/// <summary>One record's result within a collection, in request order.</summary>
-/// <param name="Created">Upserts only: whether the record was created (true) or updated (false).</param>
-/// <param name="Success">Whether the record was saved.</param>
-/// <param name="Id">The record's Id when it was saved.</param>
-/// <param name="Errors">Why it wasn't saved; empty when it was.</param>
-public sealed record RecordResult(bool Success, string? Id, IReadOnlyList<SalesforceError> Errors, bool? Created = null);
-
-/// <param name="Records">Null when the subrequest failed as a whole (see <paramref name="Errors"/>).</param>
-/// <param name="ReferenceId">The collection's reference id in the request.</param>
-/// <param name="Errors">Why the subrequest failed as a whole; empty when it answered per record.</param>
-public sealed record CollectionResult(string ReferenceId, IReadOnlyList<RecordResult>? Records, IReadOnlyList<SalesforceError> Errors);

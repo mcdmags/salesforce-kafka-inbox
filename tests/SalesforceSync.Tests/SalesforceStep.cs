@@ -19,13 +19,26 @@ internal static class SalesforceStep
 {
     private const string OrgUrl = "https://fake.my.salesforce.com";
 
+    // What appsettings.json supplies in the running worker; the tests spell out the URLs these make
+    private static readonly SalesforceOptions Org = new() { BaseApiPath = "/services/data", ApiVersion = "v62.0" };
+
+    /// <summary>A client on <paramref name="http"/> with the default API path and version.</summary>
+    public static SalesforceRestClient Client(HttpClient http)
+    {
+        return new SalesforceRestClient(http, Options.Create(Org));
+    }
+
+    /// <summary>The path of the REST calls with the default options.</summary>
+    public static readonly string DataPath = Org.DataPath;
+
+
     /// <param name="http">The HTTP stack to the org (see <see cref="Http"/>).</param>
     /// <param name="options">The Salesforce options of the engine and its error classification.</param>
     /// <param name="gate">The concurrency gate, for tests that run whole batches; the Salesforce step needs none.</param>
     public static SalesforceBatchSyncService Service(HttpClient http, IOptions<SalesforceOptions> options,
         ISalesforceBatchGate? gate = null)
     {
-        return new(gate ?? new NoDatabase(), new SalesforceRestClient(http), SchemaCache(),
+        return new(gate ?? new NoDatabase(), Client(http), SchemaCache(),
                 new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
                 NullLogger<SalesforceBatchSyncService>.Instance);
     }
@@ -34,7 +47,7 @@ internal static class SalesforceStep
     public static SalesforceSchemaCache SchemaCache(IDistributedCache? shared = null, TimeProvider? clock = null)
     {
         return new(clock ?? TimeProvider.System, shared ?? new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())),
-            Options.Create(new SalesforceOptions { InstanceUrl = OrgUrl }),
+            Options.Create(new SalesforceOptions { InstanceUrl = OrgUrl, BaseApiPath = Org.BaseApiPath, ApiVersion = Org.ApiVersion }),
             NullLogger<SalesforceSchemaCache>.Instance);
     }
 

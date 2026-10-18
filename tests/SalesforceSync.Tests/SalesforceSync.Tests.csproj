@@ -31,6 +31,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The worker's settings, to check what the running worker is configured with -->
+    <None Include="..\..\src\SalesforceSync\appsettings.json" Link="worker.appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Xunit" />
     <Using Include="FluentAssertions" />
     <Using Include="AutoFixture" />

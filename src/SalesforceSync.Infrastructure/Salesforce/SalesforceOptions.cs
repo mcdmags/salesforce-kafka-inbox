@@ -6,6 +6,22 @@ public sealed class SalesforceOptions
 
     public string InstanceUrl { get; set; } = "";
 
+    // BaseApiPath and ApiVersion have no default here on purpose: appsettings.json is their only source, so the path
+    // the sync calls is visible and changed in one place, and a deployment missing them fails at startup instead of
+    // silently calling a version nobody chose.
+
+    /// <summary>The REST API's base path on the instance, before the version, e.g. <c>/services/data</c>. Required.</summary>
+    public string BaseApiPath { get; set; } = "";
+
+    /// <summary>The REST API version every call is made against, e.g. <c>v62.0</c>. Required.</summary>
+    public string ApiVersion { get; set; } = "";
+
+    /// <summary>The path every REST call starts with: <c>{BaseApiPath}/{ApiVersion}</c>, e.g. <c>/services/data/v62.0</c>.</summary>
+    /// <exception cref="InvalidOperationException">Either setting is missing.</exception>
+    public string DataPath => string.IsNullOrWhiteSpace(BaseApiPath) || string.IsNullOrWhiteSpace(ApiVersion)
+        ? throw new InvalidOperationException($"{Section}:BaseApiPath and {Section}:ApiVersion must be set (appsettings.json)")
+        : $"/{BaseApiPath.Trim('/')}/{ApiVersion.Trim('/')}";
+
     /// <summary>
     /// The OAuth token endpoint. Unset = <c>{InstanceUrl}/services/oauth2/token</c> (the org's My Domain, and the mock
     /// org's); set it only when the org issues tokens elsewhere, e.g. another My Domain host or

@@ -1825,6 +1825,10 @@ Lightning shows the org at an address like `https://acme--dev.sandbox.lightning.
 client credentials flow only works on the org's own domain. The token URL defaults to the same address plus
 `/services/oauth2/token`; set `Salesforce:TokenUrl` only if your org issues tokens at another address.
 
+Every REST call goes to `{Salesforce:BaseApiPath}/{Salesforce:ApiVersion}` on the instance (default
+`/services/data/v62.0`, in `appsettings.json`). Change `ApiVersion` there to move to another API version; the shared
+Describe cache keys include it, so versions never share an entry.
+
 ### 2. Create the user the sync runs as
 
 With the client credentials flow there is no login. Salesforce runs every API call as one user that you choose, so the

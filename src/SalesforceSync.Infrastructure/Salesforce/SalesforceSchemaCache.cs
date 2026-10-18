@@ -54,7 +54,7 @@ public sealed class SalesforceSchemaCache(
 
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase);
 
-    private readonly string _keyPrefix = KeyPrefix(options.Value.InstanceUrl);
+    private readonly string _keyPrefix = KeyPrefix(options.Value.InstanceUrl, options.Value.ApiVersion);
 
     private long _lastWarningTicks;
 
@@ -135,10 +135,10 @@ public sealed class SalesforceSchemaCache(
     /// <summary>
     /// <c>salesforce-sync:describe:{org host}:{API version}:</c>: different orgs or API versions never share an entry.
     /// </summary>
-    private static string KeyPrefix(string instanceUrl)
+    private static string KeyPrefix(string instanceUrl, string apiVersion)
     {
         var host = Uri.TryCreate(instanceUrl, UriKind.Absolute, out var url) ? url.Host : instanceUrl;
-        return $"salesforce-sync:describe:{host.ToLowerInvariant()}:{SalesforceRestClient.ApiVersion}:";
+        return $"salesforce-sync:describe:{host.ToLowerInvariant()}:{apiVersion}:";
     }
 
     /// <summary>The shared entry of an object, e.g. <c>salesforce-sync:describe:acme.my.salesforce.com:v62.0:account</c>.</summary>

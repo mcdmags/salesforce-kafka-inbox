@@ -94,7 +94,7 @@ public sealed class FakeSalesforceTests
         var a1 = await UpsertAccountsAsync("A1");
         await DeleteAsync(a1);
 
-        var found = await new SalesforceRestClient(_http).QueryAsync(
+        var found = await SalesforceStep.Client(_http).QueryAsync(
             [new CompositeQuery("q0", "SELECT Id FROM Account WHERE ExternalId__c IN ('A1')")], CancellationToken.None);
         var recreated = (await UpsertAsync("Account", Account("A1"))).Single()!;
 
@@ -242,8 +242,8 @@ public sealed class FakeSalesforceTests
         }
 
         const string soql = "SELECT Id FROM Contact WHERE AccountId__c IN ('A1')";
-        var first = JsonNode.Parse(await _http.GetStringAsync(SalesforceRestClient.QueryUrl(soql)))!;
-        var all = await new SalesforceRestClient(_http).QueryAsync([new CompositeQuery("q0", soql)], CancellationToken.None);
+        var first = JsonNode.Parse(await _http.GetStringAsync(SalesforceRestClient.QueryUrl(Data, soql)))!;
+        var all = await SalesforceStep.Client(_http).QueryAsync([new CompositeQuery("q0", soql)], CancellationToken.None);
 
         ((int)first["totalSize"]!, (bool)first["done"]!, first["records"]!.AsArray().Count).Should().Be((2_001, false, 2_000));
         ((string?)first["nextRecordsUrl"]).Should().StartWith($"{Data}/query/");
@@ -273,7 +273,7 @@ public sealed class FakeSalesforceTests
         services.AddHttpClient(SalesforceTokenProvider.HttpClientName).ConfigurePrimaryHttpMessageHandler(() => new FakeSalesforceHandler(_org));
         await using var provider = services.BuildServiceProvider();
         var tokens = new SalesforceTokenProvider(provider.GetRequiredService<IHttpClientFactory>(), options);
-        var client = new SalesforceRestClient(new HttpClient(new SalesforceAuthHandler(tokens) { InnerHandler = new FakeSalesforceHandler(_org) })
+        var client = SalesforceStep.Client(new HttpClient(new SalesforceAuthHandler(tokens) { InnerHandler = new FakeSalesforceHandler(_org) })
         {
             BaseAddress = _http.BaseAddress
         });

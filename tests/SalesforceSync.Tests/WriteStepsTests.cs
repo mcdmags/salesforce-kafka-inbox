@@ -184,7 +184,7 @@ public sealed class WriteStepsTests
         var queries = ReadQueryBuilder.Build(units,
             [new SoqlQuery("account", "ExternalId__c", ids), new SoqlQuery("Contact", "ExternalId__c", ["C1"]), new SoqlQuery("Profile__c", "ExternalId__c", ["P1"]),
                 new SoqlQuery("Profile__c", "ExternalId__c", [])],
-            Schemas, maxValuesPerQuery: 100);
+            Schemas, maxValuesPerQuery: 100, SalesforceStep.DataPath);
 
         queries.Select(q => (q.Query.ReferenceId, q.SObject)).Should().Equal(("q0", "Account"), ("q1", "Account"), ("q2", "Contact"), ("q3", "Profile__c"));
         queries[0].Query.Soql.Should().StartWith("SELECT Name,ExternalId__c,Id FROM Account WHERE ExternalId__c IN ('A0',");
@@ -221,7 +221,7 @@ public sealed class WriteStepsTests
 
         var queries = BuildAccountRead(ids, SalesforceRestClient.MaxQueryValues);
 
-        queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(q.Query.Soql)));
+        queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, q.Query.Soql)));
         queries.Select(q => ids.Count(id => q.Query.Soql.Contains($"'{id}'"))).Should().OnlyContain(n => n < SalesforceRestClient.MaxQueryValues)
             .And.Subject.Sum().Should().Be(ids.Count);
     }
@@ -235,10 +235,10 @@ public sealed class WriteStepsTests
 
         var queries = BuildAccountRead(ids, maxValuesPerQuery: 100);
 
-        queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(q.Query.Soql)));
+        queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, q.Query.Soql)));
         var chunks = queries.Select(q => ids.Where(id => q.Query.Soql.Contains($"'{id}'")).ToList()).ToList();
         chunks.SelectMany(c => c).Should().Equal(ids, "every id is read once, in order");
-        chunks.Zip(chunks.Skip(1)).Select(p => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(
+        chunks.Zip(chunks.Skip(1)).Select(p => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, 
                 SalesforceRestClient.Soql("Account", ["Name", "ExternalId__c", "Id"], "ExternalId__c", [.. p.First, p.Second[0]]))))
             .Should().AllBeEquivalentTo(false, "a query is closed only when the next id would not fit");
     }
@@ -346,11 +346,11 @@ public sealed class WriteStepsTests
         var ids = Enumerable.Range(0, SalesforceRestClient.MaxCollectionRecords + 1).Select(i => $"003{i:D12}AAA").ToList();
         var full = new CollectionDelete("delete", ids[..SalesforceRestClient.MaxCollectionRecords]);
 
-        SalesforceRestClient.FitsUrlLimit(full.Url).Should().BeTrue("200 Ids of 18 characters are under 4 KB: {0} bytes", full.Url.Length);
-        full.Url.Should().StartWith("/services/data/v62.0/composite/sobjects?ids=003000000000000AAA,003000000000001AAA,")
+        SalesforceRestClient.FitsUrlLimit(SalesforceStep.DataPath + full.Path).Should().BeTrue("200 Ids of 18 characters are under 4 KB: {0} bytes", (SalesforceStep.DataPath + full.Path).Length);
+        full.Path.Should().StartWith("/composite/sobjects?ids=003000000000000AAA,003000000000001AAA,")
             .And.EndWith("&allOrNone=false");
 
-        var client = new SalesforceRestClient(SalesforceStep.Http(new ThrowingHandler()));
+        var client = SalesforceStep.Client(SalesforceStep.Http(new ThrowingHandler()));
         var tooMany = () => client.WriteAsync([new CollectionDelete("delete", ids)], CancellationToken.None);
         await tooMany.Should().ThrowAsync<ArgumentOutOfRangeException>().WithMessage("delete: 201 records*");
     }
@@ -377,7 +377,7 @@ public sealed class WriteStepsTests
     private static List<ReadQuery> BuildAccountRead(IReadOnlyList<string> ids, int maxValuesPerQuery)
     {
         return ReadQueryBuilder.Build(Normalized(new SyncUnit([AccountRecord("A1", "Acme")])),
-            [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas, maxValuesPerQuery);
+            [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas, maxValuesPerQuery, SalesforceStep.DataPath);
     }
 
     private static List<NormalizedUnit> Normalized(SyncUnit unit)

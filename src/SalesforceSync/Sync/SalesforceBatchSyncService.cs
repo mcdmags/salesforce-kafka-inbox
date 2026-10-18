@@ -187,7 +187,7 @@ public sealed class SalesforceBatchSyncService(
         }
 
         // 3. Read: one Composite call with the strategy's queries (more only if long ids split them into more than 5)
-        var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas, maxValuesPerQuery), schemas.Keys, ct);
+        var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas, maxValuesPerQuery, salesforce.DataPath), schemas.Keys, ct);
 
         // 4. Decide per record: unchanged, create, update or delete (by what the read found), and how each lookup is
         // linked; the writes are grouped into collections and Composite requests

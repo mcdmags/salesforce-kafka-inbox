@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -102,6 +103,10 @@ public static class SyncServiceCollectionExtensions
                 $"{SalesforceOptions.Section}:InstanceUrl must be an absolute URL")
             .Validate(o => Uri.IsWellFormedUriString(o.TokenUrl, UriKind.Absolute),
                 $"{SalesforceOptions.Section}:TokenUrl must be an absolute URL (or empty)")
+            .Validate(o => o.BaseApiPath.StartsWith('/'),
+                $"{SalesforceOptions.Section}:BaseApiPath must be set, starting with '/' (e.g. /services/data)")
+            .Validate(o => Regex.IsMatch(o.ApiVersion, @"^v\d+\.\d$"),
+                $"{SalesforceOptions.Section}:ApiVersion must be set, like v62.0")
             .ValidateOnStart();
         AddValidatedOptions<SyncOptions, SyncOptionsValidator>(services, config.GetSection(SyncOptions.Section));
         AddValidatedOptions<SalesforceLimitsOptions, SalesforceLimitsValidator>(services, config.GetSection(SalesforceLimitsOptions.Section));

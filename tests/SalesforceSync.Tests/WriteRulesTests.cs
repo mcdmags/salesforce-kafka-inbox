@@ -189,10 +189,10 @@ public sealed class WriteRulesTests
             CurrentRecords.None).Requests.Should().ContainSingle().Subject;
         var both = Plan([Normalized(new SyncUnit([widget, gadget]))], CurrentRecords.None).Requests.Should().ContainSingle().Subject;
 
-        widgetsOnly.Upserts().Select(u => (u.ReferenceId, u.Url, u.Records.Count)).Should().Equal(
-            [("Widget__c", "/services/data/v62.0/composite/sobjects/Widget__c/Key__c", 2)], "one object: one upsert, a call of its own");
-        both.Upserts().Select(u => (u.ReferenceId, u.Url)).Should().Equal(
-            [("Widget__c", "/services/data/v62.0/composite/sobjects/Widget__c/Key__c"), ("Gadget__c", "/services/data/v62.0/composite/sobjects/Gadget__c/Key__c")],
+        widgetsOnly.Upserts().Select(u => (u.ReferenceId, u.Path, u.Records.Count)).Should().Equal(
+            [("Widget__c", "/composite/sobjects/Widget__c/Key__c", 2)], "one object: one upsert, a call of its own");
+        both.Upserts().Select(u => (u.ReferenceId, u.Path)).Should().Equal(
+            [("Widget__c", "/composite/sobjects/Widget__c/Key__c"), ("Gadget__c", "/composite/sobjects/Gadget__c/Key__c")],
             "two objects: one request (Composite) of an upsert each, the parent first by its foreign key");
 
         static SObjectRecord Widget(string key)
@@ -528,7 +528,7 @@ public sealed class WriteRulesTests
         var delete = plan.Requests.Should().ContainSingle().Subject.BuildRequests().Should().ContainSingle().Subject
             .Should().BeOfType<CollectionDelete>().Subject;
         (delete.ReferenceId, delete.Ids.Single()).Should().Be(("delete", ContactId));
-        delete.Url.Should().Be($"/services/data/v62.0/composite/sobjects?ids={ContactId}&allOrNone=false");
+        delete.Path.Should().Be($"/composite/sobjects?ids={ContactId}&allOrNone=false");
         plan.NotSent.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "C2" && r.Outcome == SyncOutcome.Unchanged,
             "not in Salesforce: deleted already, or never synced");
     }
