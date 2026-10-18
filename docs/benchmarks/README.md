@@ -359,6 +359,55 @@ median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest sing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
 
+## Latest run: plain-crud without Describe, at 54c47ac
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at 54c47ac, on 2026-10-19, against the
+[run before it](#latest-run-plain-crud-with-the-mapping-error-halt-at-15a8e22). Since then: the rate limiter and its
+Postgres tables are gone (each process has its own token bucket, pause and throttle from `Sforce-Limit-Info`), Describe
+is gone (record type Ids come from a cached `RecordType` query, values are compared by their .NET type), and the inbox
+lost its `status` and `last_error_code` columns. Same workload and environment; the database was recreated.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 159.0 ms | 1,638.7 ms | 24.84 MB | 47 | 17 | 6.28 | 1,028 | 38 |
+| 1 | 1 | 1,000 | 2,113 | 666.2 ms | 5,766.4 ms | 75.12 MB | 151 | 47 | 1.90 | 3,279 | 1166 |
+| 1 | 3 | 100 | 990 | 64.4 ms | 534.6 ms | 24.94 MB | 47 | 17 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 252.4 ms | 1,822.3 ms | 76.3 MB | 157 | 49 | 1.90 | 3,274 | 1161 |
+| 4 | 1 | 100 | 990 | 65.7 ms | 440.7 ms | 26.82 MB | 51 | 17 | 5.78 | 1,117 | 127 |
+| 4 | 1 | 1,000 | 2,113 | 334.0 ms | 1,258.0 ms | 78.13 MB | 155 | 49 | 1.88 | 3,311 | 1198 |
+| 4 | 3 | 100 | 990 | 85.5 ms | 261.5 ms | 29.63 MB | 49 | 17 | 6.08 | 1,061 | 71 |
+| 4 | 3 | 1,000 | 2,113 | 372.5 ms | 559.3 ms | 87.73 MB | 155 | 52 | 2.05 | 3,036 | 923 |
+| 8 | 1 | 100 | 990 | 71.8 ms | 286.7 ms | 34.23 MB | 53 | 17 | 5.53 | 1,183 | 193 |
+| 8 | 1 | 1,000 | 2,113 | 350.8 ms | 717.4 ms | 81.79 MB | 163 | 50 | 1.86 | 3,342 | 1229 |
+| 8 | 3 | 100 | 990 | 186.4 ms | 333.8 ms | 60.22 MB | 57 | 19 | 5.41 | 1,192 | 202 |
+| 8 | 3 | 1,000 | 2,113 | 435.8 ms | 649.7 ms | 108.47 MB | 163 | 52 | 1.92 | 3,245 | 1132 |
+
+Streaming (50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.777 s | 173.83 MB | 1,181 | 536 | 2.52 | 2,554 | 7 |
+| 4 | 3 | 2.495 s | 361.82 MB | 4,563 | 1,986 | 1.49 | 4,319 | 4 |
+| 8 | 1 | 2.081 s | 271.4 MB | 2,695 | 1,185 | 1.69 | 3,825 | 4 |
+| 8 | 3 | 5.404 s | 1238.92 MB | 15,071 | 6,909 | 1.21 | 5,317 | 3 |
+
+- **Preloaded drain is the same or faster.** The one-worker, one-pod run with 100 accounts makes the same 47 API calls as
+  before and took 159 ms against 259 ms; the other configurations are within the noise of three iterations each. The
+  `RecordType` query adds 4 calls to a first iteration (one per object that has a record type) and none after that.
+- **The streaming run with 8 workers on 3 pods is much worse**: 5.4 s here and 6.4 s in a second run of the streaming
+  benchmarks alone (about 16,000 API calls in both), against 3.6 s and 2,344 calls before. The other three streaming
+  configurations are in line with the run before (1.8 to 2.5 s). This looks like the limiter, not Describe: the three
+  pods of the benchmark used to share one bucket in Postgres, which held their total call rate down, and now each pod has
+  its own, so 24 workers go at 50 hot accounts together. Coalescing falls to 1.21 events per claim, so nearly every event
+  is its own claim, read and write. That is a guess from the counters; it was not tested by putting a shared limit back.
+  With the production sizing (`Sync:Workers` x pods under 25, and Salesforce's own limits) the number to watch is the
+  calls per event, not this benchmark's wall time.
+- Allocations in the preloaded drain are 10 to 25% lower with one pod (no Describe, no limiter rows).
+
 ## Latest run: plain-crud with the mapping-error halt, at 15a8e22
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at 15a8e22, on 2026-10-19, against the
