@@ -523,18 +523,6 @@ public sealed class SalesforceBatchSyncService(
         {
             return _index.GetValueOrDefault((sobject.ToLowerInvariant(), field.ToLowerInvariant(), value));
         }
-
-        /// <summary>The record as Salesforce has it, or null if it doesn't exist yet.</summary>
-        public CurrentRecord? Find(SObjectRecord record)
-        {
-            return Find(record.SObject, record.ExternalIdField, record.ExternalId);
-        }
-
-        /// <summary>The record a foreign key points at, or null if it isn't in Salesforce.</summary>
-        public CurrentRecord? Find(ForeignKey parent)
-        {
-            return Find(parent.SObject, parent.ExternalIdField, parent.ExternalId);
-        }
     }
 
     // ---------- 4. Diff ----------
@@ -590,21 +578,15 @@ public sealed class SalesforceBatchSyncService(
             var missing = new List<SalesforceError>();  // a parent that isn't there yet: transient
             var changes = ChangesOf(unit, current, problems, missing);
 
-            if (problems.Count > 0)
+            if (problems.Count == 0 && missing.Count == 0 && changes.Count > 0)
             {
-                decided.Add(new(unit.Key, SyncOutcome.PermanentFailure, problems));
-            }
-            else if (missing.Count > 0)
-            {
-                decided.Add(new(unit.Key, SyncOutcome.TransientFailure, missing));
-            }
-            else if (changes.Count == 0)
-            {
-                decided.Add(new(unit.Key, SyncOutcome.Unchanged, []));
+                planned.Add(new PlannedUnit(unit.Key, changes));
             }
             else
             {
-                planned.Add(new PlannedUnit(unit.Key, changes));
+                decided.Add(problems.Count > 0 ? new(unit.Key, SyncOutcome.PermanentFailure, problems)
+                    : missing.Count > 0 ? new(unit.Key, SyncOutcome.TransientFailure, missing)
+                    : new(unit.Key, SyncOutcome.Unchanged, []));
             }
         }
 
@@ -619,7 +601,7 @@ public sealed class SalesforceBatchSyncService(
 
         foreach (var record in unit.Records)
         {
-            var existing = current.Find(record.Record);
+            var existing = current.Find(record.Record.SObject, record.Record.ExternalIdField, record.Record.ExternalId);
 
             if (record.Record.Delete)
             {
@@ -634,7 +616,7 @@ public sealed class SalesforceBatchSyncService(
             // A record that points at a parent needs it to exist: in Salesforce already, or created by this same unit
             foreach (var parent in record.Record.Parents)
             {
-                if (!inUnit.Contains((parent.SObject.ToLowerInvariant(), parent.ExternalId)) && current.Find(parent) is null)
+                if (!inUnit.Contains((parent.SObject.ToLowerInvariant(), parent.ExternalId)) && current.Find(parent.SObject, parent.ExternalIdField, parent.ExternalId) is null)
                 {
                     missing.Add(new(record.ReferenceId, SalesforceErrors.DependencyNotSynced,
                         $"{record.Schema.Name}.{parent.Field}: {parent.SObject} {parent.ExternalIdField}={parent.ExternalId} is not in Salesforce yet"));

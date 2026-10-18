@@ -359,6 +359,50 @@ median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest sing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
 
+## Latest run: plain-crud with lease slots, at aff3247
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at aff3247, on 2026-10-19, against the
+[run before it](#latest-run-plain-crud-no-composite-request). Two changes since: the concurrency slots are leases on
+the `sf_rate_limit` row instead of session advisory locks, and the write path's classes are members of
+`SalesforceBatchSyncService`. Same workload, environment and runtime; the database was recreated.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures.
+
+Preloaded drain, 5,000 events (medians of the iterations without a Describe, at 0 ms latency):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 252.1 ms | 1,851.1 ms | 29.35 MB | 47 | 17 | 6.28 | 1,028 | 38 |
+| 1 | 1 | 1,000 | 2,113 | 864.2 ms | 6,460.4 ms | 90.39 MB | 151 | 47 | 1.90 | 3,279 | 1166 |
+| 1 | 3 | 100 | 990 | 115.7 ms | 575.9 ms | 30.84 MB | 49 | 17 | 6.07 | 1,063 | 73 |
+| 1 | 3 | 1,000 | 2,113 | 439.2 ms | 1,814.4 ms | 93.74 MB | 156 | 49 | 1.90 | 3,274 | 1161 |
+| 4 | 1 | 100 | 990 | 135.2 ms | 473.6 ms | 31.66 MB | 51 | 17 | 5.77 | 1,119 | 129 |
+| 4 | 1 | 1,000 | 2,113 | 444.3 ms | 1,304.2 ms | 94.05 MB | 153 | 48 | 1.91 | 3,257 | 1144 |
+| 4 | 3 | 100 | 990 | 159.7 ms | 281.5 ms | 32.72 MB | 59 | 17 | 4.48 | 1,439 | 449 |
+| 4 | 3 | 1,000 | 2,113 | 430.0 ms | 568.3 ms | 99.98 MB | 170 | 57 | 2.01 | 3,097 | 984 |
+| 8 | 1 | 100 | 990 | 136.7 ms | 307.9 ms | 35.68 MB | 54 | 16 | 4.81 | 1,342 | 352 |
+| 8 | 1 | 1,000 | 2,113 | 435.7 ms | 832.4 ms | 95.58 MB | 161 | 50 | 1.83 | 3,396 | 1283 |
+| 8 | 3 | 100 | 990 | 255.8 ms | 304.7 ms | 40.62 MB | 66 | 17 | 4.44 | 1,466 | 476 |
+| 8 | 3 | 1,000 | 2,113 | 520.6 ms | 545.2 ms | 101.06 MB | 162 | 53 | 1.94 | 3,211 | 1098 |
+
+Streaming (50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 2.298 s | 249.05 MB | 1,118 | 508 | 2.59 | 2,487 | 13 |
+| 4 | 3 | 3.267 s | 442.56 MB | 2,477 | 1,081 | 1.86 | 3,458 | 4 |
+| 8 | 1 | 4.965 s | 437.79 MB | 2,433 | 1,071 | 1.74 | 3,697 | 4 |
+| 8 | 3 | 3.527 s | 418.58 MB | 2,359 | 1,016 | 2.21 | 2,923 | 6 |
+
+- **Same work, same speed.** With one worker and one pod the API calls are identical (47 and 151), and the means are
+  within run-to-run noise (235 to 252 ms and 822 to 864 ms at 0 ms latency; 1.80 to 1.85 s and 6.47 to 6.46 s at 25 ms).
+  The two slot statements per batch are not visible next to the batch's Salesforce calls.
+- **Less memory with several workers and pods**: 4 x 3 at 100 accounts allocates 32.72 MB against 45.5 MB, 8 x 3
+  40.62 MB against 100.72 MB, and the retries drop (449 against 497, 476 against 798): a worker that finds every slot
+  busy no longer opens a connection to try each advisory-lock key.
+- **Streaming 8 x 1 has a wide spread** (4.965 s, standard deviation 5.5 s), so its mean is not a comparison; the
+  others are 2.298 s against 2.276 s, 3.267 s against 3.745 s and 3.527 s against 4.476 s.
+
 ## Latest run: plain-crud, no Composite request
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at 57aef62, on 2026-10-19, against the
