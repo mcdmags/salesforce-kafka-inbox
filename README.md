@@ -1054,7 +1054,7 @@ same chapters is linked where it is cited):
 | Already deleted at the write | Success | Deleted between the read and the write: what was asked for. |
 | A refusal | The existing interpreter: `Salesforce:PermanentErrorCodes` (now with `DELETE_FAILED`) dead-letter, the rest retry; a lost answer holds the batch (`UNKNOWN_OUTCOME`), and the next read finds the record or not | No error handling of its own. |
 | Order against later events | `meta.time`, as always: an aggregate older than the delete changes nothing, a newer one that has the child again recreates it (an upsert by external id) | The inbox's one-row-per-entity rule. |
-| Same client and limits | Every delete goes through `SalesforceRestClient.DeleteAsync`, the process's rate limiter | One call is one token, whatever it does. |
+| Same client and limits | Every delete goes through `SalesforceRestClient.DeleteAsync` and the process's rate limiter | One call is one token, whatever it does. |
 | New tables, migrations, config | None for deletes. `Kafka:Topic` (one topic) replaces `Kafka:Topics` | A delete is an event in the existing inboxes. |
 
 **A deleted account.** The account's event deletes its Profile and its Account, in that order in one Collections
