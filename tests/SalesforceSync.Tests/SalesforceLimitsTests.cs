@@ -8,6 +8,7 @@ using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.Hosting;
 using SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.RateLimiting;
 
 namespace SalesforceSync.Tests;
 
@@ -300,7 +301,7 @@ public sealed class SalesforceLimitsTests
 
     private static SalesforceRateLimiter Limiter(RateLimitOptions rate)
     {
-        return new(SyncDbContext.CreateFactory(Db), Options.Create(rate),
+        return new(new RateLimitRepository(SyncDbContext.CreateFactory(Db)), Options.Create(rate),
                 Options.Create(Limits()), NullLogger<SalesforceRateLimiter>.Instance);
     }
 }

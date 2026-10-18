@@ -17,10 +17,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\SalesforceSync.Infrastructure\SalesforceSync.Infrastructure.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
     <InternalsVisibleTo Include="SalesforceSync" />
     <InternalsVisibleTo Include="SalesforceSync.Benchmarks" />
     <InternalsVisibleTo Include="SalesforceSync.Tests" />

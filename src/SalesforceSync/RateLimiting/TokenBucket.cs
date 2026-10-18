@@ -1,10 +1,11 @@
+using SalesforceSync.Data.RateLimiting;
 using SalesforceSync.Infrastructure.RateLimiting;
 
-namespace SalesforceSync.Data.RateLimiting;
+namespace SalesforceSync.RateLimiting;
 
 /// <summary>
-/// The arithmetic of the shared <c>sf_rate_limit</c> row, without I/O: <see cref="SalesforceRateLimiter"/> locks the
-/// row, reads the database clock and the usage in the window, and writes back what this decides.
+/// The arithmetic of the shared <c>sf_rate_limit</c> row, without I/O: <see cref="SalesforceRateLimiter"/> has the
+/// row locked and the usage in the window read (<see cref="RateLimitRepository"/>), and writes back what this decides.
 /// </summary>
 internal static class TokenBucket
 {
@@ -15,12 +16,6 @@ internal static class TokenBucket
     public static double Refill(RateLimitState s, DateTimeOffset now)
     {
         return Math.Min(s.Capacity, s.Tokens + ((now - s.UpdatedAt).TotalSeconds * s.RefillPerSec));
-    }
-
-    /// <summary>The start of the usage bucket <paramref name="now"/> falls in.</summary>
-    public static DateTimeOffset BucketOf(DateTimeOffset now, TimeSpan bucketSize)
-    {
-        return new DateTimeOffset(now.UtcTicks - (now.UtcTicks % bucketSize.Ticks), TimeSpan.Zero);
     }
 
     /// <summary>Whether <paramref name="permits"/> calls may be made now, and if not, how long until they may.</summary>

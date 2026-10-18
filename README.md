@@ -1268,30 +1268,33 @@ does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers
 
 ```
 src/
-  SalesforceSync/                 The entry project, the worker (Program, DI wiring):
+  SalesforceSync/                 The entry project, the worker: the only project that references the other two
+                                  (Program, DI wiring):
     Inbox/                        Kafka consumer, worker loops
     Hosting/                      The startup hosted services (SyncSchemaInitializer migrates, RateLimitInitializer) and
                                   the options validators
+    RateLimiting/                 The rate limiter's decisions: SalesforceRateLimiter (token bucket, daily budget,
+                                  throttle, pause), TokenBucket, SalesforceBatchGate; it reads and writes its state
+                                  through Data's RateLimitRepository and serves Infrastructure's ports
     Sync/                         The engine (SalesforceBatchSyncService), PreparedBatch, EntitySyncService, the
                                   strategy and event meta, the engine's model types, AccountAggregate (a Kafka
                                   aggregate → the changed entities' events), and one file per synced object
                                   (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy)
     Sync/Write/                   The write path's rules, no I/O: normalize, read queries, diff, plan (parents first),
                                   pack (one upsert per level and object, one delete; 2+ in a request → Composite), interpret
-  SalesforceSync.Infrastructure/  The Salesforce API calls (references nothing of ours):
+  SalesforceSync.Infrastructure/  The Salesforce API calls (references no other project of ours):
     Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors,
                                   SObjectMetadata and the attributes the sObject classes are read by
-    RateLimiting/                 The HTTP side of rate limiting: SalesforceRateLimitHandler, the limits header,
-                                  options, and the ports the Data project implements (ISalesforceRateLimiter,
-                                  ISalesforceBatchGate)
-  SalesforceSync.Data/            Everything that touches Postgres (references Infrastructure for those ports):
+    RateLimiting/                 The HTTP side of rate limiting: SalesforceRateLimitHandler, the limits header, options,
+                                  and the ports the entry project serves (ISalesforceRateLimiter, ISalesforceBatchGate)
+  SalesforceSync.Data/            Everything that touches Postgres (references no other project of ours):
     (root)                        SyncDbContext (the EF model: every table), SyncSchema (migrates at startup),
                                   PostgresRetryStrategy, raw-SQL helpers
     Inbox/                        InboxRow and one row type per object, IRepository (and the claim and outcome
                                   types), InboxRepository, InboxSql, SyncOptions
-    RateLimiting/                 The rate limiter's state in Postgres: SalesforceRateLimiter (token bucket, daily
-                                  budget, pause), SalesforceConcurrencySlots, SalesforceBatchGate, TokenBucket, and
-                                  its tables (RateLimitState, ApiUsageBucket) and RateLimitSql
+    RateLimiting/                 The rate limiter's state in Postgres: RateLimitRepository (the locked row and the
+                                  usage buckets), SalesforceConcurrencySlots (advisory locks), the tables
+                                  (RateLimitState, ApiUsageBucket) and RateLimitSql
     Migrations/                   EF migrations (InitialSchema: the tables, and the sf_limit_status view)
   SalesforceSync.FakeSalesforce/  In-memory Salesforce (OAuth sessions, describe, query pages, composite, sObject
                                   Collections upsert and delete, allOrNone, a Recycle Bin, Salesforce-like value

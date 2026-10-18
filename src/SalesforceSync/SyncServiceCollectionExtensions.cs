@@ -8,6 +8,7 @@ using SalesforceSync.Data.RateLimiting;
 using SalesforceSync.Hosting;
 using SalesforceSync.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
@@ -164,6 +165,7 @@ public static class SyncServiceCollectionExtensions
     public static IHttpClientBuilder AddSalesforceRateLimiting(this IHttpClientBuilder salesforce)
     {
         var services = salesforce.Services;
+        services.AddSingleton<RateLimitRepository>();
         services.AddSingleton<SalesforceRateLimiter>();
         services.AddSingleton<ISalesforceRateLimiter>(sp => sp.GetRequiredService<SalesforceRateLimiter>());
         services.AddHostedService<RateLimitInitializer>();
