@@ -141,12 +141,7 @@ public sealed class WriteOutcomeTests
             // A write is a collections call (upsert or delete); a read is a query
             var path = request.RequestUri!.AbsolutePath;
             var isWrite = path.Contains("/composite/sobjects", StringComparison.Ordinal);
-            if (!isWrite && !path.EndsWith("/query", StringComparison.Ordinal))
-            {
-                return await base.SendAsync(request, ct);
-            }
-
-            return (isWrite ? !FailWrites : !FailReads)
+            return (isWrite ? !FailWrites : !FailReads) || (!isWrite && !path.EndsWith("/query", StringComparison.Ordinal))
                 ? await base.SendAsync(request, ct)
                 : Cancel
                 ? throw new TaskCanceledException("timed out")

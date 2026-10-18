@@ -9,8 +9,8 @@ using SalesforceSync.Data.RateLimiting;
 using SalesforceSync.Hosting;
 using SalesforceSync.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
-using SalesforceSync.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
+using SalesforceSync.RateLimiting;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync;

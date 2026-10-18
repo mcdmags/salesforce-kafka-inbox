@@ -1,7 +1,5 @@
 using System.Text.Json;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 using static SalesforceSync.Sync.SalesforceBatchSyncService;
@@ -109,11 +107,11 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"OLD","Name":"Acme","Active__c":false}"""),
             ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"SAME","Name":"Same","Active__c":false}"""));
 
-        var plan = Differ.Plan(
+        var (planned, decided) = Differ.Plan(
             [Normalized(Account("NEW", "New")), Normalized(Account("OLD", "Changed")), Normalized(Account("SAME", "Same"))], current);
 
-        plan.Decided.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "SAME" && r.Outcome == SyncOutcome.Unchanged);
-        var changes = plan.Planned.Select(u => u.Changes.Single()).ToList();
+        decided.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "SAME" && r.Outcome == SyncOutcome.Unchanged);
+        var changes = planned.Select(u => u.Changes.Single()).ToList();
         changes.Select(c => (c.Record.Record.ExternalId, c.Id, c.IsCreate)).Should().Equal(("NEW", null, true), ("OLD", AccountId, false));
         changes[0].Body().Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "Name", "Active__c"], "a create sends every field");
         changes[1].Body().Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "Name"], "an update sends only what differs, never an Id");
@@ -127,12 +125,12 @@ public sealed class WriteRulesTests
         Differ.Plan([Normalized(AccountWithProfile("A1"))], CurrentRecords.None).Decided.Should().BeEmpty("the unit creates its Account");
         Differ.Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "A1")]))], accountInSalesforce).Decided.Should().BeEmpty();
 
-        var plan = Differ.Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "MISSING")]))], CurrentRecords.None);
+        var (planned, decided) = Differ.Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "MISSING")]))], CurrentRecords.None);
 
-        var result = plan.Decided.Should().ContainSingle().Subject;
+        var result = decided.Should().ContainSingle().Subject;
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced));
         result.PrimaryError.Message.Should().Contain("Account ExternalId__c=MISSING is not in Salesforce yet");
-        plan.Planned.Should().BeEmpty("nothing is sent for it");
+        planned.Should().BeEmpty("nothing is sent for it");
     }
 
     [Fact]
@@ -140,9 +138,9 @@ public sealed class WriteRulesTests
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false,"Locked__c":"old"}"""));
 
-        var plan = Differ.Plan([Normalized(Account("A1", "Acme", locked: "new"))], current);
+        var (_, decided) = Differ.Plan([Normalized(Account("A1", "Acme", locked: "new"))], current);
 
-        var result = plan.Decided.Should().ContainSingle().Subject;
+        var result = decided.Should().ContainSingle().Subject;
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.PermanentFailure, "INVALID_FIELD_FOR_INSERT_UPDATE"));
     }
 
@@ -151,11 +149,11 @@ public sealed class WriteRulesTests
     {
         var current = Rows(("Contact", $$"""{"Id":"{{ContactId}}","ExternalId__c":"C1"}"""));
 
-        var plan = Differ.Plan([Normalized(Deleting("C1")), Normalized(Deleting("C2"))], current);
+        var (planned, decided) = Differ.Plan([Normalized(Deleting("C1")), Normalized(Deleting("C2"))], current);
 
-        var change = plan.Planned.Single().Changes.Single();
+        var change = planned.Single().Changes.Single();
         (change.IsDelete, change.Id).Should().Be((true, ContactId));
-        plan.Decided.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "C2" && r.Outcome == SyncOutcome.Unchanged);
+        decided.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "C2" && r.Outcome == SyncOutcome.Unchanged);
     }
 
     // ---------- The calls ----------
@@ -426,8 +424,8 @@ public sealed class WriteRulesTests
     private static async Task<List<SyncResult>> Write(StubSalesforce salesforce, IReadOnlyList<NormalizedUnit> units,
         CurrentRecords? current = null, int maxRecordsPerWrite = 200)
     {
-        var plan = Differ.Plan(units, current ?? CurrentRecords.None);
-        return await new Sender(salesforce, new Interpreter(new SalesforceErrors(Options.Create(new SalesforceOptions())))).WriteAsync(plan.Planned, maxRecordsPerWrite, CancellationToken.None);
+        var (planned, _) = Differ.Plan(units, current ?? CurrentRecords.None);
+        return await new Sender(salesforce, new Interpreter(new SalesforceErrors(Options.Create(new SalesforceOptions())))).WriteAsync(planned, maxRecordsPerWrite, CancellationToken.None);
     }
 
     /// <summary>A change of a record Salesforce has (an update).</summary>

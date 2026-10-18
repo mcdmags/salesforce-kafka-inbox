@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using SalesforceSync.Data;
 using SalesforceSync.Data.RateLimiting;
 
 namespace SalesforceSync.IntegrationTests;

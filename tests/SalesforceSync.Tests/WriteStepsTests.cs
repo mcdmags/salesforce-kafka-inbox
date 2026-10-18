@@ -1,10 +1,7 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 using static SalesforceSync.Sync.SalesforceBatchSyncService;
-using static SalesforceSync.Sync.SalesforceBatchSyncService.Differ;
 using static SalesforceSync.Sync.SalesforceBatchSyncService.Normalizer;
 using static SalesforceSync.Sync.SalesforceBatchSyncService.Reader;
 
@@ -241,7 +238,7 @@ public sealed class WriteStepsTests
         queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, q.Soql)));
         var chunks = queries.Select(q => ids.Where(id => q.Soql.Contains($"'{id}'")).ToList()).ToList();
         chunks.SelectMany(c => c).Should().Equal(ids, "every id is read once, in order");
-        chunks.Zip(chunks.Skip(1)).Select(p => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, 
+        chunks.Zip(chunks.Skip(1)).Select(p => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath,
                 SalesforceRestClient.Soql("Account", ["Name", "ExternalId__c", "Id"], "ExternalId__c", [.. p.First, p.Second[0]]))))
             .Should().AllBeEquivalentTo(false, "a query is closed only when the next id would not fit");
     }
@@ -288,8 +285,6 @@ public sealed class WriteStepsTests
     }
 
     // ---------- Helpers ----------
-
-    private const int MaxRecordsPerWrite = 180;
 
     private static Reader Reader()
     {

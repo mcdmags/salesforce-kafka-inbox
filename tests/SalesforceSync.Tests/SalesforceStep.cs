@@ -3,8 +3,8 @@ using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Data.Inbox;
+using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
@@ -30,7 +30,6 @@ internal static class SalesforceStep
 
     /// <summary>The path of the REST calls with the default options.</summary>
     public static readonly string DataPath = Org.DataPath;
-
 
     /// <param name="http">The HTTP stack to the org (see <see cref="Http"/>).</param>
     /// <param name="options">The Salesforce options of the engine and its error classification.</param>

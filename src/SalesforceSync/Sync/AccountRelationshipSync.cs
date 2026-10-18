@@ -1,5 +1,4 @@
 using System.Text.Json.Serialization;
-using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync;

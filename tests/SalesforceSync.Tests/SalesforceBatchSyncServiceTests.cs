@@ -299,7 +299,7 @@ public sealed class SalesforceBatchSyncServiceTests
         results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
         _org.WriteRequests.Select(w => (string?)w["url"]).Should().Equal(
             "/services/data/v62.0/composite/sobjects/Account/ExternalId__c", "/services/data/v62.0/composite/sobjects/Profile__c/ExternalId__c");
-        _org.WriteRequests.Should().OnlyContain(w => w["body"]!["allOrNone"]!.GetValue<bool>() == false, "allOrNone is sent explicitly");
+        _org.WriteRequests.Should().OnlyContain(w => !w["body"]!["allOrNone"]!.GetValue<bool>(), "allOrNone is sent explicitly");
         UpsertedLast("Account").Select(r => ((string?)r["ExternalId__c"], (string?)r["Name"]))
             .Should().Equal(("A1", "One"), ("A2", "Two"));
         UpsertedLast("Profile__c").Select(r => ((string?)r["ExternalId__c"], (string?)r["AccountId__c"]))
@@ -1141,12 +1141,6 @@ public sealed class SalesforceBatchSyncServiceTests
         IReadOnlyList<SObjectBody> records, CancellationToken ct)
     {
         return await client.UpsertAsync(sobject, externalIdField, records, ct);
-    }
-
-    /// <summary>The i-th subrequest of a recorded composite write.</summary>
-    private static JsonObject Sub(JsonObject write, int i)
-    {
-        return write["compositeRequest"]![i]!.AsObject();
     }
 
     private static List<JsonObject> Records(JsonNode collection)

@@ -1,9 +1,7 @@
-using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Npgsql;
 using SalesforceSync.Data;
-using SalesforceSync.Data.Inbox;
 
 namespace SalesforceSync.IntegrationTests;
 

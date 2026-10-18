@@ -1,7 +1,5 @@
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
-using SalesforceSync.Data;
-using SalesforceSync.Data.Inbox;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Inbox;

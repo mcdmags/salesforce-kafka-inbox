@@ -1,176 +1,174 @@
-﻿using System;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
-namespace SalesforceSync.Data.Migrations
+namespace SalesforceSync.Data.Migrations;
+
+/// <inheritdoc />
+public partial class InitialSchema : Migration
 {
     /// <inheritdoc />
-    public partial class InitialSchema : Migration
+    protected override void Up(MigrationBuilder migrationBuilder)
     {
-        /// <inheritdoc />
-        protected override void Up(MigrationBuilder migrationBuilder)
-        {
-            migrationBuilder.CreateTable(
-                name: "sf_account_inbox",
-                columns: table => new
-                {
-                    entity_id = table.Column<string>(type: "text", nullable: false),
-                    payload = table.Column<string>(type: "jsonb", nullable: false),
-                    event_time = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    status = table.Column<string>(type: "text", nullable: false, defaultValueSql: "'pending'"),
-                    attempt_count = table.Column<int>(type: "integer", nullable: false, defaultValue: 0),
-                    last_error = table.Column<string>(type: "text", nullable: true),
-                    last_error_code = table.Column<string>(type: "text", nullable: true),
-                    last_updated = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false, defaultValueSql: "now()"),
-                    next_attempt_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    lock_token = table.Column<Guid>(type: "uuid", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("sf_account_inbox_pkey", x => x.entity_id);
-                })
-                .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
-                .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
+        migrationBuilder.CreateTable(
+            name: "sf_account_inbox",
+            columns: table => new
+            {
+                entity_id = table.Column<string>(type: "text", nullable: false),
+                payload = table.Column<string>(type: "jsonb", nullable: false),
+                event_time = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                status = table.Column<string>(type: "text", nullable: false, defaultValueSql: "'pending'"),
+                attempt_count = table.Column<int>(type: "integer", nullable: false, defaultValue: 0),
+                last_error = table.Column<string>(type: "text", nullable: true),
+                last_error_code = table.Column<string>(type: "text", nullable: true),
+                last_updated = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false, defaultValueSql: "now()"),
+                next_attempt_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                lock_token = table.Column<Guid>(type: "uuid", nullable: true)
+            },
+            constraints: table =>
+            {
+                table.PrimaryKey("sf_account_inbox_pkey", x => x.entity_id);
+            })
+            .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
+            .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
 
-            migrationBuilder.CreateTable(
-                name: "sf_account_relationship_inbox",
-                columns: table => new
-                {
-                    entity_id = table.Column<string>(type: "text", nullable: false),
-                    payload = table.Column<string>(type: "jsonb", nullable: false),
-                    event_time = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    status = table.Column<string>(type: "text", nullable: false, defaultValueSql: "'pending'"),
-                    attempt_count = table.Column<int>(type: "integer", nullable: false, defaultValue: 0),
-                    last_error = table.Column<string>(type: "text", nullable: true),
-                    last_error_code = table.Column<string>(type: "text", nullable: true),
-                    last_updated = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false, defaultValueSql: "now()"),
-                    next_attempt_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    lock_token = table.Column<Guid>(type: "uuid", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("sf_account_relationship_inbox_pkey", x => x.entity_id);
-                })
-                .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
-                .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
+        migrationBuilder.CreateTable(
+            name: "sf_account_relationship_inbox",
+            columns: table => new
+            {
+                entity_id = table.Column<string>(type: "text", nullable: false),
+                payload = table.Column<string>(type: "jsonb", nullable: false),
+                event_time = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                status = table.Column<string>(type: "text", nullable: false, defaultValueSql: "'pending'"),
+                attempt_count = table.Column<int>(type: "integer", nullable: false, defaultValue: 0),
+                last_error = table.Column<string>(type: "text", nullable: true),
+                last_error_code = table.Column<string>(type: "text", nullable: true),
+                last_updated = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false, defaultValueSql: "now()"),
+                next_attempt_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                lock_token = table.Column<Guid>(type: "uuid", nullable: true)
+            },
+            constraints: table =>
+            {
+                table.PrimaryKey("sf_account_relationship_inbox_pkey", x => x.entity_id);
+            })
+            .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
+            .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
 
-            migrationBuilder.CreateTable(
-                name: "sf_api_usage",
-                columns: table => new
-                {
-                    bucket = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    calls = table.Column<long>(type: "bigint", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("sf_api_usage_pkey", x => x.bucket);
-                });
+        migrationBuilder.CreateTable(
+            name: "sf_api_usage",
+            columns: table => new
+            {
+                bucket = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                calls = table.Column<long>(type: "bigint", nullable: false)
+            },
+            constraints: table =>
+            {
+                table.PrimaryKey("sf_api_usage_pkey", x => x.bucket);
+            });
 
-            migrationBuilder.CreateTable(
-                name: "sf_contact_inbox",
-                columns: table => new
-                {
-                    entity_id = table.Column<string>(type: "text", nullable: false),
-                    payload = table.Column<string>(type: "jsonb", nullable: false),
-                    event_time = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    status = table.Column<string>(type: "text", nullable: false, defaultValueSql: "'pending'"),
-                    attempt_count = table.Column<int>(type: "integer", nullable: false, defaultValue: 0),
-                    last_error = table.Column<string>(type: "text", nullable: true),
-                    last_error_code = table.Column<string>(type: "text", nullable: true),
-                    last_updated = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false, defaultValueSql: "now()"),
-                    next_attempt_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    lock_token = table.Column<Guid>(type: "uuid", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("sf_contact_inbox_pkey", x => x.entity_id);
-                })
-                .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
-                .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
+        migrationBuilder.CreateTable(
+            name: "sf_contact_inbox",
+            columns: table => new
+            {
+                entity_id = table.Column<string>(type: "text", nullable: false),
+                payload = table.Column<string>(type: "jsonb", nullable: false),
+                event_time = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                status = table.Column<string>(type: "text", nullable: false, defaultValueSql: "'pending'"),
+                attempt_count = table.Column<int>(type: "integer", nullable: false, defaultValue: 0),
+                last_error = table.Column<string>(type: "text", nullable: true),
+                last_error_code = table.Column<string>(type: "text", nullable: true),
+                last_updated = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false, defaultValueSql: "now()"),
+                next_attempt_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                lock_token = table.Column<Guid>(type: "uuid", nullable: true)
+            },
+            constraints: table =>
+            {
+                table.PrimaryKey("sf_contact_inbox_pkey", x => x.entity_id);
+            })
+            .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
+            .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
 
-            migrationBuilder.CreateTable(
-                name: "sf_rate_limit",
-                columns: table => new
-                {
-                    name = table.Column<string>(type: "text", nullable: false),
-                    tokens = table.Column<double>(type: "double precision", nullable: false),
-                    capacity = table.Column<double>(type: "double precision", nullable: false),
-                    base_refill_per_sec = table.Column<double>(type: "double precision", nullable: false),
-                    refill_per_sec = table.Column<double>(type: "double precision", nullable: false),
-                    updated_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false, defaultValueSql: "clock_timestamp()"),
-                    paused_until = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    api_used = table.Column<long>(type: "bigint", nullable: true),
-                    api_max = table.Column<long>(type: "bigint", nullable: true),
-                    burst_used = table.Column<long>(type: "bigint", nullable: true),
-                    burst_max = table.Column<long>(type: "bigint", nullable: true),
-                    app_used = table.Column<long>(type: "bigint", nullable: true),
-                    app_max = table.Column<long>(type: "bigint", nullable: true),
-                    app_name = table.Column<string>(type: "text", nullable: true),
-                    usage_updated_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    daily_budget = table.Column<long>(type: "bigint", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("sf_rate_limit_pkey", x => x.name);
-                });
+        migrationBuilder.CreateTable(
+            name: "sf_rate_limit",
+            columns: table => new
+            {
+                name = table.Column<string>(type: "text", nullable: false),
+                tokens = table.Column<double>(type: "double precision", nullable: false),
+                capacity = table.Column<double>(type: "double precision", nullable: false),
+                base_refill_per_sec = table.Column<double>(type: "double precision", nullable: false),
+                refill_per_sec = table.Column<double>(type: "double precision", nullable: false),
+                updated_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false, defaultValueSql: "clock_timestamp()"),
+                paused_until = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                api_used = table.Column<long>(type: "bigint", nullable: true),
+                api_max = table.Column<long>(type: "bigint", nullable: true),
+                burst_used = table.Column<long>(type: "bigint", nullable: true),
+                burst_max = table.Column<long>(type: "bigint", nullable: true),
+                app_used = table.Column<long>(type: "bigint", nullable: true),
+                app_max = table.Column<long>(type: "bigint", nullable: true),
+                app_name = table.Column<string>(type: "text", nullable: true),
+                usage_updated_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                daily_budget = table.Column<long>(type: "bigint", nullable: true)
+            },
+            constraints: table =>
+            {
+                table.PrimaryKey("sf_rate_limit_pkey", x => x.name);
+            });
 
-            migrationBuilder.InsertData(
-                table: "sf_rate_limit",
-                columns: new[] { "name", "api_max", "api_used", "app_max", "app_name", "app_used", "base_refill_per_sec", "burst_max", "burst_used", "capacity", "daily_budget", "paused_until", "refill_per_sec", "tokens", "usage_updated_at" },
-                values: new object[] { "salesforce", null, null, null, null, null, 2.0, null, null, 5.0, null, null, 2.0, 5.0, null });
+        migrationBuilder.InsertData(
+            table: "sf_rate_limit",
+            columns: ["name", "api_max", "api_used", "app_max", "app_name", "app_used", "base_refill_per_sec", "burst_max", "burst_used", "capacity", "daily_budget", "paused_until", "refill_per_sec", "tokens", "usage_updated_at"],
+            values: ["salesforce", null, null, null, null, null, 2.0, null, null, 5.0, null, null, 2.0, 5.0, null]);
 
-            migrationBuilder.CreateIndex(
-                name: "sf_account_inbox_ready",
-                table: "sf_account_inbox",
-                column: "next_attempt_at",
-                filter: "next_attempt_at is not null");
+        migrationBuilder.CreateIndex(
+            name: "sf_account_inbox_ready",
+            table: "sf_account_inbox",
+            column: "next_attempt_at",
+            filter: "next_attempt_at is not null");
 
-            migrationBuilder.CreateIndex(
-                name: "sf_account_relationship_inbox_ready",
-                table: "sf_account_relationship_inbox",
-                column: "next_attempt_at",
-                filter: "next_attempt_at is not null");
+        migrationBuilder.CreateIndex(
+            name: "sf_account_relationship_inbox_ready",
+            table: "sf_account_relationship_inbox",
+            column: "next_attempt_at",
+            filter: "next_attempt_at is not null");
 
-            migrationBuilder.CreateIndex(
-                name: "sf_contact_inbox_ready",
-                table: "sf_contact_inbox",
-                column: "next_attempt_at",
-                filter: "next_attempt_at is not null");
+        migrationBuilder.CreateIndex(
+            name: "sf_contact_inbox_ready",
+            table: "sf_contact_inbox",
+            column: "next_attempt_at",
+            filter: "next_attempt_at is not null");
 
-            // Added by hand (a view has no model counterpart): what Salesforce last reported, for dashboards and alerts.
-            // A later migration that changes a column it reads must drop and recreate it.
-            migrationBuilder.Sql("""
-                create view sf_limit_status as
-                select api_used, api_max, round(100.0 * api_used / nullif(api_max, 0), 1)     as api_pct,
-                       burst_used, burst_max, round(100.0 * burst_used / nullif(burst_max, 0), 1) as burst_pct,
-                       app_name, app_used, app_max, round(100.0 * app_used / nullif(app_max, 0), 1) as app_pct,
-                       refill_per_sec, base_refill_per_sec, paused_until, usage_updated_at,
-                       daily_budget
-                from sf_rate_limit
-                where name = 'salesforce';
-                """);
-        }
+        // Added by hand (a view has no model counterpart): what Salesforce last reported, for dashboards and alerts.
+        // A later migration that changes a column it reads must drop and recreate it.
+        migrationBuilder.Sql("""
+            create view sf_limit_status as
+            select api_used, api_max, round(100.0 * api_used / nullif(api_max, 0), 1)     as api_pct,
+                   burst_used, burst_max, round(100.0 * burst_used / nullif(burst_max, 0), 1) as burst_pct,
+                   app_name, app_used, app_max, round(100.0 * app_used / nullif(app_max, 0), 1) as app_pct,
+                   refill_per_sec, base_refill_per_sec, paused_until, usage_updated_at,
+                   daily_budget
+            from sf_rate_limit
+            where name = 'salesforce';
+            """);
+    }
 
-        /// <inheritdoc />
-        protected override void Down(MigrationBuilder migrationBuilder)
-        {
-            migrationBuilder.Sql("drop view sf_limit_status;");
+    /// <inheritdoc />
+    protected override void Down(MigrationBuilder migrationBuilder)
+    {
+        migrationBuilder.Sql("drop view sf_limit_status;");
 
-            migrationBuilder.DropTable(
-                name: "sf_account_inbox");
+        migrationBuilder.DropTable(
+            name: "sf_account_inbox");
 
-            migrationBuilder.DropTable(
-                name: "sf_account_relationship_inbox");
+        migrationBuilder.DropTable(
+            name: "sf_account_relationship_inbox");
 
-            migrationBuilder.DropTable(
-                name: "sf_api_usage");
+        migrationBuilder.DropTable(
+            name: "sf_api_usage");
 
-            migrationBuilder.DropTable(
-                name: "sf_contact_inbox");
+        migrationBuilder.DropTable(
+            name: "sf_contact_inbox");
 
-            migrationBuilder.DropTable(
-                name: "sf_rate_limit");
-        }
+        migrationBuilder.DropTable(
+            name: "sf_rate_limit");
     }
 }

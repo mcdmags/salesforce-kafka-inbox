@@ -11,7 +11,6 @@ using Npgsql;
 using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.IntegrationTests.Hosting;
-using SalesforceSync.Sync;
 using Testcontainers.Kafka;
 using Testcontainers.PostgreSql;
 using Testcontainers.Redis;

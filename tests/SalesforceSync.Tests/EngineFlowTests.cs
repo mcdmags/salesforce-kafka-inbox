@@ -1,7 +1,7 @@
 using System.Net;
 using Microsoft.Extensions.Options;
-using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Data.Inbox;
+using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
@@ -405,16 +405,9 @@ public sealed class EngineFlowTests
             // A write is a collections call (upsert or delete); a read is a query
             var path = request.RequestUri!.AbsolutePath;
             var isWrite = path.Contains("/composite/sobjects", StringComparison.Ordinal);
-            if (!isWrite && OnRead is not null && path.EndsWith("/query", StringComparison.Ordinal))
-            {
-                return OnRead(request);
-            }
-
-            if (isWrite && ++Writes == FailWrite?.Number)
-            {
-                throw FailWrite.Value.Failure;
-            }
-            return await base.SendAsync(request, ct);
+            return !isWrite && OnRead is not null && path.EndsWith("/query", StringComparison.Ordinal) ? OnRead(request)
+                : isWrite && ++Writes == FailWrite?.Number ? throw FailWrite.Value.Failure
+                : await base.SendAsync(request, ct);
         }
     }
 

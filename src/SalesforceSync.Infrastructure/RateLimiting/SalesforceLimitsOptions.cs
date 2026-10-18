@@ -1,5 +1,3 @@
-using Microsoft.Extensions.Options;
-
 namespace SalesforceSync.Infrastructure.RateLimiting;
 
 /// <summary>

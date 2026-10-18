@@ -1010,16 +1010,14 @@ public sealed class SalesforceBatchSyncService(
         /// </summary>
         private SalesforceError Translate(Change change, SalesforceError e)
         {
-            if (e.Code is "INVALID_CROSS_REFERENCE_KEY"
-                && (e.Fields?.Contains(SObjectSchema.RecordTypeIdField, StringComparer.OrdinalIgnoreCase) == true
-                    || e.Message?.Contains("Record Type", StringComparison.OrdinalIgnoreCase) == true))
-            {
-                return new SalesforceError(change.ReferenceId, SalesforceErrors.InvalidRecordType, $"{e.Code}: {e.Message}", e.Fields);
-            }
+            var recordType = e.Code is "INVALID_CROSS_REFERENCE_KEY"
+                             && (e.Fields?.Contains(SObjectSchema.RecordTypeIdField, StringComparer.OrdinalIgnoreCase) == true
+                                 || e.Message?.Contains("Record Type", StringComparison.OrdinalIgnoreCase) == true);
 
-            return errors.IsParentMissing(e) || (change.IsDelete && SalesforceErrors.HasDependents(e))
-                ? new SalesforceError(change.ReferenceId, SalesforceErrors.DependencyNotSynced, $"{e.Code}: {e.Message}", e.Fields)
-                : e with { ReferenceId = change.ReferenceId };
+            return recordType ? new SalesforceError(change.ReferenceId, SalesforceErrors.InvalidRecordType, $"{e.Code}: {e.Message}", e.Fields)
+                : errors.IsParentMissing(e) || (change.IsDelete && SalesforceErrors.HasDependents(e))
+                    ? new SalesforceError(change.ReferenceId, SalesforceErrors.DependencyNotSynced, $"{e.Code}: {e.Message}", e.Fields)
+                    : e with { ReferenceId = change.ReferenceId };
         }
     }
 
