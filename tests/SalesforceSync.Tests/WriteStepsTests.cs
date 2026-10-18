@@ -1,7 +1,9 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
-using SalesforceSync.Sync.Write;
+using static SalesforceSync.Sync.SalesforceBatchSyncService;
 
 namespace SalesforceSync.Tests;
 
@@ -41,14 +43,14 @@ public sealed class WriteStepsTests
         ["Contact"] = Contact
     };
 
-    // ---------- RecordNormalizer ----------
+    // ---------- Normalize ----------
 
     [Fact]
     public void A_unit_Salesforce_would_accept_has_no_problems()
     {
         var unit = new SyncUnit([AccountRecord("A1", "Acme")]);
 
-        var normalized = RecordNormalizer.Normalize("A1", unit, Schemas, out var problems);
+        var normalized = Normalize("A1", unit, Schemas, out var problems);
 
         problems.Should().BeEmpty();
         normalized.Key.Should().Be("A1");
@@ -69,7 +71,7 @@ public sealed class WriteStepsTests
                 ForeignKeys: [new ForeignKey("AccountId", "Account", "ExternalId__c", "A1")])
         ]);
 
-        RecordNormalizer.Normalize("A1", unit, Schemas, out var problems);
+        Normalize("A1", unit, Schemas, out var problems);
 
         problems.Select(p => (p.ReferenceId, p.Code)).Should().BeEquivalentTo(
         [
@@ -85,7 +87,7 @@ public sealed class WriteStepsTests
         var unit = new SyncUnit([new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1",
             new Dictionary<string, object?> { ["AccountId__c"] = "A1" }, ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", "A1")])]);
 
-        var normalized = RecordNormalizer.Normalize("P1", unit, Schemas, out var problems);
+        var normalized = Normalize("P1", unit, Schemas, out var problems);
 
         problems.Should().BeEmpty();
         normalized.Records[0].Fields.Should().ContainSingle().Which.Should().Be(
@@ -115,7 +117,7 @@ public sealed class WriteStepsTests
     {
         var unit = new SyncUnit([AccountRecord("A1", "Acme") with { RecordType = "business" }]);
 
-        var normalized = RecordNormalizer.Normalize("A1", unit, WithRecordTypes, out var problems);
+        var normalized = Normalize("A1", unit, WithRecordTypes, out var problems);
 
         problems.Should().BeEmpty();
         normalized.Records[0].Fields.Should().Contain(
@@ -126,7 +128,7 @@ public sealed class WriteStepsTests
     [Fact]
     public void A_record_without_a_record_type_leaves_RecordTypeId_alone()
     {
-        var normalized = RecordNormalizer.Normalize("A1", new SyncUnit([AccountRecord("A1", "Acme")]), WithRecordTypes, out var problems);
+        var normalized = Normalize("A1", new SyncUnit([AccountRecord("A1", "Acme")]), WithRecordTypes, out var problems);
 
         problems.Should().BeEmpty();
         normalized.Records[0].Fields.Keys.Select(f => f.Name).Should().Equal("Name");
@@ -140,7 +142,7 @@ public sealed class WriteStepsTests
     {
         var unit = new SyncUnit([AccountRecord("A1", "Acme") with { RecordType = developerName }]);
 
-        RecordNormalizer.Normalize("A1", unit, WithRecordTypes, out var problems);
+        Normalize("A1", unit, WithRecordTypes, out var problems);
 
         var problem = problems.Should().ContainSingle().Subject;
         (problem.ReferenceId, problem.Code).Should().Be(("acct", SalesforceErrors.InvalidRecordType));
@@ -157,7 +159,7 @@ public sealed class WriteStepsTests
             ("A2", new SyncUnit([AccountRecord("A2", "too long") with { RecordType = "Nope" }]))
         ];
 
-        var (normalized, rejected) = RecordNormalizer.Normalize(units, WithRecordTypes, errors);
+        var (normalized, rejected) = Service(errors).Normalize(units, WithRecordTypes);
 
         normalized.Should().BeEmpty();
         rejected.Select(r => (r.Key, r.Outcome, r.PrimaryError!.Code)).Should().Equal(
@@ -165,7 +167,7 @@ public sealed class WriteStepsTests
             ("A2", SyncOutcome.PermanentFailure, "STRING_TOO_LONG"));
     }
 
-    // ---------- ReadQueryBuilder ----------
+    // ---------- BuildReadQueries ----------
 
     [Fact]
     public void A_query_selects_what_the_diff_needs_and_is_chunked_by_100_values()
@@ -179,10 +181,10 @@ public sealed class WriteStepsTests
         ]));
         var ids = Enumerable.Range(0, 150).Select(i => $"A{i}").ToList();
 
-        var queries = ReadQueryBuilder.Build(units,
+        var queries = Service().BuildReadQueries(units,
             [new SoqlQuery("account", "ExternalId__c", ids), new SoqlQuery("Contact", "ExternalId__c", ["C1"]), new SoqlQuery("Profile__c", "ExternalId__c", ["P1"]),
                 new SoqlQuery("Profile__c", "ExternalId__c", [])],
-            Schemas, maxValuesPerQuery: 100, SalesforceStep.DataPath);
+            Schemas, maxValuesPerQuery: 100);
 
         queries.Select(q => q.SObject).Should().Equal("Account", "Account", "Contact", "Profile__c");
         queries[0].Soql.Should().StartWith("SELECT Name,ExternalId__c,Id FROM Account WHERE ExternalId__c IN ('A0',");
@@ -286,6 +288,13 @@ public sealed class WriteStepsTests
 
     private const int MaxRecordsPerWrite = 180;
 
+    private static SalesforceBatchSyncService Service(SalesforceErrors? errors = null)
+    {
+        var options = Options.Create(new SalesforceOptions());
+        return new SalesforceBatchSyncService(null!, SalesforceStep.Client(SalesforceStep.Http(new ThrowingHandler())), null!,
+            errors ?? new SalesforceErrors(options), options, Options.Create(new SyncOptions()), NullLogger<SalesforceBatchSyncService>.Instance);
+    }
+
     private static SObjectRecord AccountRecord(string key, string name)
     {
         return new("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = name });
@@ -294,13 +303,13 @@ public sealed class WriteStepsTests
     /// <summary>The read of Accounts by external id, selecting Name, ExternalId__c and Id.</summary>
     private static List<ReadQuery> BuildAccountRead(IReadOnlyList<string> ids, int maxValuesPerQuery)
     {
-        return ReadQueryBuilder.Build(Normalized(new SyncUnit([AccountRecord("A1", "Acme")])),
-            [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas, maxValuesPerQuery, SalesforceStep.DataPath);
+        return Service().BuildReadQueries(Normalized(new SyncUnit([AccountRecord("A1", "Acme")])),
+            [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas, maxValuesPerQuery);
     }
 
     private static List<NormalizedUnit> Normalized(SyncUnit unit)
     {
-        var normalized = RecordNormalizer.Normalize(unit.Records[0].ExternalId, unit, Schemas, out var problems);
+        var normalized = Normalize(unit.Records[0].ExternalId, unit, Schemas, out var problems);
         problems.Should().BeEmpty();
         return [normalized];
     }
