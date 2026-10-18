@@ -359,6 +359,64 @@ median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest sing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
 
+## Latest run: plain-crud, no Composite request
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at 57aef62, on 2026-10-19, against the
+[drop-inbox-id run](#latest-run-branch-drop-inbox-id-at-30de64f) of the Composite design (the same code up to the write
+path). The client has three calls (`SelectAsync`, `UpsertAsync`, `DeleteAsync`) and no Composite request: a read is a
+query per object, a write an upsert per object with the parents first. Same workload, environment and runtime
+(.NET 10.0.2); the database was recreated. The run took 7.4 minutes.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures: 0 overlapping claims, 0 entities not `done`, 0 stale
+rows, 0 wrong values, 0 write-history regressions, 0 failed records.
+
+Preloaded drain, 5,000 events (work counts are the medians of the iterations without a Describe, at 0 ms latency):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 234.8 ms | 1,799.7 ms | 29.36 MB | 47 | 17 | 6.28 | 1,028 | 38 |
+| 1 | 1 | 1,000 | 2,113 | 822.1 ms | 6,473.1 ms | 88.81 MB | 151 | 47 | 1.90 | 3,279 | 1166 |
+| 1 | 3 | 100 | 990 | 111.9 ms | 577.2 ms | 31.04 MB | 49 | 17 | 6.07 | 1,063 | 73 |
+| 1 | 3 | 1,000 | 2,113 | 488.6 ms | 1,823.9 ms | 94.03 MB | 157 | 49 | 1.90 | 3,274 | 1161 |
+| 4 | 1 | 100 | 990 | 111.4 ms | 465.0 ms | 32.37 MB | 51 | 17 | 5.77 | 1,119 | 129 |
+| 4 | 1 | 1,000 | 2,113 | 426.6 ms | 1,323.2 ms | 95.75 MB | 155 | 49 | 1.90 | 3,288 | 1175 |
+| 4 | 3 | 100 | 990 | 184.0 ms | 288.6 ms | 45.5 MB | 62 | 17 | 4.35 | 1,487 | 497 |
+| 4 | 3 | 1,000 | 2,113 | 425.3 ms | 603.6 ms | 113.72 MB | 154 | 52 | 2.03 | 3,063 | 950 |
+| 8 | 1 | 100 | 990 | 128.8 ms | 309.6 ms | 40.86 MB | 55 | 16 | 4.76 | 1,356 | 366 |
+| 8 | 1 | 1,000 | 2,113 | 383.6 ms | 837.4 ms | 101.16 MB | 159 | 49 | 1.86 | 3,347 | 1234 |
+| 8 | 3 | 100 | 990 | 288.7 ms | 321.8 ms | 100.72 MB | 73 | 17 | 3.61 | 1,788 | 798 |
+| 8 | 3 | 1,000 | 2,113 | 540.9 ms | 587.0 ms | 138.78 MB | 167 | 54 | 1.90 | 3,262 | 1149 |
+
+Streaming (50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 2.276 s | 256.71 MB | 1,154 | 524 | 2.56 | 2,523 | 11 |
+| 4 | 3 | 3.745 s | 620.92 MB | 3,206 | 1,390 | 1.71 | 3,768 | 5 |
+| 8 | 1 | 3.373 s | 528.03 MB | 2,806 | 1,232 | 1.66 | 3,886 | 4 |
+| 8 | 3 | 4.476 s | 733.82 MB | 3,229 | 1,349 | 2.21 | 2,915 | 11 |
+
+- **More calls on a backlog.** With one worker and one pod, 47 API calls against 30 at 100 accounts (+57%) and 151
+  against 78 at 1,000 (+94%): the reads are a call per object instead of up to 5 in one, and the Accounts' and the
+  Profiles' upserts are two calls instead of one. At 25 ms latency that is 1.80 s against 1.19 s and 6.47 s against
+  3.83 s (+51% and +69%); at 0 ms 235 ms against 205 ms and 822 ms against 752 ms.
+- **Streaming is about the same.** Batches are small there, so a Composite request combined little: 8 workers x 1 pod
+  made 2,806 calls against 2,889, 4 x 1 1,154 against 1,097.
+- **A little less memory**: 29.36 MB against 30.61 MB per drain at 100 accounts, 88.81 MB against 93.45 MB at 1,000.
+- The extra calls are the price of the simpler client and write path; the daily allocation (115,000 by default) pays for
+  them.
+
+| Method | Mean | Allocated |
+|---|--:|--:|
+| ParseLimitHeader | 658.31 ns | 2832 B |
+| PrepareTenEntities | 15,865.56 ns | 39472 B |
+| ReadAndValidateEvent | 1,131.88 ns | 1616 B |
+| MapAccountEvent | 1,415.10 ns | 3824 B |
+| MapPayloadToSObject | 18.69 ns | 200 B |
+| MapSObjectToRecord | 170.34 ns | 912 B |
+| DiffNumber | 112.97 ns | 32 B |
+| DiffDateTime | 234.50 ns | 192 B |
+
 ## Latest run: branch drop-inbox-id at 30de64f
 
 All 36 benchmarks (`--run full`) on the `drop-inbox-id` branch at 30de64f, on 2026-10-18, after three changes since the
