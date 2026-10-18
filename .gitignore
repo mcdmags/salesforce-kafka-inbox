@@ -5,3 +5,6 @@ obj/
 .idea/
 .DS_Store
 BenchmarkDotNet.Artifacts/
+
+# Local editor settings
+.editorconfig
