@@ -156,9 +156,9 @@ public sealed class ClaimRaceTests(SyncFixture app)
         // The worker records v1 done and ends the lease, as the repository does; consumer 2 stores v3 meanwhile
         await using (var record = await race.WorkerA.BeginTransactionAsync())
         {
-            var args = new { ids = claimed.Select(e => e.RowId).ToArray(), times = claimed.Select(e => e.EventTime).ToArray(), token };
+            var args = new { entityIds = claimed.Select(e => e.EntityId).ToArray(), times = claimed.Select(e => e.EventTime).ToArray(), token };
             (await race.WorkerA.ExecuteAsync(Sql.Done, args, record)).Should().Be(overwrittenDuringTheLease ? 0 : 1);
-            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.ids, tokens = new[] { token }, delay = TimeSpan.Zero }, record))
+            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.entityIds, tokens = new[] { token }, delay = TimeSpan.Zero }, record))
                 .Should().Be(overwrittenDuringTheLease ? 1 : 0, "only an overwritten row is left under the lease");
             var lateStore = race.StoreAsync(race.Consumer2, 3);
             await race.WaitUntilBlockedByAsync(race.WorkerA, lateStore);

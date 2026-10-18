@@ -6,8 +6,7 @@ namespace SalesforceSync.Sync;
 /// <summary>An entity to write: the unit mapped from its claimed event.</summary>
 /// <param name="EntityId">The entity: the Kafka message key.</param>
 /// <param name="Unit">The records to upsert for it.</param>
-/// <param name="RowId">The entity's inbox row id.</param>
-internal sealed record Work(string EntityId, SyncUnit Unit, long RowId);
+internal sealed record Work(string EntityId, SyncUnit Unit);
 
 /// <summary>
 /// What to do with a claim's rows: entities to write, and rows that are invalid on their own. Decided
@@ -46,7 +45,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
 
             try
             {
-                batch.Work.Add(new Work(entityId, strategy.Map(entityId, read.Event), row.RowId));
+                batch.Work.Add(new Work(entityId, strategy.Map(entityId, read.Event)));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -57,7 +56,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
 
         void Reject(InboxEvent row, string why)
         {
-            batch.Invalid.Add(new FailedEvent(row.RowId, $"{strategy.EntityType} {row.EntityId}: {why}", SalesforceErrors.InvalidEvent));
+            batch.Invalid.Add(new FailedEvent(row.EntityId, $"{strategy.EntityType} {row.EntityId}: {why}", SalesforceErrors.InvalidEvent));
         }
     }
 
@@ -72,7 +71,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
     /// <param name="results">The outcome of every entity in <see cref="Work"/>, by entity id.</param>
     public BatchOutcomes Outcomes(IReadOnlyDictionary<string, SyncResult> results)
     {
-        var synced = new List<long>();
+        var synced = new List<string>();
         var dead = new List<FailedEvent>(Invalid);
         var failed = new List<FailedEvent>();
 
@@ -81,7 +80,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
             var result = results[work.EntityId];
             switch (result.Outcome)
             {
-                case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(work.RowId); break;
+                case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(work.EntityId); break;
                 case SyncOutcome.NotAttempted: break;
                 case SyncOutcome.PermanentFailure: dead.Add(Failure(work, result)); break;
                 default: failed.Add(Failure(work, result)); break;
@@ -92,6 +91,6 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
 
     private static FailedEvent Failure(Work work, SyncResult result)
     {
-        return new(work.RowId, string.Join("; ", result.Errors), result.PrimaryError?.Code);
+        return new(work.EntityId, string.Join("; ", result.Errors), result.PrimaryError?.Code);
     }
 }

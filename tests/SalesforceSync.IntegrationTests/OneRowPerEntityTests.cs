@@ -38,7 +38,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         await StoreAsync(inbox, entity, 2);
 
         var after = await RowAsync(db, entity);
-        after.Should().Be(new Row(before.Id, 2, "pending", 0, null, null, SyncFixture.TimeOf(Event(entity, 2)), after.LastUpdated),
+        after.Should().Be(new Row(2, "pending", 0, null, null, SyncFixture.TimeOf(Event(entity, 2)), after.LastUpdated),
             "the entity's one row now holds the newer event, as a new event");
         after.LastUpdated.Should().BeAfter(before.LastUpdated);
     }
@@ -127,7 +127,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
     private static BatchOutcomes Synced(InboxClaim claim)
     {
-        return new BatchOutcomes(claim.RowIds, [], []);
+        return new BatchOutcomes(claim.EntityIds, [], []);
     }
 
     private static JsonObject Event(string entity, long version)
@@ -158,9 +158,9 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     {
         await using var conn = await db.OpenConnectionAsync();
         var row = await conn.QuerySingleAsync<StoredRow>(
-            $"SELECT id, payload::text, status, attempt_count, last_error, last_error_code, event_time, last_updated FROM {Table} WHERE entity_id = @entity",
+            $"SELECT payload::text, status, attempt_count, last_error, last_error_code, event_time, last_updated FROM {Table} WHERE entity_id = @entity",
             new { entity });
-        return new Row(row.Id, SyncFixture.VersionOf(row.Payload), row.Status, row.AttemptCount, row.Error, row.ErrorCode, row.EventTime, row.LastUpdated);
+        return new Row(SyncFixture.VersionOf(row.Payload), row.Status, row.AttemptCount, row.Error, row.ErrorCode, row.EventTime, row.LastUpdated);
     }
 
     private static async Task<(DateTime? NextAttemptAt, Guid? LockToken)> StateAsync(NpgsqlDataSource db, string entity)
@@ -177,10 +177,10 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     }
 
     /// <summary>An inbox row as read, its payload as stored.</summary>
-    private sealed record StoredRow(long Id, string Payload, string Status, int AttemptCount, string? Error, string? ErrorCode,
+    private sealed record StoredRow(string Payload, string Status, int AttemptCount, string? Error, string? ErrorCode,
         DateTimeOffset EventTime, DateTimeOffset LastUpdated);
 
     /// <summary>An inbox row as these tests compare it; the version is read from its payload.</summary>
-    private sealed record Row(long Id, long Version, string Status, int AttemptCount, string? Error, string? ErrorCode,
+    private sealed record Row(long Version, string Status, int AttemptCount, string? Error, string? ErrorCode,
         DateTimeOffset EventTime, DateTimeOffset LastUpdated);
 }

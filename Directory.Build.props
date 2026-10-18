@@ -17,6 +17,8 @@
     these settings like the other projects (the generated code is auto-generated, no warnings).
   -->
   <PropertyGroup>
+    <!-- One target framework for every project (src, tests, benchmarks); a project doesn't set its own -->
+    <TargetFramework>net10.0</TargetFramework>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>

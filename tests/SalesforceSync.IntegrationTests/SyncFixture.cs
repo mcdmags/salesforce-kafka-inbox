@@ -494,14 +494,14 @@ public class SyncFixture : IAsyncLifetime
     {
         await using var conn = await Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<StoredRow>(
-            $"SELECT id, payload::text, status, attempt_count, last_error_code, next_attempt_at, lock_token FROM {InboxTable(entityType)} WHERE entity_id = @key",
+            $"SELECT payload::text, status, attempt_count, last_error_code, next_attempt_at, lock_token FROM {InboxTable(entityType)} WHERE entity_id = @key",
             new { key });
-        return rows.Select(r => new InboxRowState(r.Id, VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockToken))
+        return rows.Select(r => new InboxRowState(VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockToken))
             .SingleOrDefault();
     }
 
     /// <summary>An inbox row as read, its payload as stored.</summary>
-    private sealed record StoredRow(long Id, string Payload, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
+    private sealed record StoredRow(string Payload, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
         Guid? LockToken);
 
     /// <summary>The version of a stored payload: its meta.time, BaseTime + N ms.</summary>
@@ -572,7 +572,7 @@ public class SyncFixture : IAsyncLifetime
     /// <summary>Records one of <see cref="Outcomes"/> for a claim of one row, through the worker's repository.</summary>
     public static Task RecordOutcomeAsync(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
     {
-        var row = claim.RowIds.Single();
+        var row = claim.EntityIds.Single();
         var failure = new FailedEvent(row, "failed", "SOME_CODE");
         var none = CancellationToken.None;
         return outcome switch
@@ -620,7 +620,7 @@ public class SyncFixture : IAsyncLifetime
 }
 
 /// <summary>An inbox row as the tests see it; <paramref name="Version"/> comes from the payload's meta.time.</summary>
-public sealed record InboxRowState(long Id, long Version, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
+public sealed record InboxRowState(long Version, string Status, int AttemptCount, string? ErrorCode, DateTime? NextAttemptAt,
     Guid? LockToken);
 
 [CollectionDefinition(Name)]

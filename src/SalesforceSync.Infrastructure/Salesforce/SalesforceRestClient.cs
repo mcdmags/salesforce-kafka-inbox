@@ -163,8 +163,7 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     /// Sends sObject Collections upserts and deletes in one API call: a single one as a call of its own (an upsert
     /// <c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>, a delete
     /// <c>DELETE /composite/sobjects?ids=...&amp;allOrNone=false</c>), 2 to 5 as the subrequests of one Composite
-    /// request, in the given order, where a later one may refer to an earlier one's results
-    /// (<c>@{referenceId[i].id}</c>). An upserted record is created or updated by its external id, a deleted one is
+    /// request, in the given order. An upserted record is created or updated by its external id, a deleted one is
     /// deleted by its Id. <c>allOrNone: false</c> is sent on the Composite request and on every collection: every
     /// record succeeds or fails on its own; <c>collateSubrequests: false</c> keeps the subrequests in order.
     /// </summary>

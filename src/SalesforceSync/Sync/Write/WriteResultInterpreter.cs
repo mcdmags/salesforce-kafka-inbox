@@ -3,14 +3,15 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.Sync.Write;
 
 /// <summary>
-/// Turns Salesforce's per-record results into one outcome per unit: saved (or deleted) only if every record is;
-/// permanent if any record's own error is; else transient if any is; else not attempted. Upserts and deletes are
-/// read the same way: a refused delete is permanent or transient by its code like a rejected upsert.
+/// Step 6 of a batch: turns Salesforce's per-record results into one outcome per unit. A unit is saved (or deleted) only
+/// if every one of its records is; permanent if any record's own error is; else transient if any is; else not
+/// attempted. Upserts and deletes are read the same way: a refused delete is permanent or transient by its code like a
+/// rejected upsert.
 /// </summary>
 internal sealed class WriteResultInterpreter(SalesforceErrors errors)
 {
     /// <summary>One outcome per unit of the request, from its upserts' answers by reference id.</summary>
-    public List<SyncResult> Interpret(CompositeWrite request, IReadOnlyList<CollectionResult> answers)
+    public List<SyncResult> Interpret(WriteRequest request, IReadOnlyList<CollectionResult> answers)
     {
         // Parents were sent first, so a child is classified after its parent
         foreach (var (referenceId, _, writes) in request.Collections)
@@ -38,8 +39,6 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     private void Classify(string referenceId, List<PlannedWrite> writes, CollectionResult? answer)
     {
         var subrequestErrors = SubrequestErrors(referenceId, writes.Count, answer);
-        // A reference to a parent that wasn't saved has no value, which fails every record of the subrequest
-        var brokenReference = writes.Any(w => w.Links.Any(l => l.Parent.Status != WriteStatus.Saved));
 
         for (var i = 0; i < writes.Count; i++)
         {
@@ -70,7 +69,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
                 write.Errors.Add(new SalesforceError(write.ReferenceId, "UNKNOWN_ERROR", "The record failed without error details"));
             }
 
-            write.Status = FailureStatus(write, hasOwnResult: result is not null, brokenReference);
+            write.Status = FailureStatus(write, hasOwnResult: result is not null);
         }
     }
 
@@ -92,8 +91,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
 
     /// <param name="hasOwnResult">False when the record's subrequest failed as a whole.</param>
     /// <param name="write">The record that wasn't saved.</param>
-    /// <param name="brokenReference">Its subrequest failed because a reference had no value.</param>
-    private WriteStatus FailureStatus(PlannedWrite write, bool hasOwnResult, bool brokenReference)
+    private WriteStatus FailureStatus(PlannedWrite write, bool hasOwnResult)
     {
         // E.g. the org rejecting a child whose new parent, an earlier upsert of the same Composite request, wasn't
         // saved (children are sent regardless, and the org decides): the parent's result decides the unit
@@ -103,7 +101,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
         }
 
         var ownErrors = write.Errors.Where(e => e.Code != SalesforceErrors.ProcessingHalted).ToList();
-        if (ownErrors.Count == 0 || (!hasOwnResult && brokenReference))
+        if (ownErrors.Count == 0)
         {
             return WriteStatus.NotAttempted;
         }
@@ -138,9 +136,8 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     }
 
     /// <summary>
-    /// Salesforce rejecting a lookup because its target isn't there (the target was deleted after the read), or the
-    /// org rejecting a record because its foreign key's parent isn't there (a message listed in
-    /// <see cref="SalesforceOptions.ParentMissingMessages"/>, whatever the code), is the same situation as the read not
+    /// The org rejecting a record because its foreign key's parent isn't there (a message listed in
+    /// <see cref="SalesforceOptions.ParentMissingMessages"/>, whatever the code) is the same situation as the read not
     /// finding it: the parent is expected to arrive through its own sync, so the record waits for it rather than being
     /// dead-lettered. The same in reverse: a delete refused because records still point at it
     /// (<see cref="SalesforceErrors.HasDependents"/>, an Account whose contacts are not deleted yet) waits for their
@@ -149,8 +146,7 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     /// Salesforce rejecting the RecordTypeId (the record type was deactivated or unassigned after the describe) is an
     /// <see cref="SalesforceErrors.InvalidRecordType"/>, like the describe not offering it: retried, not dead-lettered.
     /// Salesforce often leaves <c>fields</c> empty on this error ("Record Type ID: this ID value isn't valid for the
-    /// user"), so the message identifies it too; it is checked before lookups, or a record with lookups would wait
-    /// for a parent with the stale record type Id still cached.
+    /// user"), so the message identifies it too.
     /// </para>
     /// </summary>
     private SalesforceError Translate(PlannedWrite write, SalesforceError e)
@@ -160,12 +156,8 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
             return new SalesforceError(write.ReferenceId, SalesforceErrors.InvalidRecordType, $"{e.Code}: {e.Message}", e.Fields);
         }
 
-        var targetMissing = (write.LookupFields.Count > 0
-                             && e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED"
-                             && (e.Fields is not { Count: > 0 } || e.Fields.Any(write.LookupFields.Contains)))
-                            || errors.IsParentMissing(e)
-                            || (write.Delete && SalesforceErrors.HasDependents(e));
-        return targetMissing
+        var parentMissing = errors.IsParentMissing(e) || (write.Delete && SalesforceErrors.HasDependents(e));
+        return parentMissing
             ? new SalesforceError(write.ReferenceId, SalesforceErrors.DependencyNotSynced, $"{e.Code}: {e.Message}", e.Fields)
             : e with { ReferenceId = write.ReferenceId };
     }

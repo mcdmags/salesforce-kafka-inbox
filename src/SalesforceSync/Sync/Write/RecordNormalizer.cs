@@ -3,10 +3,10 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.Sync.Write;
 
 /// <summary>
-/// Checks a unit against the Describe metadata and normalizes its values (<see cref="FieldValues"/>), before any call:
-/// an unknown field, a value Salesforce would reject, a lookup that isn't one (or a foreign key that is one), or a
-/// record type the org doesn't offer is a problem of that unit alone. A record's record type becomes its RecordTypeId
-/// here, a field like any other.
+/// Step 2 of a batch: checks a unit against the Describe metadata and normalizes its values
+/// (<see cref="FieldValues"/>), before any call. An unknown field, a value Salesforce would reject, a foreign key that
+/// isn't a text field, or a record type the org doesn't offer is a problem of that unit alone: the unit is rejected and
+/// the rest of the batch carries on. A record's record type becomes its RecordTypeId here, a field like any other.
 /// </summary>
 internal static class RecordNormalizer
 {
@@ -57,14 +57,14 @@ internal static class RecordNormalizer
             ? record.Fields.Append(new(SObjectSchema.RecordTypeIdField, recordTypeId))
             : record.Fields;
         var fields = NormalizeFields(record, values, schema, problems);
-        var lookups = CheckLookups(record, schema, schemas, problems);
+        CheckForeignKeys(record, schema, schemas, problems);
 
         if (schema.Find(record.ExternalIdField) is null)
         {
             problems.Add(NoSuchColumn(record, record.ExternalIdField, schema));
         }
 
-        return new NormalizedRecord(record, schema, fields, lookups);
+        return new NormalizedRecord(record, schema, fields);
     }
 
     /// <summary>
@@ -121,27 +121,12 @@ internal static class RecordNormalizer
     }
 
     /// <summary>
-    /// A lookup needs a reference field on the record's object and the external id field on the target's. A foreign key
-    /// needs the external id field on its parent's, and a field that is not a reference (it holds text, not an Id; the
-    /// field itself is checked with the values).
+    /// A foreign key needs the external id field on its parent's object, and a field on the record that holds text
+    /// (not a reference, which holds an Id; the field itself is checked with the values).
     /// </summary>
-    private static List<NormalizedLookup> CheckLookups(SObjectRecord record, SObjectSchema schema,
+    private static void CheckForeignKeys(SObjectRecord record, SObjectSchema schema,
         IReadOnlyDictionary<string, SObjectSchema> schemas, List<SalesforceError> problems)
     {
-        var lookups = new List<NormalizedLookup>();
-        foreach (var lookup in record.Lookups ?? [])
-        {
-            if (schema.Find(lookup.Field) is { Type: "reference" } field && schemas[lookup.SObject].Find(lookup.ExternalIdField) is not null)
-            {
-                lookups.Add(new NormalizedLookup(field, lookup));
-            }
-            else
-            {
-                problems.Add(new(record.ReferenceId, "INVALID_FIELD",
-                    $"{schema.Name}.{lookup.Field} is not a lookup, or {lookup.SObject}.{lookup.ExternalIdField} doesn't exist"));
-            }
-        }
-
         foreach (var key in record.ForeignKeys ?? [])
         {
             if (schema.Find(key.Field) is { Type: "reference" } || schemas[key.SObject].Find(key.ExternalIdField) is null)
@@ -150,7 +135,6 @@ internal static class RecordNormalizer
                     $"{schema.Name}.{key.Field} is a lookup, not a foreign key, or {key.SObject}.{key.ExternalIdField} doesn't exist"));
             }
         }
-        return lookups;
     }
 
     private static SalesforceError NoSuchColumn(SObjectRecord record, string column, SObjectSchema schema)
@@ -166,11 +150,8 @@ internal sealed record NormalizedUnit(string Key, IReadOnlyList<NormalizedRecord
 internal sealed record NormalizedRecord(
     SObjectRecord Record,
     SObjectSchema Schema,
-    IReadOnlyDictionary<SalesforceField, object?> Fields,
-    IReadOnlyList<NormalizedLookup> Lookups)
+    IReadOnlyDictionary<SalesforceField, object?> Fields)
 {
     public string ReferenceId => Record.ReferenceId;
 }
 
-/// <summary>A lookup of a record: the reference field to set and the record it points at.</summary>
-internal sealed record NormalizedLookup(SalesforceField Field, SObjectLookup Target);

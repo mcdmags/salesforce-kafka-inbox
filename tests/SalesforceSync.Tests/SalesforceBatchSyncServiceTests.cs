@@ -12,9 +12,9 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The generic Salesforce half of the engine (Describe, composite read, diff, foreign keys and lookups, collections
+/// The generic Salesforce half of the engine (Describe, composite read, diff, foreign keys, collections
 /// write, classification) driven by the real Account, AccountRelationship and Contact strategies and mappings (Text
-/// foreign keys), and by test-only objects with a real lookup (<see cref="LookupStrategies"/>), against the in-memory org.
+/// foreign keys), against the in-memory org.
 /// Events are written as the source sends them (camelCase payload names, full records); assertions read Salesforce names.
 /// </summary>
 public sealed class SalesforceBatchSyncServiceTests
@@ -373,52 +373,40 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     [Fact]
-    public async Task More_than_five_collections_are_split_over_requests_with_each_units_records_together()
+    public async Task Units_over_the_records_per_write_limit_are_split_over_requests_with_each_units_records_together()
     {
-        // Account + Contact (a lookup) + Profile (a foreign key) per unit: a new unit needs the Account, Contact_ref (its
-        // Account is new) and level-1 Profile upserts, an existing one a level-1 Contact upsert instead of Contact_ref,
-        // and one without its Account level-0 Contact and Profile upserts: 6 in all
-        SyncUnit Unit(string key, string name, bool withAccount = true)
+        // Account + Contact + Profile per unit, the last two pointing at the Account: three collections of a request, each
+        // taking at most 2 records here, so 4 new units are two requests of two units each
+        static SyncUnit Unit(string key)
         {
-            var account = new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = name });
             return new(
             [
-                .. withAccount ? [account] : Array.Empty<SObjectRecord>(),
-                new SObjectRecord("contact", "Contact", "ExternalId__c", $"C-{key}", new Dictionary<string, object?> { ["LastName"] = name },
-                    [new SObjectLookup("AccountId", "Account", "ExternalId__c", key)]),
-                new SObjectRecord("prof", "Profile__c", "ExternalId__c", $"P-{key}", new Dictionary<string, object?> { ["Tier__c"] = name, ["AccountId__c"] = key },
-                    ForeignKeys: [new SObjectLookup("AccountId__c", "Account", "ExternalId__c", key)])
+                new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = key }),
+                new SObjectRecord("contact", "Contact", "ExternalId__c", $"C-{key}", new Dictionary<string, object?> { ["LastName"] = key, ["AccountId__c"] = key },
+                    ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", key)]),
+                new SObjectRecord("prof", "Profile__c", "ExternalId__c", $"P-{key}", new Dictionary<string, object?> { ["Tier__c"] = key, ["AccountId__c"] = key },
+                    ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", key)])
             ]);
         }
 
-        Task<List<SyncResult>> Send(params (string Key, SyncUnit Unit)[] units)
-        {
-            return _engine.WriteToSalesforceAsync(units,
+        var units = new[] { "N1", "N2", "N3", "N4" }.Select(k => (Key: k, Unit: Unit(k))).ToList();
+        var before = _org.GetStats();
+
+        var results = await _engine.WriteToSalesforceAsync(units,
             [
                 new SoqlQuery("Account", "ExternalId__c", [.. units.Select(u => u.Key)]),
                 new SoqlQuery("Contact", "ExternalId__c", [.. units.Select(u => $"C-{u.Key}")]),
                 new SoqlQuery("Profile__c", "ExternalId__c", [.. units.Select(u => $"P-{u.Key}")])
-            ], AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
-        }
-
-        await Send(("OLD1", Unit("OLD1", "Gold")), ("OLD2", Unit("OLD2", "Gold")));
-        var before = _org.GetStats();
-
-        var results = await Send(("NEW1", Unit("NEW1", "Gold")), ("NEW2", Unit("NEW2", "Gold")),
-            ("OLD1", Unit("OLD1", "Silver", withAccount: false)), ("OLD2", Unit("OLD2", "Silver")));
+            ], AccountInboxRow.MaxValuesPerQuery, maxRecordsPerWrite: 2, CancellationToken.None);
 
         results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
-        var after = _org.GetStats();
-        (after.ApiCalls - before.ApiCalls).Should().Be(3, "one read; 6 upserts don't fit one Composite request (5): two");
+        (_org.GetStats().CompositeRequests - before.CompositeRequests).Should().Be(3, "the read, then two write requests");
         var writes = _org.WriteRequests.TakeLast(2).Select(w => w["compositeRequest"]!.AsArray()).ToList();
-        writes[0].Select(s => (string?)s!["referenceId"]).Should().Equal("Account", "Contact", "Profile__c", "Contact_ref", "Profile__c_4");
         writes[0].SelectMany(s => Records(s!)).Select(r => (string?)r["ExternalId__c"]).Should().BeEquivalentTo(
-            ["NEW1", "NEW2", "C-NEW1", "C-NEW2", "P-NEW1", "P-NEW2", "C-OLD1", "P-OLD1"], "each unit's records are in the same request");
-        writes[1].Select(s => (string?)s!["referenceId"]).Should().Equal("Account", "Contact", "Profile__c");
-        writes[1].SelectMany(s => Records(s!)).Select(r => (string?)r["ExternalId__c"]).Should().Equal("OLD2", "C-OLD2", "P-OLD2");
-        ((string?)_org.FindByExternalId("Contact", "C-NEW2")!["AccountId"]).Should().Be(IdOf("Account", "NEW2"));
-        ((string?)_org.FindByExternalId("Profile__c", "P-NEW2")!["AccountId__c"]).Should().Be("NEW2");
-        ((string?)_org.FindByExternalId("Profile__c", "P-OLD2")!["Tier__c"]).Should().Be("Silver");
+            ["N1", "N2", "C-N1", "C-N2", "P-N1", "P-N2"], "each unit's records are in the same request");
+        writes[1].SelectMany(s => Records(s!)).Select(r => (string?)r["ExternalId__c"]).Should().BeEquivalentTo(
+            ["N3", "N4", "C-N3", "C-N4", "P-N3", "P-N4"]);
+        ((string?)_org.FindByExternalId("Profile__c", "P-N4")!["AccountId__c"]).Should().Be("N4");
     }
 
     // ---------- Query URL length ----------
@@ -484,110 +472,6 @@ public sealed class SalesforceBatchSyncServiceTests
         direct.StatusCode.Should().Be(HttpStatusCode.RequestUriTooLong);
         var answer = JsonNode.Parse(await composite.Content.ReadAsStringAsync())!["compositeResponse"]![0]!;
         ((int)answer["httpStatusCode"]!, (string?)answer["body"]![0]!["errorCode"]).Should().Be((414, "URI_TOO_LONG"));
-    }
-
-    // ---------- Real lookups (test-only objects): Id resolution and @{reference} ----------
-
-    [Fact]
-    public async Task A_new_parent_and_its_new_child_by_lookup_go_in_one_Composite_request_linked_by_reference()
-    {
-        var results = await Upsert(LookupStrategies.AccountWithContact,
-            ("A1", Read<AccountEvent>(WithoutProfile("A1", "One"))), ("A2", Read<AccountEvent>(WithoutProfile("A2", "Two"))));
-
-        results.Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
-        var write = _org.WriteRequests.Should().ContainSingle().Subject;
-        write["allOrNone"]!.GetValue<bool>().Should().BeFalse("allOrNone is sent explicitly");
-        ((string?)Sub(write, 0)["method"], (string?)Sub(write, 0)["url"], (string?)Sub(write, 0)["referenceId"]).Should()
-            .Be(("PATCH", "/services/data/v62.0/composite/sobjects/Account/ExternalId__c", "Account"));
-        Records(Sub(write, 0)).Select(r => (string?)r["ExternalId__c"]).Should().Equal("A1", "A2");
-        ((string?)Sub(write, 1)["referenceId"]).Should().Be("Contact_ref");
-        Records(Sub(write, 1)).Select(r => ((string?)r["ExternalId__c"], (string?)r["AccountId"]))
-            .Should().Equal(("C-A1", "@{Account[0].id}"), ("C-A2", "@{Account[1].id}"));
-        ((string?)_org.FindByExternalId("Contact", "C-A2")!["AccountId"]).Should().Be(IdOf("Account", "A2"));
-    }
-
-    [Fact]
-    public async Task Any_strategy_writes_one_object_as_one_upsert_and_several_as_one_Composite_request()
-    {
-        // The rule is the engine's, not the example objects': a strategy of other classes gets it as they are
-        static AccountEvent Changed(string name, string rating)
-        {
-            var e = WithoutProfile("A1", name);
-            e["account"]!["rating"] = rating;
-            return Read<AccountEvent>(e);
-        }
-
-        await Upsert(LookupStrategies.AccountWithContact, ("A1", Changed("One", "Hot")));
-        var before = _org.GetStats();
-
-        (await Upsert(LookupStrategies.AccountWithContact, ("A1", Changed("One", "Cold")))).Single().Outcome.Should().Be(SyncOutcome.Saved);
-        var oneObject = _org.GetStats();
-        (await Upsert(LookupStrategies.AccountWithContact, ("A1", Changed("Two", "Cold")))).Single().Outcome.Should().Be(SyncOutcome.Saved);
-        var twoObjects = _org.GetStats();
-
-        (oneObject.UpsertRequests - before.UpsertRequests, oneObject.CompositeRequests - before.CompositeRequests)
-            .Should().Be((1, 1), "only the Account changed: the read, then its upsert as a call of its own");
-        (twoObjects.UpsertRequests - oneObject.UpsertRequests, twoObjects.CompositeRequests - oneObject.CompositeRequests)
-            .Should().Be((0, 2), "the Account's name and its Contact's last name changed: the read, then one Composite request");
-        _org.WriteRequests[^1]["compositeRequest"]!.AsArray().Select(s => (string?)s!["referenceId"]).Should().Equal("Account", "Contact");
-        ((string?)Upserted(_org.WriteRequests[^1], "Contact").Single()["LastName"]).Should().Be("Two");
-    }
-
-    [Fact]
-    public async Task A_new_parent_failing_takes_down_the_children_that_use_references_but_dead_letters_nobody_else()
-    {
-        _org.InjectFault("Account", "A1", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Industry is required", int.MaxValue);
-
-        var results = (await Upsert(LookupStrategies.AccountWithContact,
-            ("A1", Read<AccountEvent>(WithoutProfile("A1", "One"))), ("A2", Read<AccountEvent>(WithoutProfile("A2", "Two"))))).ToDictionary(r => r.Key);
-
-        results["A1"].Outcome.Should().Be(SyncOutcome.PermanentFailure);
-        results["A1"].Errors.Select(e => e.Code).Should().Equal(["FIELD_CUSTOM_VALIDATION_EXCEPTION"], "the Contact failed only because its Account did");
-        results["A2"].Outcome.Should().Be(SyncOutcome.NotAttempted,
-            "its Account is in, its Contact's subrequest failed on A1's reference: it goes back without spending a retry");
-
-        // The next claim no longer contains A1 (dead-lettered); A2's Account now exists, so its Contact gets a literal Id
-        (await Upsert(LookupStrategies.AccountWithContact, ("A2", Read<AccountEvent>(WithoutProfile("A2", "Two"))))).Single()
-            .Outcome.Should().Be(SyncOutcome.Saved);
-        ((string?)Upserted(_org.WriteRequests[^1], "Contact").Single()["AccountId"]).Should().Be(IdOf("Account", "A2"));
-    }
-
-    [Fact]
-    public async Task A_lookup_to_a_record_of_another_inbox_gets_the_Id_the_read_found_or_waits_for_it()
-    {
-        await Account("A1", new() { ["name"] = "Acme" }, []);
-
-        var saved = await LookupContact("C1", "A1");
-        var early = await LookupContact("C2", "MISSING");
-
-        saved.Outcome.Should().Be(SyncOutcome.Saved);
-        ((string?)Upserted(_org.WriteRequests[^1], "Contact").Single()["AccountId"]).Should().Be(IdOf("Account", "A1"), "the Id comes from the read");
-        (early.Outcome, early.PrimaryError?.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced));
-        _org.FindByExternalId("Contact", "C2").Should().BeNull("nothing is sent for it");
-        (await LookupContact("C1", "A1")).Outcome.Should().Be(SyncOutcome.Unchanged, "AccountId already holds that Id");
-    }
-
-    /// <summary>The read found the Account, but it is gone (or not visible) by the time Salesforce applies the write.</summary>
-    [Theory]
-    [InlineData("INVALID_CROSS_REFERENCE_KEY", "invalid cross reference id")]
-    [InlineData("ENTITY_IS_DELETED", "entity is deleted")]
-    public async Task A_lookup_target_Salesforce_cannot_find_at_write_time_waits_the_same_way(string code, string message)
-    {
-        await Account("A1", new() { ["name"] = "Acme" }, []);
-        _org.InjectFault("Contact", "C1", code, message, 1);
-
-        var rejected = await LookupContact("C1", "A1");
-
-        rejected.Outcome.Should().Be(SyncOutcome.TransientFailure, $"{code} on a lookup is not a reason to dead-letter");
-        (rejected.PrimaryError?.Code).Should().Be(SalesforceErrors.DependencyNotSynced);
-        (rejected.PrimaryError?.Message).Should().StartWith(code);
-        (await LookupContact("C1", "A1")).Outcome.Should().Be(SyncOutcome.Saved);
-    }
-
-    private async Task<SyncResult> LookupContact(string key, string account)
-    {
-        var contact = new JsonObject { ["externalId"] = key, ["accountExternalId"] = account, ["lastName"] = "Doe" };
-        return (await Upsert(LookupStrategies.Contact, (key, Read<ContactEvent>(new JsonObject { ["contact"] = contact })))).Single();
     }
 
     // ---------- Record types ----------

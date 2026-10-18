@@ -121,23 +121,23 @@ public sealed partial class InboxSql
         /// a row whose lease another worker committed after this statement's snapshot is re-checked on its new version
         /// when it is locked, and dropped because it is not due any more; so one entity is never leased twice
         /// (ClaimRaceTests). Only pending rows are due: every outcome that finishes a row sets next_attempt_at null.
-        /// The picked ids are an array, not a CTE joined back: with statistics from a backlog, the join was planned as
+        /// The picked entity ids are an array, not a CTE joined back: with statistics from a backlog, the join was planned as
         /// a hash join over a scan of the whole table.
         /// </summary>
         public const string Claim = """
             UPDATE {inbox} i
             SET next_attempt_at = now() + @lease, lock_token = @token, last_updated = now()
-            WHERE i.id = ANY(ARRAY(
-              SELECT d.id FROM {inbox} d
+            WHERE i.entity_id = ANY(ARRAY(
+              SELECT d.entity_id FROM {inbox} d
               WHERE d.next_attempt_at <= now()
               ORDER BY d.next_attempt_at
               LIMIT @batchSize
               FOR UPDATE SKIP LOCKED))
-            RETURNING i.id AS RowId, i.entity_id AS EntityId, i.payload::text AS Payload, i.event_time AS EventTime
+            RETURNING i.entity_id AS EntityId, i.payload::text AS Payload, i.event_time AS EventTime
             """;
 
         /// <summary>
-        /// The WHERE of every outcome statement: of the claimed rows (@ids, with the event_time @times the claim read
+        /// The WHERE of every outcome statement: of the claimed rows (@entityIds, with the event_time @times the claim read
         /// for each), those that @token still holds and that still hold that event. A worker whose lease expired
         /// records nothing; a row the consumer overwrote with a newer event after the claim gets no outcome: it stays
         /// pending with the newer event, Done doesn't mark it done, and <see cref="EndLease"/> ends its lease, leaving it
@@ -153,8 +153,8 @@ public sealed partial class InboxSql
         /// </para>
         /// </summary>
         public const string StillClaimed = """
-            i.id = ANY(@ids) AND i.lock_token = @token
-              AND EXISTS (SELECT 1 FROM unnest(@ids, @times) AS c(id, event_time) WHERE c.id = i.id AND c.event_time = i.event_time)
+            i.entity_id = ANY(@entityIds) AND i.lock_token = @token
+              AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times) AS c(entity_id, event_time) WHERE c.entity_id = i.entity_id AND c.event_time = i.event_time)
             """;
 
         /// <summary>
@@ -171,7 +171,7 @@ public sealed partial class InboxSql
         /// <summary>
         /// Failure: one more failed attempt (attempt_count); the rows stay pending and back off exponentially, by their
         /// attempts, or are dead-lettered (and idle) at the @maxRetries-th; the lease ends. A permanent failure is
-        /// dead-lettered at once: @maxRetries 0. @errors is a JSON object, row id -> [error, code], so a whole batch's
+        /// dead-lettered at once: @maxRetries 0. @errors is a JSON object, entity id -> [error, code], so a whole batch's
         /// failures are one statement. The object is an uncorrelated scalar subquery, which Postgres evaluates once per
         /// statement and then only looks up a key in per row. (Joined in as a one-row CTE it was copied once per row:
         /// 230 ms for 5,000 rows.)
@@ -179,8 +179,8 @@ public sealed partial class InboxSql
         public const string Fail = $$"""
             UPDATE {inbox} i
             SET last_updated = now(), attempt_count = i.attempt_count + 1,
-                last_error = (SELECT @errors::jsonb) -> i.id::text ->> 0,
-                last_error_code = (SELECT @errors::jsonb) -> i.id::text ->> 1,
+                last_error = (SELECT @errors::jsonb) -> i.entity_id ->> 0,
+                last_error_code = (SELECT @errors::jsonb) -> i.entity_id ->> 1,
                 status = CASE WHEN i.attempt_count + 1 >= @maxRetries THEN 'dead' ELSE 'pending' END,
                 next_attempt_at = CASE WHEN i.attempt_count + 1 < @maxRetries
                                        THEN now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) END,
@@ -200,7 +200,7 @@ public sealed partial class InboxSql
             """;
 
         /// <summary>
-        /// Ends the lease on the rows (@ids) that any of @tokens still holds, due again after @delay, with no attempt spent:
+        /// Ends the lease on the rows (@entityIds) that any of @tokens still holds, due again after @delay, with no attempt spent:
         /// what becomes of a row that gets no outcome. Last in an outcome transaction, those are the rows not attempted
         /// (skipped because of another entity's record) and the rows a newer event overwrote during the lease (see
         /// <see cref="StillClaimed"/>), whatever was recorded for the others; a claim rate limited as a whole is
@@ -208,12 +208,12 @@ public sealed partial class InboxSql
         /// They are pending, and due now (held or deferred: when the hold or deferral ends) instead of at the lease's
         /// end, which the store kept as an overwritten row's next_attempt_at. Ending a lease needs no check of the
         /// claimed event: the row is due again either way. A retried claim ends the leases of the attempts it lost
-        /// the same way, all their tokens at once. The rows are looked up by @ids: lock_token has no index.
+        /// the same way, all their tokens at once. The rows are looked up by @entityIds: lock_token has no index.
         /// </summary>
         public const string EndLease = """
             UPDATE {inbox} i
             SET lock_token = NULL, next_attempt_at = now() + @delay, last_updated = now()
-            WHERE i.id = ANY(@ids) AND i.lock_token = ANY(@tokens)
+            WHERE i.entity_id = ANY(@entityIds) AND i.lock_token = ANY(@tokens)
             """;
     }
 }

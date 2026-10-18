@@ -8,8 +8,8 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// What varies per synced object: how to read an event's entity id and meta (time and type), what an event asks of
-/// Salesforce (the records to upsert, or to delete), and what to read from Salesforce to diff them, resolve their
-/// lookups and find their parents.
+/// Salesforce (the records to upsert, or to delete), and what to read from Salesforce to diff them and find
+/// their parents.
 /// Everything else (claiming, ordering, coalescing, rate limits, batching, the read, the writes and deletes, retries,
 /// dead-lettering) is <see cref="SalesforceBatchSyncService"/>'s. The engine, the Kafka consumer and the SQL never name
 /// an event field: they go through <paramref name="EntityId"/> and <paramref name="Meta"/>.
@@ -25,7 +25,7 @@ namespace SalesforceSync.Sync;
 /// one deletes them (<see cref="SObjectRecord.Deleting{TSObject}"/>, by the entity's id alone). The engine only runs
 /// what it is given.
 /// </param>
-/// <param name="Queries">The batch's units -> the reads (at most 5 after chunking) the diff and lookups need.</param>
+/// <param name="Queries">The batch's units -> the reads (at most 5 after chunking) the diff and the foreign keys need.</param>
 public sealed record SyncStrategy<TEvent>(
     string EntityType,
     Func<TEvent, string?> EntityId,
@@ -93,13 +93,13 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
     }
 
     /// <summary>
-    /// Reads the <typeparamref name="TSObject"/> records the units' lookups and foreign keys point at: for a lookup's
-    /// Id, and to know that a parent exists before its child is sent.
+    /// Reads the <typeparamref name="TSObject"/> records the units' foreign keys point at, to know that a parent exists
+    /// before its child is sent.
     /// </summary>
-    public static SoqlQuery LookupTargetsOf<TSObject>(IEnumerable<SyncUnit> units) where TSObject : class
+    public static SoqlQuery ParentsOf<TSObject>(IEnumerable<SyncUnit> units) where TSObject : class
     {
         var meta = SObjectMetadata<TSObject>.Instance;
-        return new SoqlQuery(meta.SObject, meta.ExternalIdField, LookupIdsOf(units, meta.SObject));
+        return new SoqlQuery(meta.SObject, meta.ExternalIdField, ParentIdsOf(units, meta.SObject));
     }
 
     /// <summary>The external ids of every record of <paramref name="sobject"/> in the units.</summary>
@@ -111,8 +111,8 @@ public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyColle
                 .Distinct(StringComparer.Ordinal)];
     }
 
-    /// <summary>The external ids every lookup and foreign key of the units points at in <paramref name="sobject"/>.</summary>
-    public static IReadOnlyCollection<string> LookupIdsOf(IEnumerable<SyncUnit> units, string sobject)
+    /// <summary>The external ids every foreign key of the units points at in <paramref name="sobject"/>.</summary>
+    public static IReadOnlyCollection<string> ParentIdsOf(IEnumerable<SyncUnit> units, string sobject)
     {
         return [.. units.SelectMany(u => u.Records)
                 .SelectMany(r => r.Parents)

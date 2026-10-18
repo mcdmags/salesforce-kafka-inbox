@@ -12,7 +12,7 @@ using SalesforceSync.Data;
 namespace SalesforceSync.Data.Migrations
 {
     [DbContext(typeof(SyncDbContext))]
-    [Migration("20261017225905_InitialSchema")]
+    [Migration("20261018072631_InitialSchema")]
     partial class InitialSchema
     {
         /// <inheritdoc />
@@ -27,23 +27,15 @@ namespace SalesforceSync.Data.Migrations
 
             modelBuilder.Entity("SalesforceSync.Data.Inbox.AccountInboxRow", b =>
                 {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint")
-                        .HasColumnName("id");
-
-                    NpgsqlPropertyBuilderExtensions.UseSerialColumn(b.Property<long>("Id"));
+                    b.Property<string>("EntityId")
+                        .HasColumnType("text")
+                        .HasColumnName("entity_id");
 
                     b.Property<int>("AttemptCount")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
                         .HasDefaultValue(0)
                         .HasColumnName("attempt_count");
-
-                    b.Property<string>("EntityId")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("entity_id");
 
                     b.Property<DateTimeOffset>("EventTime")
                         .HasColumnType("timestamp with time zone")
@@ -83,12 +75,8 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("status")
                         .HasDefaultValueSql("'pending'");
 
-                    b.HasKey("Id")
+                    b.HasKey("EntityId")
                         .HasName("sf_account_inbox_pkey");
-
-                    b.HasIndex("EntityId")
-                        .IsUnique()
-                        .HasDatabaseName("sf_account_inbox_entity_id");
 
                     b.HasIndex("NextAttemptAt")
                         .HasDatabaseName("sf_account_inbox_ready")
@@ -103,23 +91,15 @@ namespace SalesforceSync.Data.Migrations
 
             modelBuilder.Entity("SalesforceSync.Data.Inbox.AccountRelationshipInboxRow", b =>
                 {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint")
-                        .HasColumnName("id");
-
-                    NpgsqlPropertyBuilderExtensions.UseSerialColumn(b.Property<long>("Id"));
+                    b.Property<string>("EntityId")
+                        .HasColumnType("text")
+                        .HasColumnName("entity_id");
 
                     b.Property<int>("AttemptCount")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
                         .HasDefaultValue(0)
                         .HasColumnName("attempt_count");
-
-                    b.Property<string>("EntityId")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("entity_id");
 
                     b.Property<DateTimeOffset>("EventTime")
                         .HasColumnType("timestamp with time zone")
@@ -159,12 +139,8 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("status")
                         .HasDefaultValueSql("'pending'");
 
-                    b.HasKey("Id")
+                    b.HasKey("EntityId")
                         .HasName("sf_account_relationship_inbox_pkey");
-
-                    b.HasIndex("EntityId")
-                        .IsUnique()
-                        .HasDatabaseName("sf_account_relationship_inbox_entity_id");
 
                     b.HasIndex("NextAttemptAt")
                         .HasDatabaseName("sf_account_relationship_inbox_ready")
@@ -179,23 +155,15 @@ namespace SalesforceSync.Data.Migrations
 
             modelBuilder.Entity("SalesforceSync.Data.Inbox.ContactInboxRow", b =>
                 {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint")
-                        .HasColumnName("id");
-
-                    NpgsqlPropertyBuilderExtensions.UseSerialColumn(b.Property<long>("Id"));
+                    b.Property<string>("EntityId")
+                        .HasColumnType("text")
+                        .HasColumnName("entity_id");
 
                     b.Property<int>("AttemptCount")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
                         .HasDefaultValue(0)
                         .HasColumnName("attempt_count");
-
-                    b.Property<string>("EntityId")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("entity_id");
 
                     b.Property<DateTimeOffset>("EventTime")
                         .HasColumnType("timestamp with time zone")
@@ -235,12 +203,8 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("status")
                         .HasDefaultValueSql("'pending'");
 
-                    b.HasKey("Id")
+                    b.HasKey("EntityId")
                         .HasName("sf_contact_inbox_pkey");
-
-                    b.HasIndex("EntityId")
-                        .IsUnique()
-                        .HasDatabaseName("sf_contact_inbox_entity_id");
 
                     b.HasIndex("NextAttemptAt")
                         .HasDatabaseName("sf_contact_inbox_ready")

@@ -4,42 +4,39 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.Sync.Write;
 
 /// <summary>
-/// One write request, one API call: its units and their writes by collection, each collection an sObject Collections
-/// upsert by external id, or the Collections delete of the request's records to delete, by Id. A request of one
-/// collection (one object, e.g. only Accounts changed, or only deletes) is that collection on its own; one of several
-/// (Accounts and their Profiles, a new child linked to its new parent by a lookup, upserts and deletes) is one
-/// Composite request with a subrequest per collection, parents first and the delete last. The collections' order, their reference
-/// ids and every write's position are fixed when the request is assembled (<see cref="Pack"/>), so building the
-/// request and reading its results never depend on each other.
+/// Step 5 of a batch: one API call's worth of writes. Salesforce takes at most 5 collections per call and 200 records
+/// per collection, so the planned units are packed into as few requests as those limits allow: that is where the
+/// batch saves its API calls. A request is either one collection on its own, or several collections as one Composite
+/// request; a collection is all the upserts of one object at one level, or the request's single delete.
+/// <para>
+/// All the records of one entity (unit) go into the same request, so that its outcome is read from that request's
+/// answers alone.
+/// </para>
 /// </summary>
-internal sealed partial class CompositeWrite
+internal sealed partial class WriteRequest
 {
     private readonly Dictionary<CollectionKey, List<PlannedWrite>> _byKey = [];
 
-    private CompositeWrite()
+    private WriteRequest()
     {
     }
 
     public List<PlannedUnit> Units { get; } = [];
 
-    /// <summary>The collections in sending order, with their reference ids.</summary>
+    /// <summary>The collections in sending order, with their reference ids (how the answer names them).</summary>
     public IReadOnlyList<(string ReferenceId, CollectionKey Key, List<PlannedWrite> Writes)> Collections { get; private set; } = [];
 
     /// <summary>
-    /// Distributes the units' writes over requests. Records are grouped into one collection per level and object;
-    /// children that point at their parent by reference get a collection of their own, because one reference without
-    /// a value (its parent failed) fails that whole subrequest, and children with a literal Id should not go down with
-    /// it. A request takes 5 collections of <paramref name="maxRecordsPerWrite"/> records; a unit that fits none of the
-    /// requests so far starts another, so an entity's records (and the references between them) share a request, and its
-    /// outcome is read from that request's answers alone.
+    /// Distributes the units over requests: each unit goes into the first request it fits (so units that need the same
+    /// collections end up together), else into a new one. A unit that fits no request at all (more than 5 collections,
+    /// or more than <paramref name="maxRecordsPerWrite"/> records in one) can never be sent: a permanent failure.
     /// </summary>
     /// <param name="units">The units with writes, in order.</param>
     /// <param name="maxRecordsPerWrite">The row type's <see cref="Data.Inbox.IInboxRow.MaxRecordsPerWrite"/>: records per collection.</param>
-    /// <returns>The requests, and a permanent failure for each unit that can't fit any request.</returns>
-    public static (List<CompositeWrite> Requests, List<SyncResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units,
+    public static (List<WriteRequest> Requests, List<SyncResult> TooLarge) Pack(IReadOnlyList<PlannedUnit> units,
         int maxRecordsPerWrite)
     {
-        var requests = new List<CompositeWrite>();
+        var requests = new List<WriteRequest>();
         var tooLarge = new List<SyncResult>();
 
         foreach (var unit in units)
@@ -53,11 +50,10 @@ internal sealed partial class CompositeWrite
                 continue;
             }
 
-            // First request with room, so units needing the same collections end up together
             var request = requests.FirstOrDefault(r => r.Fits(needed, maxRecordsPerWrite));
             if (request is null)
             {
-                requests.Add(request = new CompositeWrite());
+                requests.Add(request = new WriteRequest());
             }
 
             request.Add(unit);
@@ -72,10 +68,9 @@ internal sealed partial class CompositeWrite
     }
 
     /// <summary>
-    /// The upserts and the delete, in the order and with the reference ids fixed by <see cref="Pack"/>: parents first, so
-    /// a new parent exists before its child is sent. Each upserted record carries its external id and exactly the
-    /// fields planned for it (all of a new record's, only the changed ones of an existing record; a lookup as the Id the
-    /// read found, or as a reference to its new parent's result); each deleted one is its Id.
+    /// What to send: an upsert per collection (each record with its external id and exactly the fields planned for it:
+    /// all of a new record's, only the changed ones of an existing record) and the one delete (the records' Ids), in
+    /// the order <see cref="Arrange"/> fixed.
     /// </summary>
     public List<CollectionRequest> BuildRequests()
     {
@@ -107,24 +102,18 @@ internal sealed partial class CompositeWrite
     }
 
     /// <summary>
-    /// Parents before children (a reference can only point back). Each record learns its collection and position
-    /// there, which is how its children refer to it.
+    /// Puts the collections in sending order and names them. Parents come before children (the org rejects a child
+    /// whose parent doesn't exist yet), and the delete comes last.
     /// </summary>
     private void Arrange()
     {
         var collections = new List<(string, CollectionKey, List<PlannedWrite>)>();
-        foreach (var (key, writes) in _byKey.OrderBy(c => c.Key.Depth).ThenBy(c => c.Key.SObject, StringComparer.Ordinal)
-                     .ThenBy(c => c.Key.ByReference))
+        foreach (var (key, writes) in _byKey.OrderBy(c => c.Key.Level).ThenBy(c => c.Key.SObject, StringComparer.Ordinal))
         {
             var referenceId = ReferenceIdFor(key);
             if (collections.Any(c => c.Item1 == referenceId))
             {
-                referenceId += $"_{collections.Count}";
-            }
-
-            for (var i = 0; i < writes.Count; i++)
-            {
-                (writes[i].CollectionReferenceId, writes[i].IndexInCollection) = (referenceId, i);
+                referenceId += $"_{collections.Count}"; // the same object at a second level
             }
 
             collections.Add((referenceId, key, writes));
@@ -132,43 +121,39 @@ internal sealed partial class CompositeWrite
         Collections = collections;
     }
 
-    /// <summary>E.g. Account, Contact_ref, delete. Reference ids take letters, digits and underscores only.</summary>
+    /// <summary>E.g. Account, Profile__c, delete. Reference ids take letters, digits and underscores only.</summary>
     private static string ReferenceIdFor(CollectionKey key)
     {
-        return key.Delete ? "delete" : NotReferenceIdCharacter().Replace($"{key.SObject}{(key.ByReference ? "_ref" : "")}", "_");
+        return key.Delete ? "delete" : NotReferenceIdCharacter().Replace(key.SObject, "_");
     }
 
     [GeneratedRegex("[^A-Za-z0-9_]")]
     private static partial Regex NotReferenceIdCharacter();
 }
 
-/// <summary>The writes of one unit; the unit is saved only if all of them are.</summary>
+/// <summary>The writes of one unit (one entity); the unit is saved only if all of them are.</summary>
 internal sealed record PlannedUnit(string Key, IReadOnlyList<PlannedWrite> Writes);
 
 /// <summary>The collection (one upsert) a write goes into: one per level and object; or <see cref="Deletes"/>.</summary>
-/// <param name="Depth">0 for a record that points at nothing in its unit (by a lookup or a foreign key), 1 for its children, ...</param>
-/// <param name="ExternalIdField">The external id field as the org names it, which the upsert matches records by.</param>
-/// <param name="ByReference">It points at its new parent by reference (<c>@{Account[3].id}</c>).</param>
+/// <param name="Level">0 for a record whose parents are all in Salesforce already, one more than its deepest parent in its unit otherwise.</param>
 /// <param name="SObject">The object's API name.</param>
+/// <param name="ExternalIdField">The external id field as the org names it, which the upsert matches records by.</param>
 /// <param name="Delete">The collection deletes its records, by Id.</param>
-internal sealed record CollectionKey(int Depth, string SObject, string ExternalIdField, bool ByReference, bool Delete = false)
+internal sealed record CollectionKey(int Level, string SObject, string ExternalIdField, bool Delete = false)
 {
     /// <summary>
     /// The one delete of a request: a Collections delete takes the Ids of records of any objects. It goes after every
     /// upsert of the request, so a child that the upserts move to another parent is not taken down by a delete of its
     /// old parent in the same request (a master-detail delete cascades to the children).
     /// </summary>
-    public static readonly CollectionKey Deletes = new(int.MaxValue, "", "Id", false, Delete: true);
+    public static readonly CollectionKey Deletes = new(int.MaxValue, "", "Id", Delete: true);
 }
-
-/// <summary>A lookup to set, by reference, to a record that is created in the same request.</summary>
-internal sealed record ParentReference(SalesforceField Field, PlannedWrite Parent);
 
 /// <summary>What came of a write, least to most significant: a unit's outcome follows its worst record.</summary>
 internal enum WriteStatus
 {
     Saved,
-    /// <summary>Not saved because of a record of another unit (its subrequest went down on a broken reference).</summary>
+    /// <summary>Not saved because of a record of another unit; retry now, no attempt spent.</summary>
     NotAttempted,
     /// <summary>Not saved because its parent in the same unit wasn't; the parent's result says what to do.</summary>
     ParentNotSaved,
@@ -176,32 +161,26 @@ internal enum WriteStatus
     Permanent
 }
 
-/// <summary>One record to create (<paramref name="id"/> null), update or delete, and what came of it.</summary>
-/// <param name="changes">The fields to send, by API name.</param>
-/// <param name="parents">The new records of its unit it points at (by a lookup or a foreign key): sent before it.</param>
-/// <param name="lookupFields">The lookups this write sets, by field name.</param>
+/// <summary>One record to create (<c>id</c> null), update or delete, and what came of it.</summary>
 /// <param name="record">The record as normalized against Describe.</param>
 /// <param name="id">Its Id in Salesforce, null when it is new; a delete is by it.</param>
-/// <param name="links">The lookups set by reference to a new parent's result.</param>
-/// <param name="depth">Its level in the unit: after every record it points at.</param>
+/// <param name="changes">The fields to send, by API name.</param>
+/// <param name="newParents">The new records of its unit that it points at: sent before it, and its outcome follows theirs.</param>
+/// <param name="level">After every record it points at in its unit (see <see cref="CollectionKey.Level"/>).</param>
 internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnlyDictionary<string, object?> changes,
-    IReadOnlyList<ParentReference> links, IReadOnlyList<PlannedWrite> parents, IReadOnlySet<string> lookupFields, int depth)
+    IReadOnlyList<PlannedWrite> newParents, int level)
 {
     public bool Create => id is null;
     public bool Delete => record.Record.Delete;
     public string? Id => id;
     public string ReferenceId => record.ReferenceId;
-    public IReadOnlyList<ParentReference> Links => links;
-    public IReadOnlyList<PlannedWrite> Parents => parents;
-    public IReadOnlySet<string> LookupFields => lookupFields;
+
+    /// <summary>The records of its unit that this one points at and that are new: if one wasn't saved, this one can't be.</summary>
+    public IReadOnlyList<PlannedWrite> Parents => newParents;
 
     public CollectionKey Collection { get; } = record.Record.Delete
         ? CollectionKey.Deletes
-        : new(depth, record.Schema.Name, record.Schema.Find(record.Record.ExternalIdField)!.Name, links.Count > 0);
-
-    /// <summary>Where the record is in the request: its collection's reference id and its position in it.</summary>
-    public string? CollectionReferenceId { get; set; }
-    public int IndexInCollection { get; set; }
+        : new(level, record.Schema.Name, record.Schema.Find(record.Record.ExternalIdField)!.Name);
 
     public WriteStatus Status { get; set; } = WriteStatus.NotAttempted;
     public List<SalesforceError> Errors { get; set; } = [];
@@ -220,13 +199,6 @@ internal sealed class PlannedWrite(NormalizedRecord record, string? id, IReadOnl
         foreach (var (field, value) in changes)
         {
             body[field] = value;
-        }
-
-        foreach (var link in links)
-        {
-            // The parent's row in its upsert's response. Composite documents @{referenceId.field} with []
-            // indexing; indexing into an sObject Collections response is not confirmed: verify in a sandbox.
-            body[link.Field.Name] = $"@{{{link.Parent.CollectionReferenceId}[{link.Parent.IndexInCollection}].id}}";
         }
         return body;
     }

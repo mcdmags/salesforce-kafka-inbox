@@ -27,8 +27,7 @@ public abstract record CollectionRequest(string ReferenceId)
 /// <summary>
 /// An sObject Collections upsert: up to 200 records of <paramref name="SObject"/>, each
 /// <c>{ "attributes": { "type": ... }, externalIdField: ..., field: value, ... }</c>, created or updated by
-/// <paramref name="ExternalIdField"/>. A lookup can be set by the parent's external id through the field's
-/// relationship, <c>"Account": { "ExternalId__c": "A1" }</c>.
+/// <paramref name="ExternalIdField"/>.
 /// </summary>
 public sealed record CollectionUpsert(string ReferenceId, string SObject, string ExternalIdField,
     IReadOnlyList<IReadOnlyDictionary<string, object?>> Records) : CollectionRequest(ReferenceId)

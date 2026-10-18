@@ -41,41 +41,40 @@ public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
 /// <param name="Events">The claimed row of every leased entity: one per entity.</param>
 public sealed record InboxClaim(Guid Token, IReadOnlyList<InboxEvent> Events)
 {
-    /// <summary>The inbox row ids of the claimed rows.</summary>
-    public long[] RowIds => [.. Events.Select(e => e.RowId)];
+    /// <summary>The entity ids of the claimed rows: a row's key (one row per entity).</summary>
+    public string[] EntityIds => [.. Events.Select(e => e.EntityId)];
 
-    /// <summary>The event_time of each claimed row as the claim read it, in <see cref="RowIds"/> order.</summary>
+    /// <summary>The event_time of each claimed row as the claim read it, in <see cref="EntityIds"/> order.</summary>
     public DateTimeOffset[] EventTimes => [.. Events.Select(e => e.EventTime)];
 
-    /// <summary>The event_time the claim read for each of <paramref name="rowIds"/>, in their order.</summary>
-    public DateTimeOffset[] TimesOf(IEnumerable<long> rowIds)
+    /// <summary>The event_time the claim read for each of <paramref name="entityIds"/>, in their order.</summary>
+    public DateTimeOffset[] TimesOf(IEnumerable<string> entityIds)
     {
-        var times = Events.ToDictionary(e => e.RowId, e => e.EventTime);
-        return [.. rowIds.Select(id => times[id])];
+        var times = Events.ToDictionary(e => e.EntityId, e => e.EventTime);
+        return [.. entityIds.Select(id => times[id])];
     }
 }
 
 /// <summary>A pending inbox row as claimed: the entity it belongs to and the raw event.</summary>
-/// <param name="RowId">The inbox row's primary key (its id column; one row per entity). Not the entity id.</param>
-/// <param name="EntityId">The entity the event is about: the Kafka message key.</param>
+/// <param name="EntityId">The entity the event is about: the Kafka message key, and the row's primary key (one row per entity).</param>
 /// <param name="Payload">The event as received, JSON.</param>
 /// <param name="EventTime">
 /// The row's event_time as the claim read it: every outcome is recorded only while the row still has it (a newer event
 /// stored meanwhile has overwritten the row; see <see cref="InboxSql.Template.StillClaimed"/>).
 /// </param>
-public sealed record InboxEvent(long RowId, string EntityId, string Payload, DateTimeOffset EventTime);
+public sealed record InboxEvent(string EntityId, string Payload, DateTimeOffset EventTime);
 
 /// <summary>An inbox row with the error to store on it.</summary>
-/// <param name="RowId">The inbox row id (not the entity id).</param>
+/// <param name="EntityId">The entity whose row it is: its primary key.</param>
 /// <param name="Error">The error to store.</param>
 /// <param name="Code">The Salesforce (or sync) error code, if any.</param>
-public sealed record FailedEvent(long RowId, string Error, string? Code);
+public sealed record FailedEvent(string EntityId, string Error, string? Code);
 
-/// <summary>What to record for the rows of a claim, by kind of outcome: inbox row ids (not entity ids).</summary>
+/// <summary>What to record for the rows of a claim, by kind of outcome: the entities' ids, which are their rows' keys.</summary>
 /// <param name="Synced">In Salesforce: done.</param>
 /// <param name="Dead">Dead-lettered at once.</param>
 /// <param name="Failed">Retried with backoff, dead-lettered after <see cref="SyncOptions.MaxRetries"/>.</param>
 public sealed record BatchOutcomes(
-    IReadOnlyList<long> Synced,
+    IReadOnlyList<string> Synced,
     IReadOnlyList<FailedEvent> Dead,
     IReadOnlyList<FailedEvent> Failed);

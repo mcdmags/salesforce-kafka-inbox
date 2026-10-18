@@ -57,14 +57,14 @@ public sealed class LeaseTests(SyncFixture app)
         var token = Guid.NewGuid();
         var claim = await InsertAndClaimAsync(acct, token, TimeSpan.FromMinutes(1),
             SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []));
-        var row = claim.RowIds.Single();
+        var row = claim.EntityIds.Single();
 
         await using (var conn = await app.Db.OpenConnectionAsync())
         {
             var v2 = SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = "v2" }, []);
             await conn.StoreAsync(Sql.Table, acct, SyncFixture.TimeOf(v2), v2.ToJsonString());
         }
-        (await app.GetInboxRowAsync(acct)).Should().Match<InboxRowState>(r => r.Id == row && r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0);
+        (await app.GetInboxRowAsync(acct)).Should().Match<InboxRowState>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0);
         var failure = new FailedEvent(row, "failed", "SOME_CODE");
         await app.AccountInbox.RecordAsync(claim, outcome switch
         {
@@ -89,22 +89,22 @@ public sealed class LeaseTests(SyncFixture app)
         // A real worker takes the entity over once the lease has expired, and syncs it
         (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
         // The stale worker's claim gets the row's new time, so that only the token stands in its way
-        await ExecuteAsync($"UPDATE {Sql.Table} SET event_time = event_time + interval '1000 seconds' WHERE id = @id", new { id = claim.RowIds[0] });
+        await ExecuteAsync($"UPDATE {Sql.Table} SET event_time = event_time + interval '1000 seconds' WHERE entity_id = @id", new { id = claim.EntityIds[0] });
         await using (var conn = await app.Db.OpenConnectionAsync())
         {
             var time = await conn.QuerySingleAsync<DateTime>($"SELECT event_time FROM {Sql.Table} WHERE entity_id = @acct", new { acct });
             claim = claim with { Events = [claim.Events.Single() with { EventTime = new DateTimeOffset(time) }] };
         }
-        var (claimed, times) = (claim.RowIds, claim.EventTimes);
+        var (claimed, times) = (claim.EntityIds, claim.EventTimes);
         var rowBefore = await app.GetInboxRowAsync(acct);
 
         // The first worker comes back and tries everything it could do with its old token
         var errors = $$"""{ "{{claimed[0]}}": ["late failure", "UNABLE_TO_LOCK_ROW"] }""";
-        (await ExecuteAsync(Sql.Done, new { ids = claimed, times, token = stale }))
+        (await ExecuteAsync(Sql.Done, new { entityIds = claimed, times, token = stale }))
             .Should().Be(0, "only the worker that holds the lease records anything");
         (await ExecuteAsync(Sql.Fail, new
         {
-            ids = claimed,
+            entityIds = claimed,
             times,
             token = stale,
             errors,
@@ -132,9 +132,9 @@ public sealed class LeaseTests(SyncFixture app)
         var token = Guid.NewGuid();
         var claim = await InsertAndClaimAsync(acct, token, TimeSpan.FromMinutes(1),
             SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []));
-        var claimed = claim.RowIds;
+        var claimed = claim.EntityIds;
 
-        (await ExecuteAsync(Sql.Done, new { ids = claimed, times = claim.EventTimes, token = Guid.NewGuid() }))
+        (await ExecuteAsync(Sql.Done, new { entityIds = claimed, times = claim.EventTimes, token = Guid.NewGuid() }))
             .Should().Be(0, "a lost lease completes nothing");
         (await app.GetInboxAsync(acct)).Should().Be((1L, "pending"));
 
@@ -158,13 +158,13 @@ public sealed class LeaseTests(SyncFixture app)
         var rows = await conn.QueryAsync<InboxEvent>($"""
             UPDATE {Sql.Table} SET lock_token = @token, next_attempt_at = now() + @lease
             WHERE entity_id = @acct
-            RETURNING id, entity_id, payload::text, event_time
+            RETURNING entity_id, payload::text, event_time
             """, new { token, lease, acct }, tx);
         await tx.CommitAsync();
         return new InboxClaim(token, rows);
     }
 
-    private static BatchOutcomes Synced(long id)
+    private static BatchOutcomes Synced(string id)
     {
         return new BatchOutcomes([id], [], []);
     }

@@ -91,7 +91,7 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
 
     /// <summary>
     /// An inbox table: one row per entity, holding its newest Kafka event, what became of it and the entity's sync state
-    /// (due when, leased by whom); the id is a bigserial. Columns with a database default are left out of
+    /// (due when, leased by whom); its key is the entity id. Columns with a database default are left out of
     /// an insert while they hold the CLR default, so a new row gets the database's clock and 'pending'.
     /// </summary>
     private static void ConfigureInbox<TRow>(EntityTypeBuilder<TRow> entity, string table) where TRow : InboxRow
@@ -102,16 +102,15 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         // index, where the dead index entries those updates leave behind collect. The default lets that grow with the table.
         entity.HasStorageParameter("autovacuum_vacuum_scale_factor", 0.02);
         entity.HasStorageParameter("autovacuum_vacuum_threshold", 1000);
-        entity.HasKey(r => r.Id).HasName($"{table}_pkey");
-        entity.Property(r => r.Id).UseSerialColumn();
+        // The entity id is the key: one row per entity (InboxSql.Store's on conflict), so no surrogate id and no second
+        // unique index. Every claim and outcome finds its rows by it.
+        entity.HasKey(r => r.EntityId).HasName($"{table}_pkey");
         entity.Property(r => r.Payload).HasColumnType("jsonb");
         // No default: every insert sets it from the event (InboxSql.Store)
         entity.Property(r => r.EventTime).IsRequired();
         entity.Property(r => r.Status).HasDefaultValueSql("'pending'");
         entity.Property(r => r.AttemptCount).HasDefaultValue(0);
         entity.Property(r => r.LastUpdated).HasDefaultValueSql("now()");
-        // One row per entity, which a newer event overwrites (InboxSql.Store's on conflict)
-        entity.HasIndex(r => r.EntityId).IsUnique().HasDatabaseName($"{table}_entity_id");
         // The claim (InboxSql.Claim): the due rows, the longest-waiting first. Idle rows (null) are not in the index.
         entity.HasIndex(r => r.NextAttemptAt).HasDatabaseName($"{table}_ready").HasFilter("next_attempt_at is not null");
     }

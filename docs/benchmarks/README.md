@@ -82,7 +82,7 @@ earlier workload.
 | BenchmarkDotNet | v0.14.0 |
 | OS | macOS 26.6.2 (25G83), Darwin 25.6.0 |
 | CPU | Apple M4, 10 cores |
-| .NET | SDK 10.0.100, runtime .NET 8.0.17 Arm64 (Release) |
+| .NET | SDK 10.0.100, runtime .NET 10.0.2 Arm64 (Release); runs before the .NET 10 upgrade used the .NET 8.0.17 runtime |
 | PostgreSQL | 17.11 in Docker (4 CPUs, 6 GB VM), `shared_buffers` 512MB, `max_connections` 300 |
 
 The machine ran other workloads throughout (load average 6 to 54). Absolute times are therefore noisy, by up to
@@ -358,6 +358,62 @@ A claim of 75 entities locks them (LockHeads) in about 2 ms (median over the 108
 median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest single run 21.5 ms, under load. Leasing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
+
+## Latest run: branch drop-inbox-id at 30de64f
+
+All 36 benchmarks (`--run full`) on the `drop-inbox-id` branch at 30de64f, on 2026-10-18, after three changes since the
+[9a61674 run](#latest-run-main-at-9a61674): every project targets .NET 10 (the earlier runs used the .NET 8 runtime),
+the inbox row has no surrogate `Id` (the entity id is the primary key), and the `Sync/Write` folder was simplified
+(reference lookups removed; the diff, packing and interpreting are separate small classes). Same workload and
+environment as before, except the runtime; the database was recreated. The run took 7.4 minutes.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures: 0 overlapping claims, 0 entities not `done`, 0 stale
+rows, 0 wrong values, 0 write-history regressions, 0 failed records.
+
+Preloaded drain, 5,000 events (work counts are the medians of the iterations without a Describe, at 0 ms latency):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 205.35 ms | 1,190.51 ms | 30.61 MB | 30 | 15 | 6.28 | 1,028 | 38 |
+| 1 | 1 | 1,000 | 2,113 | 752.22 ms | 3,831.74 ms | 93.45 MB | 78 | 33 | 1.90 | 3,279 | 1166 |
+| 1 | 3 | 100 | 990 | 98.35 ms | 399.80 ms | 31.55 MB | 31 | 15 | 6.07 | 1,063 | 73 |
+| 1 | 3 | 1,000 | 2,113 | 343.04 ms | 1,100.28 ms | 96.74 MB | 82 | 35 | 1.90 | 3,282 | 1169 |
+| 4 | 1 | 100 | 990 | 94.61 ms | 322.07 ms | 33.75 MB | 32 | 15 | 5.77 | 1,119 | 129 |
+| 4 | 1 | 1,000 | 2,113 | 383.17 ms | 800.49 ms | 98.86 MB | 80 | 34 | 1.90 | 3,274 | 1161 |
+| 4 | 3 | 100 | 990 | 145.89 ms | 216.82 ms | 44.82 MB | 39 | 17 | 4.88 | 1,320 | 330 |
+| 4 | 3 | 1,000 | 2,113 | 360.77 ms | 560.03 ms | 111.36 MB | 86 | 38 | 1.90 | 3,262 | 1149 |
+| 8 | 1 | 100 | 990 | 109.91 ms | 223.85 ms | 38.19 MB | 32 | 14 | 5.33 | 1,211 | 221 |
+| 8 | 1 | 1,000 | 2,113 | 358.27 ms | 572.95 ms | 105.56 MB | 87 | 36 | 1.78 | 3,501 | 1388 |
+| 8 | 3 | 100 | 990 | 228.66 ms | 254.87 ms | 90.6 MB | 48 | 19 | 3.59 | 1,799 | 809 |
+| 8 | 3 | 1,000 | 2,113 | 476.91 ms | 540.40 ms | 136.29 MB | 106 | 45 | 1.67 | 3,711 | 1598 |
+
+Streaming (50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 2.453 s | 347.87 MB | 1,097 | 546 | 1.87 | 3,449 | 7 |
+| 4 | 3 | 4.512 s | 912.03 MB | 3,265 | 1,626 | 1.35 | 4,767 | 3 |
+| 8 | 1 | 4.074 s | 766.97 MB | 2,889 | 1,441 | 1.33 | 4,864 | 4 |
+| 8 | 3 | 5.197 s | 1066.67 MB | 3,268 | 1,621 | 1.63 | 3,956 | 11 |
+
+- **Same work**: 990 and 2,113 entities, and with one worker and one pod the same 30 and 78 API calls and 15 and 33
+  write requests as the 9a61674 run. Runs with more workers or pods differ by a few calls between any two runs.
+- **Same speed within noise, less memory**: 1 x 1 at 100 accounts, 205.4 ms against 209.6 ms; at 1,000 accounts, 752.2 ms
+  against 754.3 ms. Allocation per drain is about 8% lower (30.61 MB against 33.23 MB for 1 x 1 at 100 accounts; 93.45
+  MB against 101.98 MB at 1,000 accounts), from the removed lookup bookkeeping.
+- **Micro benchmarks**: `PrepareTenEntities` allocates 39,472 B against 41,472 B and `MapAccountEvent` 3,824 B against
+  4,016 B; the times are within noise.
+
+| Method | Mean | Allocated |
+|---|--:|--:|
+| ParseLimitHeader | 644.41 ns | 2832 B |
+| PrepareTenEntities | 15,781.53 ns | 39472 B |
+| ReadAndValidateEvent | 1,134.32 ns | 1616 B |
+| MapAccountEvent | 1,422.76 ns | 3824 B |
+| MapPayloadToSObject | 18.76 ns | 200 B |
+| MapSObjectToRecord | 171.77 ns | 912 B |
+| DiffNumber | 115.00 ns | 32 B |
+| DiffDateTime | 233.58 ns | 192 B |
 
 ## Latest run: main at 9a61674
 

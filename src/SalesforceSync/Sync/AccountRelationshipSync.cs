@@ -36,7 +36,7 @@ public static class AccountRelationshipSync
     // What to read: the relationships themselves (to diff) and the Accounts they point at (to know they exist)
     public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
-        return [SoqlQuery.RecordsOf<AccountRelationshipSObject>(units), SoqlQuery.LookupTargetsOf<AccountSObject>(units)];
+        return [SoqlQuery.RecordsOf<AccountRelationshipSObject>(units), SoqlQuery.ParentsOf<AccountSObject>(units)];
     }
 
     /// <summary>Payload -> sObject, one line per field (see <see cref="AccountSync.ToAccount"/>).</summary>

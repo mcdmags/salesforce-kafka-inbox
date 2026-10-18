@@ -45,7 +45,7 @@ public sealed class InboxEventTests
         profile.Fields.Should().Contain("Tier__c", "Gold").And.Contain("Score__c", (decimal)score).And.Contain("Notes__c", null);
         profile.Fields.Should().Contain("AccountId__c", key, "the Account's key, as text");
         profile.ForeignKeys.Should().ContainSingle()
-            .Which.Should().Be(new SObjectLookup("AccountId__c", "Account", "ExternalId__c", key));
+            .Which.Should().Be(new ForeignKey("AccountId__c", "Account", "ExternalId__c", key));
     }
 
     [Theory, AutoData]
@@ -104,8 +104,8 @@ public sealed class InboxEventTests
             ["Active__c"] = null
         });
         rel.ForeignKeys.Should().Equal(
-            new SObjectLookup("AccountId__c", "Account", "ExternalId__c", account),
-            new SObjectLookup("RelatedAccountId__c", "Account", "ExternalId__c", related));
+            new ForeignKey("AccountId__c", "Account", "ExternalId__c", account),
+            new ForeignKey("RelatedAccountId__c", "Account", "ExternalId__c", related));
     }
 
     [Theory]
@@ -132,7 +132,7 @@ public sealed class InboxEventTests
         (contact.SObject, contact.ExternalIdField, contact.ExternalId, contact.RecordType).Should()
             .Be(("Contact", "ExternalId__c", key, "Standard"));
         contact.Fields.Should().Contain("LastName", lastName).And.Contain("Email", null).And.Contain("AccountId__c", account);
-        contact.ForeignKeys.Should().Equal(new SObjectLookup("AccountId__c", "Account", "ExternalId__c", account));
+        contact.ForeignKeys.Should().Equal(new ForeignKey("AccountId__c", "Account", "ExternalId__c", account));
         ContactSync.Strategy.Queries([unit]).Select(q => (q.SObject, q.WhereField, q.Values.Single())).Should()
             .Equal(("Contact", "ExternalId__c", key), ("Account", "ExternalId__c", account));
     }
@@ -182,10 +182,10 @@ public sealed class InboxEventTests
     public void The_claimed_event_is_the_full_record_and_clears_what_it_does_not_have()
     {
         var batch = Prepare(
-            Row(2, /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "Acme Ltd", "profile": { "score": 9 } } }"""));
+            Row(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-1", "name": "Acme Ltd", "profile": { "score": 9 } } }"""));
 
         var work = batch.Work.Should().ContainSingle().Subject;
-        work.RowId.Should().Be(2);
+        work.EntityId.Should().Be("ACC-1");
         work.Unit.Records[0].Fields.Should().Contain("Name", "Acme Ltd").And.Contain("Rating", null, "the record has no rating");
         work.Unit.Records[1].Fields.Should().Contain("Score__c", 9m).And.Contain("Tier__c", null, "nor a tier");
         batch.Invalid.Should().BeEmpty();
@@ -195,20 +195,20 @@ public sealed class InboxEventTests
     public void An_unreadable_event_is_invalid_on_its_own_and_the_other_entities_still_sync()
     {
         var batch = Prepare(
-            Row(1, Account("ACC-1", "good", "2026-10-14T01:00:00Z")),
-            Row(2, "ACC-2", "not json"),
-            Row(3, "ACC-3", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T05:00:00", "type": "updated" }, "account": { "externalId": "ACC-3", "name": "no offset" } }"""),
-            Row(4, "ACC-4", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T05:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-4", "name": "x", "numberOfEmployees": "lots" } }"""));
+            Row(Account("ACC-1", "good", "2026-10-14T01:00:00Z")),
+            Row("ACC-2", "not json"),
+            Row("ACC-3", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T05:00:00", "type": "updated" }, "account": { "externalId": "ACC-3", "name": "no offset" } }"""),
+            Row("ACC-4", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T05:00:00Z", "type": "updated" }, "account": { "externalId": "ACC-4", "name": "x", "numberOfEmployees": "lots" } }"""));
 
-        batch.Invalid.Select(i => i.RowId).Should().Equal(2L, 3L, 4L);
-        batch.Work.Should().ContainSingle().Which.RowId.Should().Be(1);
+        batch.Invalid.Select(i => i.EntityId).Should().Equal("ACC-2", "ACC-3", "ACC-4");
+        batch.Work.Should().ContainSingle().Which.EntityId.Should().Be("ACC-1");
     }
 
     [Fact]
     public void An_event_stored_under_another_entity_than_it_is_about_is_never_written()
     {
         // The lease is on the row's entity_id; writing ACC-2 under ACC-1's lease would bypass ACC-2's own
-        var batch = Prepare(Row(1, "ACC-1", Account("ACC-2", "mismatch", "2026-10-14T01:00:00Z")));
+        var batch = Prepare(Row("ACC-1", Account("ACC-2", "mismatch", "2026-10-14T01:00:00Z")));
 
         batch.Work.Should().BeEmpty();
         batch.Invalid.Should().ContainSingle().Which.Error.Should().Contain("ACC-2").And.Contain("ACC-1");
@@ -219,11 +219,11 @@ public sealed class InboxEventTests
     {
         var batch = PreparedBatch.Prepare(Relationships,
         [
-            new InboxEvent(2, "REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""",
+            new InboxEvent("REL-1", /*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T02:00:00Z", "type": "updated" }, "accountRelationship": { "externalId": "REL-1", "accountExternalId": "A" } }""",
                 DateTimeOffset.Parse("2026-10-14T02:00:00Z", CultureInfo.InvariantCulture))
         ]);
 
-        batch.Invalid.Should().ContainSingle().Which.RowId.Should().Be(2);
+        batch.Invalid.Should().ContainSingle().Which.EntityId.Should().Be("REL-1");
         batch.Work.Should().BeEmpty();
     }
 
@@ -361,15 +361,15 @@ public sealed class InboxEventTests
     }
 
     /// <summary>A claimed row of the entity its payload names.</summary>
-    private static InboxEvent Row(long id, string payload)
+    private static InboxEvent Row(string payload)
     {
-        return Row(id, Accounts.TryRead(payload, out var read, out _) ? read.EntityId : "ACC-1", payload);
+        return Row(Accounts.TryRead(payload, out var read, out _) ? read.EntityId : "ACC-1", payload);
     }
 
     /// <summary>A claimed row of <paramref name="entityId"/>, with the time its payload has (or none, if it can't be read).</summary>
-    private static InboxEvent Row(long id, string entityId, string payload)
+    private static InboxEvent Row(string entityId, string payload)
     {
-        return new(id, entityId, payload, Accounts.TryRead(payload, out var read, out _) ? read.Time : DateTimeOffset.UnixEpoch);
+        return new(entityId, payload, Accounts.TryRead(payload, out var read, out _) ? read.Time : DateTimeOffset.UnixEpoch);
     }
 
     private static TEvent Read<TEvent>(string json)

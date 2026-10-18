@@ -16,7 +16,7 @@ public sealed class SObjectRecordTests
 
         (record.ReferenceId, record.SObject, record.ExternalIdField, record.ExternalId, record.RecordType)
             .Should().Be(("acct", "Account", "ExternalId__c", account.ExternalId!, "Business"));
-        (record.Lookups, record.ForeignKeys).Should().Be((null, null));
+        record.ForeignKeys.Should().BeNull();
         record.Fields.Should().BeEquivalentTo(new Dictionary<string, object?>
         {
             ["Name"] = account.Name,
@@ -70,30 +70,18 @@ public sealed class SObjectRecordTests
 
         (record.SObject, record.ExternalId).Should().Be(("Account_Relationship__c", relationship.ExternalId!));
         record.ForeignKeys.Should().Equal(
-            new SObjectLookup("AccountId__c", "Account", "ExternalId__c", relationship.AccountId!),
-            new SObjectLookup("RelatedAccountId__c", "Account", "ExternalId__c", relationship.RelatedAccountId!));
-        record.Lookups.Should().BeNull();
+            new ForeignKey("AccountId__c", "Account", "ExternalId__c", relationship.AccountId!),
+            new ForeignKey("RelatedAccountId__c", "Account", "ExternalId__c", relationship.RelatedAccountId!));
         record.Fields.Should().Contain("AccountId__c", relationship.AccountId).And.Contain("RelatedAccountId__c", relationship.RelatedAccountId,
             "the text is written as it is");
     }
 
     [Fact]
-    public void Lookups_carry_the_target_object_and_its_external_id_field_and_are_not_value_fields()
-    {
-        var record = SObjectRecord.From("contact", new LookupContactSObject { ExternalId = "C1", AccountExternalId = "A1", LastName = "Doe" });
-
-        record.Lookups.Should().Equal(new SObjectLookup("AccountId", "Account", "ExternalId__c", "A1"));
-        record.Fields.Keys.Should().Equal(["LastName"], "the engine sets a lookup to the Id it resolves");
-    }
-
-    [Fact]
-    public void Missing_external_id_or_lookup_target_is_rejected_and_an_empty_foreign_key_is_just_an_empty_field()
+    public void Missing_external_id_is_rejected_and_an_empty_foreign_key_is_just_an_empty_field()
     {
         var noId = () => SObjectRecord.From("prof", new ProfileSObject { AccountId = "ACC-1" });
-        var noTarget = () => SObjectRecord.From("contact", new LookupContactSObject { ExternalId = "C1" });
 
         noId.Should().ThrowExactly<ArgumentException>().WithMessage("*Profile__c.ExternalId__c*");
-        noTarget.Should().ThrowExactly<ArgumentException>().WithMessage("*Contact.AccountId*");
         var noParent = SObjectRecord.From("prof", new ProfileSObject { ExternalId = "PRF-1" });
         noParent.ForeignKeys.Should().BeNull("no parent to wait for");
         noParent.Fields.Should().Contain("AccountId__c", null);
@@ -106,7 +94,7 @@ public sealed class SObjectRecordTests
 
         SoqlQuery.RecordsOf<AccountRelationshipSObject>(units).Should().BeEquivalentTo(
             new SoqlQuery("Account_Relationship__c", "ExternalId__c", [relationship.ExternalId!]));
-        SoqlQuery.LookupTargetsOf<AccountSObject>(units).Should().BeEquivalentTo(
+        SoqlQuery.ParentsOf<AccountSObject>(units).Should().BeEquivalentTo(
             new SoqlQuery("Account", "ExternalId__c", [relationship.AccountId!, relationship.RelatedAccountId!]),
             "a foreign key's parent is read to know it exists");
     }
@@ -152,13 +140,6 @@ public sealed class SObjectRecordTests
         FakeSchema.Describe(meta.SObject)["recordTypeInfos"]!.AsArray()
             .Should().Contain(r => (string)r!["developerName"]! == meta.RecordType && (bool)r["active"]! && (bool)r["available"]!,
                 "{0}'s record type {1} must exist in the org, active and available", meta.SObject, meta.RecordType);
-        foreach (var lookup in meta.Lookups)
-        {
-            FakeSchema.Find(meta.SObject, lookup.Field)!.Type.Should().Be("reference", "{0} is declared as a lookup", lookup.Field);
-            FakeSchema.Find(lookup.TargetSObject, lookup.TargetExternalIdField)
-                .Should().NotBeNull("{0} looks up {1} by {2}", lookup.Field, lookup.TargetSObject, lookup.TargetExternalIdField);
-        }
-
         foreach (var key in meta.ForeignKeys)
         {
             FakeSchema.Find(meta.SObject, key.Field)!.KeyOf.Should().Be(key.TargetSObject, "{0} is declared as a foreign key", key.Field);
@@ -173,7 +154,7 @@ public sealed class SObjectRecordTests
 
         // RecordTypeId is set from the class's record type; a standard lookup the class doesn't declare (Contact.AccountId)
         // is left alone
-        meta.Fields.Concat(meta.Lookups.Select(l => l.Field)).Append(meta.ExternalIdField).Append(SObjectSchema.RecordTypeIdField)
+        meta.Fields.Append(meta.ExternalIdField).Append(SObjectSchema.RecordTypeIdField)
             .Should().BeEquivalentTo(FakeSchema.Objects[meta.SObject]
                 .Where(f => (f.Createable || f.Updateable) && (f.Type != "reference" || f.Name == SObjectSchema.RecordTypeIdField))
                 .Select(f => f.Name));

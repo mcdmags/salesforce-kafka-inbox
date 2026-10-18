@@ -9,9 +9,10 @@ namespace SalesforceSync.Data.Inbox;
 /// </summary>
 public abstract class InboxRow
 {
-    public long Id { get; set; }
-
-    /// <summary>The entity's id, read from the event by the consumer; unique in the table.</summary>
+    /// <summary>
+    /// The entity's id, read from the event by the consumer: the row's primary key. There is no surrogate id: the table
+    /// has one row per entity, so the entity id already names the row, and a separate id would only add an index.
+    /// </summary>
     public string EntityId { get; set; } = "";
 
     /// <summary>The entity's event as the consumer split it from its Kafka message (jsonb); never read by SQL.</summary>

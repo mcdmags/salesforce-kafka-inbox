@@ -32,7 +32,6 @@ public class MicroBenchmarks
     {
         // Full records, as the source sends them: a claim's rows, one per entity
         _tenEvents = [.. Enumerable.Range(1, 10).Select(v => new InboxEvent(
-            RowId: v,
             EntityId: $"ACC-{v:D6}",
             Payload: new JsonObject
             {
