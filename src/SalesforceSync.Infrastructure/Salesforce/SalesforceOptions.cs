@@ -41,10 +41,10 @@ public sealed class SalesforceOptions
     public TimeSpan TokenLifetime { get; set; } = TimeSpan.FromMinutes(30);
 
     /// <summary>
-    /// How long a cached sObject Describe is trusted before it is revalidated with If-Modified-Since
-    /// (a 304 Not Modified is cheap, but still one API call).
+    /// How long the record type Ids read from the org are trusted before they are read again (one SOQL query per
+    /// object that has record types).
     /// </summary>
-    public TimeSpan SchemaRefreshInterval { get; set; } = TimeSpan.FromMinutes(15);
+    public TimeSpan RecordTypeRefreshInterval { get; set; } = TimeSpan.FromMinutes(15);
 
     /// <summary>Request bodies at least this large are sent gzip-compressed (0 = never).</summary>
     public int CompressRequestsLargerThan { get; set; } = 1024;

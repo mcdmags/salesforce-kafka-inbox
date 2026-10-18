@@ -6,7 +6,7 @@ using static SalesforceSync.FakeSalesforce.FakeJson;
 namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
-/// In-memory Salesforce org: OAuth tokens, sObject Describe, SOQL "WHERE field IN (...)" queries (in pages of 2,000),
+/// In-memory Salesforce org: OAuth tokens, SOQL "WHERE field IN (...)" queries (in pages of 2,000),
 /// and sObject Collections upserts by external id and deletes by Id (per-record results, allOrNone false or true),
 /// modelled on the REST API Developer Guide (and, for per-record codes, the SOAP API Developer Guide). Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
 /// values are stored the way Salesforce stores them. Every committed create/update is kept in a per-record write
@@ -61,9 +61,6 @@ public sealed partial class FakeSalesforceStore
             AccessToken = $"{FirstAccessToken}-{++_tokens}";
         }
     }
-
-    /// <summary>When the metadata last changed, for Describe's If-Modified-Since (HTTP dates have second precision).</summary>
-    public DateTimeOffset SchemaLastModified { get; } = DateTimeOffset.FromUnixTimeSeconds(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
     // ---------- Limits and stats ----------
 
@@ -219,28 +216,6 @@ public sealed partial class FakeSalesforceStore
         }
     }
 
-    // ---------- Describe ----------
-
-    /// <returns>(200, describe) or (304, null) if the metadata hasn't changed since <paramref name="ifModifiedSince"/>.</returns>
-    public (int Status, JsonNode? Body) Describe(string sobject, DateTimeOffset? ifModifiedSince)
-    {
-        if (!FakeSchema.Objects.ContainsKey(sobject))
-        {
-            throw new FakeSalesforceException(404, "NOT_FOUND", $"The requested resource does not exist: {sobject}");
-        }
-
-        lock (_gate)
-        {
-            _counters.Describes++;
-            if (ifModifiedSince >= SchemaLastModified)
-            {
-                _counters.DescribesNotModified++;
-                return (304, null);
-            }
-        }
-        return (200, FakeSchema.Describe(sobject));
-    }
-
     // ---------- Query ----------
 
     /// <summary>Records per query page, at most (REST API Developer Guide, "Query": up to 2,000 at a time).</summary>
@@ -268,8 +243,14 @@ public sealed partial class FakeSalesforceStore
 
             var query = FakeSoql.Parse(QueryOf(url));
             _counters.Queries++;
+            if (query.SObject.Equals(FakeSchema.RecordTypeObject, StringComparison.OrdinalIgnoreCase))
+            {
+                _counters.RecordTypeQueries++;
+            }
             var rows = new List<JsonObject>();
-            foreach (var record in _records.Table(query.SObject).Values)
+            foreach (var record in query.SObject.Equals(FakeSchema.RecordTypeObject, StringComparison.OrdinalIgnoreCase)
+                         ? FakeSchema.RecordTypeRows()
+                         : _records.Table(query.SObject).Values)
             {
                 var key = Str(record[query.WhereField]);
                 if (key is null || !query.Values.Contains(key))

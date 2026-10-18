@@ -50,9 +50,8 @@ namespace SalesforceSync.Sync;
 public sealed class SalesforceBatchSyncService(
     ISalesforceRateLimiter limiter,
     ISalesforceRestClient salesforce,
-    SalesforceSchemaCache schemaCache,
+    RecordTypeCache recordTypes,
     SalesforceErrors errors,
-    IOptions<SalesforceOptions> salesforceOptions,
     IOptions<SyncOptions> options,
     ILogger<SalesforceBatchSyncService> log)
 {
@@ -74,9 +73,8 @@ public sealed class SalesforceBatchSyncService(
     private readonly SyncOptions _opt = options.Value;
 
     // The steps of the Salesforce half of a batch, each a class below
-    private readonly Describer _describer = new(salesforce, schemaCache, salesforceOptions.Value.SchemaRefreshInterval);
-    private readonly Normalizer _normalizer = new(errors);
-    private readonly Reader _reader = new(salesforce, schemaCache);
+    private readonly Normalizer _normalizer = new(recordTypes);
+    private readonly Reader _reader = new(salesforce);
     private readonly Sender _sender = new(salesforce, new Interpreter(errors));
 
     /// <summary>Claims, writes (upserts and deletes) and records one batch of the strategy's entity type.</summary>
@@ -131,8 +129,9 @@ public sealed class SalesforceBatchSyncService(
         }
         catch (MappingErrorException ex)
         {
-            // Nothing was written. The inbox stops (every due row waits) with the error on the rows to fix, so nothing is
-            // dead-lettered and the rows go on after the deploy with no replay.
+            // The inbox stops (every due row waits) with the error on the rows to fix, so nothing is dead-lettered and the
+            // rows go on after the deploy with no replay. Found by the read, nothing was written; found in a write's
+            // answer, the records that were saved are read as unchanged next time.
             log.LogError(ex, "{Type} inbox stopped for {Hold} by {Count} mapping error(s), fix the mapping or add the field: {Errors}",
                 strategy.EntityType, _opt.MappingErrorHold, ex.Errors.Count,
                 string.Join("; ", ex.Errors.Select(e => $"{e.Key}: {e.Error.Code} {e.Error.Message}")));
@@ -149,7 +148,7 @@ public sealed class SalesforceBatchSyncService(
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // A request failed that Salesforce provably did not apply (describe, the read or a write): every entity is
+            // A request failed that Salesforce provably did not apply (the read or a write): every entity is
             // retried. Records that earlier write requests of the batch saved are safe: the retry reads them and writes
             // only what still differs. Shutdown (ct) is not caught: the failed request wrote nothing, and the lease
             // simply expires.
@@ -165,7 +164,7 @@ public sealed class SalesforceBatchSyncService(
     }
 
     /// <summary>
-    /// The Salesforce half of a batch, for any sObjects, in six steps: describe, normalize, read (one query per object),
+    /// The Salesforce half of a batch, for any sObjects, in five steps: normalize, read (one query per object),
     /// diff, send (one upsert per object, parents first, then one delete) and interpret the answers. Returns one outcome
     /// per unit. Nothing here touches the inbox.
     /// </summary>
@@ -195,31 +194,20 @@ public sealed class SalesforceBatchSyncService(
             return results;
         }
 
-        var schemas = await _describer.DescribeAsync(units, queries, ct);
-
-        // A unit Salesforce would reject fails on its own, before any call
-        var (normalized, rejected) = _normalizer.Normalize(units, schemas);
-        if (MappingErrors(rejected).Count > 0)
-        {
-            // The cached describe may just be out of date (a field was added to the org): describe again before stopping
-            await _describer.InvalidateAsync(schemas.Keys, ct);
-            schemas = await _describer.DescribeAsync(units, queries, ct);
-            (normalized, rejected) = _normalizer.Normalize(units, schemas);
-            await ThrowIfMappingErrorsAsync(rejected, schemas.Keys, ct);
-        }
-
+        // A unit whose record type the org doesn't have fails on its own, before any call that writes
+        var (normalized, rejected) = await _normalizer.NormalizeAsync(units, ct);
         results.AddRange(rejected);
 
         if (normalized.Count > 0)
         {
-            var current = await _reader.ReadCurrentAsync(_reader.BuildReadQueries(normalized, queries, schemas, maxValuesPerQuery), schemas.Keys, ct);
+            var current = await _reader.ReadCurrentAsync(_reader.BuildReadQueries(normalized, queries, maxValuesPerQuery), normalized, ct);
             var (planned, decided) = Differ.Plan(normalized, current);
-            await ThrowIfMappingErrorsAsync(decided, schemas.Keys, ct);
             results.AddRange(decided);
 
+            List<SyncResult> written;
             try
             {
-                results.AddRange(await _sender.WriteAsync(planned, maxRecordsPerWrite, ct));
+                written = await _sender.WriteAsync(planned, maxRecordsPerWrite, ct);
             }
             catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
             {
@@ -227,9 +215,12 @@ public sealed class SalesforceBatchSyncService(
                 // here on Salesforce may have the write, and may still apply it after we stop waiting.
                 throw new UnknownOutcomeException(ex);
             }
+
+            ThrowIfMappingErrors(written);
+            results.AddRange(written);
         }
 
-        await _describer.InvalidateRecordTypesAsync(units, results, ct);
+        _normalizer.InvalidateRecordTypes(units, results);
         return results;
     }
 
@@ -250,13 +241,12 @@ public sealed class SalesforceBatchSyncService(
         return [.. results.SelectMany(r => r.Errors.Where(IsMappingError).Select(e => (r.Key, e)))];
     }
 
-    /// <summary>Stops the batch, before any write, if a unit has a mapping error; the described objects are described again next time.</summary>
+    /// <summary>Stops the batch if a write was refused for a mapping error: the field is not in the org, or not settable.</summary>
     /// <exception cref="MappingErrorException">At least one unit has a mapping error.</exception>
-    private async Task ThrowIfMappingErrorsAsync(IEnumerable<SyncResult> results, IEnumerable<string> sobjects, CancellationToken ct)
+    private static void ThrowIfMappingErrors(IEnumerable<SyncResult> results)
     {
         if (MappingErrors(results) is { Count: > 0 } found)
         {
-            await _describer.InvalidateAsync(sobjects, ct);
             throw new MappingErrorException(found);
         }
     }
@@ -276,7 +266,7 @@ public sealed class SalesforceBatchSyncService(
     }
 }
 
-/// <summary>Units whose mapping Salesforce rejects, with what to fix. Thrown before any write.</summary>
+/// <summary>Units whose mapping Salesforce rejects, with what to fix.</summary>
 internal sealed class MappingErrorException(IReadOnlyList<(string Key, SalesforceError Error)> errors)
     : Exception($"{errors.Count} mapping error(s), e.g. {errors[0].Error.Code}: {errors[0].Error.Message}")
 {

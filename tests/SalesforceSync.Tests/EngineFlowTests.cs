@@ -244,24 +244,19 @@ public sealed class EngineFlowTests
     // ---------- Failures of the read ----------
 
     [Fact]
-    public async Task A_read_rejecting_a_field_fails_the_batch_and_forces_a_fresh_describe()
+    public async Task A_read_rejecting_a_field_halts_the_inbox_as_a_mapping_error()
     {
         var engine = Engine();
         _inbox.Rows.Add(Row("ACC-1", "2026-10-14T01:00:00Z"));
-        await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None); // describes are cached now
+        await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None); // record types are cached now
         _inbox.Calls.Clear();
-        const string body = /*lang=json,strict*/ """[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating'"}]""";
+        const string body = /*lang=json,strict*/ """[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating' on entity 'Account'"}]""";
         _http.OnRead = request => new HttpResponseMessage(HttpStatusCode.BadRequest) { RequestMessage = request, Content = new StringContent(body) };
 
         await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None);
 
-        _inbox.Calls.Should().HaveElementAt(1, "fail all: Salesforce 400: [{\"errorCode\":\"INVALID_FIELD\",\"message\":\"No such column 'Rating'\"}] (INVALID_FIELD)");
-        var before = _org.GetStats();
-        _http.OnRead = null;
-        await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None);
-        var after = _org.GetStats();
-        (after.Describes - before.Describes).Should().BeGreaterThan(0, "the cached describe was invalidated");
-        (after.DescribesNotModified - before.DescribesNotModified).Should().Be(0, "an invalidated describe is unconditional");
+        _inbox.Calls.Should().Equal("claim", "halt");
+        _http.Writes.Should().Be(1, "nothing was written after the first batch");
     }
 
     [Fact]

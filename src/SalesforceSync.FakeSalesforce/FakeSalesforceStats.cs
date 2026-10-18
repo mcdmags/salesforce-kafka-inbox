@@ -11,8 +11,7 @@ namespace SalesforceSync.FakeSalesforce;
 /// <param name="Creates">Records created.</param>
 /// <param name="Updates">Records updated.</param>
 /// <param name="ConcurrencyRejections">Calls refused for exceeding the concurrent long-running request limit.</param>
-/// <param name="Describes">sObject Describe calls.</param>
-/// <param name="DescribesNotModified">Describe calls answered 304 Not Modified.</param>
+/// <param name="RecordTypeQueries">SOQL queries on RecordType (also counted in <paramref name="Queries"/>).</param>
 /// <param name="Records">Records the org holds now.</param>
 public sealed record FakeSalesforceStats(
     long ApiCalls,
@@ -23,8 +22,7 @@ public sealed record FakeSalesforceStats(
     long Creates,
     long Updates,
     long ConcurrencyRejections,
-    long Describes,
-    long DescribesNotModified,
+    long RecordTypeQueries,
     long UpsertRequests,
     long Deletes,
     long DeleteRequests,
@@ -35,7 +33,7 @@ public sealed record FakeSalesforceStats(
         return $"api={ApiCalls} upserts={UpsertRequests} queries={Queries} " +
                $"writeRequests={WriteRequests} recordsOk={RecordsSucceeded} recordsFailed={RecordsFailed} " +
                $"creates={Creates} updates={Updates} deletes={Deletes} (requests={DeleteRequests}) " +
-               $"describes={Describes} (notModified={DescribesNotModified}) " +
+               $"recordTypeQueries={RecordTypeQueries} " +
                $"concurrencyRejected={ConcurrencyRejections} records={Records}";
     }
 }

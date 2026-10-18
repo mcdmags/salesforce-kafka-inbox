@@ -2,7 +2,6 @@ using System.IO.Compression;
 using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 
 namespace SalesforceSync.FakeSalesforce;
 
@@ -10,11 +9,8 @@ namespace SalesforceSync.FakeSalesforce;
 /// HttpMessageHandler that answers Salesforce REST calls from a <see cref="FakeSalesforceStore"/>.
 /// Plug it in as the primary handler so the real client, auth and rate-limit handlers stay in the pipeline.
 /// </summary>
-public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : HttpMessageHandler
+public sealed class FakeSalesforceHandler(FakeSalesforceStore store) : HttpMessageHandler
 {
-    [GeneratedRegex(@"/sobjects/(?<obj>\w+)/describe/?$", RegexOptions.IgnoreCase)]
-    private static partial Regex DescribeUrl();
-
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
         var options = store.Options;
@@ -85,25 +81,14 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
         {
             try
             {
-                if (request.Method == HttpMethod.Get && DescribeUrl().Match(path) is { Success: true } describe)
-                {
-                    var (status, body) = store.Describe(describe.Groups["obj"].Value, request.Headers.IfModifiedSince);
-                    res = body is null
-                        ? new HttpResponseMessage((HttpStatusCode)status) { RequestMessage = request }
-                        : Json(request, (HttpStatusCode)status, body);
-                    res.Content.Headers.LastModified = store.SchemaLastModified;
-                }
-                else
-                {
-                    res = request.Method == HttpMethod.Patch && FakeSalesforceStore.UpsertTarget(path) is (var sobject, var field)
-                        ? Json(request, HttpStatusCode.OK, store.Upsert(sobject, field, path, await ReadJsonAsync(request, ct)))
-                        : FakeSalesforceStore.IsDelete(request.Method.Method, path)
-                        ? Json(request, HttpStatusCode.OK, store.Delete(uri))
-                        : request.Method == HttpMethod.Get && FakeSalesforceStore.IsQuery(path)
-                        ? Json(request, HttpStatusCode.OK, store.Query(uri))
-                        : Json(request, HttpStatusCode.NotFound,
-                        FakeJson.Errors("NOT_FOUND", $"Fake does not support {request.Method} {path}"));
-                }
+                res = request.Method == HttpMethod.Patch && FakeSalesforceStore.UpsertTarget(path) is (var sobject, var field)
+                    ? Json(request, HttpStatusCode.OK, store.Upsert(sobject, field, path, await ReadJsonAsync(request, ct)))
+                    : FakeSalesforceStore.IsDelete(request.Method.Method, path)
+                    ? Json(request, HttpStatusCode.OK, store.Delete(uri))
+                    : request.Method == HttpMethod.Get && FakeSalesforceStore.IsQuery(path)
+                    ? Json(request, HttpStatusCode.OK, store.Query(uri))
+                    : Json(request, HttpStatusCode.NotFound,
+                    FakeJson.Errors("NOT_FOUND", $"Fake does not support {request.Method} {path}"));
             }
             catch (FakeSalesforceException ex)
             {

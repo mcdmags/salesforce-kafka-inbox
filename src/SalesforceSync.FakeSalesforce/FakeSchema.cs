@@ -28,7 +28,7 @@ public sealed record FakeField(
         : null;
 }
 
-/// <summary>A record type of the mock org, as Describe's <c>recordTypeInfos</c> lists it.</summary>
+/// <summary>A record type of the mock org.</summary>
 public sealed record FakeRecordType(
     string DeveloperName,
     string Name,
@@ -39,7 +39,7 @@ public sealed record FakeRecordType(
     bool Default = false);
 
 /// <summary>
-/// The mock org's metadata (served by sObject Describe) and how it stores values, the way Salesforce does:
+/// The mock org's metadata and how it stores values, the way Salesforce does:
 /// unknown and read-only fields are rejected, numbers are rounded to the field's scale, date/time is kept to the second, a checkbox is never null,
 /// multi-select values are kept in picklist order, text is length-checked, a record type must be one of the object's
 /// that is active and available. Deliberately independent of the client's
@@ -171,36 +171,22 @@ public static class FakeSchema
                 : null;
     }
 
-    public static JsonObject Describe(string sobject)
+    /// <summary>The object the sync reads the record types' Ids from (a SOQL query, the way a real org answers it).</summary>
+    public const string RecordTypeObject = "RecordType";
+
+    public static readonly string[] RecordTypeFields = ["Id", "DeveloperName", "Name", "SobjectType", "IsActive"];
+
+    /// <summary>The org's RecordType rows (the Master record type is not one: it has no row).</summary>
+    public static IEnumerable<JsonObject> RecordTypeRows()
     {
-        return new()
+        return RecordTypes.SelectMany(o => o.Value.Where(r => !r.Master).Select(r => new JsonObject
         {
-            ["name"] = Objects.Keys.First(k => k.Equals(sobject, StringComparison.OrdinalIgnoreCase)),
-            ["fields"] = new JsonArray([.. Objects[sobject].Select(f => (JsonNode)new JsonObject
-            {
-                ["name"] = f.Name,
-                ["type"] = f.Type,
-                ["length"] = f.Length,
-                ["precision"] = f.Precision,
-                ["scale"] = f.Scale,
-                ["digits"] = f.Digits,
-                ["createable"] = f.Createable,
-                ["updateable"] = f.Updateable,
-                ["nillable"] = f.Nillable,
-                ["referenceTo"] = f.ReferenceTo is null ? [] : new JsonArray(f.ReferenceTo),
-                ["relationshipName"] = f.RelationshipName
-            })]),
-            ["recordTypeInfos"] = new JsonArray([.. RecordTypes[sobject].Select(r => (JsonNode)new JsonObject
-            {
-                ["developerName"] = r.DeveloperName,
-                ["name"] = r.Name,
-                ["recordTypeId"] = r.Id,
-                ["active"] = r.Active,
-                ["available"] = r.Available,
-                ["master"] = r.Master,
-                ["defaultRecordTypeMapping"] = r.Default
-            })])
-        };
+            ["Id"] = r.Id,
+            ["DeveloperName"] = r.DeveloperName,
+            ["Name"] = r.Name,
+            ["SobjectType"] = o.Key,
+            ["IsActive"] = r.Active
+        }));
     }
 
     /// <summary>The 18-character Id of the object's record type with this developer name.</summary>

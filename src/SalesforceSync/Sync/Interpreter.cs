@@ -60,14 +60,14 @@ internal sealed class Interpreter(SalesforceErrors errors)
     /// dead-lettered. The same in reverse: a delete refused because records still point at it
     /// (<see cref="SalesforceErrors.HasDependents"/>, an Account whose contacts are not deleted yet) waits for their deletes,
     /// which their own inboxes sync. Salesforce rejecting the RecordTypeId (the record type was deactivated or unassigned
-    /// after the describe) is an <see cref="SalesforceErrors.InvalidRecordType"/>, like the describe not offering it:
+    /// after its Id was read) is an <see cref="SalesforceErrors.InvalidRecordType"/>, like the org not having it:
     /// retried, not dead-lettered. Salesforce often leaves <c>fields</c> empty on that error ("Record Type ID: this ID
     /// value isn't valid for the user"), so the message identifies it too.
     /// </summary>
     private SalesforceError Translate(Change change, SalesforceError e)
     {
         var recordType = e.Code is "INVALID_CROSS_REFERENCE_KEY"
-                         && (e.Fields?.Contains(SObjectSchema.RecordTypeIdField, StringComparer.OrdinalIgnoreCase) == true
+                         && (e.Fields?.Contains(RecordTypeCache.RecordTypeIdField, StringComparer.OrdinalIgnoreCase) == true
                              || e.Message?.Contains("Record Type", StringComparison.OrdinalIgnoreCase) == true);
 
         return recordType ? new SalesforceError(change.ReferenceId, SalesforceErrors.InvalidRecordType, $"{e.Code}: {e.Message}", e.Fields)

@@ -211,7 +211,7 @@ public sealed class FakeSalesforceTests
     {
         using var anonymous = new HttpClient(new FakeSalesforceHandler(_org)) { BaseAddress = _http.BaseAddress };
 
-        using var res = await anonymous.GetAsync($"{Data}/sobjects/Account/describe");
+        using var res = await anonymous.GetAsync($"{Data}/query?q=x");
 
         res.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
         ((string?)JsonNode.Parse(await res.Content.ReadAsStringAsync())![0]!["errorCode"]).Should().Be("INVALID_SESSION_ID");
@@ -230,12 +230,13 @@ public sealed class FakeSalesforceTests
         {
             BaseAddress = _http.BaseAddress
         });
-        await client.DescribeAsync("Account", null, CancellationToken.None);
+        var recordTypes = SalesforceRestClient.Soql("RecordType", ["Id", "DeveloperName"], "SobjectType", ["Account"]);
+        await client.SelectAsync(recordTypes, CancellationToken.None);
 
         _org.ExpireAccessToken();
-        var schema = await client.DescribeAsync("Account", null, CancellationToken.None);
+        var rows = await client.SelectAsync(recordTypes, CancellationToken.None);
 
-        schema!.Name.Should().Be("Account", "the 401 made the client fetch the org's new token and send again");
+        rows.Should().NotBeEmpty("the 401 made the client fetch the org's new token and send again");
     }
 
     // ---------- Helpers ----------

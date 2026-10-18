@@ -136,10 +136,10 @@ public sealed class SObjectRecordTests
         }
 
         FakeSchema.Find(meta.SObject, meta.ExternalIdField).Should().NotBeNull();
-        FakeSchema.Find(meta.SObject, SObjectSchema.RecordTypeIdField).Should().NotBeNull("every synced object has record types");
-        FakeSchema.Describe(meta.SObject)["recordTypeInfos"]!.AsArray()
-            .Should().Contain(r => (string)r!["developerName"]! == meta.RecordType && (bool)r["active"]! && (bool)r["available"]!,
-                "{0}'s record type {1} must exist in the org, active and available", meta.SObject, meta.RecordType);
+        FakeSchema.Find(meta.SObject, RecordTypeCache.RecordTypeIdField).Should().NotBeNull("every synced object has record types");
+        FakeSchema.RecordTypeRows()
+            .Should().Contain(r => (string)r["SobjectType"]! == meta.SObject && (string)r["DeveloperName"]! == meta.RecordType && (bool)r["IsActive"]!,
+                "{0}'s record type {1} must exist in the org and be active", meta.SObject, meta.RecordType);
         foreach (var key in meta.ForeignKeys)
         {
             FakeSchema.Find(meta.SObject, key.Field)!.KeyOf.Should().Be(key.TargetSObject, "{0} is declared as a foreign key", key.Field);
@@ -154,9 +154,9 @@ public sealed class SObjectRecordTests
 
         // RecordTypeId is set from the class's record type; a standard lookup the class doesn't declare (Contact.AccountId)
         // is left alone
-        meta.Fields.Append(meta.ExternalIdField).Append(SObjectSchema.RecordTypeIdField)
+        meta.Fields.Append(meta.ExternalIdField).Append(RecordTypeCache.RecordTypeIdField)
             .Should().BeEquivalentTo(FakeSchema.Objects[meta.SObject]
-                .Where(f => (f.Createable || f.Updateable) && (f.Type != "reference" || f.Name == SObjectSchema.RecordTypeIdField))
+                .Where(f => (f.Createable || f.Updateable) && (f.Type != "reference" || f.Name == RecordTypeCache.RecordTypeIdField))
                 .Select(f => f.Name));
     }
 

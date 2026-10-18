@@ -183,7 +183,7 @@ public sealed class SObjectAttribute(string name) : Attribute
 
     /// <summary>
     /// Developer name of the record type every record of the class has (the engine sets <c>RecordTypeId</c> to its Id,
-    /// from Describe). It must exist in the org, be active and be assigned to the user the sync runs as.
+    /// from the org's RecordType). It must exist in the org and be active.
     /// </summary>
     public required string RecordType { get; init; }
 }

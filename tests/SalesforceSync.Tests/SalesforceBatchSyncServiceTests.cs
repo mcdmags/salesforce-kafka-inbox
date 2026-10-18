@@ -11,7 +11,7 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The generic Salesforce half of the engine (Describe, read, diff, foreign keys, collections
+/// The generic Salesforce half of the engine (normalize, read, diff, foreign keys, collections
 /// write, classification) driven by the real Account, AccountRelationship and Contact strategies and mappings (Text
 /// foreign keys), against the in-memory org.
 /// Events are written as the source sends them (camelCase payload names, full records); assertions read Salesforce names.
@@ -33,7 +33,7 @@ public sealed class SalesforceBatchSyncServiceTests
         _engine = Engine();
     }
 
-    /// <summary>An engine on the same org, with its own caches.</summary>
+    /// <summary>An engine on the same org, with its own record type cache.</summary>
     private SalesforceBatchSyncService Engine(SalesforceOptions? salesforceOptions = null)
     {
         var options = Options.Create(salesforceOptions ?? new SalesforceOptions());
@@ -59,7 +59,7 @@ public sealed class SalesforceBatchSyncServiceTests
     [Fact]
     public async Task A_batch_of_new_Accounts_and_Profiles_costs_a_read_and_an_upsert_per_object()
     {
-        await Account("A1", new() { ["name"] = _any.Create<string>() }, []);  // warms the describe cache
+        await Account("A1", new() { ["name"] = _any.Create<string>() }, []);  // warms the record type cache
         var before = _org.GetStats();
 
         await Accounts(
@@ -70,21 +70,21 @@ public sealed class SalesforceBatchSyncServiceTests
         (after.ApiCalls - before.ApiCalls).Should().Be(4, "a read of the Accounts and one of the Profiles, then an upsert of each");
         (after.UpsertRequests - before.UpsertRequests).Should().Be(2, "the Accounts' and the Profiles'");
         (after.RecordsSucceeded - before.RecordsSucceeded).Should().Be(4, "two Accounts and two Profiles");
-        (after.Describes - before.Describes).Should().Be(0, "Describe results are cached");
+        (after.RecordTypeQueries - before.RecordTypeQueries).Should().Be(0, "record types are cached");
     }
 
     [Fact]
-    public async Task Values_Salesforce_stores_differently_are_written_once_not_on_every_event()
+    public async Task Values_Salesforce_stores_to_the_second_or_as_false_are_written_once_not_on_every_event()
     {
         var account = new Dictionary<string, object?>
         {
             ["name"] = "Acme",
-            ["annualRevenue"] = 10.005m,           // currency(18,2): stored as 10.01
+            ["annualRevenue"] = 10.01m,
             ["isActive"] = null,                   // checkbox: stored as false
-            ["tags"] = new[] { "Retail", "B2B" },  // multi-select: stored in picklist order
-            ["lastContactedAt"] = "2026-10-13T01:02:03.4567+02:00"
+            ["tags"] = new[] { "B2B", "Retail" },  // multi-select: sent in the picklist's order
+            ["lastContactedAt"] = "2026-10-13T01:02:03.4567+02:00" // stored to the second
         };
-        var profile = new Dictionary<string, object?> { ["score"] = "42", ["discountPercent"] = 12.345m };
+        var profile = new Dictionary<string, object?> { ["score"] = 42m, ["discountPercent"] = 12.35m };
 
         (await Account("A1", account, profile)).Outcome.Should().Be(SyncOutcome.Saved);
         (await Account("A1", account, profile)).Outcome.Should().Be(SyncOutcome.Unchanged,
@@ -132,8 +132,8 @@ public sealed class SalesforceBatchSyncServiceTests
         await Account("A1", new() { ["name"] = "Acme" }, []);
 
         _org.History("Account", "A1")!.Single().Select(kv => kv.Key).Should().BeEquivalentTo(
-            ["Name", "ExternalId__c", "Active__c", "RecordTypeId"],
-            "nothing to clear on a new record; a checkbox is sent as false, the record type always");
+            ["Name", "ExternalId__c", "RecordTypeId"],
+            "nothing to clear on a new record, a checkbox left null is left to its default, the record type always");
     }
 
     [Fact]
@@ -151,16 +151,15 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     [Fact]
-    public async Task Required_field_missing_from_the_full_record_fails_before_any_call()
+    public async Task Required_field_missing_from_the_full_record_is_refused_by_Salesforce_and_nothing_changes()
     {
         await Account("A1", new() { ["name"] = "Acme" }, []);
-        var before = _org.GetStats();
 
         var result = await Account("A1", new() { ["rating"] = "Hot" }, []);
 
-        result.Outcome.Should().Be(SyncOutcome.PermanentFailure);
         (result.PrimaryError?.Code).Should().Be("REQUIRED_FIELD_MISSING", "a full record without a name would empty Account.Name");
-        _org.GetStats().ApiCalls.Should().Be(before.ApiCalls);
+        result.Outcome.Should().Be(SyncOutcome.TransientFailure, "on an update this code can also mean the record was deleted meanwhile: retried until the limit");
+        ((string?)_org.FindByExternalId("Account", "A1")!["Name"]).Should().Be("Acme");
     }
 
     /// <summary>
@@ -170,7 +169,7 @@ public sealed class SalesforceBatchSyncServiceTests
     [Theory]
     [InlineData("Phone", "0123456789012345678901234567890123456789+", "STRING_TOO_LONG")]
     [InlineData("NumberOfEmployees", "lots", "INVALID_TYPE_ON_FIELD_IN_RECORD")]
-    public async Task A_value_Salesforce_would_reject_fails_only_its_own_unit_before_any_call(string field, string value, string code)
+    public async Task A_value_Salesforce_rejects_fails_only_its_own_unit(string field, string value, string code)
     {
         await Account("WARM", new() { ["name"] = "Warm" }, []);
         var before = _org.GetStats();
@@ -194,12 +193,13 @@ public sealed class SalesforceBatchSyncServiceTests
 
     /// <summary>
     /// A field the code sends that the org doesn't have (or won't take) is the mapping's fault for every event of that
-    /// kind: the batch stops before any write, with the error and the entity it was found on.
+    /// kind: the batch stops with the error and the entity it was found on. A missing field shows in the read, before
+    /// any write; a field that can't be set shows in the write's answer, when the other entities are saved already.
     /// </summary>
     [Theory]
-    [InlineData("No_Such_Field__c", "x", "INVALID_FIELD")]
-    [InlineData("LastModifiedDate", "2026-01-01T00:00:00Z", "INVALID_FIELD_FOR_INSERT_UPDATE")]
-    public async Task A_mapping_error_stops_the_batch_before_any_write(string field, string value, string code)
+    [InlineData("No_Such_Field__c", "x", "INVALID_FIELD", false)]
+    [InlineData("LastModifiedDate", "2026-01-01T00:00:00Z", "INVALID_FIELD_FOR_INSERT_UPDATE", true)]
+    public async Task A_mapping_error_stops_the_batch(string field, string value, string code, bool othersAreSaved)
     {
         var units = new List<(string Key, SyncUnit Unit)>
         {
@@ -214,7 +214,7 @@ public sealed class SalesforceBatchSyncServiceTests
 
         stopped.Which.Errors.Should().ContainSingle().Which.Should().Match<(string Key, SalesforceError Error)>(e => e.Key == "BAD" && e.Error.Code == code);
         _org.FindByExternalId("Account", "BAD").Should().BeNull();
-        _org.FindByExternalId("Account", "GOOD").Should().BeNull("nothing is written once the mapping is known to be wrong");
+        (_org.FindByExternalId("Account", "GOOD") is not null).Should().Be(othersAreSaved);
     }
 
     [Fact]
@@ -431,7 +431,7 @@ public sealed class SalesforceBatchSyncServiceTests
     {
         // 100 Accounts and 100 Profiles with 250-character ids: about 45 ids fit a query's URL, so 3 queries each
         var units = Enumerable.Range(0, 100).Select(i => ($"{i:D3}{new string('a', 247)}", Event(new() { ["name"] = $"N{i}" }, []))).ToArray();
-        await Account("WARM", new() { ["name"] = "Warm" }, []); // warms the describe cache
+        await Account("WARM", new() { ["name"] = "Warm" }, []); // warms the record type cache
         var before = _org.GetStats();
 
         (await Accounts(units)).Select(r => r.Outcome).Should().AllBeEquivalentTo(SyncOutcome.Saved);
@@ -479,16 +479,15 @@ public sealed class SalesforceBatchSyncServiceTests
     // ---------- Record types ----------
 
     [Fact]
-    public async Task Describe_returns_the_record_types_of_the_object()
+    public async Task The_RecordType_query_returns_the_active_record_types_of_the_object()
     {
         var http = SalesforceStep.Http(new FakeSalesforceHandler(_org));
 
-        var schema = (await SalesforceStep.Client(http).DescribeAsync("Account", null, CancellationToken.None))!;
+        var rows = await SalesforceStep.Client(http).SelectAsync(
+            SalesforceRestClient.Soql("RecordType", ["Id", "DeveloperName", "IsActive"], "SobjectType", ["Account"]), CancellationToken.None);
 
-        schema.RecordTypes.Should().ContainKey("business").WhoseValue.Should().Be(
-            new SalesforceRecordType("Business", FakeSchema.RecordTypeIdOf("Account", "Business"), Active: true, Available: true));
-        schema.RecordTypes["Master"].Available.Should().BeFalse();
-        schema.Find(SObjectSchema.RecordTypeIdField)!.Type.Should().Be("reference");
+        rows.Select(r => (r.GetProperty("DeveloperName").GetString(), r.GetProperty("Id").GetString(), r.GetProperty("IsActive").GetBoolean()))
+            .Should().Equal([("Business", FakeSchema.RecordTypeIdOf("Account", "Business"), true)], "Master has no row");
     }
 
     [Fact]
@@ -519,9 +518,9 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     [Fact]
-    public async Task A_record_type_the_org_lacks_fails_before_any_call_is_retried_and_describes_again()
+    public async Task A_record_type_the_org_lacks_fails_before_any_call_is_retried_and_read_again()
     {
-        await Account("A1", new() { ["name"] = "Acme" }, []);  // warms the describe cache
+        await Account("A1", new() { ["name"] = "Acme" }, []);  // warms the record type cache
         var before = _org.GetStats();
 
         var result = (await _engine.WriteToSalesforceAsync(
@@ -537,14 +536,13 @@ public sealed class SalesforceBatchSyncServiceTests
 
         await Account("A2", new() { ["name"] = "Two" }, []);
         var after = _org.GetStats();
-        (after.Describes - afterFailure.Describes).Should().Be(1, "the cached describe of Account was invalidated");
-        (after.DescribesNotModified - afterFailure.DescribesNotModified).Should().Be(0, "an invalidated describe is unconditional");
+        (after.RecordTypeQueries - afterFailure.RecordTypeQueries).Should().Be(1, "the cached record types of Account were invalidated");
     }
 
     [Fact]
     public async Task A_record_type_Id_Salesforce_rejects_is_retried_not_dead_lettered()
     {
-        var unknownId = "012FAKE00000099";   // deactivated or unassigned after the describe, say
+        var unknownId = "012FAKE00000099";   // deactivated or unassigned after its Id was read, say
 
         var result = (await _engine.WriteToSalesforceAsync(
             [("A1", RawAccount("A1", new() { ["Name"] = "Acme", ["RecordTypeId"] = unknownId }))],
@@ -559,7 +557,7 @@ public sealed class SalesforceBatchSyncServiceTests
 
     /// <summary>Salesforce often names no field on this error; the message still identifies the record type.</summary>
     [Fact]
-    public async Task A_record_type_rejection_without_fields_is_an_invalid_record_type_and_describes_again()
+    public async Task A_record_type_rejection_without_fields_is_an_invalid_record_type_and_reads_them_again()
     {
         await Account("A1", new() { ["name"] = "Acme" }, []);
         var before = _org.GetStats();
@@ -572,7 +570,7 @@ public sealed class SalesforceBatchSyncServiceTests
         (rejected.PrimaryError?.Code).Should().Be(SalesforceErrors.InvalidRecordType,
             "not a missing parent, although the profile has a foreign key");
         (await Account("A2", new() { ["name"] = "Two" }, [])).Outcome.Should().Be(SyncOutcome.Saved);
-        (_org.GetStats().Describes - before.Describes).Should().BeGreaterThan(0, "the cached describe was invalidated");
+        (_org.GetStats().RecordTypeQueries - before.RecordTypeQueries).Should().BeGreaterThan(0, "the cached record types were invalidated");
     }
 
     [SObject("Account", ExternalIdField = "ExternalId__c", RecordType = "Nope")]
@@ -822,7 +820,7 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     [Fact]
-    public async Task A_contact_value_Salesforce_would_reject_fails_only_its_own_entity_before_the_call()
+    public async Task A_contact_value_Salesforce_rejects_fails_only_its_own_entity()
     {
         await Account("A1", new() { ["name"] = "Acme" }, []);
         await Contact("WARM", "A1", new() { ["lastName"] = "Warm" });
@@ -834,7 +832,7 @@ public sealed class SalesforceBatchSyncServiceTests
         (results["NONAME"].Outcome, results["NONAME"].PrimaryError?.Code).Should().Be((SyncOutcome.PermanentFailure, "REQUIRED_FIELD_MISSING"));
         (results["LONG"].Outcome, results["LONG"].PrimaryError?.Code).Should().Be((SyncOutcome.PermanentFailure, "STRING_TOO_LONG"));
         results["GOOD"].Outcome.Should().Be(SyncOutcome.Saved);
-        UpsertedLast("Contact").Select(r => (string?)r["ExternalId__c"]).Should().Equal("GOOD");
+        UpsertedLast("Contact").Select(r => (string?)r["ExternalId__c"]).Should().Equal("NONAME", "LONG", "GOOD");
     }
 
     [Theory]
@@ -893,7 +891,7 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     [Fact]
-    public async Task A_contact_record_type_Salesforce_rejects_is_retried_and_describes_again()
+    public async Task A_contact_record_type_Salesforce_rejects_is_retried_and_read_again()
     {
         await Account("A1", new() { ["name"] = "Acme" }, []);
         await Contact("WARM", "A1", new() { ["lastName"] = "Warm" });
@@ -904,7 +902,7 @@ public sealed class SalesforceBatchSyncServiceTests
 
         (rejected.Outcome, rejected.PrimaryError?.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.InvalidRecordType));
         (await Contact("C1", "A1", new() { ["lastName"] = "One" })).Outcome.Should().Be(SyncOutcome.Saved);
-        (_org.GetStats().Describes - before.Describes).Should().BeGreaterThan(0, "the cached describe was invalidated");
+        (_org.GetStats().RecordTypeQueries - before.RecordTypeQueries).Should().BeGreaterThan(0, "the cached record types were invalidated");
     }
 
     // ---------- Deletes: the same engine, records the read found deleted by Id ----------
@@ -937,7 +935,7 @@ public sealed class SalesforceBatchSyncServiceTests
         (await DeleteContacts("NEVER-SYNCED")).Single().Outcome.Should().Be(SyncOutcome.Unchanged, "nothing to delete: done");
 
         var after = _org.GetStats();
-        (after.ApiCalls - after.Describes - (before.ApiCalls - before.Describes)).Should().Be(1, "the read only (and a first describe)");
+        (after.ApiCalls - after.RecordTypeQueries - (before.ApiCalls - before.RecordTypeQueries)).Should().Be(1, "the read only (and a first read of the record types)");
         after.WriteRequests.Should().Be(before.WriteRequests);
     }
 

@@ -73,7 +73,7 @@ public sealed class ContactPayload
 
     public string? FirstName { get; set; }
 
-    /// <summary>Required in Salesforce: an event without it is dead-lettered (REQUIRED_FIELD_MISSING) before any call.</summary>
+    /// <summary>Required in Salesforce: an event without it is refused by Salesforce (REQUIRED_FIELD_MISSING) and dead-lettered.</summary>
     public string? LastName { get; set; }
 
     public string? Email { get; set; }

@@ -19,9 +19,6 @@ public interface ISalesforceRestClient
     /// <summary>The path every call starts with (<see cref="SalesforceOptions.DataPath"/>).</summary>
     string DataPath { get; }
 
-    /// <summary>sObject Describe; with <paramref name="ifModifiedSince"/>, null when the org answers 304 Not Modified.</summary>
-    Task<SObjectSchema?> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct);
-
     /// <summary>Runs one SOQL query and returns all its rows (one call; more only if a page isn't enough).</summary>
     Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct);
 

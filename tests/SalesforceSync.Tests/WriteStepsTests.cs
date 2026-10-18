@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 using static SalesforceSync.Sync.Normalizer;
@@ -7,163 +8,98 @@ using static SalesforceSync.Sync.Reader;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The pure steps of <see cref="SalesforceBatchSyncService"/>'s Salesforce step on their own: normalizing against the schema, building the
-/// read and the limits of a call. No org, no HTTP.
+/// The pure steps of <see cref="SalesforceBatchSyncService"/>'s Salesforce step on their own: normalizing, building the
+/// read and the limits of a call. No HTTP except to the in-memory org for record types.
 /// </summary>
 public sealed class WriteStepsTests
 {
-    private static readonly SObjectSchema Account = new("Account",
-    [
-        new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
-        new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true),
-        new SalesforceField("Name", "string", 5, 0, 0, true, true, false)
-    ]);
-
-    /// <summary>A foreign key: AccountId__c holds the Account's external id.</summary>
-    private static readonly SObjectSchema Profile = new("Profile__c",
-    [
-        new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
-        new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true),
-        new SalesforceField("AccountId__c", "string", 255, 0, 0, true, true, true)
-    ]);
-
-    /// <summary>A lookup: AccountId holds the Account's Salesforce Id, so it can't be a foreign key.</summary>
-    private static readonly SObjectSchema Contact = new("Contact",
-    [
-        new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
-        new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true),
-        new SalesforceField("AccountId", "reference", 18, 0, 0, true, true, true)
-    ]);
-
-    private static readonly Dictionary<string, SObjectSchema> Schemas = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Account"] = Account,
-        ["Profile__c"] = Profile,
-        ["Contact"] = Contact
-    };
+    private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
 
     // ---------- Normalize ----------
 
     [Fact]
-    public void A_unit_Salesforce_would_accept_has_no_problems()
+    public async Task Values_are_put_in_canonical_form_and_the_unit_is_kept_as_it_is()
     {
-        var unit = new SyncUnit([AccountRecord("A1", "Acme")]);
+        var unit = new SyncUnit([new SObjectRecord("acct", "Account", "ExternalId__c", "A1", new Dictionary<string, object?>
+        {
+            ["Name"] = "Acme", ["Description"] = "", ["NumberOfEmployees"] = 250, ["Last_Contacted__c"] = new DateTimeOffset(2026, 10, 13, 3, 2, 3, 456, TimeSpan.FromHours(2))
+        })]);
 
-        var normalized = Normalize("A1", unit, Schemas, out var problems);
+        var (normalized, rejected) = await Normalizer().NormalizeAsync([("A1", unit)], CancellationToken.None);
 
-        problems.Should().BeEmpty();
-        normalized.Key.Should().Be("A1");
-        normalized.Records[0].Record.Should().BeSameAs(unit.Records[0]);
-        normalized.Records[0].Fields.Should().ContainSingle().Which.Key.Name.Should().Be("Name");
-    }
-
-    [Fact]
-    public void Every_problem_of_a_unit_is_reported_with_its_records_reference_id()
-    {
-        var unit = new SyncUnit(
-        [
-            new SObjectRecord("acct", "Account", "ExternalId__c", "A1",
-                new Dictionary<string, object?> { ["Name"] = "too long", ["Nope__c"] = 1 }),
-            new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1", new Dictionary<string, object?>(),
-                ForeignKeys: [new ForeignKey("AccountId__c", "Account", "Missing__c", "A1")]),
-            new SObjectRecord("contact", "Contact", "ExternalId__c", "C1", new Dictionary<string, object?>(),
-                ForeignKeys: [new ForeignKey("AccountId", "Account", "ExternalId__c", "A1")])
-        ]);
-
-        Normalize("A1", unit, Schemas, out var problems);
-
-        problems.Select(p => (p.ReferenceId, p.Code)).Should().BeEquivalentTo(
-        [
-            ("acct", "STRING_TOO_LONG"), ("acct", "INVALID_FIELD"), ("prof", "INVALID_FIELD"), ("contact", "INVALID_FIELD")
-        ]);
-        problems.Should().Contain(p => p.Message!.Contains("Account.Missing__c doesn't exist"))
-            .And.Contain(p => p.Message!.Contains("Contact.AccountId is a lookup, not a foreign key"));
-    }
-
-    [Fact]
-    public void A_foreign_key_is_normalized_and_compared_like_any_text_field()
-    {
-        var unit = new SyncUnit([new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1",
-            new Dictionary<string, object?> { ["AccountId__c"] = "A1" }, ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", "A1")])]);
-
-        var normalized = Normalize("P1", unit, Schemas, out var problems);
-
-        problems.Should().BeEmpty();
-        normalized.Records[0].Fields.Should().ContainSingle().Which.Should().Be(
-            new KeyValuePair<SalesforceField, object?>(Profile.Fields["AccountId__c"], "A1"));
+        rejected.Should().BeEmpty();
+        normalized.Single().Key.Should().Be("A1");
+        var record = normalized.Single().Records.Single();
+        record.Record.Should().BeSameAs(unit.Records[0]);
+        record.Fields.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["Name"] = "Acme",
+            ["Description"] = null,
+            ["NumberOfEmployees"] = 250m,
+            ["Last_Contacted__c"] = new DateTimeOffset(2026, 10, 13, 1, 2, 3, TimeSpan.Zero)
+        });
     }
 
     // ---------- Record types ----------
 
-    private static readonly Dictionary<string, SObjectSchema> WithRecordTypes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Account"] = new("Account",
-        [
-            new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
-            new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true),
-            new SalesforceField("Name", "string", 5, 0, 0, true, true, false),
-            new SalesforceField("RecordTypeId", "reference", 18, 0, 0, true, true, true)
-        ],
-        [
-            new SalesforceRecordType("Master", "012000000000000AAA", true, false),
-            new SalesforceRecordType("Business", "012000000000001", true, true),
-            new SalesforceRecordType("Retired", "012000000000002AAA", false, true)
-        ])
-    };
-
     [Fact]
-    public void The_record_type_becomes_RecordTypeId_a_field_like_any_other()
+    public async Task The_record_type_becomes_RecordTypeId_a_field_like_any_other()
     {
         var unit = new SyncUnit([AccountRecord("A1", "Acme") with { RecordType = "business" }]);
 
-        var normalized = Normalize("A1", unit, WithRecordTypes, out var problems);
+        var (normalized, rejected) = await Normalizer().NormalizeAsync([("A1", unit)], CancellationToken.None);
 
-        problems.Should().BeEmpty();
-        normalized.Records[0].Fields.Should().Contain(
-            new KeyValuePair<SalesforceField, object?>(WithRecordTypes["Account"].Fields["RecordTypeId"], "012000000000001AAA"),
-            "developer names match without regard to case; the Id is normalized to 18 characters for the diff");
+        rejected.Should().BeEmpty();
+        normalized.Single().Records.Single().Fields.Should().Contain(
+            new KeyValuePair<string, object?>("RecordTypeId", FakeSchema.RecordTypeIdOf("Account", "Business")),
+            "developer names match without regard to case");
     }
 
     [Fact]
-    public void A_record_without_a_record_type_leaves_RecordTypeId_alone()
+    public async Task A_record_without_a_record_type_leaves_RecordTypeId_alone()
     {
-        var normalized = Normalize("A1", new SyncUnit([AccountRecord("A1", "Acme")]), WithRecordTypes, out var problems);
+        var (normalized, rejected) = await Normalizer().NormalizeAsync([("A1", new SyncUnit([AccountRecord("A1", "Acme")]))], CancellationToken.None);
 
-        problems.Should().BeEmpty();
-        normalized.Records[0].Fields.Keys.Select(f => f.Name).Should().Equal("Name");
+        rejected.Should().BeEmpty();
+        normalized.Single().Records.Single().Fields.Keys.Should().Equal("Name");
+        _org.GetStats().Queries.Should().Be(0, "no record type to look up");
     }
 
     [Theory]
-    [InlineData("Nope", "doesn't exist")]
-    [InlineData("Retired", "is not active")]
-    [InlineData("Master", "is not available to the running user")]
-    public void A_record_type_the_org_does_not_offer_is_a_problem(string developerName, string why)
+    [InlineData("Nope")]
+    [InlineData("Master")] // every object has it, but it is not a RecordType row
+    public async Task A_record_type_the_org_does_not_offer_rejects_the_unit_as_transient(string developerName)
     {
         var unit = new SyncUnit([AccountRecord("A1", "Acme") with { RecordType = developerName }]);
 
-        Normalize("A1", unit, WithRecordTypes, out var problems);
+        var (normalized, rejected) = await Normalizer().NormalizeAsync([("A1", unit), ("A2", new SyncUnit([AccountRecord("A2", "Other")]))], CancellationToken.None);
 
-        var problem = problems.Should().ContainSingle().Subject;
+        normalized.Select(n => n.Key).Should().Equal(["A2"], "the rest of the batch carries on");
+        var result = rejected.Should().ContainSingle().Subject;
+        (result.Key, result.Outcome).Should().Be(("A1", SyncOutcome.TransientFailure));
+        var problem = result.Errors.Should().ContainSingle().Subject;
         (problem.ReferenceId, problem.Code).Should().Be(("acct", SalesforceErrors.InvalidRecordType));
-        problem.Message.Should().Be($"Record type '{developerName}' of Account {why}");
+        problem.Message.Should().Be($"Record type '{developerName}' of Account doesn't exist or is not active");
     }
 
     [Fact]
-    public void A_record_type_problem_alone_is_transient_with_another_problem_permanent()
+    public async Task Record_types_are_read_once_per_object_and_again_once_invalidated()
     {
-        var errors = new SalesforceErrors(Options.Create(new SalesforceOptions()));
-        (string, SyncUnit)[] units =
-        [
-            ("A1", new SyncUnit([AccountRecord("A1", "Acme") with { RecordType = "Nope" }])),
-            ("A2", new SyncUnit([AccountRecord("A2", "too long") with { RecordType = "Nope" }]))
-        ];
+        var normalizer = Normalizer();
+        static SyncUnit Business(string key)
+        {
+            return new SyncUnit([AccountRecord(key, "Acme") with { RecordType = "Business" }]);
+        }
 
-        var (normalized, rejected) = new Normalizer(errors).Normalize(units, WithRecordTypes);
+        await normalizer.NormalizeAsync([("A1", Business("A1")), ("A2", Business("A2"))], CancellationToken.None);
+        await normalizer.NormalizeAsync([("A3", Business("A3"))], CancellationToken.None);
+        _org.GetStats().Queries.Should().Be(1, "cached");
 
-        normalized.Should().BeEmpty();
-        rejected.Select(r => (r.Key, r.Outcome, r.PrimaryError!.Code)).Should().Equal(
-            ("A1", SyncOutcome.TransientFailure, SalesforceErrors.InvalidRecordType),
-            ("A2", SyncOutcome.PermanentFailure, "STRING_TOO_LONG"));
+        normalizer.InvalidateRecordTypes([("A1", Business("A1"))],
+            [new SyncResult("A1", SyncOutcome.TransientFailure, [new SalesforceError("acct", SalesforceErrors.InvalidRecordType, "refused")])]);
+        await normalizer.NormalizeAsync([("A4", Business("A4"))], CancellationToken.None);
+
+        _org.GetStats().Queries.Should().Be(2, "read again");
     }
 
     // ---------- BuildReadQueries ----------
@@ -181,9 +117,9 @@ public sealed class WriteStepsTests
         var ids = Enumerable.Range(0, 150).Select(i => $"A{i}").ToList();
 
         var queries = Reader().BuildReadQueries(units,
-            [new SoqlQuery("account", "ExternalId__c", ids), new SoqlQuery("Contact", "ExternalId__c", ["C1"]), new SoqlQuery("Profile__c", "ExternalId__c", ["P1"]),
+            [new SoqlQuery("Account", "ExternalId__c", ids), new SoqlQuery("Contact", "ExternalId__c", ["C1"]), new SoqlQuery("Profile__c", "ExternalId__c", ["P1"]),
                 new SoqlQuery("Profile__c", "ExternalId__c", [])],
-            Schemas, maxValuesPerQuery: 100);
+            maxValuesPerQuery: 100);
 
         queries.Select(q => q.SObject).Should().Equal("Account", "Account", "Contact", "Profile__c");
         queries[0].Soql.Should().StartWith("SELECT Name,ExternalId__c,Id FROM Account WHERE ExternalId__c IN ('A0',");
@@ -287,7 +223,7 @@ public sealed class WriteStepsTests
 
     private static Reader Reader()
     {
-        return new Reader(SalesforceStep.Client(SalesforceStep.Http(new ThrowingHandler())), null!);
+        return new Reader(SalesforceStep.Client(SalesforceStep.Http(new ThrowingHandler())));
     }
 
     private static SObjectRecord AccountRecord(string key, string name)
@@ -299,13 +235,18 @@ public sealed class WriteStepsTests
     private static List<ReadQuery> BuildAccountRead(IReadOnlyList<string> ids, int maxValuesPerQuery)
     {
         return Reader().BuildReadQueries(Normalized(new SyncUnit([AccountRecord("A1", "Acme")])),
-            [new SoqlQuery("Account", "ExternalId__c", ids)], Schemas, maxValuesPerQuery);
+            [new SoqlQuery("Account", "ExternalId__c", ids)], maxValuesPerQuery);
     }
 
     private static List<NormalizedUnit> Normalized(SyncUnit unit)
     {
-        var normalized = Normalize(unit.Records[0].ExternalId, unit, Schemas, out var problems);
-        problems.Should().BeEmpty();
-        return [normalized];
+        return [new NormalizedUnit(unit.Records[0].ExternalId,
+            [.. unit.Records.Select(r => new NormalizedRecord(r, r.Fields.ToDictionary(f => f.Key, f => FieldValues.Normalize(f.Value))))])];
+    }
+
+    private Normalizer Normalizer()
+    {
+        var http = SalesforceStep.Http(new FakeSalesforceHandler(_org));
+        return new Normalizer(SalesforceStep.RecordTypes(http, Options.Create(new SalesforceOptions())));
     }
 }

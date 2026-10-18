@@ -24,14 +24,15 @@ internal sealed partial record FakeSoql(string[] Fields, string SObject, string 
         var fields = m.Groups["fields"].Value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         var sobject = m.Groups["obj"].Value;
         var whereField = m.Groups["field"].Value;
-        if (!FakeSchema.Objects.ContainsKey(sobject))
+        var isRecordType = sobject.Equals(FakeSchema.RecordTypeObject, StringComparison.OrdinalIgnoreCase);
+        if (!isRecordType && !FakeSchema.Objects.ContainsKey(sobject))
         {
             throw new FakeSalesforceException(400, "INVALID_TYPE", $"sObject type '{sobject}' is not supported.");
         }
 
         foreach (var f in fields.Append(whereField))
         {
-            if (FakeSchema.Find(sobject, f) is null)
+            if (isRecordType ? !FakeSchema.RecordTypeFields.Contains(f, StringComparer.OrdinalIgnoreCase) : FakeSchema.Find(sobject, f) is null)
             {
                 throw new FakeSalesforceException(400, "INVALID_FIELD", $"No such column '{f}' on entity '{sobject}'.");
             }

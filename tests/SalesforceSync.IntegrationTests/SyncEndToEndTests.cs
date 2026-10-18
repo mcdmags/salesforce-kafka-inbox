@@ -370,7 +370,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     [Fact]
     public async Task A_batch_of_two_objects_costs_a_read_and_an_upsert_per_object()
     {
-        // Warm-up: the first batch after start also describes Account and Profile__c (then cached for 15 minutes)
+        // Warm-up: the first batch after start also reads the record types of Account and Profile__c (then cached for 15 minutes)
         var warm = SyncFixture.NewAccountId();
         await app.PublishAsync(warm, 1, new JsonObject { ["name"] = Any.String("Warm ") }, []);
         await app.WaitForInboxSettledAsync(warm, version: 1);
@@ -393,7 +393,7 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         Delta("upsertRequests").Should().Be(2);
         Delta("recordsSucceeded").Should().Be(2);
         Delta("recordsFailed").Should().Be(0);
-        Delta("describes").Should().Be(0, "Describe results are cached");
+        Delta("recordTypeQueries").Should().Be(0, "record types are cached");
 
         var transport = await app.Salesforce.GetFromJsonAsync<JsonObject>("/__fake/transport");
         ((long)transport!["acceptGzip"]!).Should().BePositive("the worker accepts compressed responses");

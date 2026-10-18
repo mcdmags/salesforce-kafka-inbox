@@ -356,6 +356,13 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
 
             stored[field.Name] = v;
         }
+
+        // A create has to give every required field a value, as a real org insists (a checkbox is never missing: it is false)
+        if (creating && FakeSchema.Objects[sobject].Where(f => f is { Nillable: false, Createable: true, Type: not "boolean" })
+                .Where(f => stored[f.Name] is null).Select(f => f.Name).ToList() is { Count: > 0 } missing)
+        {
+            return (null, Errors("REQUIRED_FIELD_MISSING", $"Required fields are missing: [{string.Join(", ", missing)}]"));
+        }
         return (stored, null);
     }
 }

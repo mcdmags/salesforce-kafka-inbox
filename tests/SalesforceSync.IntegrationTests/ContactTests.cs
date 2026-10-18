@@ -81,7 +81,6 @@ public sealed class ContactTests(SyncFixture app)
         (await app.WaitForInboxSettledAsync(noName, version: 1, SyncFixture.Contacts)).Should().Be((1L, "dead"));
         (await app.GetInboxRowAsync(noName, SyncFixture.Contacts))!.ErrorCode.Should().Be("REQUIRED_FIELD_MISSING");
         (await app.WaitForInboxSettledAsync(good, version: 1, SyncFixture.Contacts)).Should().Be((1L, "done"));
-        (await app.GetWriteRequestsAsync(noName)).Should().BeEmpty("it failed before any call");
     }
 
     [Fact]

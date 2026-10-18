@@ -24,13 +24,6 @@ if (!testMode)
     kafka.WithKafkaUI();
 }
 
-// Describe results shared by every salesforce-sync replica (ConnectionStrings:redis)
-var redis = builder.AddRedis("redis");
-if (!testMode)
-{
-    redis.WithRedisInsight();
-}
-
 // The deploy pipeline's migrate step: runs once, then exits; the sync waits for it to complete
 var migrate = builder.AddProject<Projects.SalesforceSync>("migrate-database")
     .WithReference(inboxDb).WaitFor(inboxDb)
@@ -40,7 +33,6 @@ var migrate = builder.AddProject<Projects.SalesforceSync>("migrate-database")
 var sync = builder.AddProject<Projects.SalesforceSync>("salesforce-sync")
     .WithReference(inboxDb).WaitFor(inboxDb).WaitForCompletion(migrate)
     .WithReference(kafka).WaitFor(kafka)
-    .WithReference(redis).WaitFor(redis)
     .WithEnvironment("Sync__Workers", "4");
 
 // A real org (a sandbox) when the AppHost's user secrets hold Salesforce:InstanceUrl, ClientId and ClientSecret

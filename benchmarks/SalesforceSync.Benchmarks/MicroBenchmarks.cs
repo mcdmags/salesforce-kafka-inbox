@@ -24,8 +24,6 @@ public class MicroBenchmarks
     private AccountSObject _sobject = default!;
     private JsonElement _number;
     private JsonElement _datetime;
-    private readonly SalesforceField _currency = new("AnnualRevenue", "currency", 0, 18, 2, true, true, true);
-    private readonly SalesforceField _stamp = new("Last_Contacted__c", "datetime", 0, 0, 0, true, true, true);
 
     [GlobalSetup]
     public void Setup()
@@ -116,12 +114,12 @@ public class MicroBenchmarks
     [Benchmark]
     public bool DiffNumber()
     {
-        return FieldValues.TryNormalize(_currency, "87.499", out var v, out _) && FieldValues.AreEqual(_currency, v, _number);
+        return FieldValues.AreEqual(FieldValues.Normalize(87.5m), _number);
     }
 
     [Benchmark]
     public bool DiffDateTime()
     {
-        return FieldValues.TryNormalize(_stamp, "2026-10-12T01:02:03Z", out var v, out _) && FieldValues.AreEqual(_stamp, v, _datetime);
+        return FieldValues.AreEqual(FieldValues.Normalize(new DateTimeOffset(2026, 10, 12, 1, 2, 3, TimeSpan.Zero)), _datetime);
     }
 }

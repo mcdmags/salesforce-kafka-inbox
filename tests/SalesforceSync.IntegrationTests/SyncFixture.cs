@@ -13,12 +13,11 @@ using SalesforceSync.Data.Inbox;
 using SalesforceSync.IntegrationTests.Hosting;
 using Testcontainers.Kafka;
 using Testcontainers.PostgreSql;
-using Testcontainers.Redis;
 
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// The whole sync, started once per xUnit collection: Postgres and Kafka (and Redis, if asked) in containers (Testcontainers), the mock
+/// The whole sync, started once per xUnit collection: Postgres and Kafka in containers (Testcontainers), the mock
 /// Salesforce org on Kestrel in this process, and <see cref="Pods"/> worker pods, each an in-process
 /// <see cref="Microsoft.Extensions.Hosting.IHost"/> wired by the worker's own registrations. Tests produce to Kafka
 /// and assert on the mock org and the Postgres inbox. Subclasses reshape the deployment (pods, per-pod settings, the
@@ -57,9 +56,6 @@ public class SyncFixture : IAsyncLifetime
 
     private readonly KafkaContainer _kafka = new KafkaBuilder("apache/kafka:3.9.1").Build();
 
-    /// <summary>Only with <see cref="SharedDescribeCache"/>.</summary>
-    private RedisContainer? _redis;
-
     private readonly List<WorkerPod> _pods = [];
     private FakeOrgHost? _org;
     private IProducer<string, string>? _producer;
@@ -78,12 +74,6 @@ public class SyncFixture : IAsyncLifetime
     }
 
     public int Pods { get; }
-
-    /// <summary>
-    /// The pods share their Describe cache through Redis (a container, <c>ConnectionStrings:redis</c>), as in production;
-    /// otherwise each pod has its own in-memory one.
-    /// </summary>
-    protected bool SharedDescribeCache { get; init; }
 
     /// <summary>
     /// Configuration every pod gets on top of the worker's appsettings.json (like the environment variables of a
@@ -136,8 +126,7 @@ public class SyncFixture : IAsyncLifetime
         var ct = cts.Token;
 
         var org = FakeOrgHost.StartAsync(FakeOrgSettings, ct);
-        _redis = SharedDescribeCache ? new RedisBuilder("redis:7.4-alpine").Build() : null;
-        await Task.WhenAll(_postgres.StartAsync(ct), _kafka.StartAsync(ct), org, _redis?.StartAsync(ct) ?? Task.CompletedTask);
+        await Task.WhenAll(_postgres.StartAsync(ct), _kafka.StartAsync(ct), org);
         _org = await org;
         Salesforce = new HttpClient { BaseAddress = _org.Url };
 
@@ -164,8 +153,7 @@ public class SyncFixture : IAsyncLifetime
                 ["ConnectionStrings:kafka"] = kafka,
                 ["Salesforce:InstanceUrl"] = instanceUrl,
                 // Pods share a process here, so name them apart (the mock org counts requests per User-Agent)
-                ["Salesforce:UserAgentInstance"] = $"pod-{i}",
-                ["ConnectionStrings:redis"] = _redis?.GetConnectionString()
+                ["Salesforce:UserAgentInstance"] = $"pod-{i}"
             };
             if (!migrated)
             {
@@ -200,8 +188,7 @@ public class SyncFixture : IAsyncLifetime
             await _org.DisposeAsync();
         }
 
-        await Task.WhenAll(_kafka.DisposeAsync().AsTask(), _postgres.DisposeAsync().AsTask(),
-            _redis?.DisposeAsync().AsTask() ?? Task.CompletedTask);
+        await Task.WhenAll(_kafka.DisposeAsync().AsTask(), _postgres.DisposeAsync().AsTask());
     }
 
     /// <summary>

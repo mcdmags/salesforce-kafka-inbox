@@ -41,10 +41,10 @@ public class ApiPathTests
         var http = new HttpClient(new Recorder(paths)) { BaseAddress = new Uri("https://fake.my.salesforce.com") };
         var client = new SalesforceRestClient(http, Options.Create(new SalesforceOptions { BaseApiPath = "/proxy/sf", ApiVersion = "v70.0" }));
 
-        await client.DescribeAsync("Account", null, CancellationToken.None);
+        await client.SelectAsync(SalesforceRestClient.Soql("Account", ["Id"], "ExternalId__c", ["A1"]), CancellationToken.None);
         await client.DeleteAsync(["001000000000000AAA"], CancellationToken.None);
 
-        paths.Should().Equal("/proxy/sf/v70.0/sobjects/Account/describe", "/proxy/sf/v70.0/composite/sobjects");
+        paths.Should().Equal("/proxy/sf/v70.0/query", "/proxy/sf/v70.0/composite/sobjects");
     }
 
     private sealed class Recorder(List<string> paths) : HttpMessageHandler
@@ -52,7 +52,7 @@ public class ApiPathTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             paths.Add(request.RequestUri!.AbsolutePath);
-            var body = request.Method == HttpMethod.Get ? """{"name":"Account","fields":[],"recordTypeInfos":[]}""" : "[]";
+            var body = request.Method == HttpMethod.Get ? """{"totalSize":0,"done":true,"records":[]}""" : "[]";
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
         }
     }

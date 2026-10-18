@@ -1,4 +1,3 @@
-using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
@@ -62,7 +61,7 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     /// <summary>
     /// The part of <see cref="MaxUriAndHeadersBytes"/> left to the headers this client sends: Authorization (a Bearer
     /// access token, about 100 bytes opaque, a JWT-based one a few times that), Host (the instance), User-Agent,
-    /// Accept-Encoding, Content-Type, Content-Length, Content-Encoding, If-Modified-Since, and their framing. They come
+    /// Accept-Encoding, Content-Type, Content-Length, Content-Encoding, and their framing. They come
     /// to well under 1 KB; 4 KB leaves room for a long token or a proxy's additions.
     /// </summary>
     public const int HeaderAllowanceBytes = 4_096;
@@ -71,33 +70,6 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     public const int MaxUrlBytes = MaxUriAndHeadersBytes - HeaderAllowanceBytes;
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
-
-    /// <summary>
-    /// sObject Describe: the fields and the record types (<c>recordTypeInfos</c>); with
-    /// <paramref name="ifModifiedSince"/>, returns null on 304 Not Modified.
-    /// </summary>
-    public async Task<SObjectSchema?> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Get, EnsureFits($"{DataPath}/sobjects/{sobject}/describe"));
-        if (ifModifiedSince is { } since)
-        {
-            // A 304 still counts as an API call but skips the large Describe download. The schema cache (in-memory and
-            // shared through Redis) is what saves the calls: it asks at most once per refresh interval, across all pods.
-            request.Headers.IfModifiedSince = since;
-        }
-
-        using var res = await http.SendAsync(request, ct);
-        if (res.StatusCode == HttpStatusCode.NotModified)
-        {
-            return null;
-        }
-
-        await EnsureSuccessAsync(res, ct);
-
-        var body = await res.Content.ReadFromJsonAsync<DescribeBody>(Json, ct)
-                   ?? throw new InvalidOperationException($"Empty describe response for {sobject}");
-        return new SObjectSchema(body.Name, body.Fields, body.RecordTypeInfos);
-    }
 
     /// <summary>Runs one SOQL query: all its rows.</summary>
     /// <exception cref="ArgumentException">The query's URL is longer than <see cref="MaxUrlBytes"/>.</exception>
@@ -235,6 +207,5 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
 
     // ---------- DTOs ----------
 
-    private sealed record DescribeBody(string Name, List<SalesforceField> Fields, List<SalesforceRecordType>? RecordTypeInfos);
     private sealed record QueryPage(List<JsonElement> Records, string? NextRecordsUrl);
 }

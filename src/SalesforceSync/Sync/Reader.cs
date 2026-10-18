@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using SalesforceSync.Infrastructure.Salesforce;
 using static SalesforceSync.Sync.Normalizer;
 
@@ -8,7 +9,7 @@ namespace SalesforceSync.Sync;
 /// Step 3. Reads what Salesforce has now for the records of the batch: the queries (chunked to fit a URL), one call per
 /// object, and the rows indexed for the diff.
 /// </summary>
-internal sealed class Reader(ISalesforceRestClient salesforce, SalesforceSchemaCache schemaCache)
+internal sealed partial class Reader(ISalesforceRestClient salesforce)
 {
     /// <summary>A query of the batch's read and the object its rows belong to.</summary>
     internal sealed record ReadQuery(string Soql, string SObject);
@@ -20,29 +21,26 @@ internal sealed class Reader(ISalesforceRestClient salesforce, SalesforceSchemaC
     /// </summary>
     /// <exception cref="InvalidOperationException">A query's URL is too long even with a single value.</exception>
     internal List<ReadQuery> BuildReadQueries(IReadOnlyList<NormalizedUnit> units, IReadOnlyList<SoqlQuery> queries,
-        IReadOnlyDictionary<string, SObjectSchema> schemas, int maxValuesPerQuery)
+        int maxValuesPerQuery)
     {
         var records = units.SelectMany(u => u.Records).ToList();
         var read = new List<ReadQuery>();
 
         foreach (var query in queries.Where(q => q.Values.Count > 0))
         {
-            var target = schemas[query.SObject];
-
             // What the diff compares, the external ids its records and the foreign keys to it are matched by, the field the
             // query filters on, and the Id
-            var fields = records.Where(r => r.Schema == target)
-                .SelectMany(r => r.Fields.Keys.Select(f => f.Name).Append(r.Record.ExternalIdField))
+            var fields = records.Where(r => r.Record.SObject.Equals(query.SObject, StringComparison.OrdinalIgnoreCase))
+                .SelectMany(r => r.Fields.Keys.Append(r.Record.ExternalIdField))
                 .Concat(records.SelectMany(r => r.Record.Parents)
-                    .Where(p => target.Name.Equals(p.SObject, StringComparison.OrdinalIgnoreCase)).Select(p => p.ExternalIdField))
+                    .Where(p => query.SObject.Equals(p.SObject, StringComparison.OrdinalIgnoreCase)).Select(p => p.ExternalIdField))
                 .Append(query.WhereField)
                 .Append("Id")
-                .Select(f => target.Find(f)?.Name ?? f)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            read.AddRange(Chunked(target.Name, fields, query.WhereField, query.Values.Distinct(StringComparer.Ordinal), maxValuesPerQuery)
-                .Select(soql => new ReadQuery(soql, target.Name)));
+            read.AddRange(Chunked(query.SObject, fields, query.WhereField, query.Values.Distinct(StringComparer.Ordinal), maxValuesPerQuery)
+                .Select(soql => new ReadQuery(soql, query.SObject)));
         }
 
         return read;
@@ -90,26 +88,45 @@ internal sealed class Reader(ISalesforceRestClient salesforce, SalesforceSchemaC
         }
     }
 
-    internal async Task<CurrentRecords> ReadCurrentAsync(IReadOnlyList<ReadQuery> queries, IEnumerable<string> describedSObjects,
+    /// <summary>What Salesforce has now for the records the queries ask for.</summary>
+    /// <exception cref="MappingErrorException">
+    /// Salesforce has no such field on an object (INVALID_FIELD): the diff needs the fields the code sends, so this is the
+    /// first place a wrong mapping shows, before anything is written. It names the entities that have a record of that object.
+    /// </exception>
+    internal async Task<CurrentRecords> ReadCurrentAsync(IReadOnlyList<ReadQuery> queries, IReadOnlyList<NormalizedUnit> units,
         CancellationToken ct)
     {
         var rows = new List<(string SObject, JsonElement Row)>();
-        try
+        foreach (var query in queries)
         {
-            foreach (var query in queries)
+            try
             {
                 rows.AddRange((await salesforce.SelectAsync(query.Soql, ct)).Select(row => (query.SObject, row)));
             }
-        }
-        catch (SalesforceResponseException ex) when (ex.ErrorCode == "INVALID_FIELD")
-        {
-            // The cached describe is out of date (a field was removed or renamed): describe again next time
-            await InvalidateAsync(describedSObjects, ct);
-            throw;
+            catch (SalesforceResponseException ex) when (ex.ErrorCode == "INVALID_FIELD")
+            {
+                throw new MappingErrorException([.. UnitsWithField(units, query.SObject, ex.Message)
+                    .Select(u => (u.Key, new SalesforceError(u.Records[0].ReferenceId, "INVALID_FIELD", ex.Message)))]);
+            }
         }
 
         return new CurrentRecords(rows);
     }
+
+    /// <summary>
+    /// The units whose records of the object send the column Salesforce names in its "No such column 'X'" message; all
+    /// of the object's when the message names none of them.
+    /// </summary>
+    private static List<NormalizedUnit> UnitsWithField(IReadOnlyList<NormalizedUnit> units, string sobject, string message)
+    {
+        var ofObject = units.Where(u => u.Records.Any(r => r.Record.SObject.Equals(sobject, StringComparison.OrdinalIgnoreCase))).ToList();
+        var column = NoSuchColumn().Match(message) is { Success: true } m ? m.Groups["column"].Value : null;
+        var named = ofObject.Where(u => u.Records.Any(r => r.Fields.ContainsKey(column ?? ""))).ToList();
+        return named.Count > 0 ? named : ofObject;
+    }
+
+    [GeneratedRegex(@"No such column (?:'|\\u0027)(?<column>[^'\\]+)")]
+    private static partial Regex NoSuchColumn();
 
     /// <summary>A record as Salesforce has it now: the fields the read selected, by API name (case-insensitive).</summary>
     internal sealed class CurrentRecord(Dictionary<string, JsonElement> fields)
@@ -149,14 +166,6 @@ internal sealed class Reader(ISalesforceRestClient salesforce, SalesforceSchemaC
         public CurrentRecord? Find(string sobject, string field, string value)
         {
             return _index.GetValueOrDefault((sobject.ToLowerInvariant(), field.ToLowerInvariant(), value));
-        }
-    }
-
-    private async Task InvalidateAsync(IEnumerable<string> sobjects, CancellationToken ct)
-    {
-        foreach (var sobject in sobjects)
-        {
-            await schemaCache.InvalidateAsync(sobject, ct);
         }
     }
 }

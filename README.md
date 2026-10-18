@@ -40,15 +40,15 @@ account, is deleted in Salesforce. Several things make this harder than "consume
 | Bursts of updates to one entity | Pending events for an entity are **coalesced** in the inbox: every event carries the full record, so an event with a newer `meta.time` (or the same, stored later) overwrites the entity's row, and what a claim writes is the newest event stored before it. Five updates in five seconds become one Salesforce write with the newest data. An event that overwrites a row while a worker writes the event it claimed is not lost: that worker's outcome is recorded only on rows that still hold the event time it claimed, and the newer event is claimed next. |
 | Late or replayed older events | **Never stored**: the entity's row is overwritten only by an event newer than the one it holds, or as new while that one is not `done` yet (`InboxRepository.StoreSql`, by `event_time`). An older event, or a redelivery of an event already in Salesforce, changes nothing and is never claimed, so it can't be written. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement is conditional on its `lock_token` on the entity's row. |
-| Mapping errors | A field the code sends that Salesforce doesn't have (`INVALID_FIELD`) or won't let us set (`INVALID_FIELD_FOR_INSERT_UPDATE`) is wrong for every event of that kind, so it **stops the inbox** instead of dead-lettering one entity at a time. Before any write, the batch's rows and every other due row of that inbox are held (`MAPPING_ERROR`) for `Sync:MappingErrorHold` (5 minutes), with the error on the row (`last_error`: the field and the object) and an ERROR in the log. Nothing is dead-lettered and no attempt is spent, so after the fix is deployed (or the field added) the rows go on with no replay. The cached Describe is dropped first and read again once, so a field that was only just added to the org does not stop anything. |
+| Mapping errors | A field the code sends that Salesforce doesn't have (`INVALID_FIELD`) or won't let us set (`INVALID_FIELD_FOR_INSERT_UPDATE`) is wrong for every event of that kind, so it **stops the inbox** instead of dead-lettering one entity at a time. Salesforce itself finds it: `INVALID_FIELD` on the read (the read selects every field the code sends, so a field missing in the org shows before anything is written) or `INVALID_FIELD_FOR_INSERT_UPDATE` / `INVALID_FIELD` in a write's answer (the other entities of that write are saved already and are read as unchanged next time). The batch's rows and every other due row of that inbox are then held (`MAPPING_ERROR`) for `Sync:MappingErrorHold` (5 minutes), with the error on the row (`last_error`: the field and the object) and an ERROR in the log. Nothing is dead-lettered and no attempt is spent, so after the fix is deployed (or the field added) the rows go on with no replay. The rows named are those whose records send the column Salesforce names (all of the object's when it names none). Nothing is cached about the org's fields, so a field that was only just added is found at once. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
 | Records that belong together | Written in the same batch, **parents first**: the Accounts' **upsert** is one call, then the Profiles' is another. The org's foreign keys are **Text fields holding the parent's external id** (`Profile__c.AccountId__c` = the account key), declared with `[SObjectForeignKey]`: written as the text, never resolved to an Id, never a reference. A parent of another inbox (a relationship's or a contact's Account) must already be in Salesforce: the read checks, and a missing one makes the entity wait (`DEPENDENCY_NOT_SYNCED`) with nothing sent. Each record is saved or rejected on its own (`allOrNone: false`); the entity is done only when all of its records are in. An entity that failed in one call is not sent in the next: its outcome is already decided. See [Writing to Salesforce](#writing-to-salesforce). |
 | Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. `inserted` and `updated` are the same to the sync. |
 | Deletes | A child gone from an aggregate's `after` (or the whole Account, when `after` is missing) is a `deleted` event in its inbox, ordered by `meta.time` like any other: an older insert can't bring it back, a newer one recreates it. The batch's read finds the record's Id by its external id, and every record to delete goes into one **sObject Collections delete** by Id (`DELETE /composite/sobjects?ids=...&allOrNone=false`), after the batch's upserts. A record the read doesn't find (never synced, or deleted already) costs nothing and is done. Already deleted is success, a refusal is permanent or transient by its code, a lost answer is held (`UNKNOWN_OUTCOME`). See [Deletes](#deletes). |
-| Change-only updates | **Type-aware diff against Salesforce**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are normalized with the fields' cached Describe metadata (number scale, checkbox `null` → `false`, 15 → 18-character ids, multi-select as a set, date/time to the second and time to the millisecond, int/long within their `digits`, 18-character ids checked against their case suffix, `""` = `null`) and only fields that differ are sent, in their normalized form, so a value Salesforce stores differently never rewrites itself on every event. The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
-| Batching and API calls | Every call is one operation on many records (`SelectAsync`, `UpsertAsync`, `DeleteAsync`); there is no Composite request. **One read call per object** per batch of up to `Sync:BatchSize` entities (75, max 100): a query of up to 100 external ids (the row type's `MaxValuesPerQuery`), whose URL fits Salesforce's 16,384-byte limit on a call's URI and headers (long ids split a query further). Then, after the diff, the writes: **one `UpsertAsync` per object** (≤180 records, the row type's `MaxRecordsPerWrite`, under Salesforce's 200), parents first, with exactly the planned fields, matched by external id; then **one `DeleteAsync`** of the Ids to delete (≤180). So a batch of new Accounts with their Profiles costs 4 calls (two reads, two upserts), an Account-only change 3 (two reads, one upsert: the Profile is read too), and relationships and contacts 3 (their own object and the Account they point at, read; one upsert). A batch of deletes only is its reads plus one delete, and a delete Salesforce has nothing for costs the reads only. See [One call per object](#one-call-per-object) for the cost against Composite requests. Describe is cached and revalidated with `If-Modified-Since`. Request bodies are gzipped, responses accepted compressed. |
-| Record types | Every synced object has a record type, named by developer name on its sObject class (`[SObject("Account", …, RecordType = "Business")]`). Its Id comes from the `recordTypeInfos` of the object's cached Describe, so it costs no extra call, and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't offer fails the entity before any call (`INVALID_RECORD_TYPE`, retried) and makes the next batch describe again. See [Record types](#record-types). |
-| Bad records | A value Salesforce would reject (unknown or read-only field, too long, wrong type, required field emptied) fails only its own unit, before any call; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
+| Change-only updates | **Diff against Salesforce by the value's .NET type**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are put in a canonical form by their type (`""` = `null`, numbers as decimals, date/time to the second, time to the millisecond; a checkbox `null` equals Salesforce's `false`) and only fields that differ are sent. The org's field metadata is not read, so a value Salesforce stores differently (a number with more decimals than the field's scale, multi-select values in another order than the picklist's) looks changed and is written again: the mapping should send values as Salesforce stores them. A new record's `null` checkbox is not sent (Salesforce defaults it to `false`). The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
+| Batching and API calls | Every call is one operation on many records (`SelectAsync`, `UpsertAsync`, `DeleteAsync`); there is no Composite request. **One read call per object** per batch of up to `Sync:BatchSize` entities (75, max 100): a query of up to 100 external ids (the row type's `MaxValuesPerQuery`), whose URL fits Salesforce's 16,384-byte limit on a call's URI and headers (long ids split a query further). Then, after the diff, the writes: **one `UpsertAsync` per object** (≤180 records, the row type's `MaxRecordsPerWrite`, under Salesforce's 200), parents first, with exactly the planned fields, matched by external id; then **one `DeleteAsync`** of the Ids to delete (≤180). So a batch of new Accounts with their Profiles costs 4 calls (two reads, two upserts), an Account-only change 3 (two reads, one upsert: the Profile is read too), and relationships and contacts 3 (their own object and the Account they point at, read; one upsert). A batch of deletes only is its reads plus one delete, and a delete Salesforce has nothing for costs the reads only. See [One call per object](#one-call-per-object) for the cost against Composite requests. The first batch of a pod, and then every 15 minutes (`Salesforce:RecordTypeRefreshInterval`), adds one query on `RecordType` per object that has a record type. Request bodies are gzipped, responses accepted compressed. |
+| Record types | Every synced object has a record type, named by developer name on its sObject class (`[SObject("Account", …, RecordType = "Business")]`). Its Id comes from one SOQL query on `RecordType` per object, cached in the process for `Salesforce:RecordTypeRefreshInterval` (15 minutes), and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't have (or not active) fails that entity alone before any write (`INVALID_RECORD_TYPE`, retried) and makes the next batch read the record types again. See [Record types](#record-types). |
+| Bad records | A value Salesforce rejects (too long, wrong type, required field emptied, a validation rule) fails only its own unit, by Salesforce's answer for that record (permanent or transient by its code; a required field emptied on an *update* is retried until `MaxRetries`, since the code can also mean the record was deleted meanwhile); an unknown or read-only field is a mapping error and stops the inbox; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a parent not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
 | Postgres failures | Every unit of work (claim, outcomes, ingest, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` around a transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new transaction, change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
 | Rate limits | Salesforce publishes a daily total (a soft limit, rolling 24 hours) and a cap on concurrent long-running requests, and no per-second limit (see [Salesforce API limits](#salesforce-api-limits)). Each process keeps an in-memory **token bucket**, pause and throttle: the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) slows it down at 80% and pauses it at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause the process that gets them. `Sync:Workers` x pods is kept under the org's concurrent limit by configuration. Rate-limited batches are handed back without spending an attempt. |
@@ -69,7 +69,7 @@ Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per 
                                                                 ▼
                               SalesforceBatchSyncService.SyncBatchAsync<TEvent, TRow>(strategy, IRepository<TRow>)
                                 claim → each entity's newest event → map
-                                → describe → normalize → 1 query per object → decide (diff + parents)
+                                → normalize → 1 query per object → decide (diff + parents)
                                 → write: 1 collections upsert per level and object, parents first, and
                                   1 collections delete (by Id) last
                                 → per-record results → outcome per entity → record outcomes
@@ -85,9 +85,9 @@ The sync is three layers, each with one job:
 
 | Layer | Classes | Does |
 |---|---|---|
-| **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `SelectAsync`, and `UpsertAsync` and `DeleteAsync` for Collections upserts and deletes); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext` and `PostgresRetryStrategy`) | Sends requests and returns raw results. Decides nothing. |
-| **Business flow** | `SalesforceBatchSyncService` | `SyncBatchAsync` is the sync as a list of steps: claim → map each entity's event → `WriteToSalesforceAsync` (describe → normalize → read → diff → send) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | in `Sync/`, one file per step, in the order a batch runs them: `PreparedBatch` (`Prepare`: read and map; `Outcomes`: entity results → inbox outcomes), then `Describer` (field metadata, cached), `Normalizer` (values against Describe, via `FieldValues`), `Reader` (the read's SOQL and what it found), `Differ` (the diff: changed fields, create / update / delete / unchanged, `DEPENDENCY_NOT_SYNCED`), `Sender` (one upsert per object, parents first, then the delete; an entity that failed is not sent again) and `Interpreter` (one record's answer → saved, retry or dead-letter); and `AccountAggregate` (a Kafka aggregate → the changed entities' events) | Pure and deterministic, except `Describer`, `Reader` and `Sender`, which call the client; unit-tested without a database or HTTP. |
+| **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `SelectAsync`, and `UpsertAsync` and `DeleteAsync` for Collections upserts and deletes); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext` and `PostgresRetryStrategy`) | Sends requests and returns raw results. Decides nothing. |
+| **Business flow** | `SalesforceBatchSyncService` | `SyncBatchAsync` is the sync as a list of steps: claim → map each entity's event → `WriteToSalesforceAsync` (normalize → read → diff → send) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
+| **Rules, no I/O** | in `Sync/`, one file per step, in the order a batch runs them: `PreparedBatch` (`Prepare`: read and map; `Outcomes`: entity results → inbox outcomes), then `Normalizer` (values in canonical form via `FieldValues`, record types to their Ids via `RecordTypeCache`), `Reader` (the read's SOQL and what it found), `Differ` (the diff: changed fields, create / update / delete / unchanged, `DEPENDENCY_NOT_SYNCED`), `Sender` (one upsert per object, parents first, then the delete; an entity that failed is not sent again) and `Interpreter` (one record's answer → saved, retry or dead-letter); and `AccountAggregate` (a Kafka aggregate → the changed entities' events) | Pure and deterministic, except `Normalizer` (through `RecordTypeCache`), `Reader` and `Sender`, which call the client; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`). The
 model defines every table in `OnModelCreating` (partial indexes with `HasFilter`, autovacuum settings with
@@ -105,66 +105,33 @@ lost claim attempt's leases) are the SQL texts of `InboxRepository` run unchange
 (`new { ids, times, token }`), since `FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have
 no LINQ form. The rate limiter's `RateLimitSql` only locks its row (`FOR UPDATE`) and reads the database clock.
 
-### The Describe cache
+### The record type cache
 
-Describe results (fields and record types) are cached by `SalesforceSchemaCache`, in two layers:
+The only metadata of the org the sync reads is its record types' Ids (Salesforce takes `RecordTypeId` as an Id, which
+differs between orgs). `RecordTypeCache` reads them with one SOQL query per object that has a record type
+(`SELECT Id, DeveloperName, IsActive FROM RecordType WHERE SobjectType IN ('Account')`), keeps the active ones by developer
+name in the process for `Salesforce:RecordTypeRefreshInterval` (15 min), and shares one in-flight read per object between
+the worker loops (a `SemaphoreSlim`). When a developer name is missing, or Salesforce rejects a `RecordTypeId`
+(`INVALID_RECORD_TYPE`), the object's entry is dropped and read again by the next batch. Two pods, or two objects, read
+independently: that costs one call per object per pod per interval, never correctness. Nothing is shared between pods
+and nothing needs Redis.
 
-| Layer | What it holds | Shared by |
+### Why the sync does not call Describe
+
+The sync used to read each object's Describe (cached per process, shared through Redis, revalidated with
+`If-Modified-Since`). Caching Describe is what Salesforce recommends when metadata is needed, but the sync can do without
+it, and the cache, the Redis layer and the rules built on it were a lot of code for little: Salesforce checks every
+write itself, so the sync now sends what the mapping says and reads Salesforce's answer.
+
+| | With Describe | Without |
 |---|---|---|
-| In process | The snapshot every worker loop reads without I/O; one describe in flight per object | The pod's worker loops |
-| `IDistributedCache` (Redis) | The same snapshot as JSON: fields, record types, when it was fetched and last checked | Every pod |
-
-A pod whose own snapshot is missing or older than `Salesforce:SchemaRefreshInterval` (15 min) first looks in Redis. An
-entry checked within the interval (by any pod) is used as it is, without calling Salesforce, so the org is described
-about once per interval in total rather than once per pod, and a new pod starts warm. Otherwise the pod describes with
-`If-Modified-Since` (the entry's date), reuses the stored schema on 304 Not Modified, and writes the result back.
-
-- **Key**: `salesforce-sync:describe:{org host}:{API version}:{object, lower case}`, e.g.
-  `salesforce-sync:describe:acme.my.salesforce.com:v62.0:account`. Different orgs and API versions never share one.
-- **Expiry**: 1 day (absolute). Much longer than the refresh interval on purpose: an entry too old to trust still
-  dates the conditional describe, so a 304 replaces a download.
-- **Invalidation**: when Salesforce rejects a field the cached schema has (`INVALID_FIELD` on the read) or a record
-  type is missing (`INVALID_RECORD_TYPE`), the object's entry is invalidated in the pod **and removed from Redis**, so
-  every pod describes it again.
-- **Failures**: the shared layer only saves calls. If Redis is unreachable, slower than 2 seconds, or holds an entry
-  that can't be read, the pod logs a warning (at most once a minute) and describes as if the entry were missing.
-  Syncing never waits for or fails because of Redis.
-- **Configuration**: `ConnectionStrings:redis` (Aspire injects it; elsewhere set `ConnectionStrings__redis`, e.g.
-  `redis:6379`). Without it the shared layer is an in-memory cache of the process (`AddDistributedMemoryCache`), so
-  tests, benchmarks and single-process runs need no Redis.
-
-Two pods that miss at the same moment may both describe once; that costs a call, never correctness.
-
-**Why Redis.** Without it every pod describes every object once per interval, and a pod that starts (a deploy, a
-scale-out) describes everything before its first batch. With it the pods pool their describes: one call per object
-per interval for the whole deployment, and new pods start warm. It is optional, and never on the critical path: a
-cache failure means a describe, not a failed batch.
-
-### Why the sync calls Describe
-
-Change-only writes depend on it. To decide that a value is unchanged, the sync must compare it in the form Salesforce
-stores it, and only Describe says what that is:
-
-- **Normalization**: number scale and precision, int digits, date/time to the second, checkbox `null` → `false`, text
-  length, required fields.
-- **Validation before any call**: an unknown or read-only field (`INVALID_FIELD`), a lookup that isn't a reference
-  (or a foreign key that is one), a value that would be rejected. The entity fails on its own instead of costing a write.
-- **The read query**: which fields to select.
-- **The diff**: whether a field is createable or updateable.
-- **Record types**: the developer name → `RecordTypeId` (`recordTypeInfos`).
-
-**Is it best practice?** Caching Describe and revalidating it with `If-Modified-Since` is what Salesforce's REST API
-documentation recommends, and what generic integration tools do. The cost is about one call per object per refresh
-interval: with 4 objects and 15 minutes, 384 calls a day (a 304 still counts as a call). That was per pod; with the
-shared Redis layer it is for the whole deployment.
-
-| Alternative | Gains | Loses |
-|---|---|---|
-| Upsert everything by external id (no Describe, no read, no diff) | Two fewer steps | Every event writes every field: triggers, flows, field history and `LastModifiedDate` fire on every event, and bursts multiply writes. A bad value costs a call and comes back as a per-record error. |
-| Hard-coded field metadata | No calls | Drifts silently when an admin changes a field (scale, length, read-only). |
-| Describe once at startup, refresh only on `INVALID_FIELD` | Fewer calls | Misses scale or read-only changes until the next restart. |
-
-Recommendation: keep it. To spend fewer calls, raise `Salesforce:SchemaRefreshInterval`.
+| Unknown field | Found before any call, from the cached metadata | Found by the read (`INVALID_FIELD`), before any write; stops the inbox either way |
+| Read-only field | Found by the diff, before any write | Found in the write's answer (`INVALID_FIELD_FOR_INSERT_UPDATE`); the other entities of that write are saved, and the inbox stops |
+| Too long, wrong type, required field emptied, lookup vs foreign key | The unit failed alone before any call | The unit fails alone by Salesforce's answer for its record (a call is spent on it) |
+| Number scale, checkbox, id case, multi-select order | Normalized to what Salesforce stores | Compared by the .NET value: a value Salesforce stores differently is written again until the mapping sends it as stored |
+| Record type Ids | From the cached Describe | One `RecordType` query per object per interval |
+| Calls | One Describe (or 304) per object per interval | One `RecordType` query per object that has one, per interval |
+| Moving parts | Cache, shared Redis layer, schema types | A small cache of Ids |
 
 ## Event format
 
@@ -293,8 +260,8 @@ the target's external id. The attributes are read by reflection once per class
 (`SObjectMetadata<TSObject>.Instance`, with compiled property getters), not per event; a class declared wrongly (a
 property without `[JsonPropertyName]`, no external id property, a blank record type) fails the first time it is used.
 `RecordType` is a required member of `[SObject]`, so leaving it out doesn't compile. A unit test checks
-every name on every sObject class, record type included, against the mock org's schema (`FakeSchema`, whose Describe
-serves each object's record types and which rejects an unknown `RecordTypeId` like Salesforce), which catches typos.
+every name on every sObject class, record type included, against the mock org's schema (`FakeSchema`, whose `RecordType` rows
+answer the record type query and which rejects an unknown `RecordTypeId` like Salesforce), which catches typos.
 
 ## The inbox
 
@@ -647,7 +614,7 @@ the entity were released and a newer event synced in the meantime, the late writ
 - **What does not**: anything Salesforce itself answered (4xx including 429, `REQUEST_LIMIT_EXCEEDED`, per-record
   errors, a 5xx with a Salesforce error body), a connection that was never established (refused, DNS, TLS), and
   failures before the request left (waiting for a rate-limit token, getting the OAuth token). Failures of the
-  describe or the read are never unknown: nothing was written. These follow the normal rules at once.
+  record type query or the read are never unknown: nothing was written. These follow the normal rules at once.
 - **What happens**: every entity of that batch is held: its row gets `next_attempt_at = now() +
   Sync:UnknownOutcomeHold` and loses its lease (no `lock_token`: the old worker can't record anything on it); it stays
   `pending` with `last_error_code = 'UNKNOWN_OUTCOME'`, and the attempt doesn't count. A
@@ -743,8 +710,9 @@ A batch is written with plain, bulk calls: **one sObject Collections upsert per 
 Id for the records to delete (`DELETE /composite/sobjects?ids=...`, [Deletes](#deletes)). Each is one call and takes up
 to 200 records; there is no Composite request. The steps, in the order the code reads (one file per step in `Sync/`):
 
-1. **Normalize** (`Normalizer`): each record is checked against Describe and its values put in the form Salesforce
-   stores. A record Salesforce would reject fails its entity here, before any call.
+1. **Normalize** (`Normalizer`): each record's values are put in a canonical form by their .NET type, and its record
+   type becomes its `RecordTypeId` (`RecordTypeCache`). An entity whose record type the org doesn't have fails here,
+   alone; everything else Salesforce rejects, it rejects at the write.
 2. **Read** (`Reader`): one query per object (`SelectAsync`), by external id, for what the
    diff compares.
 3. **Diff** (`Differ`): each record becomes a create (all its non-empty fields), an update (only the fields that
@@ -888,25 +856,23 @@ Every synced object must have a record type, and each sObject class names it by 
 ```
 
 These are defaults; they must match record types in the org (see
-[step 4](#4-create-the-objects-and-fields)). The engine turns the name into an Id with the RecordType data Salesforce
-returns in the object's Describe (`recordTypeInfos`: `developerName`, `recordTypeId`, `active`, `available` for the
-running user). It is the same Describe the engine already calls for the fields, so the record type Ids are cached with
-it (`SalesforceSchemaCache`: same refresh interval, `If-Modified-Since`, one fetch in flight per object): no extra call
-and no second cache.
+[step 4](#4-create-the-objects-and-fields)). The engine turns the name into an Id with one SOQL query per object on Salesforce's `RecordType`
+(`SELECT Id, DeveloperName, IsActive FROM RecordType WHERE SobjectType IN ('Account')`), cached in the process for
+`Salesforce:RecordTypeRefreshInterval` (15 minutes; see [The record type cache](#the-record-type-cache)). That is one
+extra call per object per interval per pod.
 
 `RecordTypeId` is then an ordinary field of the record's desired state: set on create, read back by the batch's read,
-compared after normalization (15 → 18-character id), and written on update only when Salesforce has another one
+compared as text, and written on update only when Salesforce has another one
 (for example after a user changed it). A parent needs no record type to be found: it is found by its external id only.
 
 | Problem | Result |
 |---|---|
-| The developer name isn't in the object's Describe, isn't active, or isn't available to the run-as user | The entity fails before any call with `INVALID_RECORD_TYPE` (the message names the object and developer name). The object's cached Describe is invalidated, so the next batch describes it again. |
-| Salesforce rejects the `RecordTypeId` at write time (`INVALID_CROSS_REFERENCE_KEY` on `RecordTypeId`: deactivated or unassigned after the describe) | Recorded as the same `INVALID_RECORD_TYPE`, Describe invalidated. |
+| The developer name isn't among the object's active record types | The entity fails alone, before any write, with `INVALID_RECORD_TYPE` (the message names the object and developer name). The object's cached record types are dropped, so the next batch reads them again. |
+| Salesforce rejects the `RecordTypeId` at write time (`INVALID_CROSS_REFERENCE_KEY` on `RecordTypeId`: unassigned to the run-as user, or deactivated after its Id was read) | Recorded as the same `INVALID_RECORD_TYPE`, record types dropped. |
 
-**Why from Describe, not a query on `RecordType`.** The record type Ids come from the Describe the engine already
-makes, so there is no extra call and no second cache: they are refreshed together with the fields, and Describe
-already says whether a record type is active and available to the run-as user, which a SOQL query on `RecordType`
-would not.
+**Why a query on `RecordType`.** It is the one piece of metadata the sync needs, and it is a plain SOQL query: no
+Describe, no `If-Modified-Since`, no shared cache. It does not say whether a record type is *available* to the run-as
+user; Salesforce's rejection of the Id at write time covers that.
 
 `INVALID_RECORD_TYPE` is transient (it is not in `Salesforce:PermanentErrorCodes`): it is retried with backoff, so
 events go through once an admin has created, activated or assigned the record type, and dead-lettered only after
@@ -948,9 +914,10 @@ and it pays off when unnecessary writes cost something:
 What it costs:
 
 - **More API calls per batch**: a query per object reads before the writes.
-- **Exact value handling.** `FieldValues` normalizes each value to what Salesforce stores for its field type (scale,
-  checkbox, 15/18-character ids, multi-picklist order, date/time precision, from Describe), or the diff would see a
-  change on every event. It is the logic most likely to be subtly wrong; the sandbox checks under
+- **Value handling by type.** `FieldValues` puts each value in a canonical form by its .NET type (empty text as
+  `null`, numbers as decimals, date/time to the second, time to the millisecond) and compares it with the JSON
+  Salesforce returned. It does not know a field's scale, length or picklist order, so a value Salesforce stores
+  differently is written again on every event until the mapping sends it as stored; the sandbox checks under
   [Tune and check](#6-tune-and-check) cover it.
 - **A small race**: an edit made in Salesforce between the read and the write is overwritten, but only on fields
   this sync owns, which the write would overwrite anyway.
@@ -1098,8 +1065,8 @@ out of queries, what cascades.
 
 This org links records by **Text foreign keys**, so the engine has no Lookup support: no resolving a parent to its
 Salesforce Id, and no Composite `referenceId` or `@{Account[0].id}` to link a new child to its new parent in the same
-request. A Lookup field (a reference holding an Id) is refused when the sObject class is checked against Describe
-(`INVALID_FIELD`: "is a lookup, not a foreign key"). An org that needs real Lookups would resolve the parent's Id from
+request. A Lookup field (a reference holding an Id) is refused by Salesforce when a foreign key's text is written into it
+(a malformed Id). An org that needs real Lookups would resolve the parent's Id from
 the read, and write the parent's object before the child's, as it does for foreign keys; a new parent's Id would then
 come from the parent's upsert answer rather than from a reference. That is not built.
 
@@ -1260,8 +1227,8 @@ one named `Standard` (see [step 4](#4-create-the-objects-and-fields)), or change
 
 **Why `SemaphoreSlim` isn't used for parallel batches:** it limits concurrency within one process, while
 Salesforce's limits are org-wide. Parallelism comes from competing worker loops in every pod pulling from the
-shared inbox, kept under Salesforce's concurrent limit by `Sync:Workers` x pods and paced by each process's token bucket. (The Describe cache
-does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers don't all describe at once.)
+shared inbox, kept under Salesforce's concurrent limit by `Sync:Workers` x pods and paced by each process's token bucket. (The record type cache
+does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers don't all read the record types at once.)
 
 ## Repository layout
 
@@ -1273,12 +1240,12 @@ src/
     Hosting/                      The options validators
     RateLimiting/                 The process's rate limiter, in memory: SalesforceRateLimiter (token bucket, throttle from
                                   Sforce-Limit-Info, pause) and TokenBucket; it serves Infrastructure's port
-    Sync/                         The engine (SalesforceBatchSyncService.cs: the flow), PreparedBatch and one file per step of the write path (Describer, Normalizer, Reader, Differ, Sender, Interpreter), EntitySyncService, the
+    Sync/                         The engine (SalesforceBatchSyncService.cs: the flow), PreparedBatch and one file per step of the write path (Normalizer, Reader, Differ, Sender, Interpreter), EntitySyncService, the
                                   strategy and event meta, the engine's model types, AccountAggregate (a Kafka
                                   aggregate → the changed entities' events), and one file per synced object
                                   (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy)
   SalesforceSync.Infrastructure/  The Salesforce API calls (references no other project of ours):
-    Salesforce/                   The REST client and its request/result types, Describe cache, FieldValues, errors,
+    Salesforce/                   The REST client and its request/result types, RecordTypeCache, FieldValues, errors,
                                   SObjectMetadata and the attributes the sObject classes are read by
     RateLimiting/                 The HTTP side of rate limiting: SalesforceRateLimitHandler, the limits header, options,
                                   and the port the entry project serves (ISalesforceRateLimiter)
@@ -1288,7 +1255,7 @@ src/
     Inbox/                        InboxRow and one row type per object, IRepository (and the claim and outcome
                                   types), InboxRepository (with its SQL), SyncOptions
     Migrations/                   EF migrations (InitialSchema: the tables)
-  SalesforceSync.FakeSalesforce/  In-memory Salesforce (OAuth sessions, describe, query pages, sObject
+  SalesforceSync.FakeSalesforce/  In-memory Salesforce (OAuth sessions, RecordType and record queries, query pages, sObject
                                   Collections upsert and delete, allOrNone, a Recycle Bin, Salesforce-like value
                                   storage, Text foreign keys checked like the org's automation on write (and, opted
                                   in, on delete), error injection, write history, Sforce-Limit-Info): FakeSalesforceStore
@@ -1323,8 +1290,7 @@ The dashboard shows:
 
 - **postgres / inboxdb / benchdb** (+ pgAdmin)
 - **kafka** (+ Kafka UI)
-- **redis** (+ Redis Insight): the Describe cache shared by the sync's pods ([The Describe cache](#the-describe-cache))
-- **fake-salesforce**: mock Salesforce org over HTTP (OAuth token, describe, query, sObject Collections upsert by
+- **fake-salesforce**: mock Salesforce org over HTTP (OAuth token, query, sObject Collections upsert by
   external id and delete by Id, gzip). Its Text foreign keys (`AccountId__c`,
   `RelatedAccountId__c`) are stored as plain text, and a create or update whose key names an Account that doesn't
   exist is rejected (`FIELD_CUSTOM_VALIDATION_EXCEPTION` "Parent record not found"), as the org's automation would.
@@ -1347,8 +1313,8 @@ To sync to a Salesforce sandbox instead of the mock org, see [Run against the sa
 ## Tests
 
 Requires the .NET 10 SDK; the integration tests also need **Docker** (Docker Desktop, OrbStack or Colima), nothing
-else: no Aspire, no local Postgres, Kafka or Redis, no ports to free up. Images are pulled on first run (`postgres:17`,
-`apache/kafka:3.9.1`, `redis:7.4-alpine`).
+else: no Aspire, no local Postgres or Kafka, no ports to free up. Images are pulled on first run (`postgres:17`,
+`apache/kafka:3.9.1`).
 
 ```bash
 dotnet test                                      # everything
@@ -1362,7 +1328,7 @@ are warnings, so `dotnet build -warnaserror` fails on them. Undocumented public 
 
 Libraries: **xUnit** (2.x), **FluentAssertions** (pinned to 7.x, `[7.2.2]`: version 8 needs a commercial license),
 **AutoFixture** (+ `AutoFixture.Xunit2` for `[AutoData]`) for values that only need to exist or be unique (keys,
-names, numbers that are written and read back; documented examples such as the 15 → 18-character id stay
+names, numbers that are written and read back; documented examples stay
 literal), and **Testcontainers** (`Testcontainers.PostgreSql`, `Testcontainers.Kafka`) for the integration tests.
 
 ### Integration tests
@@ -1372,9 +1338,7 @@ Each xUnit collection fixture (`SyncFixture`, `MultiPodFixture`, `FewRetriesFixt
 starts its own environment once, shared by the tests in that collection:
 
 - **Postgres** (`postgres:17`) and **Kafka** (KRaft) in containers, removed when the collection finishes. The
-  topic is created up front with 6 partitions, like production. `MultiPodFixture` also starts **Redis**
-  (`redis:7.4-alpine`), so its pods share their Describe cache like replicas in production; the other fixtures'
-  pods use the in-memory fallback.
+  topic is created up front with 6 partitions, like production.
 - **The mock Salesforce org**: the `SalesforceSync.FakeSalesforce.Server` app itself (`FakeSalesforceServer.Build`,
   the same code its `Program.cs` runs) on Kestrel at a random loopback port, so the worker goes through real HTTP:
   OAuth token, gzip, the REST client.
@@ -1415,9 +1379,8 @@ publish version N as `meta.time` = a fixed base time + N ms, and read it back fr
 relationship event is dead-lettered alone. Contacts (`ContactTests`): upserted with their Account's key in `AccountId__c` once the read
 has found the Account, an unchanged contact not written and a changed one sent with only what differs; a contact that arrives
 before its Account waits (`DEPENDENCY_NOT_SYNCED`, found by the read) and syncs once it exists; a contact without `lastName` or its
-Account dead-lettered alone before any call; a lost upsert answer held, then ending at the newest event. Every record
-ends with its class's `RecordTypeId`. Pods share their
-Describes through Redis, so a pod that has described nothing finds them there (`SharedDescribeCacheTests`). Writes are checked with the mock's per-record write history
+Account refused by Salesforce and dead-lettered alone; a lost upsert answer held, then ending at the newest event. Every record
+ends with its class's `RecordTypeId`. Writes are checked with the mock's per-record write history
 (`/__fake/history/{sobject}/{externalId}`) and with the requests it received (`/__fake/requests`).
 
 The write itself (`CollectionsWriteTests`): a new Account and Profile as two upserts, the Account's first,
@@ -1474,8 +1437,7 @@ fields and parents, lookups and external id), the guard that every Salesforce na
 (account with and without a profile, relationships, contacts, missing Account ids, camelCase and PascalCase bodies), what the
 engine does with a claim (the claimed event is the full record, invalid rows alone), what the consumer
 admits (the typed read: id, time with offset, `meta.type`), the classification of failed writes (unknown outcome or
-not), inbox table names as plain identifiers, every normalization rule (including the documented 15 → 18-character id
-example), error classification, the Postgres execution strategy (retried, not retried, gives up), the token bucket
+not), every normalization rule (empty text, numbers, date/time precision, checkbox null) and the record type resolution, error classification, the Postgres execution strategy (retried, not retried, gives up), the token bucket
 (`TokenBucketTests`: granted with the refill capped at the capacity, out of tokens, a new rate, paused, rate limited after `MaxWait`), startup validation (including every
 registered row type's query and write limits) and throttle decisions. Deletes: one Collections delete by the Ids the
 read found, a record Salesforce doesn't have costing the read only, the upserts before the delete and the delete without a body, a refused delete permanent or transient by its code, an already deleted record as
@@ -1622,7 +1584,7 @@ The daily allocation is not configured either: the header carries it, with the u
 | Salesforce limit | How it's applied |
 |---|---|
 | **Total API requests per 24 hours**, shared by every user and integration of the org | Read from `Sforce-Limit-Info: api-usage=used/limit` (and `per-app-api-usage` when Salesforce sends it): slow down at `DailySoftRatio`, pause at `DailyHardRatio`. The allocation Salesforce reports is logged when first seen and whenever it changes. `api-bursts` appears in Salesforce's example of the header but isn't defined, so it is not acted on. The sync keeps no count of its own: the header is the count. |
-| **What a call is**: each HTTP request; an sObject Collections request counts as one call however many records it holds | One token per HTTP request: a describe (cached), each query, and each upsert or delete. Every call goes through the same `SalesforceRateLimitHandler`; a worker's batch sends its calls one after another. |
+| **What a call is**: each HTTP request; an sObject Collections request counts as one call however many records it holds | One token per HTTP request: a record type query (cached), each query, and each upsert or delete. Every call goes through the same `SalesforceRateLimitHandler`; a worker's batch sends its calls one after another. |
 | **Requests per second**: no such limit | `MaxRequestsPerSecond` and `BurstCapacity` are this process's own pacing. |
 | **Concurrent long-running requests** (20 s or longer) | Nothing caps them across pods. Each worker has one call in flight, so keep **`Sync:Workers` x pods** well below `SalesforceLimits:ConcurrentLongRunningLimit` (4 workers x 5 pods = 20 of 25). Startup fails when one pod's `Workers` alone exceeds it. Calls that take `LongRunningThreshold` or longer are logged. If the org does reject one (`REQUEST_LIMIT_EXCEEDED`, `ConcurrentPerOrgLongTxn`), that pod pauses for `ConcurrentLimitPause`, its batch is handed back without spending an attempt, and the rejected call, which was not applied, is retried. |
 | **Total requests exceeded** (`REQUEST_LIMIT_EXCEEDED`, `TotalRequests`) | The pod pauses for `DailyHardPause`. |
@@ -1688,8 +1650,7 @@ client credentials flow only works on the org's own domain. The token URL defaul
 `/services/oauth2/token`; set `Salesforce:TokenUrl` only if your org issues tokens at another address.
 
 Every REST call goes to `{Salesforce:BaseApiPath}/{Salesforce:ApiVersion}` on the instance (default
-`/services/data/v62.0`, in `appsettings.json`). Change `ApiVersion` there to move to another API version; the shared
-Describe cache keys include it, so versions never share an entry.
+`/services/data/v62.0`, in `appsettings.json`). Change `ApiVersion` there to move to another API version; versions never share anything.
 
 ### 2. Create the user the sync runs as
 
@@ -1876,7 +1837,7 @@ The mappings as they are:
 | `accountRelationship.relatedAccountExternalId` | `Account_Relationship__c.RelatedAccountId__c` (Text; the Account must exist) |
 | `contact.externalId`, `firstName`, `lastName`, `email`, `phone` | `Contact.ExternalId__c`, `FirstName`, `LastName`, `Email`, `Phone` |
 | `contact.accountExternalId` | `Contact.AccountId__c` (Text; the Account must exist, checked by the read) |
-| (none: the sObject class's `RecordType`) | `RecordTypeId` of every object: the Id of `Business` (Account) or `Standard` (`Profile__c`, `Account_Relationship__c`, Contact), from the cached Describe |
+| (none: the sObject class's `RecordType`) | `RecordTypeId` of every object: the Id of `Business` (Account) or `Standard` (`Profile__c`, `Account_Relationship__c`, Contact), from a query on `RecordType` |
 
 To change a mapping:
 
@@ -1928,10 +1889,7 @@ end `done`. A `dead` row's `last_error` says what Salesforce rejected. Delete th
 afterwards: `ACC-…`, `PRF-…`, `REL-…` and `CON-…`.
 
 To run the worker without Aspire (a server or Kubernetes), give it the same settings as environment variables
-(`Salesforce__InstanceUrl`, `Salesforce__ClientId`, `Salesforce__ClientSecret`), plus `ConnectionStrings__inboxdb` and `ConnectionStrings__kafka`, and
-`ConnectionStrings__redis` so the replicas share their Describe results (optional: without it each process describes on
-its own; see [The Describe cache](#the-describe-cache)). With Aspire, Redis needs no setup: the AppHost starts it and
-passes the connection string.
+(`Salesforce__InstanceUrl`, `Salesforce__ClientId`, `Salesforce__ClientSecret`), plus `ConnectionStrings__inboxdb` and `ConnectionStrings__kafka`. The replicas share nothing but Postgres.
 
 ### 6. Tune and check
 

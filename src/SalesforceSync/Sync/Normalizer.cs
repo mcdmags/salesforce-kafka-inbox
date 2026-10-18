@@ -3,136 +3,93 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Step 2. Checks each unit against Describe and puts its values in the form Salesforce stores them, before any call.
-/// A unit Salesforce would reject is rejected on its own here.
+/// Step 1. Puts each unit's values in a canonical form (<see cref="FieldValues.Normalize"/>) and its record types as
+/// the Ids the org knows them by, before any call that writes. A unit whose record type the org doesn't have is
+/// rejected on its own. No other check is made here: the org's metadata is not read, so a field it doesn't have or won't
+/// let us set is found by Salesforce itself (the read, or the write's answer for the record).
 /// </summary>
-internal sealed class Normalizer(SalesforceErrors errors)
+internal sealed class Normalizer(RecordTypeCache recordTypes)
 {
-    /// <summary>A unit whose values are in the form Salesforce stores them, ready to be compared and sent.</summary>
+    /// <summary>A unit whose values are in canonical form, ready to be compared and sent.</summary>
     internal sealed record NormalizedUnit(string Key, IReadOnlyList<NormalizedRecord> Records);
 
-    /// <summary>A record with its object's Describe metadata and its values normalized per field.</summary>
-    internal sealed record NormalizedRecord(SObjectRecord Record, SObjectSchema Schema, IReadOnlyDictionary<SalesforceField, object?> Fields)
+    /// <summary>A record with its values normalized, by API name (and its RecordTypeId among them).</summary>
+    internal sealed record NormalizedRecord(SObjectRecord Record, IReadOnlyDictionary<string, object?> Fields)
     {
         public string ReferenceId => Record.ReferenceId;
     }
 
     /// <summary>
-    /// Checks each unit against the Describe metadata and normalizes its values (<see cref="FieldValues"/>), before any
-    /// call. An unknown field, a value Salesforce would reject, a foreign key that isn't a text field, or a record type
-    /// the org doesn't offer is a problem of that unit alone: the unit is rejected, permanent if any of its problems is
-    /// (<see cref="SalesforceErrors.IsPermanent"/>), else transient (a record type the org doesn't offer yet), and the
-    /// rest of the batch carries on. A record's record type becomes its RecordTypeId here, a field like any other.
+    /// The units with their values normalized. A record type the org doesn't have (or not active) is a problem of that
+    /// unit alone: the unit is rejected, transient (an admin may yet add or activate it: the object's record types are
+    /// read again next time), and the rest of the batch carries on. A record's record type becomes its RecordTypeId
+    /// here, a field like any other.
     /// </summary>
-    internal (List<NormalizedUnit> Normalized, List<SyncResult> Rejected) Normalize(
-        IReadOnlyList<(string Key, SyncUnit Unit)> units, IReadOnlyDictionary<string, SObjectSchema> schemas)
+    internal async Task<(List<NormalizedUnit> Normalized, List<SyncResult> Rejected)> NormalizeAsync(
+        IReadOnlyList<(string Key, SyncUnit Unit)> units, CancellationToken ct)
     {
         var normalized = new List<NormalizedUnit>(units.Count);
         var rejected = new List<SyncResult>();
         foreach (var (key, unit) in units)
         {
-            var candidate = Normalize(key, unit, schemas, out var problems);
-            if (problems.Count == 0)
+            var problems = new List<SalesforceError>();
+            var records = new List<NormalizedRecord>(unit.Records.Count);
+            foreach (var record in unit.Records)
             {
-                normalized.Add(candidate);
-                continue;
+                records.Add(await NormalizeAsync(record, problems, ct));
             }
 
-            var permanent = problems.Any(p => errors.IsPermanent(p.Code));
-            rejected.Add(new(key, permanent ? SyncOutcome.PermanentFailure : SyncOutcome.TransientFailure,
-                [.. problems.OrderByDescending(p => errors.IsPermanent(p.Code))]));
+            if (problems.Count == 0)
+            {
+                normalized.Add(new NormalizedUnit(key, records));
+            }
+            else
+            {
+                rejected.Add(new(key, SyncOutcome.TransientFailure, problems));
+            }
         }
         return (normalized, rejected);
     }
 
-    /// <param name="key">The entity's key.</param>
-    /// <param name="unit">The records the strategy mapped.</param>
-    /// <param name="schemas">Describe of every object in the unit, by API name.</param>
-    /// <param name="problems">Why Salesforce would reject the unit; empty when it can be written.</param>
-    internal static NormalizedUnit Normalize(string key, SyncUnit unit, IReadOnlyDictionary<string, SObjectSchema> schemas,
-        out List<SalesforceError> problems)
+    /// <summary>
+    /// A record type the org rejected or didn't have may just have been created, activated or assigned: the objects
+    /// are read again next time.
+    /// </summary>
+    internal void InvalidateRecordTypes(IReadOnlyList<(string Key, SyncUnit Unit)> units, IEnumerable<SyncResult> results)
     {
-        var found = problems = [];
-        return new NormalizedUnit(key, [.. unit.Records.Select(r => Normalize(r, schemas, found))]);
+        var failed = results
+            .SelectMany(r => r.Errors.Where(e => e.Code == SalesforceErrors.InvalidRecordType).Select(e => (r.Key, e.ReferenceId)))
+            .ToHashSet();
+        foreach (var sobject in units
+                     .SelectMany(u => u.Unit.Records.Where(r => failed.Contains((u.Key, r.ReferenceId))))
+                     .Select(r => r.SObject)
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            recordTypes.Invalidate(sobject);
+        }
     }
 
-    private static NormalizedRecord Normalize(SObjectRecord record, IReadOnlyDictionary<string, SObjectSchema> schemas,
-        List<SalesforceError> problems)
+    private async Task<NormalizedRecord> NormalizeAsync(SObjectRecord record, List<SalesforceError> problems, CancellationToken ct)
     {
-        var schema = schemas[record.SObject];
-        SalesforceError NoSuchColumn(string column)
+        var fields = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, value) in record.Fields)
         {
-            return new(record.ReferenceId, "INVALID_FIELD", $"No such column '{column}' on {schema.Name}");
+            fields[name] = FieldValues.Normalize(value);
         }
 
-        var values = RecordTypeId(record, schema, problems) is { } recordTypeId
-            ? record.Fields.Append(new(SObjectSchema.RecordTypeIdField, recordTypeId))
-            : record.Fields;
-
-        var fields = new Dictionary<SalesforceField, object?>();
-        foreach (var (name, value) in values)
+        if (record.RecordType is { } developerName)
         {
-            if (schema.Find(name) is not { } field)
+            if (await recordTypes.IdOfAsync(record.SObject, developerName, ct) is { } id)
             {
-                problems.Add(NoSuchColumn(name));
-            }
-            else if (FieldValues.TryNormalize(field, value, out var normalized, out var error))
-            {
-                fields[field] = normalized;
+                fields[RecordTypeCache.RecordTypeIdField] = id;
             }
             else
             {
-                problems.Add(new(record.ReferenceId, error.Code, $"{field.Name}: {error.Message}"));
+                problems.Add(new(record.ReferenceId, SalesforceErrors.InvalidRecordType,
+                    $"Record type '{developerName}' of {record.SObject} doesn't exist or is not active", [RecordTypeCache.RecordTypeIdField]));
             }
         }
 
-        // A foreign key needs the external id field on its parent's object, and a field on the record that holds text
-        // (not a reference, which holds an Id; the field itself is checked with the values)
-        foreach (var key in record.Parents)
-        {
-            if (schema.Find(key.Field) is { Type: "reference" } || schemas[key.SObject].Find(key.ExternalIdField) is null)
-            {
-                problems.Add(new(record.ReferenceId, "INVALID_FIELD",
-                    $"{schema.Name}.{key.Field} is a lookup, not a foreign key, or {key.SObject}.{key.ExternalIdField} doesn't exist"));
-            }
-        }
-
-        if (schema.Find(record.ExternalIdField) is null)
-        {
-            problems.Add(NoSuchColumn(record.ExternalIdField));
-        }
-
-        return new NormalizedRecord(record, schema, fields);
-    }
-
-    /// <summary>
-    /// The Id of the record's record type, from Describe's record types: null if the record has none, or if the org has
-    /// no such record type for the running user (a problem; the object is described again next time). Describe rather
-    /// than a query on RecordType: no extra call, cached and refreshed with the fields, and it already says whether the
-    /// record type is active and available to the running user.
-    /// </summary>
-    private static string? RecordTypeId(SObjectRecord record, SObjectSchema schema, List<SalesforceError> problems)
-    {
-        if (record.RecordType is not { } developerName)
-        {
-            return null;
-        }
-
-        var recordType = schema.RecordTypes.GetValueOrDefault(developerName);
-        var why = recordType switch
-        {
-            null => "doesn't exist",
-            { Active: false } => "is not active",
-            { Available: false } => "is not available to the running user",
-            _ => null
-        };
-        if (why is null)
-        {
-            return recordType!.RecordTypeId;
-        }
-
-        problems.Add(new(record.ReferenceId, SalesforceErrors.InvalidRecordType,
-            $"Record type '{developerName}' of {schema.Name} {why}", [SObjectSchema.RecordTypeIdField]));
-        return null;
+        return new NormalizedRecord(record, fields);
     }
 }

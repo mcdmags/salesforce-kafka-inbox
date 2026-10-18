@@ -1,6 +1,4 @@
 using System.Net.Http.Headers;
-using Microsoft.Extensions.Caching.Distributed;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data.Inbox;
@@ -13,7 +11,7 @@ namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The engine wired for its Salesforce step alone (<see cref="SalesforceBatchSyncService.WriteToSalesforceAsync"/>:
-/// describe, read, decide, send, interpret): a real client on the given HTTP stack, its own caches, and no database.
+/// normalize, read, decide, send, interpret): a real client on the given HTTP stack, its own record type cache, and no database.
 /// </summary>
 internal static class SalesforceStep
 {
@@ -37,17 +35,15 @@ internal static class SalesforceStep
     public static SalesforceBatchSyncService Service(HttpClient http, IOptions<SalesforceOptions> options,
         ISalesforceRateLimiter? limiter = null)
     {
-        return new(limiter ?? new NotPaused(), Client(http), SchemaCache(),
-                new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
+        return new(limiter ?? new NotPaused(), Client(http), RecordTypes(http, options),
+                new SalesforceErrors(options), Options.Create(new SyncOptions()),
                 NullLogger<SalesforceBatchSyncService>.Instance);
     }
 
-    /// <summary>A Describe cache of its own; with <paramref name="shared"/>, a pod sharing that cache with others.</summary>
-    public static SalesforceSchemaCache SchemaCache(IDistributedCache? shared = null, TimeProvider? clock = null)
+    /// <summary>A record type cache of its own, reading through <paramref name="http"/>.</summary>
+    public static RecordTypeCache RecordTypes(HttpClient http, IOptions<SalesforceOptions> options, TimeProvider? clock = null)
     {
-        return new(clock ?? TimeProvider.System, shared ?? new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())),
-            Options.Create(new SalesforceOptions { InstanceUrl = OrgUrl, BaseApiPath = Org.BaseApiPath, ApiVersion = Org.ApiVersion }),
-            NullLogger<SalesforceSchemaCache>.Instance);
+        return new(clock ?? TimeProvider.System, Client(http), options);
     }
 
     /// <summary>

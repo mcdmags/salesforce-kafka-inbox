@@ -18,37 +18,6 @@ public sealed class WriteRulesTests
     private const string AccountId = "001000000000001AAA";
     private const string ContactId = "003000000000001AAA";
 
-    private static readonly Dictionary<string, SObjectSchema> Schemas = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Account"] = new("Account",
-        [
-            Field("Id", "id", createable: false, updateable: false),
-            Field("ExternalId__c", "string"),
-            Field("Name", "string"),
-            Field("Active__c", "boolean", nillable: false),
-            Field("Locked__c", "string", updateable: false)
-        ]),
-        // A foreign key: AccountId__c holds the Account's external id
-        ["Profile__c"] = new("Profile__c",
-        [
-            Field("Id", "id", createable: false, updateable: false),
-            Field("ExternalId__c", "string"),
-            Field("Tier__c", "string"),
-            Field("AccountId__c", "string")
-        ]),
-        // A foreign key too: AccountId__c holds the Account's external id
-        ["Contact"] = new("Contact",
-        [
-            Field("Id", "id", createable: false, updateable: false),
-            Field("ExternalId__c", "string"),
-            Field("LastName", "string"),
-            Field("AccountId__c", "string")
-        ]),
-        // Objects the sync has no strategy for: the write rule knows no object by name
-        ["Widget__c"] = new("Widget__c", [Field("Id", "id", createable: false, updateable: false), Field("Key__c", "string"), Field("Label__c", "string")]),
-        ["Gadget__c"] = new("Gadget__c", [Field("Id", "id", createable: false, updateable: false), Field("Key__c", "string"), Field("Widget__c", "string")])
-    };
-
     // ---------- The diff ----------
 
     public static TheoryData<string, object?, string, string[]> Diffs()
@@ -67,35 +36,20 @@ public sealed class WriteRulesTests
     public void Only_fields_whose_normalized_value_differs_are_sent(string what, object? name, string stored, string[] expected)
     {
         var record = Normalized(Account("A1", name, active: null)).Records[0];
-        var problems = new List<SalesforceError>();
 
-        var fields = Diff(record, Current(stored), problems);
+        var fields = Diff(record, Current(stored));
 
         fields.Keys.Should().BeEquivalentTo(expected, what);
-        problems.Should().BeEmpty();
     }
 
     [Fact]
-    public void A_new_record_gets_its_non_empty_fields_and_a_checkbox_is_sent_as_false()
+    public void A_new_record_gets_its_non_empty_fields_and_a_checkbox_that_is_null_is_left_to_its_default()
     {
         var record = Normalized(Account("A1", "Acme", active: null)).Records[0];
 
-        var fields = Diff(record, null, []);
+        var fields = Diff(record, null);
 
-        fields.Should().BeEquivalentTo(new Dictionary<string, object?> { ["Name"] = "Acme", ["Active__c"] = false });
-    }
-
-    [Fact]
-    public void A_field_Salesforce_does_not_let_us_update_is_a_problem_only_if_it_differs()
-    {
-        var record = Normalized(Account("A1", "Acme", locked: "new")).Records[0];
-        var problems = new List<SalesforceError>();
-
-        Diff(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"new"}"""), problems);
-        problems.Should().BeEmpty();
-
-        Diff(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"old"}"""), problems);
-        problems.Should().ContainSingle().Which.Code.Should().Be("INVALID_FIELD_FOR_INSERT_UPDATE");
+        fields.Should().BeEquivalentTo(new Dictionary<string, object?> { ["Name"] = "Acme" });
     }
 
     // ---------- The plan ----------
@@ -130,17 +84,6 @@ public sealed class WriteRulesTests
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced));
         result.PrimaryError.Message.Should().Contain("Account ExternalId__c=MISSING is not in Salesforce yet");
         planned.Should().BeEmpty("nothing is sent for it");
-    }
-
-    [Fact]
-    public void A_field_that_must_change_but_is_not_updateable_fails_the_unit()
-    {
-        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false,"Locked__c":"old"}"""));
-
-        var (_, decided) = Differ.Plan([Normalized(Account("A1", "Acme", locked: "new"))], current);
-
-        var result = decided.Should().ContainSingle().Subject;
-        (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.PermanentFailure, "INVALID_FIELD_FOR_INSERT_UPDATE"));
     }
 
     [Fact]
@@ -373,19 +316,9 @@ public sealed class WriteRulesTests
         return new([new SObjectRecord("contact", "Contact", "ExternalId__c", key, new Dictionary<string, object?>(), Delete: true)]);
     }
 
-    private static SalesforceField Field(string name, string type, bool createable = true, bool updateable = true, bool nillable = true)
-    {
-        return new(name, type, 255, 0, 0, createable, updateable, nillable);
-    }
-
-    private static SyncUnit Account(string key, object? name, bool? active = false, string? locked = null)
+    private static SyncUnit Account(string key, object? name, bool? active = false)
     {
         var fields = new Dictionary<string, object?> { ["Name"] = name, ["Active__c"] = active };
-        if (locked is not null)
-        {
-            fields["Locked__c"] = locked;
-        }
-
         return new SyncUnit([new SObjectRecord("acct", "Account", "ExternalId__c", key, fields)]);
     }
 
@@ -403,9 +336,8 @@ public sealed class WriteRulesTests
 
     private static NormalizedUnit Normalized(SyncUnit unit)
     {
-        var normalized = Normalize(unit.Records[0].ExternalId, unit, Schemas, out var problems);
-        problems.Should().BeEmpty();
-        return normalized;
+        return new NormalizedUnit(unit.Records[0].ExternalId,
+            [.. unit.Records.Select(r => new NormalizedRecord(r, r.Fields.ToDictionary(f => f.Key, f => FieldValues.Normalize(f.Value))))]);
     }
 
     private static CurrentRecord Current(string json)
@@ -469,11 +401,6 @@ public sealed class WriteRulesTests
         public bool AnswerWithNothing { get; set; }
 
         public string DataPath => "/services/data/v62.0";
-
-        public Task<SObjectSchema?> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct)
-        {
-            throw new NotSupportedException();
-        }
 
         public Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct)
         {
