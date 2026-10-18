@@ -19,6 +19,9 @@ internal static class SalesforceStep
 {
     private const string OrgUrl = "https://fake.my.salesforce.com";
 
+    /// <summary>The path of the REST calls with the default options.</summary>
+    public static readonly string DataPath = new SalesforceOptions().DataPath;
+
     /// <param name="http">The HTTP stack to the org (see <see cref="Http"/>).</param>
     /// <param name="options">The Salesforce options of the engine and its error classification.</param>
     /// <param name="gate">The concurrency gate, for tests that run whole batches; the Salesforce step needs none.</param>

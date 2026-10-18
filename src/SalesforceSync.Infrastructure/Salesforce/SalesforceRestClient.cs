@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace SalesforceSync.Infrastructure.Salesforce;
 
@@ -10,10 +12,25 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// takes requests and returns the raw results per subrequest and per record. It decides nothing (what to write, what
 /// a result means); that is <c>SalesforceBatchSyncService</c>'s.
 /// </summary>
-public sealed class SalesforceRestClient(HttpClient http)
+public sealed class SalesforceRestClient
 {
-    public const string ApiVersion = "v62.0";
-    public const string DataPath = $"/services/data/{ApiVersion}";
+    private readonly HttpClient http;
+
+    /// <summary>A client for the path and version in <paramref name="options"/> (<c>Salesforce:BaseApiPath</c> and <c>ApiVersion</c>).</summary>
+    [ActivatorUtilitiesConstructor] // the one the typed HttpClient uses; the other is a shortcut for tests
+    public SalesforceRestClient(HttpClient http, IOptions<SalesforceOptions> options)
+    {
+        this.http = http;
+        DataPath = options.Value.DataPath;
+    }
+
+    /// <summary>A client for the default API path and version (<see cref="SalesforceOptions"/>).</summary>
+    public SalesforceRestClient(HttpClient http) : this(http, Options.Create(new SalesforceOptions()))
+    {
+    }
+
+    /// <summary>The path every call starts with (<see cref="SalesforceOptions.DataPath"/>).</summary>
+    public string DataPath { get; }
 
     /// <summary>Composite: at most 5 of its (25) subrequests may be queries or sObject Collections operations.</summary>
     public const int MaxCompositeQueries = 5;
@@ -159,21 +176,31 @@ public sealed class SalesforceRestClient(HttpClient http)
                 $"{tooLarge.ReferenceId}: {tooLarge.Count} records; a collection takes 1 to {MaxCollectionRecords}");
         }
 
-        var urls = collections.Select(c => EnsureFits(c.Url)).ToList(); // checked before anything is sent
-        if (collections is [var single])
-        {
-            using var request = new HttpRequestMessage(single.Method, urls[0])
-            {
-                Content = single.Body is { } content ? JsonContent.Create(content, options: Json) : null
-            };
-            using var res = await http.SendAsync(request, ct);
-            await EnsureSuccessAsync(res, ct);
-            var body = await res.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
-            return body.ValueKind == JsonValueKind.Array
-                ? [new CollectionResult(single.ReferenceId, [.. body.EnumerateArray().Select(ParseRecordResult)], [])]
-                : throw new InvalidOperationException($"{single.ReferenceId} answered without per-record results");
-        }
+        var urls = collections.Select(c => EnsureFits(DataPath + c.Path)).ToList(); // checked before anything is sent
+        return collections is [var single]
+            ? [await SendCollectionAsync(single, urls[0], ct)]
+            : await SendCompositeAsync(collections, urls, ct);
+    }
 
+    /// <summary>One collection as a call of its own: its method, URL and body, and its per-record results.</summary>
+    private async Task<CollectionResult> SendCollectionAsync(CollectionRequest collection, string url, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(collection.Method, url)
+        {
+            Content = collection.Body is { } content ? JsonContent.Create(content, options: Json) : null
+        };
+        using var res = await http.SendAsync(request, ct);
+        await EnsureSuccessAsync(res, ct);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
+        return body.ValueKind == JsonValueKind.Array
+            ? new CollectionResult(collection.ReferenceId, [.. body.EnumerateArray().Select(ParseRecordResult)], [])
+            : throw new InvalidOperationException($"{collection.ReferenceId} answered without per-record results");
+    }
+
+    /// <summary>Several collections as the subrequests of one Composite request, in order.</summary>
+    private async Task<IReadOnlyList<CollectionResult>> SendCompositeAsync(IReadOnlyList<CollectionRequest> collections,
+        IReadOnlyList<string> urls, CancellationToken ct)
+    {
         var payload = new
         {
             allOrNone = false,
@@ -219,9 +246,15 @@ public sealed class SalesforceRestClient(HttpClient http)
     }
 
     /// <summary>The URL a query is sent with, as a Composite subrequest or a call of its own.</summary>
-    internal static string QueryUrl(string soql)
+    internal string QueryUrl(string soql)
     {
-        return $"{DataPath}/query?q={Uri.EscapeDataString(soql)}";
+        return QueryUrl(DataPath, soql);
+    }
+
+    /// <summary>The URL of a query under <paramref name="dataPath"/> (<see cref="SalesforceOptions.DataPath"/>).</summary>
+    internal static string QueryUrl(string dataPath, string soql)
+    {
+        return $"{dataPath}/query?q={Uri.EscapeDataString(soql)}";
     }
 
     /// <summary>
@@ -322,7 +355,9 @@ public sealed record CompositeQuery(string ReferenceId, string Soql);
 public abstract record CollectionRequest(string ReferenceId)
 {
     public abstract HttpMethod Method { get; }
-    public abstract string Url { get; }
+
+    /// <summary>The path after the data path (<see cref="SalesforceOptions.DataPath"/>), query string included.</summary>
+    public abstract string Path { get; }
 
     /// <summary>Its records: 1 to 200.</summary>
     public abstract int Count { get; }
@@ -341,7 +376,7 @@ public sealed record CollectionUpsert(string ReferenceId, string SObject, string
     IReadOnlyList<IReadOnlyDictionary<string, object?>> Records) : CollectionRequest(ReferenceId)
 {
     public override HttpMethod Method => HttpMethod.Patch;
-    public override string Url => $"{SalesforceRestClient.DataPath}/composite/sobjects/{SObject}/{ExternalIdField}";
+    public override string Path => $"/composite/sobjects/{SObject}/{ExternalIdField}";
     public override int Count => Records.Count;
     public override object Body => new { allOrNone = false, records = Records };
 }
@@ -356,7 +391,7 @@ public sealed record CollectionDelete(string ReferenceId, IReadOnlyList<string> 
     public override HttpMethod Method => HttpMethod.Delete;
 
     // Ids are letters and digits: nothing to escape
-    public override string Url => $"{SalesforceRestClient.DataPath}/composite/sobjects?ids={string.Join(",", Ids)}&allOrNone=false";
+    public override string Path => $"/composite/sobjects?ids={string.Join(",", Ids)}&allOrNone=false";
     public override int Count => Ids.Count;
     public override object? Body => null;
 }

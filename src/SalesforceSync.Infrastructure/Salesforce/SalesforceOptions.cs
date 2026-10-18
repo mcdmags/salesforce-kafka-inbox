@@ -6,6 +6,15 @@ public sealed class SalesforceOptions
 
     public string InstanceUrl { get; set; } = "";
 
+    /// <summary>The REST API's base path on the instance, before the version.</summary>
+    public string BaseApiPath { get; set; } = "/services/data";
+
+    /// <summary>The REST API version every call is made against, e.g. <c>v62.0</c>.</summary>
+    public string ApiVersion { get; set; } = "v62.0";
+
+    /// <summary>The path every REST call starts with: <c>{BaseApiPath}/{ApiVersion}</c>, e.g. <c>/services/data/v62.0</c>.</summary>
+    public string DataPath => $"/{BaseApiPath.Trim('/')}/{ApiVersion.Trim('/')}";
+
     /// <summary>
     /// The OAuth token endpoint. Unset = <c>{InstanceUrl}/services/oauth2/token</c> (the org's My Domain, and the mock
     /// org's); set it only when the org issues tokens elsewhere, e.g. another My Domain host or

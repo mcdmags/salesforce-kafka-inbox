@@ -450,7 +450,7 @@ public sealed class SalesforceBatchSyncServiceTests
         {
             var empty = SalesforceRestClient.Soql("Account", ["Id"], "ExternalId__c", [""]);
             return SalesforceRestClient.Soql("Account", ["Id"], "ExternalId__c",
-                [new string('a', urlBytes - SalesforceRestClient.QueryUrl(empty).Length)]);
+                [new string('a', urlBytes - SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, empty).Length)]);
         }
 
         var before = _org.GetStats();
@@ -459,7 +459,7 @@ public sealed class SalesforceBatchSyncServiceTests
         _org.GetStats().ApiCalls.Should().Be(before.ApiCalls);
 
         var atBudget = Soql(SalesforceRestClient.MaxUrlBytes);
-        SalesforceRestClient.QueryUrl(atBudget).Length.Should().Be(SalesforceRestClient.MaxUrlBytes);
+        SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, atBudget).Length.Should().Be(SalesforceRestClient.MaxUrlBytes);
         (await client.QueryAsync([new CompositeQuery("q0", atBudget)], CancellationToken.None))["q0"].Should().BeEmpty();
     }
 

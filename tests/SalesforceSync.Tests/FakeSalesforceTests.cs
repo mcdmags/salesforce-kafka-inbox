@@ -242,7 +242,7 @@ public sealed class FakeSalesforceTests
         }
 
         const string soql = "SELECT Id FROM Contact WHERE AccountId__c IN ('A1')";
-        var first = JsonNode.Parse(await _http.GetStringAsync(SalesforceRestClient.QueryUrl(soql)))!;
+        var first = JsonNode.Parse(await _http.GetStringAsync(SalesforceRestClient.QueryUrl(Data, soql)))!;
         var all = await new SalesforceRestClient(_http).QueryAsync([new CompositeQuery("q0", soql)], CancellationToken.None);
 
         ((int)first["totalSize"]!, (bool)first["done"]!, first["records"]!.AsArray().Count).Should().Be((2_001, false, 2_000));
