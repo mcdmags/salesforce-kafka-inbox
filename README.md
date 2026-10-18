@@ -489,6 +489,23 @@ that time.
    of Salesforce shows what the crashed worker did or didn't save. (A write whose outcome is unknown is held instead;
    see [Unknown outcomes](#unknown-outcomes).)
 
+### Why there is no `processing_timeout` column
+
+A queue table often has a `processing_timeout` (or `locked_until`) column next to a status, plus a job that resets rows
+stuck in `processing`. Here the lease is that column and that job in one: `next_attempt_at` is moved to `now() + Sync:Lease`
+when a worker claims the row, so "being processed" and "times out at" are the same timestamp.
+
+- **Expiry needs no cleanup.** The claim takes rows where `next_attempt_at <= now()`. A worker that died or hung leaves
+  its row with a lease end in the past, so the row is due again and the next claim takes it. No job resets anything.
+- **A late worker changes nothing.** Every outcome statement also requires `lock_token = @token`, so a worker that
+  finishes after its lease expired matches no row (see below).
+- **One column, one index.** A retry's backoff, a hold and a lease all set `next_attempt_at`, so the one partial index
+  (`next_attempt_at WHERE next_attempt_at IS NOT NULL`) serves them all; a finished row has `next_attempt_at` null and
+  is not in it.
+
+The cost: `Sync:Lease` must be longer than a normal batch takes (startup checks it against the HTTP request timeout),
+or the worker's outcome is dropped and another worker may already have the rows.
+
 ### Why the lease needs a lock token
 
 The row's `event_time` tells an outcome whether the row still holds the **event** the claim read (a newer event
@@ -538,6 +555,25 @@ and the old worker noticing. That is harmless: an upsert by external id writes t
 sure only the current owner's outcome counts, so a worker that no longer owns a record can't change its state or its
 hold. Tests: `LeaseTests.Worker_whose_lease_expired_can_record_nothing`
 (a lease expires mid-batch) and `ClaimRetryTests` (a claim retried after a lost commit).
+
+### Why the outcome statements use `unnest`
+
+An outcome must touch a row only if this worker still owns it (`lock_token`) **and** the row still holds the event the
+claim read. The second test is a pair: the entity id and the event time. The claim returns both, and the outcome sends
+them back as two parallel arrays, `@entityIds` and `@times`. `unnest(@entityIds, @times)` turns the two arrays into a
+small table of pairs (`('A1', t1)`, `('A2', t2)`, ...), which the statement compares row by row:
+
+```sql
+i.entity_id = ANY(@entityIds) AND i.lock_token = @token
+  AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times) AS c(entity_id, event_time)
+              WHERE c.entity_id = i.entity_id AND c.event_time = i.event_time)
+```
+
+- **Why not only the entity id:** a newer event for the same entity has the same id, so the id alone can't tell "the
+  event I wrote" from "the event that overwrote it". Only the pair can.
+- **Why `unnest` and not a statement per entity:** one statement handles the whole batch, whether it is 1 or 200
+  entities. `= ANY(array)` tests one array; `unnest` with two arrays is how Postgres compares two arrays by position.
+- **Cost:** each row is found by its primary key (`entity_id`), so the planner never scans the table.
 
 ### Why the Salesforce calls run outside a transaction
 
@@ -668,6 +704,20 @@ design into this one) was deleted and `InitialSchema` regenerated from the model
 earlier migrations doesn't match it**: its `__EFMigrationsHistory` names migrations that no longer exist. Start from a
 fresh database (or drop the sync's tables and `__EFMigrationsHistory`).
 
+**A custom schema.** The tables live in whatever schema is first on the connection's `search_path` (`public` by
+default). `HasDefaultSchema("x")` only changes the SQL that EF generates; the raw statements (`InboxSql`, `RateLimitSql`)
+name their tables unqualified, so with a schema that is not on the path they fail with `relation "sf_rate_limit" does not
+exist` while EF's own queries and migrations work. The fix is on the connection string, once for everything:
+
+```
+Host=...;Database=...;Username=...;Search Path=your_schema
+```
+
+(and `HasDefaultSchema("your_schema")` too, so EF's migration history table is in the same schema). To check what a
+connection sees: `select current_schemas(true), to_regclass('sf_rate_limit');`, where a null `to_regclass` means the schema is
+not on the path. Qualifying the raw SQL instead (the table name from `db.Model.GetDefaultSchema()`, the view in
+`InitialSchema` and `sql/apply-rate-limits.sql` too) is the alternative when the connection string can't change.
+
 The pods never migrate or write the rate-limit row. Deploying is two steps, before the pods roll out:
 
 ```bash
@@ -700,6 +750,12 @@ A batch's writes are **sObject Collections upserts, one per level and object**
 records to delete (`DELETE /composite/sobjects?ids=...`, [Deletes](#deletes)), grouped into write requests (normally
 one), each **one call**: the collection on its own when the request has one, else **one Composite request** of them,
 upserts parents first, the delete last ([below](#one-request-per-batch)).
+
+**The external id in an upsert: the field's name once, each record's value.** In
+`PATCH /composite/sobjects/{SObject}/{ExternalIdField}` the last part is the **name** of the field the records are matched
+by (e.g. `ExternalId__c`), the same for the whole call, so one call holds records of one object matched by one field. Each
+record carries its own **value** of that field in its body (`{"attributes":{"type":"Account"},"ExternalId__c":"A1","Name":"Acme"}`),
+and Salesforce updates the record with that value or creates it.
 
 ### Foreign keys: Text fields holding the parent's external id
 
