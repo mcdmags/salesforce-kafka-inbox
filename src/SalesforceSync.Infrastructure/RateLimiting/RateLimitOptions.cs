@@ -7,14 +7,14 @@ public sealed class RateLimitOptions
     /// <summary>Max time a request waits for a token before giving up (keep well under HttpClient.Timeout).</summary>
     public TimeSpan MaxWait { get; set; } = TimeSpan.FromSeconds(20);
 
-    /// <summary>Sustained Salesforce calls per second across all workers in all processes (token bucket refill).</summary>
+    /// <summary>Sustained Salesforce calls per second across the workers of this process (token bucket refill). Salesforce has no per-second limit: this only smooths bursts.</summary>
     public double MaxRequestsPerSecond { get; set; } = 2;
 
-    /// <summary>Calls that may be made back to back after an idle period (token bucket capacity).</summary>
+    /// <summary>Calls this process may make back to back after an idle period (token bucket capacity).</summary>
     public double BurstCapacity { get; set; } = 5;
 
     /// <summary>
-    /// Pause after REQUEST_LIMIT_EXCEEDED for too many concurrent long-running requests
+    /// Pause of the process that meets REQUEST_LIMIT_EXCEEDED for too many concurrent long-running requests
     /// (clears as soon as one of them finishes).
     /// </summary>
     public TimeSpan ConcurrentLimitPause { get; set; } = TimeSpan.FromSeconds(30);
@@ -36,10 +36,4 @@ public sealed class RateLimitOptions
     /// (usage is a rolling 24 hours, so it frees up gradually, not at midnight).
     /// </summary>
     public TimeSpan DailyHardPause { get; set; } = TimeSpan.FromMinutes(15);
-
-    /// <summary>
-    /// Minimum gap between writes of header values to Postgres per process.
-    /// A change in throttle level is always written immediately.
-    /// </summary>
-    public TimeSpan ReportInterval { get; set; } = TimeSpan.FromSeconds(5);
 }

@@ -18,7 +18,7 @@ public sealed class EngineFlowTests
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly RecordingInbox _inbox = new();
-    private readonly Gate _gate = new();
+    private readonly SalesforceStep.NotPaused _limiter = new();
     private readonly Interceptor _http = new();
 
     [Fact]
@@ -34,9 +34,9 @@ public sealed class EngineFlowTests
     }
 
     [Fact]
-    public async Task Nothing_is_claimed_while_there_is_no_capacity()
+    public async Task Nothing_is_claimed_while_the_process_is_paused()
     {
-        _gate.Open = false;
+        _limiter.IsPaused = true;
         _inbox.Rows.Add(Row("ACC-1", "2026-10-14T01:00:00Z"));
 
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
@@ -50,7 +50,6 @@ public sealed class EngineFlowTests
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
 
         _inbox.Calls.Should().Equal("claim");
-        _gate.Released.Should().Be(1, "the slot is given back");
     }
 
     [Fact]
@@ -70,7 +69,6 @@ public sealed class EngineFlowTests
         outcomes.Synced.Should().Equal(["ACC-1"]);
         outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.EntityId == "ACC-2" && f.Code == SalesforceErrors.InvalidEvent);
         outcomes.Failed.Should().BeEmpty();
-        _gate.Released.Should().Be(1);
     }
 
     [Fact]
@@ -362,7 +360,7 @@ public sealed class EngineFlowTests
     private SalesforceBatchSyncService Engine()
     {
         _http.InnerHandler ??= new FakeSalesforceHandler(_org);
-        return SalesforceStep.Service(SalesforceStep.Http(_http), Options.Create(new SalesforceOptions()), _gate);
+        return SalesforceStep.Service(SalesforceStep.Http(_http), Options.Create(new SalesforceOptions()), _limiter);
     }
 
     /// <summary>An account event with its Profile (keyed like the account).</summary>
@@ -407,23 +405,6 @@ public sealed class EngineFlowTests
             return !isWrite && OnRead is not null && path.EndsWith("/query", StringComparison.Ordinal) ? OnRead(request)
                 : isWrite && ++Writes == FailWrite?.Number ? throw FailWrite.Value.Failure
                 : await base.SendAsync(request, ct);
-        }
-    }
-
-    private sealed class Gate : ISalesforceBatchGate, IAsyncDisposable
-    {
-        public bool Open { get; set; } = true;
-        public int Released { get; private set; }
-
-        public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct)
-        {
-            return Task.FromResult<IAsyncDisposable?>(Open ? this : null);
-        }
-
-        public ValueTask DisposeAsync()
-        {
-            Released++;
-            return ValueTask.CompletedTask;
         }
     }
 

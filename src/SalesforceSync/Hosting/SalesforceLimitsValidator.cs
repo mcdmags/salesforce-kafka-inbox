@@ -17,11 +17,11 @@ public sealed class SalesforceLimitsValidator(IOptions<SyncOptions> sync, IOptio
             errors.Add($"{SalesforceLimitsOptions.Section}:ConcurrentLongRunningLimit ({o.ConcurrentLongRunningLimit}) must be the " +
                        "org's concurrent long-running request limit, a positive number (25 for production orgs and sandboxes).");
         }
-        else if (sync.Value.MaxConcurrentRequests > o.ConcurrentLongRunningLimit)
+        else if (sync.Value.Workers > o.ConcurrentLongRunningLimit)
         {
-            errors.Add($"Sync:MaxConcurrentRequests ({sync.Value.MaxConcurrentRequests}) exceeds the org's limit of " +
-                       $"{o.ConcurrentLongRunningLimit} concurrent long-running requests. Other integrations share that " +
-                       "limit, so keep it well below.");
+            errors.Add($"Sync:Workers ({sync.Value.Workers}) exceeds the org's limit of {o.ConcurrentLongRunningLimit} " +
+                       "concurrent long-running requests. Every pod has that many, and other integrations share the limit, " +
+                       "so keep workers x pods well below it.");
         }
 
         if (o.RequestTimeout <= TimeSpan.Zero || o.RequestTimeout > SalesforceLimitsOptions.MaxApiTimeout)

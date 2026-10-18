@@ -4,7 +4,7 @@ internal static class BenchmarkDb
 {
     /// <summary>
     /// Aspire injects ConnectionStrings__benchdb. Use a dedicated database: the drain benchmark
-    /// truncates the inbox tables and resets sf_rate_limit.
+    /// truncates the inbox tables.
     /// </summary>
     public static string ConnectionString =>
         Environment.GetEnvironmentVariable("ConnectionStrings__benchdb")

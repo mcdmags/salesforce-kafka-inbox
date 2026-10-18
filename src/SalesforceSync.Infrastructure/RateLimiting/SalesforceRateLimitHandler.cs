@@ -6,8 +6,8 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.Infrastructure.RateLimiting;
 
 /// <summary>
-/// Every Salesforce HTTP call takes a token from the shared bucket. The Sforce-Limit-Info header on each
-/// response feeds back into the bucket's speed; limit errors pause all workers.
+/// Every Salesforce HTTP call takes a token from the process's bucket. The Sforce-Limit-Info header on each
+/// response feeds back into the bucket's speed; limit errors pause the process's workers.
 /// </summary>
 public sealed class SalesforceRateLimitHandler(
     ISalesforceRateLimiter limiter,
@@ -53,12 +53,12 @@ public sealed class SalesforceRateLimitHandler(
                     limits.Value.ConcurrentLongRunningLimit);
             }
 
-            await ReportLimitsAsync(res, ct);
+            ReportLimits(res);
 
             if (res.StatusCode is HttpStatusCode.ServiceUnavailable or HttpStatusCode.TooManyRequests)
             {
                 var retryAfter = RetryAfter(res) ?? DefaultRetryAfter;
-                await limiter.PauseAsync(retryAfter, ct);
+                limiter.Pause(retryAfter);
                 // A 503 that isn't Salesforce's own (a gateway in front of it) doesn't say whether the request was
                 // processed: everyone pauses just the same, but a write must be treated as possibly applied
                 var processed = res.StatusCode == HttpStatusCode.ServiceUnavailable &&
@@ -71,8 +71,8 @@ public sealed class SalesforceRateLimitHandler(
                 var pause = exceeded == LimitExceeded.ConcurrentLongRunning
                     ? options.Value.ConcurrentLimitPause
                     : options.Value.DailyHardPause;
-                log.LogWarning("Salesforce REQUEST_LIMIT_EXCEEDED ({Limit}); pausing all workers for {Pause}", exceeded, pause);
-                await limiter.PauseAsync(pause, ct);
+                log.LogWarning("Salesforce REQUEST_LIMIT_EXCEEDED ({Limit}); pausing this pod's workers for {Pause}", exceeded, pause);
+                limiter.Pause(pause);
                 throw new RateLimitedException(pause);
             }
 
@@ -112,27 +112,16 @@ public sealed class SalesforceRateLimitHandler(
             : LimitExceeded.TotalRequests;
     }
 
-    private async Task ReportLimitsAsync(HttpResponseMessage res, CancellationToken ct)
+    private void ReportLimits(HttpResponseMessage res)
     {
         if (!res.Headers.TryGetValues(LimitInfoHeader, out var values))
         {
             return;
         }
 
-        var info = SalesforceLimitInfo.Parse(string.Join("; ", values));
-        if (info is null)
+        if (SalesforceLimitInfo.Parse(string.Join("; ", values)) is { } info)
         {
-            return;
-        }
-
-        try
-        {
-            await limiter.ReportLimitsAsync(info, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Limit tracking must never fail the actual Salesforce call.
-            log.LogWarning(ex, "Failed to record Salesforce limits {Info}", info);
+            limiter.ReportLimits(info);
         }
     }
 }

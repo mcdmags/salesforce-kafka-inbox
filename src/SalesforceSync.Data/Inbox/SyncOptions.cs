@@ -6,11 +6,13 @@ public sealed class SyncOptions
 {
     public const string Section = "Sync";
 
-    /// <summary>Parallel worker loops in this process.</summary>
+    /// <summary>
+    /// Parallel worker loops in this process. Each has one Salesforce call in flight at a time, so the org sees at most
+    /// this many times the number of pods: keep that under the org's concurrent long-running request limit
+    /// (<c>SalesforceLimits:ConcurrentLongRunningLimit</c>, 25), since nothing caps it across pods. A pod that meets the
+    /// limit pauses itself and defers its batch without spending an attempt.
+    /// </summary>
     public int Workers { get; set; } = 4;
-
-    /// <summary>Max in-flight Salesforce batches across ALL processes.</summary>
-    public int MaxConcurrentRequests { get; set; } = 6;
 
     /// <summary>
     /// Entities per batch, 1 to <see cref="MaxEntitiesPerBatch"/>: with the default cap a batch is read with one
@@ -92,7 +94,6 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
         }
 
         AtLeastOne(nameof(o.Workers), o.Workers);
-        AtLeastOne(nameof(o.MaxConcurrentRequests), o.MaxConcurrentRequests);
         AtLeastOne(nameof(o.MaxEntitiesPerBatch), o.MaxEntitiesPerBatch);
         if (o.BatchSize < 1 || o.BatchSize > o.MaxEntitiesPerBatch)
         {

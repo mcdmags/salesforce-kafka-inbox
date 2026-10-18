@@ -18,7 +18,6 @@ public sealed class MultiPodFixture : SyncFixture
     {
         SharedDescribeCache = true;   // the pods share their Describe cache through Redis, like replicas in production
         WorkerSettings["Sync:Workers"] = WorkersPerPod.ToString();
-        WorkerSettings["Sync:MaxConcurrentRequests"] = (PodCount * WorkersPerPod).ToString();
         WorkerSettings["Sync:BatchSize"] = "10";
         WorkerSettings["Sync:IdleDelay"] = "00:00:00.050";
         // Short lease: a claim lost to a dropped connection (chaos test) is reclaimed quickly

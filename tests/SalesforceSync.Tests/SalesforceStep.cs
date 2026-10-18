@@ -33,11 +33,11 @@ internal static class SalesforceStep
 
     /// <param name="http">The HTTP stack to the org (see <see cref="Http"/>).</param>
     /// <param name="options">The Salesforce options of the engine and its error classification.</param>
-    /// <param name="gate">The concurrency gate, for tests that run whole batches; the Salesforce step needs none.</param>
+    /// <param name="limiter">The rate limiter, for tests that run whole batches; the Salesforce step needs none.</param>
     public static SalesforceBatchSyncService Service(HttpClient http, IOptions<SalesforceOptions> options,
-        ISalesforceBatchGate? gate = null)
+        ISalesforceRateLimiter? limiter = null)
     {
-        return new(gate ?? new NoDatabase(), Client(http), SchemaCache(),
+        return new(limiter ?? new NotPaused(), Client(http), SchemaCache(),
                 new SalesforceErrors(options), options, Options.Create(new SyncOptions()),
                 NullLogger<SalesforceBatchSyncService>.Instance);
     }
@@ -61,12 +61,22 @@ internal static class SalesforceStep
         return http;
     }
 
-    /// <summary>The Salesforce step never takes a slot.</summary>
-    private sealed class NoDatabase : ISalesforceBatchGate
+    /// <summary>A limiter that is never paused and is never asked for a token: the Salesforce step calls it through the client only.</summary>
+    public sealed class NotPaused : ISalesforceRateLimiter
     {
-        public Task<IAsyncDisposable?> TryEnterAsync(CancellationToken ct)
+        public bool IsPaused { get; set; }
+
+        public Task AcquireAsync(CancellationToken ct)
         {
-            throw new NotSupportedException("The Salesforce step does not use the inbox");
+            return Task.CompletedTask;
+        }
+
+        public void Pause(TimeSpan duration)
+        {
+        }
+
+        public void ReportLimits(SalesforceLimitInfo info)
+        {
         }
     }
 }

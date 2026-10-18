@@ -16,13 +16,13 @@ public sealed class SchemaTests(SyncFixture app)
     {
         // The worker already migrated at startup; a restart against a persisted volume migrates again
         var before = await TablesAndIndexesAsync();
-        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_contact_inbox", "sf_rate_limit",
+        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_contact_inbox",
             "__EFMigrationsHistory"]);
         before.Should().Contain([
             "sf_account_inbox_pkey", "sf_account_relationship_inbox_pkey", "sf_contact_inbox_pkey",
             "sf_account_relationship_inbox_ready", "sf_contact_inbox_ready"]);
         before.Should().NotContain("sf_sync_state", "every entity's state is in its inbox row");
-        before.Should().NotContain("sf_api_usage", "the daily allocation is read from Sforce-Limit-Info, not counted");
+        before.Should().NotContain(["sf_api_usage", "sf_rate_limit"], "rate limiting lives in each process and reads the daily allocation from Sforce-Limit-Info");
         before.Where(r => r.StartsWith("sf_account_inbox", StringComparison.Ordinal)).Should().BeEquivalentTo(
             ["sf_account_inbox", "sf_account_inbox_pkey", "sf_account_inbox_ready"]);
 
@@ -34,7 +34,7 @@ public sealed class SchemaTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Each_inbox_has_one_row_per_entity_the_ready_index_is_partial_the_hot_tables_vacuum_often_and_the_rate_limit_row_and_view_exist()
+    public async Task Each_inbox_has_one_row_per_entity_the_ready_index_is_partial_the_hot_tables_vacuum_often()
     {
         await using var conn = await app.Db.OpenConnectionAsync();
 
@@ -54,9 +54,6 @@ public sealed class SchemaTests(SyncFixture app)
                 .Should().Be("autovacuum_vacuum_scale_factor=0.02, autovacuum_vacuum_threshold=1000", table);
         }
 
-        (await conn.QuerySingleAsync<double>("SELECT capacity FROM sf_rate_limit WHERE name = 'salesforce'"))
-            .Should().BeGreaterThan(0, "the migration creates the shared bucket's row (startup then configures it)");
-        (await conn.QuerySingleAsync<long>("SELECT count(*) FROM sf_limit_status")).Should().Be(1);
     }
 
     [Fact]

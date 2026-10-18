@@ -1,168 +1,120 @@
 using Microsoft.Extensions.Options;
-using SalesforceSync.Data.RateLimiting;
 using SalesforceSync.Infrastructure.RateLimiting;
 
 namespace SalesforceSync.RateLimiting;
 
 /// <summary>
-/// Token bucket + limit guard stored in Postgres, shared by every worker in every process.
-/// The bucket's speed is adjusted from the Sforce-Limit-Info header Salesforce returns on each call: it slows down at
-/// <see cref="RateLimitOptions.DailySoftRatio"/> of the org's (or the connected app's) daily allocation and pauses at
-/// <see cref="RateLimitOptions.DailyHardRatio"/>. Salesforce counts the allocation over a rolling 24 hours and treats it as
-/// a soft limit, so there is no count of our own to keep: the header is the count.
-/// <para>
-/// Every change has the shared <c>sf_rate_limit</c> row locked, with the database clock, by the
-/// <see cref="RateLimitRepository"/>, decides in C# (<see cref="TokenBucket"/>) and has the row written back in the same
-/// transaction. Every acquire in every process queues for that lock, so it is held for as few round trips as possible.
-/// </para>
+/// The rate limiter of this process: a token bucket, a pause, and the throttle that follows the Sforce-Limit-Info header
+/// Salesforce returns on each call. The header carries the org's (and the connected app's) daily usage, so it slows the
+/// bucket down at <see cref="RateLimitOptions.DailySoftRatio"/> of the daily allocation and pauses at
+/// <see cref="RateLimitOptions.DailyHardRatio"/>; Salesforce counts the allocation over a rolling 24 hours and treats it
+/// as a soft limit, so there is no count of our own to keep. Salesforce has no per-second limit and caps only the
+/// concurrent requests of 20 seconds or longer, so the pods share nothing: each learns the same ratio from its own
+/// responses, and a pod that meets a limit error pauses itself.
 /// </summary>
-public sealed class SalesforceRateLimiter(
-    RateLimitRepository repository,
-    IOptions<RateLimitOptions> options,
-    IOptions<SalesforceLimitsOptions> limits,
-    ILogger<SalesforceRateLimiter> log) : ISalesforceRateLimiter
+public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
 {
     /// <summary>The least wait between attempts to acquire.</summary>
     private static readonly TimeSpan MinWait = TimeSpan.FromMilliseconds(50);
 
-    private readonly RateLimitOptions _opt = options.Value;
-    private readonly SalesforceLimitsOptions _limits = limits.Value;
-    private readonly object _reportLock = new();
-    private DateTime _lastReportUtc = DateTime.MinValue;
+    private readonly TimeProvider _clock;
+    private readonly RateLimitOptions _opt;
+    private readonly ILogger<SalesforceRateLimiter> _log;
+    private readonly object _lock = new();
+    private readonly TokenBucket _bucket;
+    private DateTimeOffset? _pausedUntil;
     private ThrottleDecision _lastDecision = ThrottleDecision.Normal;
     private long _loggedAllocation;
 
-    /// <summary>
-    /// Writes the configured bucket size and rate to the shared row when they differ from what the row holds: the
-    /// deploy's <c>sql/apply-rate-limits.sql</c> (the migrate step runs it; nothing is written when the limits haven't
-    /// changed). The current throttle factor and stored tokens are kept.
-    /// </summary>
-    /// <returns>Whether the row was changed.</returns>
-    public async Task<bool> ApplyConfigurationAsync(CancellationToken ct)
+    public SalesforceRateLimiter(TimeProvider clock, IOptions<RateLimitOptions> options, ILogger<SalesforceRateLimiter> log)
     {
-        var changed = await repository.ApplyLimitsAsync(_opt.BurstCapacity, _opt.MaxRequestsPerSecond, ct);
+        _clock = clock;
+        _opt = options.Value;
+        _log = log;
+        _bucket = new TokenBucket(_opt.BurstCapacity, _opt.MaxRequestsPerSecond, clock.GetUtcNow());
+    }
 
-        log.LogInformation(
-            "Salesforce limits {Outcome}: {Rate} calls/s, burst {Burst}, max {Concurrent} concurrent long-running requests; " +
-            "the daily allocation is read from Sforce-Limit-Info",
-            changed ? "updated" : "unchanged", _opt.MaxRequestsPerSecond, _opt.BurstCapacity, _limits.ConcurrentLongRunningLimit);
-        return changed;
+    public bool IsPaused
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _pausedUntil > _clock.GetUtcNow();
+            }
+        }
     }
 
     /// <summary>
-    /// Takes a token for one call, waiting up to <see cref="RateLimitOptions.MaxWait"/> for it, else throws
-    /// <see cref="RateLimitedException"/>.
+    /// Takes a token for one call, waiting up to <see cref="RateLimitOptions.MaxWait"/> for it (and for a pause to end),
+    /// else throws <see cref="RateLimitedException"/>.
     /// </summary>
     public async Task AcquireAsync(CancellationToken ct)
     {
-        const int oneCall = 1;
-        var deadline = DateTime.UtcNow + _opt.MaxWait;
+        var deadline = _clock.GetUtcNow() + _opt.MaxWait;
         while (true)
         {
-            var decision = await repository.DecideAsync(locked =>
-            {
-                var decision = TokenBucket.Decide(locked.Row, locked.Now, oneCall);
-                if (decision.Granted)
-                {
-                    locked.Row.Tokens = decision.Tokens;
-                    locked.Row.UpdatedAt = locked.Now;
-                }
-                return decision;
-            }, ct);
-
-            if (decision.Granted)
+            var decision = TryAcquire();
+            if (decision.IsGranted)
             {
                 return;
             }
 
             var wait = (decision.Wait > MinWait ? decision.Wait : MinWait)
                        + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100)); // jitter
-            if (DateTime.UtcNow + wait > deadline)
+            if (_clock.GetUtcNow() + wait > deadline)
             {
                 throw new RateLimitedException(wait);
             }
 
-            await Task.Delay(wait, ct);
+            await Task.Delay(wait, _clock, ct);
         }
     }
 
-    public Task<bool> IsPausedAsync(CancellationToken ct)
+    public void Pause(TimeSpan duration)
     {
-        return repository.IsPausedAsync(ct);
+        lock (_lock)
+        {
+            PauseLocked(duration);
+        }
     }
 
-    public Task PauseAsync(TimeSpan duration, CancellationToken ct)
-    {
-        return UpdateAsync((row, now) => Pause(row, now, duration), ct);
-    }
-
-    /// <summary>
-    /// Records the limits Salesforce reported and adjusts the shared bucket: slows down near the daily or per-app
-    /// allocation, pauses near exhaustion. api-bursts is recorded but not acted on (see <see cref="SalesforceLimitInfo"/>).
-    /// </summary>
-    public async Task ReportLimitsAsync(SalesforceLimitInfo info, CancellationToken ct)
+    /// <summary>Slows the bucket down near the daily or per-app allocation, pauses near exhaustion. api-bursts is not acted on (see <see cref="SalesforceLimitInfo"/>).</summary>
+    public void ReportLimits(SalesforceLimitInfo info)
     {
         LogAllocation(info);
         var decision = Decide(info);
-
-        // Throttle writes: every response carries the header, but Postgres only needs it occasionally,
-        // unless the throttle level just changed.
-        lock (_reportLock)
+        lock (_lock)
         {
-            var now = DateTime.UtcNow;
-            if (decision == _lastDecision && now - _lastReportUtc < _opt.ReportInterval)
-            {
-                return;
-            }
-
             if (decision != _lastDecision)
             {
                 LogTransition(_lastDecision, decision, info);
+                _lastDecision = decision;
             }
 
-            _lastDecision = decision;
-            _lastReportUtc = now;
-        }
-
-        await UpdateAsync((row, now) =>
-        {
-            row.RefillPerSec = Math.Max(row.BaseRefillPerSec * decision.Speed, 0.01);
+            _bucket.SetRate(_clock.GetUtcNow(), Math.Max(_opt.MaxRequestsPerSecond * decision.Speed, 0.01));
             if (decision.Pause > TimeSpan.Zero)
             {
-                Pause(row, now, decision.Pause);
+                PauseLocked(decision.Pause);
             }
-            row.ApiUsed = info.ApiUsage?.Used ?? row.ApiUsed;
-            row.ApiMax = info.ApiUsage?.Max ?? row.ApiMax;
-            row.BurstUsed = info.ApiBursts?.Used ?? row.BurstUsed;
-            row.BurstMax = info.ApiBursts?.Max ?? row.BurstMax;
-            row.AppUsed = info.PerAppUsage?.Used ?? row.AppUsed;
-            row.AppMax = info.PerAppUsage?.Max ?? row.AppMax;
-            row.AppName = info.AppName ?? row.AppName;
-            row.UsageUpdatedAt = now;
-        }, ct);
+        }
     }
 
-    /// <summary>
-    /// With the row locked, refills its tokens at the current rate (so a change of rate or capacity applies from now on)
-    /// and applies <paramref name="change"/>.
-    /// </summary>
-    private Task UpdateAsync(Action<RateLimitState, DateTimeOffset> change, CancellationToken ct)
+    private AcquireDecision TryAcquire()
     {
-        return repository.UpdateAsync((row, now) =>
+        lock (_lock)
         {
-            row.Tokens = TokenBucket.Refill(row, now);
-            row.UpdatedAt = now;
-            change(row, now);
-        }, ct);
+            var now = _clock.GetUtcNow();
+            return _pausedUntil > now ? AcquireDecision.NotYet(_pausedUntil.Value - now) : _bucket.TryTake(now, 1);
+        }
     }
 
-    /// <summary>Pauses until <paramref name="duration"/> from now, unless already paused for longer.</summary>
-    private static void Pause(RateLimitState row, DateTimeOffset now, TimeSpan duration)
+    private void PauseLocked(TimeSpan duration)
     {
-        var until = now + duration;
-        if (row.PausedUntil is null || row.PausedUntil < until)
+        var until = _clock.GetUtcNow() + duration;
+        if (_pausedUntil is null || _pausedUntil < until)
         {
-            row.PausedUntil = until;
+            _pausedUntil = until;
         }
     }
 
@@ -188,14 +140,14 @@ public sealed class SalesforceRateLimiter(
         {
             return;
         }
-        log.LogInformation("Salesforce reports a daily API allocation of {Reported} calls: slowing down at {Soft:P0}, pausing at {Hard:P0}",
+        _log.LogInformation("Salesforce reports a daily API allocation of {Reported} calls: slowing down at {Soft:P0}, pausing at {Hard:P0}",
             usage.Max, _opt.DailySoftRatio, _opt.DailyHardRatio);
     }
 
     private void LogTransition(ThrottleDecision from, ThrottleDecision to, SalesforceLimitInfo info)
     {
         var level = to.Level == ThrottleLevel.Normal ? LogLevel.Information : LogLevel.Warning;
-        log.Log(level,
+        _log.Log(level,
             "Salesforce throttle {From} -> {To} (speed x{Speed}, pause {Pause}). api-usage={Api} api-bursts={Bursts} per-app={App} ({AppName})",
             from.Level, to.Level, to.Speed, to.Pause,
             info.ApiUsage, info.ApiBursts, info.PerAppUsage, info.AppName);

@@ -231,7 +231,6 @@ public abstract class DrainBenchmarkBase
         services.Configure<SyncOptions>(o =>
         {
             o.Workers = Workers;
-            o.MaxConcurrentRequests = Workers * Pods; // global cap across all pods
             o.BatchSize = StreamIngest ? 10 : 75;     // streaming: small batches, so entities are claimed again and again
             o.Lease = TimeSpan.FromMinutes(5);
             // A relationship can be claimed before its Accounts are in the org (DEPENDENCY_NOT_SYNCED): retry it
@@ -240,9 +239,10 @@ public abstract class DrainBenchmarkBase
             o.MaxRetryDelay = TimeSpan.FromMilliseconds(500);
             o.MaxRetries = 50;
         });
-        services.Configure<RateLimitOptions>(_ => { });
+        // Effectively unlimited bucket: measure the pipeline, not the throttle
+        services.Configure<RateLimitOptions>(o => (o.MaxRequestsPerSecond, o.BurstCapacity) = (1e9, 1e9));
         services.AddSalesforceClient()
-            .AddSalesforceRateLimiting() // the bucket is opened up per iteration (SetupAsync)
+            .AddSalesforceRateLimiting()
             .ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
         services.AddInboxSync();
         return services.BuildServiceProvider();
@@ -259,13 +259,6 @@ public abstract class DrainBenchmarkBase
             await db.Database.ExecuteAsync($"TRUNCATE {table} RESTART IDENTITY", default);
         }
         await db.Database.ExecuteAsync("TRUNCATE sf_claim_audit", default);
-        // Effectively unlimited bucket: measure the pipeline, not the throttle
-        await db.Database.ExecuteAsync("""
-            UPDATE sf_rate_limit
-            SET tokens = 1e9, capacity = 1e9, base_refill_per_sec = 1e9, refill_per_sec = 1e9,
-                paused_until = NULL, updated_at = clock_timestamp()
-            WHERE name = 'salesforce'
-            """, default);
 
         (_workload, _events) = Generate(Events, Accounts, _syncs);
         // Per entity, its newest event: what its one inbox row must end with

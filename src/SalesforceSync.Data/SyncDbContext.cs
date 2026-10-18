@@ -4,7 +4,6 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Npgsql;
 using SalesforceSync.Data.Inbox;
-using SalesforceSync.Data.RateLimiting;
 
 namespace SalesforceSync.Data;
 
@@ -60,18 +59,6 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         modelBuilder.Entity<AccountInboxRow>(entity => ConfigureInbox(entity, "sf_account_inbox"));
         modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
         modelBuilder.Entity<ContactInboxRow>(entity => ConfigureInbox(entity, "sf_contact_inbox"));
-
-        // The shared token bucket and pause: one row, created here. Bucket size and refill rate are set from
-        // configuration by the deploy's migrate step.
-        modelBuilder.Entity<RateLimitState>(entity =>
-        {
-            entity.ToTable("sf_rate_limit");
-            entity.HasKey(r => r.Name).HasName("sf_rate_limit_pkey");
-            entity.Property(r => r.UpdatedAt).HasDefaultValueSql("clock_timestamp()");
-            entity.Property(r => r.Slots).HasColumnType("jsonb").HasDefaultValue("[]");
-            entity.HasData(new { Name = "salesforce", Tokens = 5.0, Capacity = 5.0, BaseRefillPerSec = 2.0, RefillPerSec = 2.0 });
-        });
-        modelBuilder.HasDbFunction(() => RateLimitSql.ClockTimestamp()).HasName("clock_timestamp").IsBuiltIn();
 
         // Every column is its property's name in snake_case (EntityId -> entity_id)
         foreach (var property in modelBuilder.Model.GetEntityTypes().SelectMany(e => e.GetProperties()))

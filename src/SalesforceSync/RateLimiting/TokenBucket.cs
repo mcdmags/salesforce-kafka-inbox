@@ -1,44 +1,56 @@
-using SalesforceSync.Data.RateLimiting;
-
 namespace SalesforceSync.RateLimiting;
 
 /// <summary>
-/// The arithmetic of the shared <c>sf_rate_limit</c> row, without I/O: <see cref="SalesforceRateLimiter"/> has the
-/// row locked (<see cref="RateLimitRepository"/>) and writes back what this decides.
+/// A token bucket: <see cref="Capacity"/> calls may be made back to back, then <see cref="RatePerSec"/> a second.
+/// No I/O and no lock of its own: <see cref="SalesforceRateLimiter"/> uses it under its lock.
 /// </summary>
-internal static class TokenBucket
+internal sealed class TokenBucket(double capacity, double baseRatePerSec, DateTimeOffset now)
 {
-    /// <summary>The row's tokens at <paramref name="now"/>: those stored plus the refill since, at most its capacity.</summary>
-    public static double Refill(RateLimitState s, DateTimeOffset now)
+    private double _tokens = capacity;
+    private DateTimeOffset _updatedAt = now;
+
+    public double Capacity { get; } = capacity;
+
+    /// <summary>The current rate: the normal one, reduced near the daily limit.</summary>
+    public double RatePerSec { get; private set; } = baseRatePerSec;
+
+    /// <summary>The tokens at <paramref name="at"/>: those stored plus the refill since, at most the capacity.</summary>
+    public double Tokens(DateTimeOffset at)
     {
-        return Math.Min(s.Capacity, s.Tokens + ((now - s.UpdatedAt).TotalSeconds * s.RefillPerSec));
+        return Math.Min(Capacity, _tokens + ((at - _updatedAt).TotalSeconds * RatePerSec));
     }
 
-    /// <summary>Whether <paramref name="permits"/> calls may be made now, and if not, how long until they may.</summary>
-    /// <param name="s">The shared bucket row, locked by the caller.</param>
-    /// <param name="now">The database clock, read with the lock.</param>
-    /// <param name="permits">Calls to make.</param>
-    public static AcquireDecision Decide(RateLimitState s, DateTimeOffset now, int permits)
+    /// <summary>Takes <paramref name="permits"/> tokens if there are enough; else says how long until there are.</summary>
+    public AcquireDecision TryTake(DateTimeOffset at, int permits)
     {
-        if (s.PausedUntil > now)
+        var available = Tokens(at);
+        if (available < permits)
         {
-            return AcquireDecision.NotYet(s.PausedUntil.Value - now);
+            return AcquireDecision.NotYet(TimeSpan.FromSeconds((permits - available) / RatePerSec));
         }
 
-        var available = Refill(s, now);
-        return available < permits
-            ? AcquireDecision.NotYet(TimeSpan.FromSeconds((permits - available) / s.RefillPerSec))
-            : new AcquireDecision(true, available - permits, TimeSpan.Zero);
+        _tokens = available - permits;
+        _updatedAt = at;
+        return AcquireDecision.Granted;
+    }
+
+    /// <summary>Changes the rate from now on (tokens refilled so far at the old rate are kept).</summary>
+    public void SetRate(DateTimeOffset at, double ratePerSec)
+    {
+        _tokens = Tokens(at);
+        _updatedAt = at;
+        RatePerSec = ratePerSec;
     }
 }
 
-/// <param name="Granted">Whether the calls may be made now.</param>
-/// <param name="Tokens">The row's tokens after spending them, when granted.</param>
+/// <param name="IsGranted">Whether the calls may be made now.</param>
 /// <param name="Wait">How long until they may be made, when not granted.</param>
-internal readonly record struct AcquireDecision(bool Granted, double Tokens, TimeSpan Wait)
+internal readonly record struct AcquireDecision(bool IsGranted, TimeSpan Wait)
 {
+    public static AcquireDecision Granted => new(true, TimeSpan.Zero);
+
     public static AcquireDecision NotYet(TimeSpan wait)
     {
-        return new AcquireDecision(false, 0, wait);
+        return new AcquireDecision(false, wait);
     }
 }

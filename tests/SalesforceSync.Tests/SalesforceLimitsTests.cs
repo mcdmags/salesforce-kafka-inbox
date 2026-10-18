@@ -2,10 +2,7 @@ using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using Npgsql;
-using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
-using SalesforceSync.Data.RateLimiting;
 using SalesforceSync.Hosting;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.RateLimiting;
@@ -30,12 +27,12 @@ public sealed class SalesforceLimitsTests
     }
 
     [Fact]
-    public void More_concurrent_requests_than_the_org_allows_fails_startup()
+    public void More_workers_than_the_org_allows_concurrent_requests_fails_startup()
     {
-        var result = Validate(Limits(concurrentLongRunningLimit: 5), new SyncOptions { MaxConcurrentRequests = 6 });
+        var result = Validate(Limits(concurrentLongRunningLimit: 5), new SyncOptions { Workers = 6 });
 
         result.Failed.Should().BeTrue();
-        result.FailureMessage.Should().Contain("MaxConcurrentRequests (6) exceeds the org's limit of 5");
+        result.FailureMessage.Should().Contain("Workers (6) exceeds the org's limit of 5");
     }
 
     [Theory]
@@ -211,11 +208,8 @@ public sealed class SalesforceLimitsTests
                 .Validate(null, limits);
     }
 
-    private static readonly NpgsqlDataSource Db = NpgsqlDataSource.Create("Host=unused");
-
     private static SalesforceRateLimiter Limiter(RateLimitOptions rate)
     {
-        return new(new RateLimitRepository(SyncDbContext.CreateFactory(Db)), Options.Create(rate),
-                Options.Create(Limits()), NullLogger<SalesforceRateLimiter>.Instance);
+        return new(TimeProvider.System, Options.Create(rate), NullLogger<SalesforceRateLimiter>.Instance);
     }
 }

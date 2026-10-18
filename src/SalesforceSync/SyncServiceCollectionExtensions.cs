@@ -5,7 +5,6 @@ using Microsoft.Extensions.Options;
 using Npgsql;
 using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
-using SalesforceSync.Data.RateLimiting;
 using SalesforceSync.Hosting;
 using SalesforceSync.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
@@ -68,8 +67,7 @@ public static class SyncServiceCollectionExtensions
 
     /// <summary>
     /// The deploy's migrate step (<c>SalesforceSync --migrate</c>), performed once before the pods roll out: applies the
-    /// migrations, then the configured rate limits to the shared row when they changed
-    /// (<see cref="SalesforceRateLimiter.ApplyConfigurationAsync"/>). Needs only Postgres and the limit settings.
+    /// migrations. Needs only Postgres.
     /// </summary>
     public static async Task MigrateAsync(this IHostApplicationBuilder builder)
     {
@@ -77,15 +75,10 @@ public static class SyncServiceCollectionExtensions
         var config = builder.Configuration;
         services.Configure<PostgresRetryOptions>(config.GetSection(PostgresRetryOptions.Section));
         AddValidatedOptions<SyncOptions, SyncOptionsValidator>(services, config.GetSection(SyncOptions.Section));
-        AddValidatedOptions<SalesforceLimitsOptions, SalesforceLimitsValidator>(services, config.GetSection(SalesforceLimitsOptions.Section));
-        services.Configure<RateLimitOptions>(config.GetSection(RateLimitOptions.Section));
         builder.AddNpgsqlDataSource("inboxdb");
         services.AddInboxSync();
-        services.AddSingleton<RateLimitRepository>();
-        services.AddSingleton<SalesforceRateLimiter>();
         using var host = ((HostApplicationBuilder)builder).Build();
         await SyncSchema.MigrateAsync(host.Services.GetRequiredService<IDbContextFactory<SyncDbContext>>());
-        await host.Services.GetRequiredService<SalesforceRateLimiter>().ApplyConfigurationAsync(CancellationToken.None);
     }
 
     private static void AddWorkerOptions(IServiceCollection services, IConfiguration config)
@@ -180,10 +173,8 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Rate limiting shared through Postgres, for the client from <see cref="AddSalesforceClient"/>: the token bucket,
-    /// daily budget and pause (<see cref="SalesforceRateLimiter"/>, configured by the migrate step,
-    /// <see cref="MigrateAsync"/>), the global concurrency slots (leases on the rate-limit row, at most
-    /// <see cref="SyncOptions.MaxConcurrentRequests"/> batches across all pods) and <see cref="SalesforceRateLimitHandler"/>,
+    /// Rate limiting for the client from <see cref="AddSalesforceClient"/>, in memory: the process's token bucket, pause
+    /// and throttle from Sforce-Limit-Info (<see cref="SalesforceRateLimiter"/>) and <see cref="SalesforceRateLimitHandler"/>,
     /// inserted as the outermost handler whatever else is added, so every attempt costs a token:
     /// rate limiter -> gzip -> auth. Register it before the worker loops
     /// (hosted services start in registration order). <see cref="SalesforceBatchSyncService"/> needs it.
@@ -191,16 +182,8 @@ public static class SyncServiceCollectionExtensions
     public static IHttpClientBuilder AddSalesforceRateLimiting(this IHttpClientBuilder salesforce)
     {
         var services = salesforce.Services;
-        services.AddSingleton<RateLimitRepository>();
         services.AddSingleton<SalesforceRateLimiter>();
         services.AddSingleton<ISalesforceRateLimiter>(sp => sp.GetRequiredService<SalesforceRateLimiter>());
-        services.AddSingleton(sp =>
-        {
-            var sync = sp.GetRequiredService<IOptions<SyncOptions>>().Value;
-            return new SalesforceConcurrencySlots(sp.GetRequiredService<IDbContextFactory<SyncDbContext>>(),
-                sync.MaxConcurrentRequests, sync.Lease, sp.GetRequiredService<ILogger<SalesforceConcurrencySlots>>());
-        });
-        services.AddSingleton<ISalesforceBatchGate, SalesforceBatchGate>();
         services.AddTransient<SalesforceRateLimitHandler>();
 
         return salesforce

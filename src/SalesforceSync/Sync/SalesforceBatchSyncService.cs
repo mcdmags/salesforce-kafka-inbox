@@ -48,7 +48,7 @@ namespace SalesforceSync.Sync;
 /// <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
 /// </summary>
 public sealed class SalesforceBatchSyncService(
-    ISalesforceBatchGate gate,
+    ISalesforceRateLimiter limiter,
     ISalesforceRestClient salesforce,
     SalesforceSchemaCache schemaCache,
     SalesforceErrors errors,
@@ -84,8 +84,8 @@ public sealed class SalesforceBatchSyncService(
     public async Task<int> SyncBatchAsync<TEvent, TRow>(SyncStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
         where TRow : InboxRow, IInboxRow, new()
     {
-        await using var admission = await gate.TryEnterAsync(ct);
-        if (admission is null)
+        // No batch starts while this process is paused (Salesforce asked for it): nothing is claimed
+        if (limiter.IsPaused)
         {
             return 0;
         }
