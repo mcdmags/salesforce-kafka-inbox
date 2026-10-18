@@ -65,8 +65,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
 
     /// <summary>
     /// What to record in the inbox once Salesforce has answered: saved or unchanged entities are done, permanent
-    /// failures and invalid rows are dead-lettered, the rest is retried. Entities not attempted get no outcome: their
-    /// leases end and they are due again, with no attempt spent.
+    /// failures and invalid rows are dead-lettered, the rest is retried.
     /// </summary>
     /// <param name="results">The outcome of every entity in <see cref="Work"/>, by entity id.</param>
     public BatchOutcomes Outcomes(IReadOnlyDictionary<string, SyncResult> results)
@@ -81,7 +80,6 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
             switch (result.Outcome)
             {
                 case SyncOutcome.Saved or SyncOutcome.Unchanged: synced.Add(work.EntityId); break;
-                case SyncOutcome.NotAttempted: break;
                 case SyncOutcome.PermanentFailure: dead.Add(Failure(work, result)); break;
                 default: failed.Add(Failure(work, result)); break;
             }

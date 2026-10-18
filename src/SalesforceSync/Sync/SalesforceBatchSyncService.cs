@@ -21,11 +21,8 @@ namespace SalesforceSync.Sync;
 /// part, so events may come out of order, over any partitions. An event that can't be read or mapped is
 /// dead-lettered on its own.</item>
 /// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
-/// one Composite request reads the current records (more only when very long ids need more than 5 queries), then
-/// what differs is written with sObject Collections upserts, one per level and object, and the records to delete
-/// that Salesforce has are deleted with one Collections delete: one call when the request has one collection, else
-/// one Composite request of them, parents first and the delete last (Accounts, then their Profiles: 1 call),
-/// whatever the objects.</item>
+/// reads the current records (one query per object), then sends what differs, one upsert per object with parents first,
+/// and last the records to delete that Salesforce has, in one delete.</item>
 /// <item>Records each entity's outcome in one transaction: done, released for the
 /// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
 /// every claimed entity is held (the write's outcome is unknown), deferred (rate limited) or retried. An entity whose
@@ -44,8 +41,7 @@ namespace SalesforceSync.Sync;
 /// <item>The records of one entity are its <see cref="SyncUnit"/>.</item>
 /// <item><b>Diff</b> (<see cref="WritePlanner"/>): each record is compared with what the read found in Salesforce, and
 /// becomes a create (all its fields), an update (only the fields that differ), a delete or nothing.</item>
-/// <item><b>Collections</b> (<see cref="WriteRequest"/>): the creates and updates are grouped into one upsert per object
-/// and level (parents first), and the units packed into as few API calls as the limits allow.</item>
+/// <item><b>Write</b> (<see cref="Writer"/>): one upsert per object, parents first, then the deletes.</item>
 /// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="PreparedBatch"/> and the
 /// ones in <c>Sync/Write</c>); Salesforce is reached only through <see cref="ISalesforceRestClient"/> and the inbox only
@@ -77,7 +73,7 @@ public sealed class SalesforceBatchSyncService(
 
     private readonly SyncOptions _opt = options.Value;
     private readonly SalesforceOptions _salesforceOpt = salesforceOptions.Value;
-    private readonly WriteResultInterpreter _interpreter = new(errors);
+    private readonly Writer _writer = new(salesforce, new WriteResultInterpreter(errors));
 
     /// <summary>Claims, writes (upserts and deletes) and records one batch of the strategy's entity type.</summary>
     /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
@@ -142,7 +138,7 @@ public sealed class SalesforceBatchSyncService(
             // only what still differs. Shutdown (ct) is not caught: the failed request wrote nothing, and the lease
             // simply expires.
             log.LogError(ex, "{Type} batch failed", strategy.EntityType);
-            await inbox.FailAllAsync(claim, ex.Message, ex is SalesforceQueryException q ? q.Errors.FirstOrDefault()?.Code : null, ct);
+            await inbox.FailAllAsync(claim, ex.Message, (ex as SalesforceResponseException)?.ErrorCode, ct);
             return claim.Events.Count;
         }
 
@@ -202,35 +198,24 @@ public sealed class SalesforceBatchSyncService(
             return results;
         }
 
-        // 3. Read: one Composite call with the strategy's queries (more only if long ids split them into more than 5)
+        // 3. Read what Salesforce has: one query per object (and per chunk of external ids)
         var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas, maxValuesPerQuery, salesforce.DataPath), schemas.Keys, ct);
 
-        // 4. Diff: per record unchanged, create, update or delete (by what the read found); parents are ordered before
-        // the children that hold their external id; the writes are grouped into collections and requests
-        var plan = WritePlanner.Plan(normalized, current, maxRecordsPerWrite);
-        results.AddRange(plan.NotSent);
+        // 4. Diff: per record unchanged, create, update or delete (by what the read found)
+        var plan = WritePlanner.Plan(normalized, current);
+        results.AddRange(plan.Decided);
 
-        // 5. Send. A request of one collection is that Collections upsert or delete; a request of several (Accounts and
-        // their Profiles, upserts and deletes) is one Composite request of them, parents first and the delete last. Either way one call per request, and a delete
-        // whose answer is lost is held like an upsert: a late delete must not remove a record a newer event recreated.
-        // 6. Per-record results -> one outcome per unit, the same way for all; a unit with writes in several collections
-        // gets one outcome from all of them. A child is sent even if its new parent failed in an
-        // earlier subrequest: the org decides, and the parent's result decides the unit.
-        foreach (var request in plan.Requests)
+        // 5. Send, and read the answers into one outcome per unit. A write whose answer is lost is held, a delete too: a
+        // late delete must not remove a record a newer event recreated.
+        try
         {
-            var collections = request.BuildRequests();
-            IReadOnlyList<CollectionResult> answers;
-            try
-            {
-                answers = await salesforce.WriteAsync(collections, ct);
-            }
-            catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
-            {
-                // Everything before the first write only read from Salesforce, so its failures are safe to retry. From
-                // here on Salesforce may have the write, and may still apply it after we stop waiting.
-                throw new UnknownOutcomeException(ex);
-            }
-            results.AddRange(_interpreter.Interpret(request, answers));
+            results.AddRange(await _writer.WriteAsync(plan.Units, maxRecordsPerWrite, ct));
+        }
+        catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
+        {
+            // Everything before the first write only read from Salesforce, so its failures are safe to retry. From here
+            // on Salesforce may have the write, and may still apply it after we stop waiting.
+            throw new UnknownOutcomeException(ex);
         }
 
         await InvalidateRecordTypesAsync(units, results, ct);
@@ -278,26 +263,15 @@ public sealed class SalesforceBatchSyncService(
     private async Task<CurrentRecords> ReadCurrentAsync(IReadOnlyList<ReadQuery> queries, IEnumerable<string> describedSObjects,
         CancellationToken ct)
     {
-        if (queries.Count == 0)
-        {
-            return CurrentRecords.None;
-        }
-
+        var rows = new List<(string SObject, JsonElement Row)>();
         try
         {
-            // One Composite request (call) per 5 queries: normally one
-            var rows = new Dictionary<string, List<JsonElement>>(StringComparer.Ordinal);
-            foreach (var request in queries.Chunk(SalesforceRestClient.MaxCompositeQueries))
+            foreach (var query in queries)
             {
-                foreach (var (referenceId, found) in await salesforce.QueryAsync([.. request.Select(q => q.Query)], ct))
-                {
-                    rows[referenceId] = found;
-                }
+                rows.AddRange((await salesforce.SelectAsync(query.Soql, ct)).Select(row => (query.SObject, row)));
             }
-
-            return CurrentRecords.From(rows, queries);
         }
-        catch (SalesforceQueryException ex) when (ex.Errors.Any(e => e.Code == "INVALID_FIELD"))
+        catch (SalesforceResponseException ex) when (ex.ErrorCode == "INVALID_FIELD")
         {
             // The cached describe is out of date (a field was removed or renamed): describe again next time
             foreach (var sobject in describedSObjects)
@@ -307,6 +281,8 @@ public sealed class SalesforceBatchSyncService(
 
             throw;
         }
+
+        return CurrentRecords.From(rows);
     }
 
     private void LogFailures(string entityType, PreparedBatch batch, IEnumerable<SyncResult> results)

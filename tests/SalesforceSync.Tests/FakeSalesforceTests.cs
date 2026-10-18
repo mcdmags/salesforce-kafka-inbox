@@ -94,11 +94,10 @@ public sealed class FakeSalesforceTests
         var a1 = await UpsertAccountsAsync("A1");
         await DeleteAsync(a1);
 
-        var found = await SalesforceStep.Client(_http).QueryAsync(
-            [new CompositeQuery("q0", "SELECT Id FROM Account WHERE ExternalId__c IN ('A1')")], CancellationToken.None);
+        var found = await SalesforceStep.Client(_http).SelectAsync("SELECT Id FROM Account WHERE ExternalId__c IN ('A1')", CancellationToken.None);
         var recreated = (await UpsertAsync("Account", Account("A1"))).Single()!;
 
-        found["q0"].Should().BeEmpty("Query leaves out the Recycle Bin");
+        found.Should().BeEmpty("Query leaves out the Recycle Bin");
         ((bool)recreated["created"]!).Should().BeTrue("an upsert matches no record in the Recycle Bin");
         ((string?)recreated["id"]).Should().NotBe(a1);
     }
@@ -243,12 +242,12 @@ public sealed class FakeSalesforceTests
 
         const string soql = "SELECT Id FROM Contact WHERE AccountId__c IN ('A1')";
         var first = JsonNode.Parse(await _http.GetStringAsync(SalesforceRestClient.QueryUrl(Data, soql)))!;
-        var all = await SalesforceStep.Client(_http).QueryAsync([new CompositeQuery("q0", soql)], CancellationToken.None);
+        var all = await SalesforceStep.Client(_http).SelectAsync(soql, CancellationToken.None);
 
         ((int)first["totalSize"]!, (bool)first["done"]!, first["records"]!.AsArray().Count).Should().Be((2_001, false, 2_000));
         ((string?)first["nextRecordsUrl"]).Should().StartWith($"{Data}/query/");
         ((string?)first["records"]![0]!["attributes"]!["url"]).Should().StartWith($"{Data}/sobjects/Contact/003");
-        all["q0"].Should().HaveCount(2_001);
+        all.Should().HaveCount(2_001);
     }
 
     // ---------- OAuth sessions ----------

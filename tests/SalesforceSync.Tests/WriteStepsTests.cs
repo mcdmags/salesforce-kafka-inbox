@@ -184,11 +184,11 @@ public sealed class WriteStepsTests
                 new SoqlQuery("Profile__c", "ExternalId__c", [])],
             Schemas, maxValuesPerQuery: 100, SalesforceStep.DataPath);
 
-        queries.Select(q => (q.Query.ReferenceId, q.SObject)).Should().Equal(("q0", "Account"), ("q1", "Account"), ("q2", "Contact"), ("q3", "Profile__c"));
-        queries[0].Query.Soql.Should().StartWith("SELECT Name,ExternalId__c,Id FROM Account WHERE ExternalId__c IN ('A0',");
-        queries[1].Query.Soql.Should().Contain("'A149'").And.NotContain("'A99'");
-        queries[2].Query.Soql.Should().Be("SELECT ExternalId__c,Id FROM Contact WHERE ExternalId__c IN ('C1')");
-        queries[3].Query.Soql.Should().Be("SELECT AccountId__c,ExternalId__c,Id FROM Profile__c WHERE ExternalId__c IN ('P1')",
+        queries.Select(q => q.SObject).Should().Equal("Account", "Account", "Contact", "Profile__c");
+        queries[0].Soql.Should().StartWith("SELECT Name,ExternalId__c,Id FROM Account WHERE ExternalId__c IN ('A0',");
+        queries[1].Soql.Should().Contain("'A149'").And.NotContain("'A99'");
+        queries[2].Soql.Should().Be("SELECT ExternalId__c,Id FROM Contact WHERE ExternalId__c IN ('C1')");
+        queries[3].Soql.Should().Be("SELECT AccountId__c,ExternalId__c,Id FROM Profile__c WHERE ExternalId__c IN ('P1')",
             "a foreign key is selected as the field it is");
     }
 
@@ -209,7 +209,7 @@ public sealed class WriteStepsTests
 
         var queries = BuildAccountRead(ids, maxValuesPerQuery: 3);
 
-        queries.Select(q => ids.Count(id => q.Query.Soql.Contains($"'{id}'"))).Should().Equal(3, 3, 1);
+        queries.Select(q => ids.Count(id => q.Soql.Contains($"'{id}'"))).Should().Equal(3, 3, 1);
     }
 
     [Fact]
@@ -219,8 +219,8 @@ public sealed class WriteStepsTests
 
         var queries = BuildAccountRead(ids, SalesforceRestClient.MaxQueryValues);
 
-        queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, q.Query.Soql)));
-        queries.Select(q => ids.Count(id => q.Query.Soql.Contains($"'{id}'"))).Should().OnlyContain(n => n < SalesforceRestClient.MaxQueryValues)
+        queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, q.Soql)));
+        queries.Select(q => ids.Count(id => q.Soql.Contains($"'{id}'"))).Should().OnlyContain(n => n < SalesforceRestClient.MaxQueryValues)
             .And.Subject.Sum().Should().Be(ids.Count);
     }
 
@@ -233,8 +233,8 @@ public sealed class WriteStepsTests
 
         var queries = BuildAccountRead(ids, maxValuesPerQuery: 100);
 
-        queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, q.Query.Soql)));
-        var chunks = queries.Select(q => ids.Where(id => q.Query.Soql.Contains($"'{id}'")).ToList()).ToList();
+        queries.Should().HaveCountGreaterThan(1).And.OnlyContain(q => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, q.Soql)));
+        var chunks = queries.Select(q => ids.Where(id => q.Soql.Contains($"'{id}'")).ToList()).ToList();
         chunks.SelectMany(c => c).Should().Equal(ids, "every id is read once, in order");
         chunks.Zip(chunks.Skip(1)).Select(p => SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(SalesforceStep.DataPath, 
                 SalesforceRestClient.Soql("Account", ["Name", "ExternalId__c", "Id"], "ExternalId__c", [.. p.First, p.Second[0]]))))
@@ -258,99 +258,19 @@ public sealed class WriteStepsTests
         SalesforceRestClient.FitsUrlLimit(new string('a', SalesforceRestClient.MaxUrlBytes - 1) + "é").Should().BeFalse("bytes count, not characters");
     }
 
-    // ---------- WriteRequest.Pack ----------
+    // ---------- The client refuses before sending ----------
 
     [Fact]
-    public void Units_that_need_the_same_collections_share_one_request_parents_first()
-    {
-        var (requests, tooLarge) = WriteRequest.Pack(
-        [
-            new PlannedUnit("NEW", [Write("Account", create: true), Write("Profile__c", create: true, depth: 1)]),
-            new PlannedUnit("OLD", [Write("Account", create: false), Write("Profile__c", create: false, depth: 1)]),
-            new PlannedUnit("NEW2", [Write("Account", create: true)])
-        ], MaxRecordsPerWrite);
-
-        tooLarge.Should().BeEmpty();
-        var request = requests.Should().ContainSingle().Subject;
-        request.Units.Select(u => u.Key).Should().Equal("NEW", "OLD", "NEW2");
-        request.Upserts().Select(r => (r.ReferenceId, r.Records.Count)).Should().Equal([("Account", 3), ("Profile__c", 2)],
-            "one upsert per level and object, creates and updates together");
-    }
-
-    [Fact]
-    public void A_unit_that_does_not_fit_the_requests_so_far_starts_another_and_stays_whole()
-    {
-        var (requests, _) = WriteRequest.Pack(
-        [
-            new PlannedUnit("A", [Write("Account", true), Write("Account", false, 1), Write("Profile__c", true, 1), Write("Profile__c", false, 2)]),
-            new PlannedUnit("B", [Write("Account_Relationship__c", true), Write("Account_Relationship__c", false, 1)]),
-            new PlannedUnit("C", [Write("Account", true)])
-        ], MaxRecordsPerWrite);
-
-        requests.Select(r => r.Units.Select(u => u.Key)).Should().BeEquivalentTo<string[]>([["A", "C"], ["B"]],
-            "B would be a 5th and 6th collection; C still fits the first request");
-    }
-
-    [Fact]
-    public void A_collection_takes_up_to_200_records()
-    {
-        var units = Enumerable.Range(0, SalesforceRestClient.MaxCollectionRecords + 1)
-            .Select(i => new PlannedUnit($"A{i}", [Write("Account", create: true)])).ToList();
-
-        var (requests, _) = WriteRequest.Pack(units, SalesforceRestClient.MaxCollectionRecords);
-
-        requests.Select(r => r.Units.Count).Should().Equal(SalesforceRestClient.MaxCollectionRecords, 1);
-    }
-
-    [Fact]
-    public void Writes_are_split_at_the_given_number_of_records_per_collection()
-    {
-        var (requests, tooLarge) = WriteRequest.Pack(
-            [.. Enumerable.Range(0, 3).Select(i => new PlannedUnit($"A{i}", [Write("Account", create: true)]))], maxRecordsPerWrite: 2);
-
-        tooLarge.Should().BeEmpty();
-        requests.Select(r => r.Upserts().Single().Records.Count).Should().Equal(2, 1);
-    }
-
-    [Fact]
-    public void A_unit_with_more_records_of_an_object_than_a_collection_takes_fails_alone()
-    {
-        var (requests, tooLarge) = WriteRequest.Pack(
-            [new PlannedUnit("BIG", [Write("Account", true), Write("Account", false)]), new PlannedUnit("OK", [Write("Account", true)])],
-            maxRecordsPerWrite: 1);
-
-        tooLarge.Should().ContainSingle().Which.Key.Should().Be("BIG");
-        requests.Should().ContainSingle().Which.Units.Should().ContainSingle().Which.Key.Should().Be("OK");
-    }
-
-    [Fact]
-    public void A_unit_that_needs_more_collections_than_a_request_takes_fails_alone()
-    {
-        var tooMany = Enumerable.Range(0, SalesforceRestClient.MaxCompositeCollections + 1).Select(depth => Write("Account", true, depth)).ToList();
-
-        var (requests, tooLarge) = WriteRequest.Pack([new PlannedUnit("BIG", tooMany), new PlannedUnit("OK", [Write("Account", true)])],
-            MaxRecordsPerWrite);
-
-        var failed = tooLarge.Should().ContainSingle().Subject;
-        (failed.Key, failed.Outcome, failed.PrimaryError!.Code).Should().Be(("BIG", SyncOutcome.PermanentFailure, "LIMIT_EXCEEDED"));
-        requests.Should().ContainSingle().Which.Units.Should().ContainSingle().Which.Key.Should().Be("OK");
-    }
-
-    // ---------- Collections delete ----------
-
-    [Fact]
-    public async Task A_delete_of_as_many_Ids_as_a_collection_takes_fits_a_call_and_one_more_is_refused_before_sending()
+    public async Task A_delete_of_as_many_Ids_as_a_call_takes_fits_a_URL_and_one_more_is_refused_before_sending()
     {
         var ids = Enumerable.Range(0, SalesforceRestClient.MaxCollectionRecords + 1).Select(i => $"003{i:D12}AAA").ToList();
-        var full = new CollectionDelete("delete", ids[..SalesforceRestClient.MaxCollectionRecords]);
+        var url = $"{SalesforceStep.DataPath}/composite/sobjects?ids={string.Join(",", ids[..SalesforceRestClient.MaxCollectionRecords])}&allOrNone=false";
 
-        SalesforceRestClient.FitsUrlLimit(SalesforceStep.DataPath + full.Path).Should().BeTrue("200 Ids of 18 characters are under 4 KB: {0} bytes", (SalesforceStep.DataPath + full.Path).Length);
-        full.Path.Should().StartWith("/composite/sobjects?ids=003000000000000AAA,003000000000001AAA,")
-            .And.EndWith("&allOrNone=false");
+        SalesforceRestClient.FitsUrlLimit(url).Should().BeTrue("200 Ids of 18 characters are under 4 KB: {0} bytes", url.Length);
 
         var client = SalesforceStep.Client(SalesforceStep.Http(new ThrowingHandler()));
-        var tooMany = () => client.WriteAsync([new CollectionDelete("delete", ids)], CancellationToken.None);
-        await tooMany.Should().ThrowAsync<ArgumentOutOfRangeException>().WithMessage("delete: 201 records*");
+        var tooMany = () => client.DeleteAsync(ids, CancellationToken.None);
+        await tooMany.Should().ThrowAsync<ArgumentOutOfRangeException>().WithMessage("201 records*");
     }
 
     /// <summary>A handler the test must never reach: the client refuses before sending.</summary>
@@ -383,14 +303,5 @@ public sealed class WriteStepsTests
         var normalized = RecordNormalizer.Normalize(unit.Records[0].ExternalId, unit, Schemas, out var problems);
         problems.Should().BeEmpty();
         return [normalized];
-    }
-
-    private static PlannedWrite Write(string sobject, bool create, int depth = 0)
-    {
-        var record = new NormalizedRecord(
-            new SObjectRecord("r", sobject, "ExternalId__c", "X", new Dictionary<string, object?>()),
-            new SObjectSchema(sobject, [new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true)]),
-            new Dictionary<SalesforceField, object?>());
-        return new PlannedWrite(record, create ? null : "001000000000001AAA", new Dictionary<string, object?>(), [], depth);
     }
 }

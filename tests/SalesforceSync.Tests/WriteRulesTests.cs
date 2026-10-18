@@ -7,8 +7,9 @@ using SalesforceSync.Sync.Write;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The write path's rules on their own, from hand-built Salesforce state and results: <see cref="WritePlanner.Changes"/>,
-/// <see cref="WritePlanner"/> and <see cref="WriteResultInterpreter"/>. No org, no HTTP.
+/// The write path's rules on their own, from hand-built Salesforce state and results: the diff and the plan
+/// (<see cref="WritePlanner"/>), the calls (<see cref="Writer"/>, on a stub client) and the reading of the answers
+/// (<see cref="WriteResultInterpreter"/>). No org, no HTTP.
 /// </summary>
 public sealed class WriteRulesTests
 {
@@ -46,7 +47,7 @@ public sealed class WriteRulesTests
         ["Gadget__c"] = new("Gadget__c", [Field("Id", "id", createable: false, updateable: false), Field("Key__c", "string"), Field("Widget__c", "string")])
     };
 
-    // ---------- WritePlanner.Changes ----------
+    // ---------- The diff ----------
 
     public static TheoryData<string, object?, string, string[]> Diffs()
     {
@@ -66,9 +67,9 @@ public sealed class WriteRulesTests
         var record = Normalized(Account("A1", name, active: null)).Records[0];
         var problems = new List<SalesforceError>();
 
-        var changes = WritePlanner.Changes(record, Current(stored), problems);
+        var fields = WritePlanner.Diff(record, Current(stored), problems);
 
-        changes.Keys.Should().BeEquivalentTo(expected, what);
+        fields.Keys.Should().BeEquivalentTo(expected, what);
         problems.Should().BeEmpty();
     }
 
@@ -77,9 +78,9 @@ public sealed class WriteRulesTests
     {
         var record = Normalized(Account("A1", "Acme", active: null)).Records[0];
 
-        var changes = WritePlanner.Changes(record, null, []);
+        var fields = WritePlanner.Diff(record, null, []);
 
-        changes.Should().BeEquivalentTo(new Dictionary<string, object?> { ["Name"] = "Acme", ["Active__c"] = false });
+        fields.Should().BeEquivalentTo(new Dictionary<string, object?> { ["Name"] = "Acme", ["Active__c"] = false });
     }
 
     [Fact]
@@ -88,14 +89,14 @@ public sealed class WriteRulesTests
         var record = Normalized(Account("A1", "Acme", locked: "new")).Records[0];
         var problems = new List<SalesforceError>();
 
-        WritePlanner.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"new"}"""), problems);
+        WritePlanner.Diff(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"new"}"""), problems);
         problems.Should().BeEmpty();
 
-        WritePlanner.Changes(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"old"}"""), problems);
+        WritePlanner.Diff(record, Current(/*lang=json,strict*/ """{"Name":"Acme","Active__c":false,"Locked__c":"old"}"""), problems);
         problems.Should().ContainSingle().Which.Code.Should().Be("INVALID_FIELD_FOR_INSERT_UPDATE");
     }
 
-    // ---------- WritePlanner ----------
+    // ---------- The plan ----------
 
     [Fact]
     public void Create_update_and_unchanged_are_decided_by_what_Salesforce_has()
@@ -103,136 +104,30 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"OLD","Name":"Acme","Active__c":false}"""),
             ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"SAME","Name":"Same","Active__c":false}"""));
 
-        var plan = Plan(
-            [Normalized(Account("NEW", "New")), Normalized(Account("OLD", "Changed")), Normalized(Account("SAME", "Same"))],
-            current);
+        var plan = WritePlanner.Plan(
+            [Normalized(Account("NEW", "New")), Normalized(Account("OLD", "Changed")), Normalized(Account("SAME", "Same"))], current);
 
-        plan.NotSent.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "SAME" && r.Outcome == SyncOutcome.Unchanged);
-        var upsert = plan.Requests.Should().ContainSingle().Subject.Upserts().Should().ContainSingle().Subject;
-        upsert.ReferenceId.Should().Be("Account");
-        upsert.Records.Select(r => r["ExternalId__c"]).Should().Equal("NEW", "OLD");
-        upsert.Records[0].Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "Name", "Active__c"], "a create sends every field");
-        upsert.Records[1].Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "Name"], "an update sends only what differs, never an Id");
+        plan.Decided.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "SAME" && r.Outcome == SyncOutcome.Unchanged);
+        var changes = plan.Units.Select(u => u.Changes.Single()).ToList();
+        changes.Select(c => (c.Record.Record.ExternalId, c.Id, c.IsCreate)).Should().Equal(("NEW", null, true), ("OLD", AccountId, false));
+        changes[0].Body().Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "Name", "Active__c"], "a create sends every field");
+        changes[1].Body().Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "Name"], "an update sends only what differs, never an Id");
     }
 
     [Fact]
-    public void A_parent_that_is_neither_in_the_unit_nor_in_Salesforce_waits_and_nothing_is_sent()
+    public void A_parent_in_the_same_unit_or_in_Salesforce_is_enough_one_in_neither_makes_the_unit_wait()
     {
-        var orphan = new SyncUnit([Profile("P1", "Gold", "MISSING")]);
+        var accountInSalesforce = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
 
-        var plan = Plan([Normalized(orphan)], CurrentRecords.None);
+        WritePlanner.Plan([Normalized(AccountWithProfile("A1"))], CurrentRecords.None).Decided.Should().BeEmpty("the unit creates its Account");
+        WritePlanner.Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "A1")]))], accountInSalesforce).Decided.Should().BeEmpty();
 
-        var result = plan.NotSent.Should().ContainSingle().Subject;
+        var plan = WritePlanner.Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "MISSING")]))], CurrentRecords.None);
+
+        var result = plan.Decided.Should().ContainSingle().Subject;
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced));
         result.PrimaryError.Message.Should().Contain("Account ExternalId__c=MISSING is not in Salesforce yet");
-        plan.Requests.Should().BeEmpty();
-    }
-
-    // ---------- Foreign keys ----------
-
-    [Fact]
-    public void A_new_Account_and_its_new_Profile_are_one_request_of_two_upserts_Account_first_with_the_key_as_text()
-    {
-        var request = Request(AccountWithProfile("A1"), AccountWithProfile("A2"));
-
-        var upserts = request.Upserts();
-
-        upserts.Select(u => (u.ReferenceId, u.SObject, u.ExternalIdField)).Should().Equal(
-            ("Account", "Account", "ExternalId__c"), ("Profile__c", "Profile__c", "ExternalId__c"));
-        JsonSerializer.Serialize(upserts[1].Records).Should().Be(JsonSerializer.Serialize(new object[]
-        {
-            new Dictionary<string, object?> { ["attributes"] = new { type = "Profile__c" }, ["ExternalId__c"] = "P-A1", ["Tier__c"] = "Gold", ["AccountId__c"] = "A1" },
-            new Dictionary<string, object?> { ["attributes"] = new { type = "Profile__c" }, ["ExternalId__c"] = "P-A2", ["Tier__c"] = "Gold", ["AccountId__c"] = "A2" }
-        }), "the Account's key is written as the text it is, no reference");
-        request.Collections[1].Writes.Select(w => w.Parents.Single()).Should().Equal(request.Collections[0].Writes,
-            "each Profile follows its own new Account");
-    }
-
-    [Fact]
-    public void Writes_of_one_object_are_one_upsert_and_writes_of_several_objects_one_request_of_an_upsert_each_whatever_the_objects()
-    {
-        var widget = Widget("W1");
-        var gadget = new SObjectRecord("gadget", "Gadget__c", "Key__c", "G1", new Dictionary<string, object?> { ["Widget__c"] = "W1" },
-            ForeignKeys: [new ForeignKey("Widget__c", "Widget__c", "Key__c", "W1")]);
-
-        var widgetsOnly = Plan([Normalized(new SyncUnit([widget])), Normalized(new SyncUnit([Widget("W2")]))],
-            CurrentRecords.None).Requests.Should().ContainSingle().Subject;
-        var both = Plan([Normalized(new SyncUnit([widget, gadget]))], CurrentRecords.None).Requests.Should().ContainSingle().Subject;
-
-        widgetsOnly.Upserts().Select(u => (u.ReferenceId, u.Path, u.Records.Count)).Should().Equal(
-            [("Widget__c", "/composite/sobjects/Widget__c/Key__c", 2)], "one object: one upsert, a call of its own");
-        both.Upserts().Select(u => (u.ReferenceId, u.Path)).Should().Equal(
-            [("Widget__c", "/composite/sobjects/Widget__c/Key__c"), ("Gadget__c", "/composite/sobjects/Gadget__c/Key__c")],
-            "two objects: one request (Composite) of an upsert each, the parent first by its foreign key");
-
-        static SObjectRecord Widget(string key)
-        {
-            return new("widget", "Widget__c", "Key__c", key, new Dictionary<string, object?> { ["Label__c"] = "w" });
-        }
-    }
-
-    [Theory]
-    [InlineData("A1", false)]
-    [InlineData("A2", true)]
-    public void A_foreign_key_is_written_only_when_its_text_differs(string storedKey, bool written)
-    {
-        var current = Rows(
-            ("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""),
-            ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"A2","Name":"Acme","Active__c":false}"""),
-            ("Profile__c", $$"""{"Id":"a00000000000001AAA","ExternalId__c":"P-A1","Tier__c":"Gold","AccountId__c":"{{storedKey}}"}"""));
-
-        var plan = Plan([Normalized(AccountWithProfile("A1"))], current);
-
-        if (written)
-        {
-            var upsert = plan.Requests.Single().Upserts().Should().ContainSingle().Subject;
-            upsert.Records.Single().Keys.Should().BeEquivalentTo(["attributes", "ExternalId__c", "AccountId__c"]);
-            upsert.Records.Single()["AccountId__c"].Should().Be("A1");
-        }
-        else
-        {
-            plan.Requests.Should().BeEmpty();
-            plan.NotSent.Single().Outcome.Should().Be(SyncOutcome.Unchanged);
-        }
-    }
-
-    [Fact]
-    public void A_child_whose_new_parent_failed_in_an_earlier_upsert_is_sent_the_org_decides_and_the_parent_decides_the_unit()
-    {
-        var request = Request(AccountWithProfile("A1"), AccountWithProfile("A2"));
-        request.Upserts()[1].Records.Should().HaveCount(2, "both Profiles are in the Composite request, A1's too");
-
-        var results = Interpret(request,
-            new CollectionResult("Account",
-            [
-                new RecordResult(false, null, [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "bad")]),
-                new RecordResult(true, AccountId, [], true)
-            ], []),
-            new CollectionResult("Profile__c",
-            [
-                new RecordResult(false, null, [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Parent Account A1 does not exist")]),
-                new RecordResult(true, "a00000000000002AAA", [], true)
-            ], [])).ToDictionary(r => r.Key);
-
-        (results["A1"].Outcome, results["A1"].Errors.Single().ReferenceId).Should().Be((SyncOutcome.PermanentFailure, "acct"),
-            "the org rejecting the Profile is the Account's fault");
-        results["A2"].Outcome.Should().Be(SyncOutcome.Saved);
-    }
-
-    [Theory]
-    [InlineData(new string[0], SyncOutcome.PermanentFailure, "FIELD_CUSTOM_VALIDATION_EXCEPTION")]
-    [InlineData(new[] { "other", "PARENT ACCOUNT" }, SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced)]
-    public void The_orgs_message_for_a_missing_parent_can_be_configured_to_mean_wait_for_it(string[] messages, SyncOutcome outcome, string code)
-    {
-        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
-        var request = Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "A1")]))], current).Requests.Single();
-        var options = new SalesforceOptions { ParentMissingMessages = messages };
-
-        var result = Interpret(options, request,
-            new CollectionResult("Profile__c", [new RecordResult(false, null,
-                [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Parent Account A1 does not exist")])], [])).Single();
-
-        (result.Outcome, result.PrimaryError!.Code).Should().Be((outcome, code), "any code, as long as the message matches (case-insensitive)");
+        plan.Units.Should().BeEmpty("nothing is sent for it");
     }
 
     [Fact]
@@ -240,271 +135,60 @@ public sealed class WriteRulesTests
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false,"Locked__c":"old"}"""));
 
-        var plan = Plan([Normalized(Account("A1", "Acme", locked: "new"))], current);
+        var plan = WritePlanner.Plan([Normalized(Account("A1", "Acme", locked: "new"))], current);
 
-        var result = plan.NotSent.Should().ContainSingle().Subject;
+        var result = plan.Decided.Should().ContainSingle().Subject;
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.PermanentFailure, "INVALID_FIELD_FOR_INSERT_UPDATE"));
     }
-
-    // ---------- WriteRequest ----------
-
-    [Fact]
-    public void Building_a_request_twice_gives_the_same_request()
-    {
-        var plan = Plan([Normalized(AccountWithContact("A1")), Normalized(AccountWithContact("A2"))], CurrentRecords.None);
-        var request = plan.Requests.Single();
-
-        JsonSerializer.Serialize(request.Upserts()).Should().Be(JsonSerializer.Serialize(request.Upserts()));
-        request.Collections.Select(c => c.ReferenceId).Should().Equal("Account", "Contact");
-    }
-
-    // ---------- WriteResultInterpreter ----------
-
-    [Fact]
-    public void Every_record_saved_means_the_unit_is_saved()
-    {
-        var request = Request(AccountWithContact("A1"));
-
-        var results = Interpret(request, Ok("Account"), Ok("Contact"));
-
-        results.Single().Outcome.Should().Be(SyncOutcome.Saved);
-    }
-
-    public static TheoryData<string, CollectionResult[], SyncOutcome, string> SingleRecordResults()
-    {
-        return new()
-        {
-            { "no answer for the subrequest", [], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
-            { "the subrequest failed as a whole, even with a permanent code",
-                [new CollectionResult("Account", null, [new SalesforceError("Account", "INVALID_FIELD", "x")])],
-                SyncOutcome.TransientFailure, "INVALID_FIELD" },
-            { "fewer results than records", [new CollectionResult("Account", [], [])], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
-            { "a record failed without details", [new CollectionResult("Account", [new RecordResult(false, null, [])], [])],
-                SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
-            { "a validation rule", [Failed("Account", "FIELD_CUSTOM_VALIDATION_EXCEPTION")], SyncOutcome.PermanentFailure, "FIELD_CUSTOM_VALIDATION_EXCEPTION" },
-            { "a create that lost a race", [Failed("Account", "DUPLICATE_VALUE")], SyncOutcome.TransientFailure, "DUPLICATE_VALUE" },
-            { "only skipped, nobody says why", [Failed("Account", "PROCESSING_HALTED")], SyncOutcome.TransientFailure, "UNKNOWN_ERROR" }
-        };
-    }
-
-    [Theory, MemberData(nameof(SingleRecordResults))]
-    public void A_records_result_decides_its_units_outcome(string what, CollectionResult[] answers, SyncOutcome outcome, string code)
-    {
-        var result = Interpret(Request(Account("A1", "Acme")), answers).Single();
-
-        (result.Outcome, result.PrimaryError?.Code).Should().Be((outcome, code), what);
-    }
-
-    [Theory]
-    [InlineData(new[] { "UNABLE_TO_LOCK_ROW", "PROCESSING_HALTED" }, SyncOutcome.TransientFailure, "UNABLE_TO_LOCK_ROW")]
-    [InlineData(new[] { "REQUIRED_FIELD_MISSING", "PROCESSING_HALTED" }, SyncOutcome.PermanentFailure, "REQUIRED_FIELD_MISSING")]
-    [InlineData(new[] { "UNABLE_TO_LOCK_ROW", "REQUIRED_FIELD_MISSING" }, SyncOutcome.PermanentFailure, "REQUIRED_FIELD_MISSING")]
-    [InlineData(new[] { "SOMETHING_NEW" }, SyncOutcome.TransientFailure, "SOMETHING_NEW")]
-    public void A_records_own_errors_are_permanent_if_any_is_and_skipping_is_not_one_of_them(string[] codes, SyncOutcome outcome, string code)
-    {
-        var result = Interpret(Request(Account("A1", "Acme")), Failed("Account", codes)).Single();
-
-        (result.Outcome, result.PrimaryError?.Code).Should().Be((outcome, code));
-    }
-
-    [Fact]
-    public void A_record_only_skipped_because_of_another_records_failure_is_not_attempted()
-    {
-        var results = Interpret(Request(Account("A1", "Acme"), Account("A2", "Acme")), new CollectionResult("Account",
-        [
-            new RecordResult(false, null, [new SalesforceError(null, "UNABLE_TO_LOCK_ROW", "locked")]),
-            new RecordResult(false, null, [new SalesforceError(null, "PROCESSING_HALTED", "skipped")])
-        ], [])).ToDictionary(r => r.Key);
-
-        results["A1"].Outcome.Should().Be(SyncOutcome.TransientFailure);
-        results["A2"].Outcome.Should().Be(SyncOutcome.NotAttempted);
-    }
-
-    [Fact]
-    public void Permanent_codes_are_configurable()
-    {
-        var options = new SalesforceOptions { PermanentErrorCodes = ["UNABLE_TO_LOCK_ROW"] };
-
-        Interpret(options, Request(Account("A1", "Acme")), Failed("Account", "UNABLE_TO_LOCK_ROW")).Single().Outcome
-            .Should().Be(SyncOutcome.PermanentFailure);
-        Interpret(options, Request(Account("A1", "Acme")), Failed("Account", "REQUIRED_FIELD_MISSING")).Single().Outcome
-            .Should().Be(SyncOutcome.TransientFailure, "a code is permanent only when listed, and setting the list replaces the defaults");
-    }
-
-    [Fact]
-    public void A_record_deleted_between_the_read_and_the_update_is_retried_not_dead_lettered()
-    {
-        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
-        var request = Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
-
-        var result = Interpret(request, Failed("Account", "ENTITY_IS_DELETED")).Single();
-
-        result.Outcome.Should().Be(SyncOutcome.TransientFailure, "the next read finds it gone and creates it");
-    }
-
-    [Fact]
-    public void A_failed_parent_decides_its_childs_unit_and_the_other_children_are_saved()
-    {
-        var request = Request(AccountWithContact("A1"), AccountWithContact("A2"));
-
-        var results = Interpret(request,
-            new CollectionResult("Account",
-            [
-                new RecordResult(false, null, [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "bad")]),
-                new RecordResult(true, AccountId, [])
-            ], []),
-            new CollectionResult("Contact", [new RecordResult(true, ContactId, []), new RecordResult(true, ContactId, [])], [])
-        ).ToDictionary(r => r.Key);
-
-        results["A1"].Outcome.Should().Be(SyncOutcome.PermanentFailure);
-        results["A1"].Errors.Should().OnlyContain(e => e.ReferenceId == "acct", "the child's own error is the parent's fault");
-        results["A2"].Outcome.Should().Be(SyncOutcome.Saved, "its Account and its Contact are in");
-    }
-
-    // ---------- Requests: one upsert per level and object ----------
-
-    [Fact]
-    public void A_request_of_one_object_is_one_upsert_carrying_the_planned_fields()
-    {
-        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
-        var request = Plan([Normalized(Account("A1", "New")), Normalized(Account("A2", "Created"))], current).Requests.Single();
-
-        var upsert = request.Upserts().Should().ContainSingle().Subject;
-
-        (upsert.ReferenceId, upsert.SObject, upsert.ExternalIdField).Should().Be(("Account", "Account", "ExternalId__c"));
-        JsonSerializer.Serialize(upsert.Records).Should().Be(JsonSerializer.Serialize(new object[]
-        {
-            new Dictionary<string, object?> { ["attributes"] = new { type = "Account" }, ["ExternalId__c"] = "A1", ["Name"] = "New" },
-            new Dictionary<string, object?> { ["attributes"] = new { type = "Account" }, ["ExternalId__c"] = "A2", ["Name"] = "Created", ["Active__c"] = false }
-        }), "a new record whole, an existing one by its external id with what differs, never an Id");
-    }
-
-    [Fact]
-    public void Account_only_and_Profile_only_changes_are_one_request_of_two_upserts_Accounts_first()
-    {
-        var current = Rows(
-            ("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""),
-            ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"A2","Name":"Acme","Active__c":false}"""),
-            ("Profile__c", /*lang=json,strict*/ """{"Id":"a00000000000002AAA","ExternalId__c":"P-A2","Tier__c":"Silver","AccountId__c":"A2"}"""));
-        var request = Plan([Normalized(Account("A1", "New")), Normalized(AccountWithProfile("A2"))], current).Requests.Single();
-
-        var upserts = request.Upserts();
-
-        upserts.Select(u => (u.ReferenceId, u.SObject, u.Records.Count)).Should().Equal(("Account", "Account", 1), ("Profile__c", "Profile__c", 1));
-        JsonSerializer.Serialize(upserts[1].Records).Should().Be(JsonSerializer.Serialize(new object[]
-        {
-            new Dictionary<string, object?> { ["attributes"] = new { type = "Profile__c" }, ["ExternalId__c"] = "P-A2", ["Tier__c"] = "Gold" }
-        }), "only what differs: the Profile already points at its Account");
-    }
-
-    [Fact]
-    public void A_new_child_of_a_new_parent_shares_the_request_with_the_other_writes()
-    {
-        Request(AccountWithContact("A1")).Upserts().Select(u => u.ReferenceId).Should().Equal("Account", "Contact");
-
-        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A2","Name":"Old","Active__c":false}"""));
-        var request = Plan([Normalized(AccountWithContact("A1")), Normalized(Account("A2", "New"))], current).Requests.Single();
-        request.Upserts().Select(u => (u.ReferenceId, u.Records.Count)).Should().Equal([("Account", 2), ("Contact", 1)],
-            "A2's update goes in the same upsert as A1's create");
-    }
-
-    [Fact]
-    public void More_than_200_records_of_one_object_are_upserted_200_per_request_each_record_once()
-    {
-        var existing = Enumerable.Range(0, 150).Select(i => ("Account", $$"""{"Id":"001{{i:D12}}","ExternalId__c":"OLD{{i}}","Name":"Old","Active__c":false}"""));
-        var units = Enumerable.Range(0, 150).Select(i => Normalized(Account($"NEW{i}", "New")))
-            .Concat(Enumerable.Range(0, 150).Select(i => Normalized(Account($"OLD{i}", "New")))).ToList();
-
-        var requests = Plan(units, Rows([.. existing])).Requests;
-
-        requests.Select(r => r.Upserts().Single().Records.Count).Should().Equal([200, 100], "one upsert each");
-        requests.SelectMany(r => r.Collections.SelectMany(c => c.Writes)).Should().HaveCount(300).And.OnlyHaveUniqueItems();
-    }
-
-    public static TheoryData<string, CollectionResult, SyncOutcome> ProfileAnswers()
-    {
-        return new()
-        {
-            { "saved", Ok("Profile__c"), SyncOutcome.Saved },
-            { "a validation rule", Failed("Profile__c", "FIELD_CUSTOM_VALIDATION_EXCEPTION"), SyncOutcome.PermanentFailure },
-            { "a row lock", Failed("Profile__c", "UNABLE_TO_LOCK_ROW"), SyncOutcome.TransientFailure }
-        };
-    }
-
-    [Theory, MemberData(nameof(ProfileAnswers))]
-    public void An_entity_written_in_two_upserts_gets_one_outcome_and_the_other_objects_records_keep_theirs(string what,
-        CollectionResult profileAnswer, SyncOutcome outcome)
-    {
-        var current = Rows(
-            ("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""),
-            ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"A2","Name":"Old","Active__c":false}"""),
-            ("Profile__c", /*lang=json,strict*/ """{"Id":"a00000000000001AAA","ExternalId__c":"P-A1","Tier__c":"Silver","AccountId__c":"A1"}"""));
-        var request = Plan([Normalized(AccountWithProfile("A1")), Normalized(Account("A2", "Acme"))], current).Requests.Single();
-        var results = Interpret(request,
-            new CollectionResult("Account", [new RecordResult(true, AccountId, [], false), new RecordResult(true, "001000000000002AAA", [], false)], []),
-            profileAnswer).ToDictionary(r => r.Key);
-
-        results.Should().HaveCount(2);
-        results["A1"].Outcome.Should().Be(outcome, $"its Account is saved and its Profile {what}");
-        results["A2"].Outcome.Should().Be(SyncOutcome.Saved, "its Account was saved; the Profile upsert is not its business");
-    }
-
-    [Fact]
-    public void An_update_sent_as_an_upsert_that_created_the_record_is_retried_to_write_the_rest()
-    {
-        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
-        var request = Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
-
-        var result = Interpret(request, new CollectionResult("Account", [new RecordResult(true, AccountId, [], Created: true)], [])).Single();
-
-        (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, "ENTITY_IS_DELETED"),
-            "the record was deleted after the read, and the upsert created it from the changed fields alone");
-    }
-
-    [Theory]
-    [InlineData(false, SyncOutcome.PermanentFailure)]
-    [InlineData(true, SyncOutcome.TransientFailure)]
-    public void A_required_field_missing_on_an_update_sent_as_an_upsert_means_the_record_is_gone(bool exists, SyncOutcome outcome)
-    {
-        var current = exists ? Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}""")) : CurrentRecords.None;
-        var request = Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
-        var result = Interpret(request, Failed("Account", "REQUIRED_FIELD_MISSING")).Single();
-
-        result.Outcome.Should().Be(outcome);
-    }
-
-    // ---------- Deletes ----------
 
     [Fact]
     public void A_record_to_delete_that_Salesforce_has_is_deleted_by_its_Id_and_one_it_does_not_have_costs_nothing()
     {
         var current = Rows(("Contact", $$"""{"Id":"{{ContactId}}","ExternalId__c":"C1"}"""));
 
-        var plan = Plan([Normalized(Deleting("C1")), Normalized(Deleting("C2"))], current);
+        var plan = WritePlanner.Plan([Normalized(Deleting("C1")), Normalized(Deleting("C2"))], current);
 
-        var delete = plan.Requests.Should().ContainSingle().Subject.BuildRequests().Should().ContainSingle().Subject
-            .Should().BeOfType<CollectionDelete>().Subject;
-        (delete.ReferenceId, delete.Ids.Single()).Should().Be(("delete", ContactId));
-        delete.Path.Should().Be($"/composite/sobjects?ids={ContactId}&allOrNone=false");
-        plan.NotSent.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "C2" && r.Outcome == SyncOutcome.Unchanged,
-            "not in Salesforce: deleted already, or never synced");
+        var change = plan.Units.Single().Changes.Single();
+        (change.IsDelete, change.Id).Should().Be((true, ContactId));
+        plan.Decided.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "C2" && r.Outcome == SyncOutcome.Unchanged);
+    }
+
+    // ---------- The calls ----------
+
+    [Fact]
+    public async Task Objects_are_upserted_one_call_each_parents_first_whatever_the_order_of_the_records()
+    {
+        var salesforce = new StubSalesforce();
+        var unit = new SyncUnit([Profile("P-A1", "Gold", "A1"), Account("A1", "Acme").Records[0]]);
+
+        var results = await Write(salesforce, [Normalized(unit)]);
+
+        salesforce.Calls.Select(c => c.Describe()).Should().Equal("upsert Account ExternalId__c [A1]", "upsert Profile__c ExternalId__c [P-A1]");
+        results.Single().Outcome.Should().Be(SyncOutcome.Saved);
     }
 
     [Fact]
-    public void Upserts_and_deletes_of_a_batch_share_one_Composite_request_with_the_delete_last()
+    public async Task Units_with_the_same_object_share_its_upsert_and_up_to_200_records_go_in_one_call()
     {
-        var current = Rows(("Contact", $$"""{"Id":"{{ContactId}}","ExternalId__c":"C1"}"""));
+        var salesforce = new StubSalesforce();
+        var units = Enumerable.Range(0, 5).Select(i => Normalized(AccountWithProfile($"A{i}"))).ToList();
 
-        var plan = Plan([Normalized(Deleting("C1")), Normalized(Account("A1", "Acme"))], current);
+        await Write(salesforce, units, maxRecordsPerWrite: 200);
+        salesforce.Calls.Select(c => c.Describe()).Should().Equal(
+            "upsert Account ExternalId__c [A0, A1, A2, A3, A4]", "upsert Profile__c ExternalId__c [P-A0, P-A1, P-A2, P-A3, P-A4]");
 
-        plan.Requests.Should().ContainSingle("one call").Subject.BuildRequests().Select(r => (r.ReferenceId, r.Method.Method))
-            .Should().Equal([("Account", "PATCH"), ("delete", "DELETE")]);
+        salesforce.Calls.Clear();
+        await Write(salesforce, units, maxRecordsPerWrite: 2);
+        salesforce.Calls.Select(c => c.Describe()).Should().Equal(
+            "upsert Account ExternalId__c [A0, A1]", "upsert Account ExternalId__c [A2, A3]", "upsert Account ExternalId__c [A4]",
+            "upsert Profile__c ExternalId__c [P-A0, P-A1]", "upsert Profile__c ExternalId__c [P-A2, P-A3]", "upsert Profile__c ExternalId__c [P-A4]");
     }
 
     [Fact]
-    public void An_entitys_records_to_delete_are_deleted_in_its_order_and_more_than_a_collection_takes_go_to_further_requests()
+    public async Task Deletes_go_last_in_the_order_of_the_records_and_200_to_a_call()
     {
-        var accountAndProfile = new SyncUnit(
+        var salesforce = new StubSalesforce();
+        var unit = new SyncUnit(
         [
             new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P-A1", new Dictionary<string, object?>(), Delete: true),
             new SObjectRecord("acct", "Account", "ExternalId__c", "A1", new Dictionary<string, object?>(), Delete: true)
@@ -512,15 +196,143 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1"}"""),
             ("Profile__c", /*lang=json,strict*/ """{"Id":"a00000000000001AAA","ExternalId__c":"P-A1"}"""));
 
-        var request = Plan([Normalized(accountAndProfile)], current).Requests.Single();
-        ((CollectionDelete)request.BuildRequests().Single()).Ids.Should().Equal(["a00000000000001AAA", AccountId],
-            "children first, as the strategy lists them: a parent may not be deleted while they point at it");
+        await Write(salesforce, [Normalized(Account("A2", "Acme")), Normalized(unit)], current, maxRecordsPerWrite: 1);
 
-        var many = Enumerable.Range(0, 3).Select(i => $"C{i}").ToList();
-        var rows = Rows([.. many.Select((c, i) => ("Contact", $$"""{"Id":"003000000000{{i:D3}}AAA","ExternalId__c":"{{c}}"}"""))]);
-        var requests = WritePlanner.Plan([.. many.Select(c => Normalized(Deleting(c)))], rows, maxRecordsPerWrite: 2).Requests;
-        requests.Select(r => ((CollectionDelete)r.BuildRequests().Single()).Ids.Count).Should().Equal([2, 1],
-            "a delete takes the row type's MaxRecordsPerWrite Ids, as an upsert takes its records");
+        salesforce.Calls.Select(c => c.Describe()).Should().Equal(
+            "upsert Account ExternalId__c [A2]", "delete [a00000000000001AAA]", $"delete [{AccountId}]");
+    }
+
+    [Fact]
+    public async Task A_unit_that_failed_in_one_call_is_not_sent_in_the_next_and_the_others_are()
+    {
+        var salesforce = new StubSalesforce { Failing = { ["A1"] = "FIELD_CUSTOM_VALIDATION_EXCEPTION" } };
+
+        var results = (await Write(salesforce, [Normalized(AccountWithProfile("A1")), Normalized(AccountWithProfile("A2"))]))
+            .ToDictionary(r => r.Key);
+
+        salesforce.Calls.Select(c => c.Describe()).Should().Equal(
+            "upsert Account ExternalId__c [A1, A2]", "upsert Profile__c ExternalId__c [P-A2]");
+        (results["A1"].Outcome, results["A1"].PrimaryError!.Code).Should().Be((SyncOutcome.PermanentFailure, "FIELD_CUSTOM_VALIDATION_EXCEPTION"));
+        results["A1"].Errors.Should().OnlyContain(e => e.ReferenceId == "acct");
+        results["A2"].Outcome.Should().Be(SyncOutcome.Saved);
+    }
+
+    [Fact]
+    public async Task An_entity_written_in_two_calls_gets_one_outcome_the_worst_of_its_records()
+    {
+        var salesforce = new StubSalesforce { Failing = { ["P-A1"] = "UNABLE_TO_LOCK_ROW" } };
+
+        var results = (await Write(salesforce, [Normalized(AccountWithProfile("A1")), Normalized(Account("A2", "Acme"))])).ToDictionary(r => r.Key);
+
+        results["A1"].Outcome.Should().Be(SyncOutcome.TransientFailure, "its Account is saved and its Profile hit a row lock");
+        results["A2"].Outcome.Should().Be(SyncOutcome.Saved, "the Profile call is not its business");
+    }
+
+    [Fact]
+    public async Task A_call_Salesforce_answers_with_too_few_results_fails_the_records_it_did_not_answer_for()
+    {
+        var salesforce = new StubSalesforce { AnswerWithNothing = true };
+
+        var result = (await Write(salesforce, [Normalized(Account("A1", "Acme"))])).Single();
+
+        (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, "UNKNOWN_ERROR"));
+    }
+
+    [Fact]
+    public async Task Objects_that_point_at_each_other_cannot_be_ordered()
+    {
+        var a = new SObjectRecord("a", "Widget__c", "Key__c", "W1", new Dictionary<string, object?> { ["Label__c"] = "x" },
+            ForeignKeys: [new ForeignKey("Label__c", "Gadget__c", "Key__c", "G1")]);
+        var b = new SObjectRecord("b", "Gadget__c", "Key__c", "G1", new Dictionary<string, object?> { ["Widget__c"] = "W1" },
+            ForeignKeys: [new ForeignKey("Widget__c", "Widget__c", "Key__c", "W1")]);
+
+        var write = () => Write(new StubSalesforce(), [Normalized(new SyncUnit([a, b]))]);
+
+        await write.Should().ThrowAsync<InvalidOperationException>().WithMessage("*point at each other*");
+    }
+
+    // ---------- Reading the answers ----------
+
+    [Fact]
+    public void A_saved_record_is_saved()
+    {
+        Interpret(Account("A1", "Acme"), Ok()).Status.Should().Be(SyncOutcome.Saved);
+    }
+
+    public static TheoryData<string, RecordResult?, SyncOutcome, string> RecordResults()
+    {
+        return new()
+        {
+            { "no answer", null, SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
+            { "a failure without details", new RecordResult(false, null, []), SyncOutcome.TransientFailure, "UNKNOWN_ERROR" },
+            { "a validation rule", Failed("FIELD_CUSTOM_VALIDATION_EXCEPTION"), SyncOutcome.PermanentFailure, "FIELD_CUSTOM_VALIDATION_EXCEPTION" },
+            { "a create that lost a race", Failed("DUPLICATE_VALUE"), SyncOutcome.TransientFailure, "DUPLICATE_VALUE" },
+            { "a row lock", Failed("UNABLE_TO_LOCK_ROW"), SyncOutcome.TransientFailure, "UNABLE_TO_LOCK_ROW" },
+            { "a code nobody knows", Failed("SOMETHING_NEW"), SyncOutcome.TransientFailure, "SOMETHING_NEW" },
+            { "a permanent and a transient error", Failed("UNABLE_TO_LOCK_ROW", "REQUIRED_FIELD_MISSING"), SyncOutcome.PermanentFailure, "REQUIRED_FIELD_MISSING" }
+        };
+    }
+
+    [Theory, MemberData(nameof(RecordResults))]
+    public void A_records_result_decides_whether_a_retry_can_help(string what, RecordResult? result, SyncOutcome status, string code)
+    {
+        var (actual, errors) = Interpret(Account("A1", "Acme"), result);
+
+        (actual, errors.First().Code).Should().Be((status, code), what);
+    }
+
+    [Fact]
+    public void Permanent_codes_are_configurable()
+    {
+        var options = new SalesforceOptions { PermanentErrorCodes = ["UNABLE_TO_LOCK_ROW"] };
+
+        Interpret(Account("A1", "Acme"), Failed("UNABLE_TO_LOCK_ROW"), options).Status.Should().Be(SyncOutcome.PermanentFailure);
+        Interpret(Account("A1", "Acme"), Failed("REQUIRED_FIELD_MISSING"), options).Status.Should().Be(SyncOutcome.TransientFailure,
+            "a code is permanent only when listed, and setting the list replaces the defaults");
+    }
+
+    [Theory]
+    [InlineData(new string[0], SyncOutcome.PermanentFailure, "FIELD_CUSTOM_VALIDATION_EXCEPTION")]
+    [InlineData(new[] { "other", "PARENT ACCOUNT" }, SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced)]
+    public void The_orgs_message_for_a_missing_parent_can_be_configured_to_mean_wait_for_it(string[] messages, SyncOutcome status, string code)
+    {
+        var result = new RecordResult(false, null, [new SalesforceError(null, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "Parent Account A1 does not exist")]);
+
+        var (actual, errors) = Interpret(new SyncUnit([Profile("P1", "Gold", "A1")]), result, new SalesforceOptions { ParentMissingMessages = messages });
+
+        (actual, errors.First().Code).Should().Be((status, code), "any code, as long as the message matches (case-insensitive)");
+    }
+
+    [Fact]
+    public void An_update_sent_as_an_upsert_that_created_the_record_is_retried_to_write_the_rest()
+    {
+        var update = Update("A1", "New");
+
+        var (status, errors) = Interpret(update, new RecordResult(true, AccountId, [], Created: true));
+
+        (status, errors.Single().Code).Should().Be((SyncOutcome.TransientFailure, "ENTITY_IS_DELETED"),
+            "the record was deleted after the read, and the upsert created it from the changed fields alone");
+    }
+
+    [Theory]
+    [InlineData("ENTITY_IS_DELETED")]
+    [InlineData("INVALID_CROSS_REFERENCE_KEY")]
+    [InlineData("REQUIRED_FIELD_MISSING")]
+    public void The_codes_that_mean_the_record_is_gone_make_an_update_transient_and_a_create_permanent(string code)
+    {
+        Interpret(Update("A1", "New"), Failed(code)).Status.Should().Be(SyncOutcome.TransientFailure,
+            "an update of a record deleted after the read is retried: the next read finds it gone and creates it");
+        Interpret(Account("A1", "New"), Failed(code)).Status.Should().Be(SyncOutcome.PermanentFailure);
+    }
+
+    [Fact]
+    public void The_org_rejecting_the_record_type_is_retried_not_dead_lettered()
+    {
+        var result = new RecordResult(false, null, [new SalesforceError(null, "INVALID_CROSS_REFERENCE_KEY", "Record Type ID: this ID value isn't valid", ["RecordTypeId"])]);
+
+        var (status, errors) = Interpret(Account("A1", "Acme"), result);
+
+        (status, errors.Single().Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.InvalidRecordType));
     }
 
     public static TheoryData<string, string, SyncOutcome, string?> DeleteResults()
@@ -534,34 +346,21 @@ public sealed class WriteRulesTests
             { "DELETE_FAILED", "Your attempt to delete Acme could not be completed because it is associated with the following contacts.",
                 SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced },
             { "DELETE_FAILED", "Cannot delete: a validation rule", SyncOutcome.PermanentFailure, "DELETE_FAILED" },
-            { "INSUFFICIENT_ACCESS_OR_READONLY", "insufficient access rights on object id", SyncOutcome.PermanentFailure,
-                "INSUFFICIENT_ACCESS_OR_READONLY" },
+            { "INSUFFICIENT_ACCESS_OR_READONLY", "insufficient access rights on object id", SyncOutcome.PermanentFailure, "INSUFFICIENT_ACCESS_OR_READONLY" },
             { "UNABLE_TO_LOCK_ROW", "unable to obtain exclusive access to this record", SyncOutcome.TransientFailure, "UNABLE_TO_LOCK_ROW" },
             { "ENTITY_IS_LOCKED", "the entity is locked for editing (an approval)", SyncOutcome.TransientFailure, "ENTITY_IS_LOCKED" }
         };
     }
 
     [Theory, MemberData(nameof(DeleteResults))]
-    public void A_deletes_result_decides_its_units_outcome_and_a_record_gone_already_is_deleted(string code, string message,
-        SyncOutcome outcome, string? decidingCode)
+    public void A_deletes_result_is_read_like_any_other_and_a_record_gone_already_is_deleted(string code, string message,
+        SyncOutcome status, string? decidingCode)
     {
-        var current = Rows(("Contact", $$"""{"Id":"{{ContactId}}","ExternalId__c":"C1"}"""));
-        var request = Plan([Normalized(Deleting("C1"))], current).Requests.Single();
+        var delete = DeleteOf("C1", ContactId);
 
-        var result = Interpret(request, new CollectionResult("delete",
-            [new RecordResult(false, null, [new SalesforceError(null, code, message)])], [])).Single();
+        var (actual, errors) = Interpret(delete, new RecordResult(false, null, [new SalesforceError(null, code, message)]));
 
-        (result.Outcome, outcome == SyncOutcome.Saved ? null : result.PrimaryError?.Code).Should().Be((outcome, decidingCode), $"{code}: {message}");
-    }
-
-    [Fact]
-    public void The_codes_that_mean_gone_on_a_delete_keep_their_meaning_on_an_update()
-    {
-        var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Old","Active__c":false}"""));
-        var request = Plan([Normalized(Account("A1", "New"))], current).Requests.Single();
-
-        Interpret(request, Failed("Account", "ENTITY_IS_DELETED")).Single().Outcome.Should().Be(SyncOutcome.TransientFailure,
-            "an update of a record deleted after the read is retried, not taken for success");
+        (actual, status == SyncOutcome.Saved ? null : errors.First().Code).Should().Be((status, decidingCode), $"{code}: {message}");
     }
 
     // ---------- Helpers ----------
@@ -592,24 +391,12 @@ public sealed class WriteRulesTests
     private static SObjectRecord Profile(string key, string? tier, string accountKey)
     {
         return new("prof", "Profile__c", "ExternalId__c", key, new Dictionary<string, object?> { ["Tier__c"] = tier, ["AccountId__c"] = accountKey },
-                ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", accountKey)]);
-    }
-
-    /// <summary>A Contact pointing at its Account by foreign key.</summary>
-    private static SObjectRecord Contact(string key, string accountKey)
-    {
-        return new("contact", "Contact", "ExternalId__c", key, new Dictionary<string, object?> { ["LastName"] = "Doe", ["AccountId__c"] = accountKey },
-                ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", accountKey)]);
+            ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", accountKey)]);
     }
 
     private static SyncUnit AccountWithProfile(string key)
     {
         return new([Account(key, "Acme").Records[0], Profile($"P-{key}", "Gold", key)]);
-    }
-
-    private static SyncUnit AccountWithContact(string key)
-    {
-        return new([Account(key, "Acme").Records[0], Contact($"C-{key}", key)]);
     }
 
     private static NormalizedUnit Normalized(SyncUnit unit)
@@ -622,7 +409,7 @@ public sealed class WriteRulesTests
     private static CurrentRecord Current(string json)
     {
         return new(JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json)!
-        .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase));
+            .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase));
     }
 
     private static CurrentRecords Rows(params (string SObject, string Json)[] rows)
@@ -630,44 +417,101 @@ public sealed class WriteRulesTests
         return new(rows.Select(r => (r.SObject, Current(r.Json))));
     }
 
-    /// <summary>The plan with Salesforce's 200 records per collection.</summary>
-    private static WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current)
+    /// <summary>Plans the units against what Salesforce has and sends the plan.</summary>
+    private static async Task<List<SyncResult>> Write(StubSalesforce salesforce, IReadOnlyList<NormalizedUnit> units,
+        CurrentRecords? current = null, int maxRecordsPerWrite = 200)
     {
-        return WritePlanner.Plan(units, current, SalesforceRestClient.MaxCollectionRecords);
+        var plan = WritePlanner.Plan(units, current ?? CurrentRecords.None);
+        var writer = new Writer(salesforce, new WriteResultInterpreter(new SalesforceErrors(Options.Create(new SalesforceOptions()))));
+        return await writer.WriteAsync(plan.Units, maxRecordsPerWrite, CancellationToken.None);
     }
 
-    /// <summary>The one request for these new units.</summary>
-    private static WriteRequest Request(params SyncUnit[] units)
+    /// <summary>A change of a record Salesforce has (an update).</summary>
+    private static Change Update(string key, string name)
     {
-        return Plan([.. units.Select(Normalized)], CurrentRecords.None).Requests.Single();
+        return new Change(key, Normalized(Account(key, name)).Records[0], AccountId, new Dictionary<string, object?> { ["Name"] = name });
     }
 
-    private static List<SyncResult> Interpret(WriteRequest request, params CollectionResult[] answers)
+    private static Change DeleteOf(string key, string id)
     {
-        return Interpret(new SalesforceOptions(), request, answers);
+        return new Change(key, Normalized(Deleting(key)).Records[0], id, new Dictionary<string, object?>());
     }
 
-    private static List<SyncResult> Interpret(SalesforceOptions options, WriteRequest request, params CollectionResult[] answers)
+    private static (SyncOutcome Status, List<SalesforceError> Errors) Interpret(SyncUnit unit, RecordResult? result, SalesforceOptions? options = null)
     {
-        return new WriteResultInterpreter(new SalesforceErrors(Options.Create(options))).Interpret(request, answers);
+        return Interpret(new Change(unit.Records[0].ExternalId, Normalized(unit).Records[0], null, new Dictionary<string, object?>()), result, options);
     }
 
-    private static CollectionResult Ok(string referenceId)
+    private static (SyncOutcome Status, List<SalesforceError> Errors) Interpret(Change change, RecordResult? result, SalesforceOptions? options = null)
     {
-        return new(referenceId, [new RecordResult(true, AccountId, [])], []);
+        var (status, errors) = new WriteResultInterpreter(new SalesforceErrors(Options.Create(options ?? new SalesforceOptions()))).Interpret(change, result);
+        return (status switch
+        {
+            WriteStatus.Saved => SyncOutcome.Saved,
+            WriteStatus.Permanent => SyncOutcome.PermanentFailure,
+            _ => SyncOutcome.TransientFailure
+        }, errors);
     }
 
-    private static CollectionResult Failed(string referenceId, params string[] codes)
+    private static RecordResult Ok()
     {
-        return new(referenceId, [new RecordResult(false, null, [.. codes.Select(code => new SalesforceError(null, code, "failed"))])], []);
+        return new(true, AccountId, []);
     }
-}
 
-internal static class WriteRequestTestExtensions
-{
-    /// <summary>The request's collections, all of them upserts (in a test of upserts only).</summary>
-    public static List<CollectionUpsert> Upserts(this WriteRequest request)
+    private static RecordResult Failed(params string[] codes)
     {
-        return [.. request.BuildRequests().Cast<CollectionUpsert>()];
+        return new(false, null, [.. codes.Select(code => new SalesforceError(null, code, "failed"))]);
+    }
+
+    /// <summary>
+    /// A Salesforce that records its calls and answers each record: saved, or failed with the code given for its external
+    /// id in <see cref="Failing"/>.
+    /// </summary>
+    private sealed class StubSalesforce : ISalesforceRestClient
+    {
+        public List<Call> Calls { get; } = [];
+        public Dictionary<string, string> Failing { get; } = [];
+        public bool AnswerWithNothing { get; set; }
+
+        public string DataPath => "/services/data/v62.0";
+
+        public Task<SObjectSchema?> DescribeAsync(string sobject, DateTimeOffset? ifModifiedSince, CancellationToken ct)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdField, IReadOnlyList<SObjectBody> records,
+            CancellationToken ct)
+        {
+            var keys = records.Select(r => (string)r[externalIdField]!).ToList();
+            Calls.Add(new Call($"upsert {sobject} {externalIdField}", keys));
+            return Task.FromResult(Answer(keys));
+        }
+
+        public Task<IReadOnlyList<RecordResult>> DeleteAsync(IReadOnlyList<string> ids, CancellationToken ct)
+        {
+            Calls.Add(new Call("delete", ids));
+            return Task.FromResult(Answer(ids));
+        }
+
+        private IReadOnlyList<RecordResult> Answer(IReadOnlyList<string> keys)
+        {
+            return AnswerWithNothing
+                ? []
+                : [.. keys.Select(k => Failing.TryGetValue(k, out var code) ? Failed(code) : new RecordResult(true, "001000000000009AAA", []))];
+        }
+
+        public sealed record Call(string What, IReadOnlyList<string> Keys)
+        {
+            public string Describe()
+            {
+                return $"{What} [{string.Join(", ", Keys)}]";
+            }
+        }
     }
 }

@@ -2,30 +2,53 @@ using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync.Write;
 
+/// <summary>One record to send, as decided by the diff: a create, an update (only the fields that differ) or a delete.</summary>
+/// <param name="UnitKey">The entity the record belongs to.</param>
+/// <param name="Record">The record, normalized against Describe.</param>
+/// <param name="Id">Its Salesforce Id when it exists there (a delete needs it), null when it is new.</param>
+/// <param name="Fields">What to send, by API name: all of a new record's non-empty fields, only the changed ones of an existing one.</param>
+internal sealed record Change(string UnitKey, NormalizedRecord Record, string? Id, IReadOnlyDictionary<string, object?> Fields)
+{
+    public bool IsDelete => Record.Record.Delete;
+    public bool IsCreate => !IsDelete && Id is null;
+    public string SObject => Record.Schema.Name;
+    public string ExternalIdField => Record.Schema.Find(Record.Record.ExternalIdField)!.Name;
+    public string ReferenceId => Record.ReferenceId;
+
+    /// <summary>The record as an upsert takes it: its type, its external id (which decides create or update) and the fields to send.</summary>
+    public SObjectBody Body()
+    {
+        var body = new SObjectBody(SObject) { [ExternalIdField] = Record.Record.ExternalId };
+        foreach (var (field, value) in Fields)
+        {
+            body[field] = value;
+        }
+        return body;
+    }
+}
+
+/// <summary>An entity that has something to send.</summary>
+internal sealed record PlannedUnit(string Key, IReadOnlyList<Change> Changes);
+
 /// <summary>What to do with a batch after the read.</summary>
-/// <param name="Requests">The write requests, each one API call (see <see cref="WriteRequest"/>).</param>
-/// <param name="NotSent">The units that won't be sent, with their outcome: unchanged, rejected, too large, or waiting for a parent.</param>
-internal sealed record WritePlan(IReadOnlyList<WriteRequest> Requests, IReadOnlyList<SyncResult> NotSent);
+/// <param name="Units">The entities with something to send.</param>
+/// <param name="Decided">The entities that need no call: unchanged, rejected, or waiting for a parent.</param>
+internal sealed record WritePlan(IReadOnlyList<PlannedUnit> Units, IReadOnlyList<SyncResult> Decided);
 
 /// <summary>
-/// Step 4 of a batch: decides what each record needs by comparing it with what Salesforce has (what the read found).
-/// No I/O. Per record:
+/// Step 4 of a batch: the diff. Each record is compared with what Salesforce has (what the read found), and becomes:
 /// <list type="bullet">
-/// <item>not in Salesforce: create it, with all its non-empty fields;</item>
-/// <item>in Salesforce, some field differs: update it, with only the fields that differ (<see cref="Changes"/>);</item>
-/// <item>in Salesforce, nothing differs: send nothing;</item>
-/// <item>to delete and in Salesforce: delete it by the Id the read found; to delete and not there: send nothing.</item>
+/// <item>a create, when Salesforce doesn't have it: all its non-empty fields;</item>
+/// <item>an update, when Salesforce has it and some field differs: only the fields that differ;</item>
+/// <item>nothing, when Salesforce has it and nothing differs;</item>
+/// <item>a delete, when it is to be deleted and Salesforce has it (nothing, when it doesn't).</item>
 /// </list>
-/// Per unit (one entity's records), the result is one of: rejected (a field can't be written: permanent), waiting (a
-/// parent is in neither Salesforce nor the unit: transient), unchanged, or planned (its writes go to
-/// <see cref="WriteRequest.Pack"/>).
+/// Then each entity (unit) is one of: rejected (a field can't be written: permanent), waiting (a record it points at is
+/// neither in Salesforce nor in the unit: transient), unchanged (nothing to send) or planned. No I/O.
 /// </summary>
 internal static class WritePlanner
 {
-    /// <param name="units">The batch's units, normalized against Describe.</param>
-    /// <param name="current">What the read found.</param>
-    /// <param name="maxRecordsPerWrite">The row type's <see cref="Data.Inbox.IInboxRow.MaxRecordsPerWrite"/>: records per collection.</param>
-    public static WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current, int maxRecordsPerWrite)
+    public static WritePlan Plan(IReadOnlyList<NormalizedUnit> units, CurrentRecords current)
     {
         var planned = new List<PlannedUnit>();
         var decided = new List<SyncResult>();
@@ -33,8 +56,8 @@ internal static class WritePlanner
         foreach (var unit in units)
         {
             var problems = new List<SalesforceError>(); // what Salesforce would reject: permanent
-            var missing = new List<SalesforceError>(); // a parent that isn't there yet: transient
-            var writes = PlanUnit(unit, current, problems, missing);
+            var missing = new List<SalesforceError>();  // a parent that isn't there yet: transient
+            var changes = ChangesOf(unit, current, problems, missing);
 
             if (problems.Count > 0)
             {
@@ -44,39 +67,24 @@ internal static class WritePlanner
             {
                 decided.Add(new(unit.Key, SyncOutcome.TransientFailure, missing));
             }
-            else if (writes.Count == 0)
+            else if (changes.Count == 0)
             {
                 decided.Add(new(unit.Key, SyncOutcome.Unchanged, []));
             }
             else
             {
-                planned.Add(new PlannedUnit(unit.Key, writes));
+                planned.Add(new PlannedUnit(unit.Key, changes));
             }
         }
 
-        var (requests, tooLarge) = WriteRequest.Pack(planned, maxRecordsPerWrite);
-        decided.AddRange(tooLarge);
-        return new WritePlan(requests, decided);
+        return new WritePlan(planned, decided);
     }
 
-    /// <summary>What an earlier record of a unit is to the records after it, which may point at it.</summary>
-    /// <param name="Level">The record's level in the unit (see <see cref="CollectionKey.Level"/>).</param>
-    /// <param name="Create">Its write when it is new (a child's outcome follows it), else null.</param>
-    private readonly record struct EarlierRecord(int Level, PlannedWrite? Create);
-
-    /// <summary>
-    /// The unit's writes, in record order. A record whose foreign key points at another record of the unit goes one
-    /// level below it, so it is sent after it; a parent that is in Salesforce already puts no constraint on it.
-    /// </summary>
-    /// <param name="unit">The unit, normalized.</param>
-    /// <param name="current">What the read found in Salesforce.</param>
-    /// <param name="problems">Receives what Salesforce would reject (a field that can't be written).</param>
-    /// <param name="missing">Receives the foreign keys whose parent is neither in Salesforce nor in the unit.</param>
-    private static List<PlannedWrite> PlanUnit(NormalizedUnit unit, CurrentRecords current, List<SalesforceError> problems,
+    private static List<Change> ChangesOf(NormalizedUnit unit, CurrentRecords current, List<SalesforceError> problems,
         List<SalesforceError> missing)
     {
-        var writes = new List<PlannedWrite>();
-        var earlier = new Dictionary<(string SObject, string ExternalId), EarlierRecord>();
+        var changes = new List<Change>();
+        var inUnit = unit.Records.Where(r => !r.Record.Delete).Select(r => (r.Record.SObject.ToLowerInvariant(), r.Record.ExternalId)).ToHashSet();
 
         foreach (var record in unit.Records)
         {
@@ -87,59 +95,43 @@ internal static class WritePlanner
                 // By the Id the read found. A record the read didn't find is deleted already (or never was): nothing to send.
                 if (existing is not null)
                 {
-                    writes.Add(new PlannedWrite(record, existing.Id, new Dictionary<string, object?>(), [], level: 0));
+                    changes.Add(new Change(unit.Key, record, existing.Id, new Dictionary<string, object?>()));
                 }
-
                 continue;
             }
 
-            var changes = Changes(record, existing, problems);
-
-            var level = 0;
-            var newParents = new List<PlannedWrite>();
-            foreach (var key in record.Record.ForeignKeys ?? [])
+            // A record that points at a parent needs it to exist: in Salesforce already, or created by this same unit
+            foreach (var parent in record.Record.ForeignKeys ?? [])
             {
-                if (earlier.TryGetValue((key.SObject.ToLowerInvariant(), key.ExternalId), out var sibling))
-                {
-                    level = Math.Max(level, sibling.Level + 1);
-                    if (sibling.Create is not null)
-                    {
-                        newParents.Add(sibling.Create);
-                    }
-                }
-                else if (current.Find(key) is null)
+                if (!inUnit.Contains((parent.SObject.ToLowerInvariant(), parent.ExternalId)) && current.Find(parent) is null)
                 {
                     missing.Add(new(record.ReferenceId, SalesforceErrors.DependencyNotSynced,
-                        $"{record.Schema.Name}.{key.Field}: {key.SObject} {key.ExternalIdField}={key.ExternalId} is not in Salesforce yet"));
+                        $"{record.Schema.Name}.{parent.Field}: {parent.SObject} {parent.ExternalIdField}={parent.ExternalId} is not in Salesforce yet"));
                 }
             }
 
-            // A new record is always written; an existing one only when a field differs
-            var write = existing is not null && changes.Count == 0
-                ? null
-                : new PlannedWrite(record, existing?.Id, changes, newParents, level);
-            if (write is not null)
-            {
-                writes.Add(write);
-            }
+            var fields = Diff(record, existing, problems);
 
-            earlier[(record.Record.SObject.ToLowerInvariant(), record.Record.ExternalId)] =
-                new EarlierRecord(level, existing is null ? write : null);
+            // A new record is always written; an existing one only when a field differs
+            if (existing is null || fields.Count > 0)
+            {
+                changes.Add(new Change(unit.Key, record, existing?.Id, fields));
+            }
         }
-        return writes;
+        return changes;
     }
 
     /// <summary>
-    /// The diff. The fields to send: every non-empty one for a new record, otherwise only those whose normalized value
-    /// differs from Salesforce's. A field Salesforce won't let us set (not createable / updateable) is a problem only
-    /// if it must actually be written.
+    /// The fields to send: every non-empty one for a new record, otherwise only those whose normalized value differs
+    /// from Salesforce's. A field Salesforce won't let us set (not createable / updateable) is a problem only if it must
+    /// actually be written.
     /// </summary>
     /// <param name="existing">The record in Salesforce, or null if it is new.</param>
     /// <param name="record">The desired record, normalized.</param>
     /// <param name="problems">Receives the fields that must be written but can't be.</param>
-    public static Dictionary<string, object?> Changes(NormalizedRecord record, CurrentRecord? existing, List<SalesforceError> problems)
+    public static Dictionary<string, object?> Diff(NormalizedRecord record, CurrentRecord? existing, List<SalesforceError> problems)
     {
-        var changes = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        var fields = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         foreach (var (field, value) in record.Fields)
         {
             // A new record has no value to clear, and an explicit null would override the field's default
@@ -153,24 +145,16 @@ internal static class WritePlanner
                 continue;
             }
 
-            if (NotWritable(record, field, existing) is { } problem)
+            var creating = existing is null;
+            if (!(creating ? field.Createable : field.Updateable))
             {
-                problems.Add(problem);
+                problems.Add(new SalesforceError(record.ReferenceId, "INVALID_FIELD_FOR_INSERT_UPDATE",
+                    $"{record.Schema.Name}.{field.Name} is not {(creating ? "createable" : "updateable")}"));
                 continue;
             }
 
-            changes[field.Name] = FieldValues.ToWire(value);
+            fields[field.Name] = FieldValues.ToWire(value);
         }
-        return changes;
-    }
-
-    /// <summary>The problem with writing <paramref name="field"/>, if Salesforce doesn't allow it on a create / an update.</summary>
-    private static SalesforceError? NotWritable(NormalizedRecord record, SalesforceField field, CurrentRecord? existing)
-    {
-        var creating = existing is null;
-        return (creating ? field.Createable : field.Updateable)
-            ? null
-            : new SalesforceError(record.ReferenceId, "INVALID_FIELD_FOR_INSERT_UPDATE",
-                $"{record.Schema.Name}.{field.Name} is not {(creating ? "createable" : "updateable")}");
+        return fields;
     }
 }

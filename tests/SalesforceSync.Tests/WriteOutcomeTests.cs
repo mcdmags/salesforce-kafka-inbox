@@ -127,8 +127,7 @@ public sealed class WriteOutcomeTests
     }
 
     /// <summary>
-    /// Fails the composite read or the write (the composite with sObject Collections, or a Collections upsert) before it
-    /// reaches the org.
+    /// Fails the read (a query) or the write (a Collections upsert or delete) before it reaches the org.
     /// </summary>
     private sealed class FailingHandler : DelegatingHandler
     {
@@ -139,14 +138,14 @@ public sealed class WriteOutcomeTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
+            // A write is a collections call (upsert or delete); a read is a query
             var path = request.RequestUri!.AbsolutePath;
-            var isUpsert = path.Contains("/composite/sobjects/", StringComparison.Ordinal);
-            if (!isUpsert && !path.EndsWith("/composite", StringComparison.Ordinal))
+            var isWrite = path.Contains("/composite/sobjects", StringComparison.Ordinal);
+            if (!isWrite && !path.EndsWith("/query", StringComparison.Ordinal))
             {
                 return await base.SendAsync(request, ct);
             }
 
-            var isWrite = isUpsert || (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
             return (isWrite ? !FailWrites : !FailReads)
                 ? await base.SendAsync(request, ct)
                 : Cancel

@@ -4,25 +4,24 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.Sync.Write;
 
 /// <summary>A query of the batch's read and the object its rows belong to.</summary>
-internal sealed record ReadQuery(CompositeQuery Query, string SObject);
+internal sealed record ReadQuery(string Soql, string SObject);
 
 /// <summary>
-/// Step 3 of a batch: builds the read. The strategy's queries become SOQL, each selecting every field the diff compares,
+/// Step 3 of a batch: builds the read, one query per object and chunk of external ids. The strategy's queries become SOQL, each selecting every field the diff compares,
 /// the Id (a delete needs it) and the external ids that show a parent exists, split into chunks of at most the row type's
 /// <see cref="Data.Inbox.IInboxRow.MaxValuesPerQuery"/> values whose URL fits a call (<see cref="SalesforceRestClient.MaxUrlBytes"/>).
 /// </summary>
 internal static class ReadQueryBuilder
 {
     /// <summary>
-    /// One query per chunk of at most <paramref name="maxValuesPerQuery"/> values (the row type's), under <paramref name="dataPath"/>, named q0, q1, ...;
-    /// more than one Composite request takes (5) are sent as several.
+    /// One query per chunk of at most <paramref name="maxValuesPerQuery"/> values (the row type's), under <paramref name="dataPath"/>.
     /// </summary>
     /// <exception cref="InvalidOperationException">A query's URL is too long even with a single value.</exception>
     public static List<ReadQuery> Build(IReadOnlyList<NormalizedUnit> units, IReadOnlyList<SoqlQuery> queries,
         IReadOnlyDictionary<string, SObjectSchema> schemas, int maxValuesPerQuery, string dataPath)
     {
         var records = units.SelectMany(u => u.Records).ToList();
-        var composite = new List<ReadQuery>();
+        var read = new List<ReadQuery>();
 
         foreach (var query in queries.Where(q => q.Values.Count > 0))
         {
@@ -31,11 +30,11 @@ internal static class ReadQueryBuilder
 
             foreach (var soql in Chunked(target.Name, fields, query.WhereField, query.Values.Distinct(StringComparer.Ordinal), maxValuesPerQuery, dataPath))
             {
-                composite.Add(new ReadQuery(new CompositeQuery($"q{composite.Count}", soql), target.Name));
+                read.Add(new ReadQuery(soql, target.Name));
             }
         }
 
-        return composite;
+        return read;
     }
 
     /// <summary>
@@ -123,13 +122,12 @@ internal sealed class CurrentRecords
 
     private readonly Dictionary<(string SObject, string Field, string Value), CurrentRecord> _index = [];
 
-    /// <summary>The rows of a Composite read (by query reference id), each query's rows belonging to one object.</summary>
-    public static CurrentRecords From(IReadOnlyDictionary<string, List<JsonElement>> rowsByQuery, IEnumerable<ReadQuery> queries)
+    /// <summary>The rows a read found, each with the object its query was for.</summary>
+    public static CurrentRecords From(IEnumerable<(string SObject, JsonElement Row)> rows)
     {
-        var sobjectOf = queries.ToDictionary(q => q.Query.ReferenceId, q => q.SObject, StringComparer.Ordinal);
-        return new CurrentRecords(rowsByQuery.SelectMany(q => q.Value.Select(row => (sobjectOf[q.Key], new CurrentRecord(row.EnumerateObject()
+        return new CurrentRecords(rows.Select(r => (r.SObject, new CurrentRecord(r.Row.EnumerateObject()
             .Where(p => p.Name != "attributes")
-            .ToDictionary(p => p.Name, p => p.Value, StringComparer.OrdinalIgnoreCase))))));
+            .ToDictionary(p => p.Name, p => p.Value, StringComparer.OrdinalIgnoreCase)))));
     }
 
     public CurrentRecords(IEnumerable<(string SObject, CurrentRecord Record)> rows)

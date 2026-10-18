@@ -8,13 +8,6 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// </summary>
 internal static class SalesforceResponseParser
 {
-    internal static List<SalesforceError> ParseErrors(string? referenceId, JsonElement body)
-    {
-        return body.ValueKind != JsonValueKind.Array
-            ? [new SalesforceError(referenceId, "UNKNOWN_ERROR", body.ValueKind == JsonValueKind.Undefined ? null : body.GetRawText())]
-            : [.. body.EnumerateArray().Select(e => ParseError(referenceId, e, "errorCode"))];
-    }
-
     internal static RecordResult ParseRecordResult(JsonElement record)
     {
         return new(

@@ -8,13 +8,13 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
 /// Salesforce REST transport, and the only class that talks to Salesforce. Every method is exactly one API call: it
-/// takes requests and returns the raw results per subrequest and per record. It decides nothing (what to write, what
-/// a result means); that is <c>SalesforceBatchSyncService</c>'s.
+/// takes many records and returns the raw result of each. It decides nothing (what to write, what a result means); that
+/// is <c>SalesforceBatchSyncService</c>'s.
 /// <para>
-/// There are deliberately no single-record methods (get, update, delete or upsert one record by id): each costs one API
-/// call per record, and the integration lives on a daily call budget (<c>SalesforceLimits:DailyApiAllocation</c>). The
-/// client is bulk-only: up to 5 queries per call, and up to 200 records per collection with up to 5 collections per call.
-/// Writing 200 records one by one would spend 200 calls where <see cref="WriteAsync"/> spends one.
+/// There is deliberately no call for one record (get, update, delete or upsert by id): each costs one API call per record,
+/// and the integration lives on a daily call budget (<c>SalesforceLimits:DailyApiAllocation</c>). A read takes up to
+/// 2,000 external ids, an upsert or a delete up to 200 records. Writing 200 records one by one would spend 200 calls
+/// where <see cref="UpsertAsync"/> spends one.
 /// </para>
 /// </summary>
 public sealed class SalesforceRestClient : ISalesforceRestClient
@@ -35,10 +35,6 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
 
     // The limits below are Salesforce's. They are the call-saving ceilings: the engine packs each call up to them, and the
     // client refuses anything over them before sending (a rejected call is still a call).
-
-    /// <summary>Composite: at most 5 of its (25) subrequests may be queries or sObject Collections operations.</summary>
-    public const int MaxCompositeQueries = 5;
-    public const int MaxCompositeCollections = 5;
 
     /// <summary>
     /// sObject Collections: max records in one create, update or upsert; the ceiling of a row type's
@@ -104,152 +100,87 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
         return new SObjectSchema(body.Name, body.Fields, body.RecordTypeInfos);
     }
 
-    /// <summary>
-    /// Runs up to 5 queries in one Composite request (one API call). Results are keyed by reference id;
-    /// a failed subrequest throws <see cref="SalesforceQueryException"/>.
-    /// </summary>
-    /// <exception cref="ArgumentException">A query's URL is longer than <see cref="MaxUrlBytes"/>.</exception>
-    public async Task<Dictionary<string, List<JsonElement>>> QueryAsync(IReadOnlyList<CompositeQuery> queries, CancellationToken ct)
+    /// <summary>Runs one SOQL query: all its rows.</summary>
+    /// <exception cref="ArgumentException">The query's URL is longer than <see cref="MaxUrlBytes"/>.</exception>
+    public async Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct)
     {
-        if (queries.Count is 0 or > MaxCompositeQueries)
+        // Checked before anything is sent: an over-long URL is rejected by Salesforce (414/431), but the rejected call is
+        // still counted against the budget
+        var page = await GetPageAsync(EnsureFits(QueryUrl(soql)), ct);
+        var rows = page.Records;
+
+        // Lookups by unique external id return at most one row per id, far below a query page (2,000), so this loop
+        // normally never runs a second call. It follows nextRecordsUrl anyway: dropping rows silently would be worse than
+        // one extra call, and the engine would then treat a record that exists as missing and create a duplicate
+        for (var next = page.NextRecordsUrl; next is not null;)
         {
-            throw new ArgumentOutOfRangeException(nameof(queries), $"1 to {MaxCompositeQueries} queries per request");
+            var more = await GetPageAsync(EnsureFits(next), ct);
+            rows.AddRange(more.Records);
+            next = more.NextRecordsUrl;
         }
+        return rows;
+    }
 
-        // One Composite call carries up to 5 queries: 5 reads for the price of 1 API call. allOrNone=false so one failed
-        // query doesn't discard the other four answers (each subresponse carries its own status)
-        var payload = new
-        {
-            allOrNone = false,
-            compositeRequest = queries.Select(q => new
-            {
-                method = "GET",
-                // Checked here, before anything is sent: an over-long URL is rejected by Salesforce (414/431) but the
-                // rejected call is still counted against the budget
-                url = EnsureFits(QueryUrl(q.Soql)),
-                referenceId = q.ReferenceId
-            }).ToList() // checked before anything is sent
-        };
-
-        var subresponses = await PostCompositeAsync(payload, ct);
-
-        var results = new Dictionary<string, List<JsonElement>>(StringComparer.Ordinal);
-        foreach (var sub in subresponses)
-        {
-            if (sub.HttpStatusCode >= 400)
-            {
-                throw new SalesforceQueryException(sub.ReferenceId, SalesforceResponseParser.ParseErrors(sub.ReferenceId, sub.Body));
-            }
-
-            var page = sub.Body.Deserialize<QueryPage>(Json)
-                       ?? throw new InvalidOperationException($"Empty query result {sub.ReferenceId}");
-            var records = page.Records;
-            // Lookups by unique external id return at most one row per id, far below a query page (2,000), so this loop
-            // normally never runs a second call. It follows nextRecordsUrl anyway: dropping rows silently would be worse
-            // than one extra call, and the engine would then treat a record that exists as missing and create a duplicate
-            for (var next = page.NextRecordsUrl; next is not null;)
-            {
-                var more = await http.GetFromJsonAsync<QueryPage>(EnsureFits(next), Json, ct)
-                           ?? throw new InvalidOperationException("Empty query page");
-                records.AddRange(more.Records);
-                next = more.NextRecordsUrl;
-            }
-            results[sub.ReferenceId] = records;
-        }
-        return results;
+    private async Task<QueryPage> GetPageAsync(string url, CancellationToken ct)
+    {
+        using var res = await http.GetAsync(url, ct);
+        await EnsureSuccessAsync(res, ct);
+        return await res.Content.ReadFromJsonAsync<QueryPage>(Json, ct) ?? throw new InvalidOperationException("Empty query result");
     }
 
     /// <summary>
-    /// Sends sObject Collections upserts and deletes in one API call: a single one as a call of its own (an upsert
-    /// <c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>, a delete
-    /// <c>DELETE /composite/sobjects?ids=...&amp;allOrNone=false</c>), 2 to 5 as the subrequests of one Composite
-    /// request, in the given order. An upserted record is created or updated by its external id, a deleted one is
-    /// deleted by its Id. <c>allOrNone: false</c> is sent on the Composite request and on every collection: every
-    /// record succeeds or fails on its own; <c>collateSubrequests: false</c> keeps the subrequests in order.
+    /// <c>PATCH /composite/sobjects/{object}/{externalIdField}</c>: up to 200 records created or updated by their external
+    /// id. <c>allOrNone: false</c>: every record succeeds or fails on its own, so one bad record doesn't cost the other
+    /// 199 (and the call that carried them) a retry.
     /// </summary>
-    /// <returns>
-    /// One result per collection Salesforce answered (HTTP 200 does not mean any record was saved or deleted), each
-    /// upserted record's with <c>created</c> set. A single collection that fails as a whole throws; a Composite
-    /// subrequest that does answers with its errors instead of per-record results.
-    /// </returns>
-    /// <exception cref="ArgumentException">Too many collections or records, or a URL longer than <see cref="MaxUrlBytes"/>.</exception>
-    public async Task<IReadOnlyList<CollectionResult>> WriteAsync(IReadOnlyList<CollectionRequest> collections, CancellationToken ct)
+    /// <returns>One result per record (HTTP 200 does not mean any record was saved), each with <c>created</c> set.</returns>
+    /// <exception cref="ArgumentException">No records or more than <see cref="MaxCollectionRecords"/>, or a URL longer than <see cref="MaxUrlBytes"/>.</exception>
+    public Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdField, IReadOnlyList<SObjectBody> records,
+        CancellationToken ct)
     {
-        if (collections.Count is 0 or > MaxCompositeCollections)
+        EnsureRecordCount(records.Count);
+        var request = new HttpRequestMessage(HttpMethod.Patch, EnsureFits($"{DataPath}/composite/sobjects/{sobject}/{externalIdField}"))
         {
-            throw new ArgumentOutOfRangeException(nameof(collections), $"1 to {MaxCompositeCollections} collections per request");
-        }
+            Content = JsonContent.Create(new { allOrNone = false, records }, options: Json)
+        };
+        return SendAsync(request, ct);
+    }
 
-        if (collections.FirstOrDefault(c => c.Count is 0 or > MaxCollectionRecords) is { } tooLarge)
+    /// <summary>
+    /// <c>DELETE /composite/sobjects?ids=...&amp;allOrNone=false</c>: up to 200 records, of any objects, by their Ids (it
+    /// takes no external ids). Deleted records go to the Recycle Bin. The Ids are in the URL (a DELETE has no body); 200
+    /// Ids of 18 characters make a URL of under 4 KB, within <see cref="MaxUrlBytes"/>.
+    /// </summary>
+    /// <exception cref="ArgumentException">No Ids or more than <see cref="MaxCollectionRecords"/>, or a URL longer than <see cref="MaxUrlBytes"/>.</exception>
+    public Task<IReadOnlyList<RecordResult>> DeleteAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        EnsureRecordCount(ids.Count);
+        var url = $"{DataPath}/composite/sobjects?ids={string.Join(",", ids.Select(Uri.EscapeDataString))}&allOrNone=false";
+        return SendAsync(new HttpRequestMessage(HttpMethod.Delete, EnsureFits(url)), ct);
+    }
+
+    // A call that answers with a result per record, as both Collections calls do
+    private async Task<IReadOnlyList<RecordResult>> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        using (request)
         {
-            throw new ArgumentOutOfRangeException(nameof(collections),
-                $"{tooLarge.ReferenceId}: {tooLarge.Count} records; a collection takes 1 to {MaxCollectionRecords}");
-        }
-
-        // Every URL is checked before anything is sent, so a bad request fails locally and costs no call (a Composite
-        // with one over-long subrequest would otherwise spend the call and fail that subrequest)
-        var urls = collections.Select(c => EnsureFits(DataPath + c.Path)).ToList();
-
-        // A single collection goes as a call of its own: the Composite wrapper would add nothing, and a failure of the
-        // whole call then surfaces as an exception instead of a subresponse. 2 to 5 collections share one Composite
-        // call, which is the saving: a batch's parent and child upserts and its delete are one API call, not several.
-        if (collections is [var single])
-        {
-            using var request = new HttpRequestMessage(single.Method, urls[0])
-            {
-                Content = single.Body is { } content ? JsonContent.Create(content, options: Json) : null
-            };
             using var res = await http.SendAsync(request, ct);
             await EnsureSuccessAsync(res, ct);
+
             var body = await res.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
             return body.ValueKind == JsonValueKind.Array
-                ? [new CollectionResult(single.ReferenceId, [.. body.EnumerateArray().Select(SalesforceResponseParser.ParseRecordResult)], [])]
-                : throw new InvalidOperationException($"{single.ReferenceId} answered without per-record results");
+                ? [.. body.EnumerateArray().Select(SalesforceResponseParser.ParseRecordResult)]
+                : throw new InvalidOperationException("Salesforce answered without per-record results");
         }
-
-        var payload = new
-        {
-            allOrNone = false,
-            // Run in the order sent. From API version 49.0 Composite collates (bulkifies) unrelated subrequests by default,
-            // and then "the order of execution is not guaranteed (unless there is an explicit dependency)": a Text
-            // foreign key is no explicit dependency, yet the org's automation needs the parents' upserts first and the
-            // delete last (REST API Developer Guide, "Composite", collateSubrequests)
-            collateSubrequests = false,
-            compositeRequest = collections.Select((c, i) =>
-            {
-                // A delete has no body: its ids are in its URL
-                var subrequest = new Dictionary<string, object?>
-                {
-                    ["method"] = c.Method.Method,
-                    ["url"] = urls[i],
-                    ["referenceId"] = c.ReferenceId
-                };
-                if (c.Body is { } content)
-                {
-                    subrequest["body"] = content;
-                }
-
-                return subrequest;
-            })
-        };
-
-        var subresponses = await PostCompositeAsync(payload, ct);
-
-        // A subrequest that failed as a whole answers with an error list instead of one result per record
-        return [.. subresponses.Select(sub => sub.HttpStatusCode >= 400 || sub.Body.ValueKind != JsonValueKind.Array
-            ? new CollectionResult(sub.ReferenceId, null, SalesforceResponseParser.ParseErrors(sub.ReferenceId, sub.Body))
-            : new CollectionResult(sub.ReferenceId, [.. sub.Body.EnumerateArray().Select(SalesforceResponseParser.ParseRecordResult)], []))];
     }
 
-    // The one place a Composite request is posted, for queries and writes alike, so both get the same success check and
-    // the same parsing of the answer.
-    private async Task<List<SubResponse>> PostCompositeAsync(object payload, CancellationToken ct)
+    // A call takes 1 to 200 records: checked before sending, as a rejected call is still a call
+    private static void EnsureRecordCount(int count)
     {
-        using var res = await http.PostAsJsonAsync($"{DataPath}/composite", payload, Json, ct);
-        await EnsureSuccessAsync(res, ct);
-        var body = await res.Content.ReadFromJsonAsync<CompositeBody>(Json, ct)
-                   ?? throw new InvalidOperationException("Empty composite response");
-        return body.CompositeResponse;
+        if (count is 0 or > MaxCollectionRecords)
+        {
+            throw new ArgumentOutOfRangeException(nameof(count), $"{count} records; a call takes 1 to {MaxCollectionRecords}");
+        }
     }
 
     /// <summary>The URL a query is sent with, as a Composite subrequest or a call of its own.</summary>
@@ -306,7 +237,5 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     // ---------- DTOs ----------
 
     private sealed record DescribeBody(string Name, List<SalesforceField> Fields, List<SalesforceRecordType>? RecordTypeInfos);
-    private sealed record CompositeBody(List<SubResponse> CompositeResponse);
     private sealed record QueryPage(List<JsonElement> Records, string? NextRecordsUrl);
-    private sealed record SubResponse(string ReferenceId, int HttpStatusCode, JsonElement Body);
 }

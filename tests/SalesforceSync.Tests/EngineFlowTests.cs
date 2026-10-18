@@ -17,8 +17,7 @@ public sealed class EngineFlowTests
     private static readonly SyncStrategy<AccountEvent> Accounts = AccountSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
-    private readonly RecordingInbox<AccountInboxRow> _inbox = new();
-    private readonly RecordingInbox<OneRecordPerWriteRow> _narrow = new();
+    private readonly RecordingInbox _inbox = new();
     private readonly Gate _gate = new();
     private readonly Interceptor _http = new();
 
@@ -176,7 +175,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _narrow.Calls.Should().Equal(["claim", "fail all: refused ()"],
+        _inbox.Calls.Should().Equal(["claim", "fail all: refused ()"],
             "every event is retried and none is marked done, not even NEW's, whose call succeeded");
     }
 
@@ -186,14 +185,14 @@ public sealed class EngineFlowTests
         await CreateOldAsync();
         _http.FailWrite = (2, new HttpRequestException(HttpRequestError.ConnectionError, "refused"));
         await TwoCallBatchAsync();
-        _narrow.Calls.Clear();
+        _inbox.Calls.Clear();
         _http.FailWrite = null;
         _http.Writes = 0;
 
-        (await Engine().SyncBatchAsync(ThreeObjects, _narrow, CancellationToken.None)).Should().Be(3);
+        (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(3);
 
-        _http.Writes.Should().Be(1, "NEW is unchanged now: only OLD's change is written, in one Composite request");
-        _narrow.Recorded!.Synced.Should().BeEquivalentTo(["NEW", "OLD", "KIDS"], "NEW's, OLD's and KIDS's rows");
+        _http.Writes.Should().Be(2, "the Accounts are in now: only the Contacts and the Profiles are written");
+        _inbox.Recorded!.Synced.Should().BeEquivalentTo(["NEW", "OLD", "KIDS"], "NEW's, OLD's and KIDS's rows");
         _org.History("Account", "NEW").Should().ContainSingle("NEW was written once, not twice");
     }
 
@@ -201,11 +200,11 @@ public sealed class EngineFlowTests
     public async Task A_later_call_whose_answer_is_lost_holds_the_whole_batch()
     {
         await CreateOldAsync();
-        _org.LoseResponsesFor("Account", "OLD", 1);
+        _org.LoseResponsesFor("Contact", "C-KIDS", 1);
 
         await TwoCallBatchAsync();
 
-        _narrow.Calls.Should().Equal("claim", "hold");
+        _inbox.Calls.Should().Equal("claim", "hold");
     }
 
     [Fact]
@@ -216,7 +215,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync(processed: 0);
 
-        _narrow.Calls.Should().Equal("claim", "defer 00:00:07");
+        _inbox.Calls.Should().Equal("claim", "defer 00:00:07");
     }
 
     [Fact]
@@ -232,7 +231,7 @@ public sealed class EngineFlowTests
 
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
 
-        _http.Writes.Should().Be(1, "ACC-1's Account and ACC-2's Profile in one Composite request");
+        _http.Writes.Should().Be(2, "ACC-1's Account upsert, then ACC-2's Profile upsert");
         _inbox.Calls.Should().Equal(["claim", "hold"], "the org applied it, but the batch's outcome is unknown until the held rows are read again");
         ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("One!");
 
@@ -253,15 +252,12 @@ public sealed class EngineFlowTests
         _inbox.Rows.Add(Row("ACC-1", "2026-10-14T01:00:00Z"));
         await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None); // describes are cached now
         _inbox.Calls.Clear();
-        _http.OnRead = request => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            RequestMessage = request,
-            Content = new StringContent(/*lang=json,strict*/ """{"compositeResponse":[{"referenceId":"q0","httpStatusCode":400,"httpHeaders":{},"body":[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating'"}]}]}""")
-        };
+        const string body = /*lang=json,strict*/ """[{"errorCode":"INVALID_FIELD","message":"No such column 'Rating'"}]""";
+        _http.OnRead = request => new HttpResponseMessage(HttpStatusCode.BadRequest) { RequestMessage = request, Content = new StringContent(body) };
 
         await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None);
 
-        _inbox.Calls.Should().HaveElementAt(1, "fail all: Query q0 failed: q0: INVALID_FIELD No such column 'Rating' (INVALID_FIELD)");
+        _inbox.Calls.Should().HaveElementAt(1, "fail all: Salesforce 400: [{\"errorCode\":\"INVALID_FIELD\",\"message\":\"No such column 'Rating'\"}] (INVALID_FIELD)");
         var before = _org.GetStats();
         _http.OnRead = null;
         await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None);
@@ -291,34 +287,29 @@ public sealed class EngineFlowTests
             return new(id, new SyncUnit([]));
         }
 
-        var batch = new PreparedBatch([Entity("A"), Entity("B"), Entity("C"), Entity("D"), Entity("E")],
+        var batch = new PreparedBatch([Entity("A"), Entity("B"), Entity("D"), Entity("E")],
             [new FailedEvent("BAD", "bad", SalesforceErrors.InvalidEvent)]);
-        SalesforceError[] error = [new(null, "PROCESSING_HALTED", "x"), new("acct", "SOME_CODE", "why")];
+        SalesforceError[] error = [new("acct", "SOME_CODE", "why")];
 
         var outcomes = batch.Outcomes(new Dictionary<string, SyncResult>
         {
             ["A"] = new("A", SyncOutcome.Saved, []),
             ["B"] = new("B", SyncOutcome.Unchanged, []),
-            ["C"] = new("C", SyncOutcome.NotAttempted, error),
             ["D"] = new("D", SyncOutcome.PermanentFailure, error),
             ["E"] = new("E", SyncOutcome.TransientFailure, error)
         });
 
         outcomes.Synced.Should().Equal("A", "B");
-        outcomes.Synced.Concat(outcomes.Dead.Concat(outcomes.Failed).Select(f => f.EntityId)).Should().NotContain("C",
-            "C was not attempted: it gets no outcome, its lease ends and it is due again");
         outcomes.Dead.Should().Equal(new FailedEvent("BAD", "bad", SalesforceErrors.InvalidEvent),
-            new FailedEvent("D", "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));
-        outcomes.Failed.Should().Equal(new FailedEvent("E", "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));
+            new FailedEvent("D", "acct: SOME_CODE why", "SOME_CODE"));
+        outcomes.Failed.Should().Equal(new FailedEvent("E", "acct: SOME_CODE why", "SOME_CODE"));
     }
 
     // ---------- Helpers ----------
 
     /// <summary>
     /// Account, Contact and Profile per entity, except for a KIDS entity, whose Account is not written (only its Contact
-    /// and Profile). A new entity needs the Account, Contact_ref (it looks its new Account up by reference) and level-1
-    /// Profile upserts, an existing one a level-1 Contact upsert besides, and KIDS level-0 Contact and Profile upserts:
-    /// 6 in all, so NEW, OLD and KIDS together take two write requests (5 upserts each at most), KIDS's the second.
+    /// and Profile). A batch of them is three upserts, one per object: the Accounts, then the Contacts, then the Profiles.
     /// </summary>
     private static readonly SyncStrategy<AccountEvent> ThreeObjects = new("account",
         e => e.Account?.ExternalId, e => e.Meta,
@@ -342,26 +333,26 @@ public sealed class EngineFlowTests
     private async Task CreateOldAsync()
     {
         await CreateAccountAsync("KIDS");
-        _narrow.Rows.AddRange([Row("OLD", "2026-10-14T01:00:00Z", "Gold"), Row("KIDS", "2026-10-14T01:00:00Z", "Gold")]);
-        (await Engine().SyncBatchAsync(ThreeObjects, _narrow, CancellationToken.None)).Should().Be(2);
-        _narrow.Recorded!.Synced.Should().HaveCount(2);
-        _narrow.Rows.Clear();
-        _narrow.Calls.Clear();
+        _inbox.Rows.AddRange([Row("OLD", "2026-10-14T01:00:00Z", "Gold"), Row("KIDS", "2026-10-14T01:00:00Z", "Gold")]);
+        (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
+        _inbox.Recorded!.Synced.Should().HaveCount(2);
+        _inbox.Rows.Clear();
+        _inbox.Calls.Clear();
         _http.Writes = 0;
     }
 
     /// <summary>
-    /// NEW, a change of OLD and a change of KIDS's Contact and Profile, one record per write: NEW and KIDS go in the
-    /// first call (they need no collection in common), OLD's Account update in the second.
+    /// NEW, a change of OLD and a change of KIDS's Contact and Profile: the Accounts' upsert is the first write call, the
+    /// Contacts' the second (the one the tests make fail), the Profiles' the third.
     /// </summary>
     /// <param name="processed">What the engine returns: 0 when the batch is deferred (no progress).</param>
     private async Task TwoCallBatchAsync(int processed = 3)
     {
-        _narrow.Rows.AddRange([Row("NEW", "2026-10-14T02:00:00Z", "Gold"), Row("OLD", "2026-10-14T02:00:00Z", "Silver"),
+        _inbox.Rows.AddRange([Row("NEW", "2026-10-14T02:00:00Z", "Gold"), Row("OLD", "2026-10-14T02:00:00Z", "Silver"),
             Row("KIDS", "2026-10-14T02:00:00Z", "Silver")]);
         var before = _org.GetStats().WriteRequests;
 
-        (await Engine().SyncBatchAsync(ThreeObjects, _narrow, CancellationToken.None)).Should().Be(processed);
+        (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(processed);
 
         _http.Writes.Should().Be(2, "the batch stops at its failed second call");
         _org.FindByExternalId("Account", "NEW").Should().NotBeNull("the first call's records are in Salesforce");
@@ -410,20 +401,17 @@ public sealed class EngineFlowTests
                 throw Throw;
             }
 
+            // A write is a collections call (upsert or delete); a read is a query
             var path = request.RequestUri!.AbsolutePath;
-            var isUpsert = path.Contains("/composite/sobjects/", StringComparison.Ordinal);
-            if (isUpsert || path.EndsWith("/composite", StringComparison.Ordinal))
+            var isWrite = path.Contains("/composite/sobjects", StringComparison.Ordinal);
+            if (!isWrite && OnRead is not null && path.EndsWith("/query", StringComparison.Ordinal))
             {
-                var isWrite = isUpsert || (await request.Content!.ReadAsStringAsync(ct)).Contains("/composite/sobjects", StringComparison.Ordinal);
-                if (!isWrite && OnRead is not null)
-                {
-                    return OnRead(request);
-                }
+                return OnRead(request);
+            }
 
-                if (isWrite && ++Writes == FailWrite?.Number)
-                {
-                    throw FailWrite.Value.Failure;
-                }
+            if (isWrite && ++Writes == FailWrite?.Number)
+            {
+                throw FailWrite.Value.Failure;
             }
             return await base.SendAsync(request, ct);
         }
@@ -446,14 +434,7 @@ public sealed class EngineFlowTests
         }
     }
 
-    private sealed class OneRecordPerWriteRow : InboxRow, IInboxRow
-    {
-        public static int MaxValuesPerQuery => 100;
-        public static int MaxRecordsPerWrite => 1;
-    }
-
-    private sealed class RecordingInbox<TRow> : IRepository<TRow>
-        where TRow : InboxRow, IInboxRow, new()
+    private sealed class RecordingInbox : IRepository<AccountInboxRow>
     {
         public List<InboxEvent> Rows { get; } = [];
         public List<string> Calls { get; } = [];

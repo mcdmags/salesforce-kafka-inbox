@@ -42,7 +42,7 @@ public class ApiPathTests
         var client = new SalesforceRestClient(http, Options.Create(new SalesforceOptions { BaseApiPath = "/proxy/sf", ApiVersion = "v70.0" }));
 
         await client.DescribeAsync("Account", null, CancellationToken.None);
-        await client.WriteAsync([new CollectionDelete("d", ["001000000000000AAA"])], CancellationToken.None);
+        await client.DeleteAsync(["001000000000000AAA"], CancellationToken.None);
 
         paths.Should().Equal("/proxy/sf/v70.0/sobjects/Account/describe", "/proxy/sf/v70.0/composite/sobjects");
     }

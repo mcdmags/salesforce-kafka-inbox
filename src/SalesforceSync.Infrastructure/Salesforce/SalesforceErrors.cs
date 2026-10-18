@@ -22,12 +22,6 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     /// <summary>Our own code: the inbox event can't be mapped to records (malformed payload). Permanent.</summary>
     public const string InvalidEvent = "INVALID_EVENT";
 
-    /// <summary>
-    /// A subrequest skipped because an earlier one it refers to failed: the record itself was fine but was not saved,
-    /// because of another record in the request.
-    /// </summary>
-    public const string ProcessingHalted = "PROCESSING_HALTED";
-
     /// <summary>Errors in the data or the org's configuration: retrying the same data fails the same way.</summary>
     public static readonly IReadOnlyList<string> DefaultPermanentCodes =
     [
@@ -106,20 +100,35 @@ public sealed record SalesforceError(string? ReferenceId, string Code, string? M
     }
 }
 
-/// <summary>A query subrequest failed, e.g. INVALID_FIELD because a field was deleted after it was described.</summary>
-public sealed class SalesforceQueryException(string referenceId, IReadOnlyList<SalesforceError> errors)
-    : Exception($"Query {referenceId} failed: {string.Join("; ", errors)}")
-{
-    public IReadOnlyList<SalesforceError> Errors { get; } = errors;
-}
-
 /// <summary>Salesforce answered with an error status. <see cref="IsSalesforceError"/>: the body is Salesforce's own error list.</summary>
-public sealed class SalesforceResponseException(HttpStatusCode status, string body)
-    : HttpRequestException($"Salesforce {(int)status}: {body}", null, status)
+public sealed class SalesforceResponseException(HttpStatusCode status, string responseBody)
+    : HttpRequestException($"Salesforce {(int)status}: {responseBody}", null, status)
 {
     /// <summary>
     /// True when Salesforce itself produced the response (<c>[{ "errorCode": ..., "message": ... }]</c>), as opposed to a
     /// gateway or load balancer in front of it, which can't know whether the request was processed.
     /// </summary>
-    public bool IsSalesforceError { get; } = body.Contains("\"errorCode\"", StringComparison.Ordinal);
+    public bool IsSalesforceError { get; } = responseBody.Contains("\"errorCode\"", StringComparison.Ordinal);
+
+    /// <summary>The response's body, Salesforce's error list when <see cref="IsSalesforceError"/>.</summary>
+    public string Body { get; } = responseBody;
+
+    /// <summary>Salesforce's code of the first error of the response, e.g. INVALID_FIELD, or null.</summary>
+    public string? ErrorCode
+    {
+        get
+        {
+            try
+            {
+                using var json = System.Text.Json.JsonDocument.Parse(responseBody);
+                return json.RootElement is { ValueKind: System.Text.Json.JsonValueKind.Array } list && list.GetArrayLength() > 0
+                    ? SalesforceResponseParser.StringProperty(list[0], "errorCode")
+                    : null;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return null;
+            }
+        }
+    }
 }

@@ -52,7 +52,7 @@ public sealed class SalesforceOptions
     /// <summary>
     /// Salesforce error codes that won't succeed on retry; the entity's event is dead-lettered immediately.
     /// Unset = <see cref="SalesforceErrors.DefaultPermanentCodes"/>; setting it replaces the list.
-    /// Codes not listed (and not <see cref="SalesforceErrors.ProcessingHalted"/>) are treated as transient and retried with backoff.
+    /// Codes not listed are treated as transient and retried with backoff.
     /// </summary>
     public string[]? PermanentErrorCodes { get; set; }
 

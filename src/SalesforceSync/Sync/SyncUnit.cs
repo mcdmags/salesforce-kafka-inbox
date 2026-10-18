@@ -99,8 +99,7 @@ public sealed record ForeignKey(string Field, string SObject, string ExternalIdF
 public sealed record SyncResult(string Key, SyncOutcome Outcome, IReadOnlyList<SalesforceError> Errors)
 {
     /// <summary>The error that decided the outcome (errors are ordered most significant first).</summary>
-    public SalesforceError? PrimaryError =>
-        Errors.FirstOrDefault(e => e.Code != SalesforceErrors.ProcessingHalted) ?? Errors.FirstOrDefault();
+    public SalesforceError? PrimaryError => Errors.FirstOrDefault();
 }
 
 public enum SyncOutcome
@@ -110,9 +109,6 @@ public enum SyncOutcome
 
     /// <summary>The differing fields were written, and the records to delete deleted.</summary>
     Saved,
-
-    /// <summary>Not saved because of another entity's record (skipped with it): retry now, no attempt spent.</summary>
-    NotAttempted,
 
     /// <summary>May succeed later (lock contention, outage, a foreign key's parent not synced yet): retry with backoff.</summary>
     TransientFailure,

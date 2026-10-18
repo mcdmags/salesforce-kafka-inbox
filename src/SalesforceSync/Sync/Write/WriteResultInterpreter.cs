@@ -2,137 +2,55 @@ using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync.Write;
 
+/// <summary>What came of one record, least to most significant: an entity's outcome follows its worst record.</summary>
+internal enum WriteStatus
+{
+    Saved,
+    /// <summary>May succeed later: retry with backoff.</summary>
+    Transient,
+    /// <summary>Retrying the same data fails the same way: dead-letter.</summary>
+    Permanent
+}
+
 /// <summary>
-/// Step 6 of a batch: turns Salesforce's per-record results into one outcome per unit. A unit is saved (or deleted) only
-/// if every one of its records is; permanent if any record's own error is; else transient if any is; else not
-/// attempted. Upserts and deletes are read the same way: a refused delete is permanent or transient by its code like a
-/// rejected upsert.
+/// Reads Salesforce's answer for one record: saved, or failed and, if failed, whether retrying can help. Upserts and
+/// deletes are read the same way: a refused delete is permanent or transient by its code like a rejected upsert.
 /// </summary>
 internal sealed class WriteResultInterpreter(SalesforceErrors errors)
 {
-    /// <summary>One outcome per unit of the request, from its upserts' answers by reference id.</summary>
-    public List<SyncResult> Interpret(WriteRequest request, IReadOnlyList<CollectionResult> answers)
+    /// <param name="change">The record that was sent.</param>
+    /// <param name="result">Salesforce's answer for it; null when it gave none.</param>
+    public (WriteStatus Status, List<SalesforceError> Errors) Interpret(Change change, RecordResult? result)
     {
-        // Parents were sent first, so a child is classified after its parent
-        foreach (var (referenceId, _, writes) in request.Collections)
+        if (result is null)
         {
-            Classify(referenceId, writes, answers.FirstOrDefault(a => a.ReferenceId == referenceId));
+            return (WriteStatus.Transient, [new SalesforceError(change.ReferenceId, "UNKNOWN_ERROR", "Salesforce gave no result for the record")]);
         }
 
-        return Results(request.Units);
-    }
-
-    /// <summary>One outcome per unit, from its records' statuses (every collection with its writes classified).</summary>
-    private List<SyncResult> Results(IReadOnlyList<PlannedUnit> units)
-    {
-        // Records failed, but none says why (every one of them reports being skipped because of another, or has no
-        // answer): handing the units straight back would repeat the same request forever, so they spend a retry and
-        // back off instead.
-        var all = units.SelectMany(u => u.Writes).ToList();
-        var causeUnknown = all.Any(w => w.Status != WriteStatus.Saved)
-                           && !all.Any(w => w.Status is WriteStatus.Transient or WriteStatus.Permanent);
-
-        return [.. units.Select(unit => UnitResult(unit, causeUnknown))];
-    }
-
-    /// <summary>Sets the status and errors of every record of one collection from its upsert's answer.</summary>
-    private void Classify(string referenceId, List<PlannedWrite> writes, CollectionResult? answer)
-    {
-        var subrequestErrors = SubrequestErrors(referenceId, writes.Count, answer);
-
-        for (var i = 0; i < writes.Count; i++)
+        if (result is { Success: true, Created: true } && !change.IsCreate && !change.IsDelete)
         {
-            var write = writes[i];
-            var result = subrequestErrors is null ? answer!.Records![i] : null;
-            if (result is { Success: true, Created: true } && !write.Create)
-            {
-                // An update sent as an upsert found no record by its external id (deleted after the read) and created
-                // one with only the changed fields: the retry reads it and writes the rest
-                write.Errors = [new SalesforceError(write.ReferenceId, "ENTITY_IS_DELETED",
-                    "The record was gone when the update was upserted; it was created with the changed fields only")];
-                write.Status = WriteStatus.Transient;
-                continue;
-            }
-
-            // A record to delete that is gone already (deleted after the read, by someone else or by an earlier attempt
-            // whose answer was lost) is what the delete wanted
-            if (result is { Success: true } || (write.Delete && result is { Errors: [_, ..] why }
-                                                && why.All(SalesforceErrors.IsAlreadyDeleted)))
-            {
-                write.Status = WriteStatus.Saved;
-                continue;
-            }
-
-            write.Errors = [.. (result?.Errors ?? subrequestErrors!).Select(e => Translate(write, e))];
-            if (result is not null && write.Errors.Count == 0)
-            {
-                write.Errors.Add(new SalesforceError(write.ReferenceId, "UNKNOWN_ERROR", "The record failed without error details"));
-            }
-
-            write.Status = FailureStatus(write, hasOwnResult: result is not null);
-        }
-    }
-
-    /// <summary>
-    /// The errors that apply to every record of a subrequest that has no usable per-record results, or null when
-    /// each record has a result of its own.
-    /// </summary>
-    private static IReadOnlyList<SalesforceError>? SubrequestErrors(string referenceId, int sent, CollectionResult? answer)
-    {
-        return answer switch
-        {
-            null => [],   // not in the response: never processed
-            { Records: null } => answer.Errors,
-            { Records: var records } when records.Count != sent =>
-                [new SalesforceError(referenceId, "UNKNOWN_ERROR", $"{records.Count} results for {sent} records")],
-            _ => null
-        };
-    }
-
-    /// <param name="hasOwnResult">False when the record's subrequest failed as a whole.</param>
-    /// <param name="write">The record that wasn't saved.</param>
-    private WriteStatus FailureStatus(PlannedWrite write, bool hasOwnResult)
-    {
-        // E.g. the org rejecting a child whose new parent, an earlier upsert of the same Composite request, wasn't
-        // saved (children are sent regardless, and the org decides): the parent's result decides the unit
-        if (write.Parents.Any(p => p.Status != WriteStatus.Saved))
-        {
-            return WriteStatus.ParentNotSaved;
+            // An update sent as an upsert found no record by its external id (deleted after the read) and created one with
+            // only the changed fields: the retry reads it and writes the rest
+            return (WriteStatus.Transient, [new SalesforceError(change.ReferenceId, "ENTITY_IS_DELETED",
+                "The record was gone when the update was upserted; it was created with the changed fields only")]);
         }
 
-        var ownErrors = write.Errors.Where(e => e.Code != SalesforceErrors.ProcessingHalted).ToList();
-        if (ownErrors.Count == 0)
+        // A record to delete that is gone already (deleted after the read, by someone else or by an earlier attempt whose
+        // answer was lost) is what the delete wanted
+        var gone = change.IsDelete && result.Errors.Count > 0 && result.Errors.All(SalesforceErrors.IsAlreadyDeleted);
+        if (result.Success || gone)
         {
-            return WriteStatus.NotAttempted;
+            return (WriteStatus.Saved, []);
         }
 
-        // A subrequest that failed as a whole says nothing about any one record's data, so it never
-        // dead-letters: the records are retried, and by then a child finds its parent by the read
-        return hasOwnResult && ownErrors.Any(e => errors.IsPermanent(e.Code) && !IsStaleUpdate(write, e))
-            ? WriteStatus.Permanent
-            : WriteStatus.Transient;
-    }
-
-    private SyncResult UnitResult(PlannedUnit unit, bool causeUnknown)
-    {
-        // Most significant first: the record that decided the outcome, and within it the permanent error
-        var unitErrors = unit.Writes.Where(w => w.Status != WriteStatus.ParentNotSaved).OrderByDescending(w => w.Status)
-            .SelectMany(w => w.Errors.OrderByDescending(e => errors.IsPermanent(e.Code)))
-            .ToList();
-        var outcome = unit.Writes.Max(w => w.Status) switch
+        var failures = result.Errors.Select(e => Translate(change, e)).ToList();
+        if (failures.Count == 0)
         {
-            WriteStatus.Saved => SyncOutcome.Saved,
-            WriteStatus.Permanent => SyncOutcome.PermanentFailure,
-            WriteStatus.Transient => SyncOutcome.TransientFailure,
-            _ => SyncOutcome.NotAttempted
-        };
-        if (outcome == SyncOutcome.NotAttempted && causeUnknown)
-        {
-            outcome = SyncOutcome.TransientFailure;
-            unitErrors.Insert(0, new SalesforceError(null, "UNKNOWN_ERROR",
-                "Records of the request failed without any of them reporting the cause"));
+            failures.Add(new SalesforceError(change.ReferenceId, "UNKNOWN_ERROR", "The record failed without error details"));
         }
-        return new SyncResult(unit.Key, outcome, unitErrors);
+
+        var permanent = failures.Any(e => errors.IsPermanent(e.Code) && !IsStaleUpdate(change, e));
+        return (permanent ? WriteStatus.Permanent : WriteStatus.Transient, [.. failures.OrderByDescending(e => errors.IsPermanent(e.Code))]);
     }
 
     /// <summary>
@@ -149,17 +67,17 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     /// user"), so the message identifies it too.
     /// </para>
     /// </summary>
-    private SalesforceError Translate(PlannedWrite write, SalesforceError e)
+    private SalesforceError Translate(Change change, SalesforceError e)
     {
         if (e.Code is "INVALID_CROSS_REFERENCE_KEY" && RejectsRecordType(e))
         {
-            return new SalesforceError(write.ReferenceId, SalesforceErrors.InvalidRecordType, $"{e.Code}: {e.Message}", e.Fields);
+            return new SalesforceError(change.ReferenceId, SalesforceErrors.InvalidRecordType, $"{e.Code}: {e.Message}", e.Fields);
         }
 
-        var parentMissing = errors.IsParentMissing(e) || (write.Delete && SalesforceErrors.HasDependents(e));
+        var parentMissing = errors.IsParentMissing(e) || (change.IsDelete && SalesforceErrors.HasDependents(e));
         return parentMissing
-            ? new SalesforceError(write.ReferenceId, SalesforceErrors.DependencyNotSynced, $"{e.Code}: {e.Message}", e.Fields)
-            : e with { ReferenceId = write.ReferenceId };
+            ? new SalesforceError(change.ReferenceId, SalesforceErrors.DependencyNotSynced, $"{e.Code}: {e.Message}", e.Fields)
+            : e with { ReferenceId = change.ReferenceId };
     }
 
     private static bool RejectsRecordType(SalesforceError e)
@@ -169,12 +87,12 @@ internal sealed class WriteResultInterpreter(SalesforceErrors errors)
     }
 
     /// <summary>
-    /// The record was deleted between the read and the update: the next read finds it gone and creates it. The update,
-    /// an upsert, then tries to create the record from the changed fields alone, which fails on a required field the
-    /// update didn't need to send.
+    /// The record was deleted between the read and the update: the next read finds it gone and creates it. The update, an
+    /// upsert, then tries to create the record from the changed fields alone, which fails on a required field the update
+    /// didn't need to send.
     /// </summary>
-    private static bool IsStaleUpdate(PlannedWrite write, SalesforceError e)
+    private static bool IsStaleUpdate(Change change, SalesforceError e)
     {
-        return !write.Create && !write.Delete && e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED" or "REQUIRED_FIELD_MISSING";
+        return !change.IsCreate && !change.IsDelete && e.Code is "INVALID_CROSS_REFERENCE_KEY" or "ENTITY_IS_DELETED" or "REQUIRED_FIELD_MISSING";
     }
 }
