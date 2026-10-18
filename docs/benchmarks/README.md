@@ -5,9 +5,10 @@ Salesforce client and rate limiter real; only the Salesforce HTTP endpoint mocke
 [main README](../../README.md#benchmarks).
 
 These numbers come from the claim and outcome tuning merged in PR #13, re-measured after the move to EF Core
-(PR #12). [Latest run](#latest-run-main-at-df2c269) re-measures everything on `main` at df2c269 (PR #70, migrations once per
-deploy);
-the [run before it](#latest-run-main-at-3ff8ae1) measured `main` at 3ff8ae1 (PR #67 to #69, the split into projects);
+(PR #12). [Latest run](#latest-run-main-at-f80334e) re-measures everything on `main` at f80334e (PR #71, rate limits applied by
+the migrate step);
+the [run before it](#latest-run-main-at-df2c269) measured `main` at df2c269 (PR #70, migrations once per deploy);
+the [run before that](#latest-run-main-at-3ff8ae1) measured `main` at 3ff8ae1 (PR #67 to #69, the split into projects);
 the [run before that](#latest-run-main-at-93b4ace) measured `main` at 93b4ace (PR #67);
 the [run before that](#latest-run-main-at-3f68779) measured `main` at 3f68779 (PR #66);
 the [run before that](#latest-run-main-at-b5950c1) measured `main` at b5950c1 (PR #47 to #65);
@@ -354,6 +355,66 @@ A claim of 75 entities locks them (LockHeads) in about 2 ms (median over the 108
 median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest single run 21.5 ms, under load. Leasing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
+
+## Latest run: main at f80334e
+
+All 36 benchmarks (`--run full`) on `main` at f80334e, after PR #71 moved the rate-limit configuration out of the pods
+(`RateLimitInitializer` is gone; `SalesforceSync --migrate` writes the configured limits to the shared row, only when
+they changed), on 2026-10-18. It measures the same workload and environment as the
+[df2c269 run](#latest-run-main-at-df2c269), so the two compare. The database was recreated. The run took 7.5 minutes.
+The change only affects process startup, which the benchmarks don't time (they configure the limiter per iteration
+themselves), so no difference is expected.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures: 0 overlapping claims, 0 entities not `done`, 0 stale
+rows, 0 wrong values, 0 write-history regressions, 0 failed records.
+
+Preloaded drain, 5,000 events. The means are BenchmarkDotNet's; the work counts are the medians of the iterations
+without a Describe, at 0 ms latency:
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 199.6 ms | 1,217.5 ms | 33.05 MB | 30 | 15 | 6.28 | 1,028 | 38 |
+| 1 | 1 | 1,000 | 2,113 | 744.9 ms | 3,872.8 ms | 101.75 MB | 78 | 33 | 1.90 | 3,279 | 1166 |
+| 1 | 3 | 100 | 990 | 105.8 ms | 390.5 ms | 35.3 MB | 31 | 15 | 6.08 | 1,062 | 72 |
+| 1 | 3 | 1,000 | 2,113 | 460.1 ms | 1,124.0 ms | 106.9 MB | 81 | 35 | 1.90 | 3,282 | 1169 |
+| 4 | 1 | 100 | 990 | 115.9 ms | 314.7 ms | 36.65 MB | 32 | 15 | 5.77 | 1,118 | 128 |
+| 4 | 1 | 1,000 | 2,113 | 316.0 ms | 778.5 ms | 107.57 MB | 81 | 35 | 1.88 | 3,316 | 1203 |
+| 4 | 3 | 100 | 990 | 157.8 ms | 200.3 ms | 54.71 MB | 41 | 17 | 3.93 | 1,643 | 653 |
+| 4 | 3 | 1,000 | 2,113 | 467.3 ms | 552.6 ms | 122.64 MB | 90 | 41 | 1.87 | 3,329 | 1216 |
+| 8 | 1 | 100 | 990 | 129.8 ms | 233.7 ms | 44.68 MB | 34 | 15 | 4.97 | 1,299 | 309 |
+| 8 | 1 | 1,000 | 2,113 | 439.0 ms | 531.0 ms | 114.46 MB | 86 | 36 | 1.80 | 3,459 | 1346 |
+| 8 | 3 | 100 | 990 | 255.5 ms | 277.6 ms | 94.25 MB | 44 | 17 | 4.08 | 1,582 | 592 |
+| 8 | 3 | 1,000 | 2,113 | 537.1 ms | 542.2 ms | 145.54 MB | 105 | 45 | 1.71 | 3,646 | 1533 |
+
+Streaming (50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 2.963 s | 418.68 MB | 1,312 | 654 | 1.67 | 3,858 | 4 |
+| 4 | 3 | 4.402 s | 873.39 MB | 3,052 | 1,520 | 1.38 | 4,676 | 4 |
+| 8 | 1 | 4.257 s | 811.47 MB | 2,957 | 1,473 | 1.32 | 4,880 | 3 |
+| 8 | 3 | 5.008 s | 1036.38 MB | 3,123 | 1,553 | 1.63 | 3,941 | 8 |
+
+- **Same work as df2c269**: the entity counts (990 and 2,113 preloaded, 762 streaming) and the call counts with one
+  worker and one pod (30 and 78 API calls) are the same; streaming call counts are within 2% (1,312 against 1,290 with
+  4 x 1). Runs with more workers or pods differ by a few calls and claims between any two runs.
+- **Same speed within noise**: 1 x 1 at 100 accounts, 199.6 ms against 205.8 ms; 4 workers x 1 pod, 115.9 ms against
+  108.1 ms; streaming 4 x 1, 2.963 s against 2.913 s. The larger cases moved both ways by up to 40% (8 x 1 with 1,000
+  accounts: 439.0 ms against 315.9 ms; 8 x 3 with 100 accounts: 255.5 ms against 274.6 ms), the same spread as between
+  the earlier runs. Memory is the same (33.05 MB against 33.27 MB for 1 x 1 at 100 accounts).
+
+Micro benchmarks (match the earlier runs within noise):
+
+| Method | Mean | Allocated |
+|---|--:|--:|
+| ParseLimitHeader | 644.40 ns | 2832 B |
+| PrepareTenEntities | 19,132.82 ns | 41472 B |
+| ReadAndValidateEvent | 1,242.70 ns | 1616 B |
+| MapAccountEvent | 1,695.75 ns | 4016 B |
+| MapPayloadToSObject | 21.55 ns | 200 B |
+| MapSObjectToRecord | 273.55 ns | 1008 B |
+| DiffNumber | 129.83 ns | 32 B |
+| DiffDateTime | 245.34 ns | 192 B |
 
 ## Latest run: main at df2c269
 
