@@ -1,9 +1,8 @@
 using Microsoft.Extensions.Options;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
-using static SalesforceSync.Sync.SalesforceBatchSyncService;
-using static SalesforceSync.Sync.SalesforceBatchSyncService.Normalizer;
-using static SalesforceSync.Sync.SalesforceBatchSyncService.Reader;
+using static SalesforceSync.Sync.Normalizer;
+using static SalesforceSync.Sync.Reader;
 
 namespace SalesforceSync.Tests;
 

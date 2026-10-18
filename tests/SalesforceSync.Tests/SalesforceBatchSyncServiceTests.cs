@@ -212,7 +212,7 @@ public sealed class SalesforceBatchSyncServiceTests
         var stopped = await FluentActions.Awaiting(() => _engine.WriteToSalesforceAsync(units,
                 [.. AccountSync.Queries([.. units.Select(u => u.Unit)])],
                 AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None))
-            .Should().ThrowAsync<SalesforceBatchSyncService.MappingErrorException>();
+            .Should().ThrowAsync<MappingErrorException>();
 
         stopped.Which.Errors.Should().ContainSingle().Which.Should().Match<(string Key, SalesforceError Error)>(e => e.Key == "BAD" && e.Error.Code == code);
         _org.FindByExternalId("Account", "BAD").Should().BeNull();

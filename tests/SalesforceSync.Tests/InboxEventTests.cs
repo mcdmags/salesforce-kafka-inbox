@@ -5,7 +5,6 @@ using Microsoft.EntityFrameworkCore;
 using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.Sync;
-using static SalesforceSync.Sync.SalesforceBatchSyncService;
 
 namespace SalesforceSync.Tests;
 

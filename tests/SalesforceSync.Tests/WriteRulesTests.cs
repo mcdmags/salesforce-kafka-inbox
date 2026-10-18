@@ -2,17 +2,16 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
-using static SalesforceSync.Sync.SalesforceBatchSyncService;
-using static SalesforceSync.Sync.SalesforceBatchSyncService.Differ;
-using static SalesforceSync.Sync.SalesforceBatchSyncService.Normalizer;
-using static SalesforceSync.Sync.SalesforceBatchSyncService.Reader;
+using static SalesforceSync.Sync.Differ;
+using static SalesforceSync.Sync.Normalizer;
+using static SalesforceSync.Sync.Reader;
 
 namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The write path's rules on their own, from hand-built Salesforce state and results: the diff and the plan
-/// (<see cref="SalesforceBatchSyncService.Differ.Plan"/>), the calls (<see cref="SalesforceBatchSyncService.Sender.WriteAsync"/>, on a stub client) and the reading of the answers
-/// (<see cref="SalesforceBatchSyncService.Interpreter.Interpret"/>). No org, no HTTP.
+/// (<see cref="Differ.Plan"/>), the calls (<see cref="Sender.WriteAsync"/>, on a stub client) and the reading of the answers
+/// (<see cref="Interpreter.Interpret"/>). No org, no HTTP.
 /// </summary>
 public sealed class WriteRulesTests
 {
