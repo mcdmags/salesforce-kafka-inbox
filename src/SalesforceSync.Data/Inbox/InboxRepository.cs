@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -44,14 +43,14 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     {
         // What the attempts so far leased: if this runs again, their commits were lost
         var lostTokens = new List<Guid>();
-        var lostRowIds = new List<long>();
+        var lostEntityIds = new List<string>();
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
             var sql = InboxSql.For(db.TableOf<TEntity>());
-            if (lostRowIds.Count > 0)
+            if (lostEntityIds.Count > 0)
             {
                 await db.Database.ExecuteAsync(sql.EndLease, t,
-                    new { ids = lostRowIds.ToArray(), tokens = lostTokens.ToArray(), delay = TimeSpan.Zero });
+                    new { entityIds = lostEntityIds.ToArray(), tokens = lostTokens.ToArray(), delay = TimeSpan.Zero });
             }
 
             var token = Guid.NewGuid();
@@ -62,7 +61,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
                 batchSize = _opt.BatchSize
             });
             lostTokens.Add(token);
-            lostRowIds.AddRange(events.Select(e => e.RowId));
+            lostEntityIds.AddRange(events.Select(e => e.EntityId));
             return new InboxClaim(token, events);
         }, ct);
     }
@@ -80,7 +79,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             if (outcomes.Synced.Count > 0)
             {
                 recorded += await db.Database.ExecuteAsync(sql.Done, t,
-                    new { ids = outcomes.Synced.ToArray(), times = claim.TimesOf(outcomes.Synced), token });
+                    new { entityIds = outcomes.Synced.ToArray(), times = claim.TimesOf(outcomes.Synced), token });
             }
             if (outcomes.Dead.Count > 0)
             {
@@ -105,7 +104,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         var hold = _opt.UnknownOutcomeHold;
         return InTransactionAsync(claim, hold, (db, sql, t) => db.Database.ExecuteAsync(sql.Hold, t, new
         {
-            ids = claim.RowIds,
+            entityIds = claim.EntityIds,
             times = claim.EventTimes,
             token = claim.Token,
             error,
@@ -121,12 +120,12 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
     {
         return contexts.RunAsync((db, t) => db.Database.ExecuteAsync(InboxSql.For(db.TableOf<TEntity>()).EndLease, t,
-            new { ids = claim.RowIds, tokens = new[] { claim.Token }, delay }), ct);
+            new { entityIds = claim.EntityIds, tokens = new[] { claim.Token }, delay }), ct);
     }
 
     public Task FailAllAsync(InboxClaim claim, string error, string? code, CancellationToken ct)
     {
-        FailedEvent[] rows = [.. claim.RowIds.Select(id => new FailedEvent(id, error, code))];
+        FailedEvent[] rows = [.. claim.EntityIds.Select(id => new FailedEvent(id, error, code))];
         return InTransactionAsync(claim, TimeSpan.Zero, (db, sql, t) => FailAsync(db, sql, claim, rows, _opt.MaxRetries, t), ct);
     }
 
@@ -146,7 +145,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             var sql = InboxSql.For(db.TableOf<TEntity>());
             if (await record(db, sql, t) < claim.Events.Count)
             {
-                await db.Database.ExecuteAsync(sql.EndLease, t, new { ids = claim.RowIds, tokens = new[] { claim.Token }, delay });
+                await db.Database.ExecuteAsync(sql.EndLease, t, new { entityIds = claim.EntityIds, tokens = new[] { claim.Token }, delay });
             }
         }, ct);
     }
@@ -155,10 +154,10 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     private Task<int> FailAsync(SyncDbContext db, InboxSql sql, InboxClaim claim, IReadOnlyList<FailedEvent> rows, int maxRetries,
         CancellationToken ct)
     {
-        long[] ids = [.. rows.Select(r => r.RowId)];
+        string[] ids = [.. rows.Select(r => r.EntityId)];
         return db.Database.ExecuteAsync(sql.Fail, ct, new
         {
-            ids,
+            entityIds = ids,
             times = claim.TimesOf(ids),
             errors = ErrorsJson(rows),
             token = claim.Token,
@@ -168,9 +167,9 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         });
     }
 
-    /// <summary>{ "row id": [error, code] }, as InboxSql.Fail takes the errors.</summary>
+    /// <summary>{ "entity id": [error, code] }, as InboxSql.Fail takes the errors.</summary>
     private static string ErrorsJson(IReadOnlyList<FailedEvent> rows)
     {
-        return JsonSerializer.Serialize(rows.ToDictionary(r => r.RowId.ToString(CultureInfo.InvariantCulture), r => new[] { r.Error, r.Code }));
+        return JsonSerializer.Serialize(rows.ToDictionary(r => r.EntityId, r => new[] { r.Error, r.Code }));
     }
 }

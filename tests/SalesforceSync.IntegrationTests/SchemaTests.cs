@@ -21,11 +21,11 @@ public sealed class SchemaTests(SyncFixture app)
         before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_contact_inbox", "sf_rate_limit", "sf_api_usage",
             "__EFMigrationsHistory"]);
         before.Should().Contain([
-            "sf_account_inbox_entity_id", "sf_account_inbox_pkey", "sf_account_relationship_inbox_entity_id", "sf_contact_inbox_entity_id",
+            "sf_account_inbox_pkey", "sf_account_relationship_inbox_pkey", "sf_contact_inbox_pkey",
             "sf_account_relationship_inbox_ready", "sf_contact_inbox_ready"]);
         before.Should().NotContain("sf_sync_state", "every entity's state is in its inbox row");
         before.Where(r => r.StartsWith("sf_account_inbox", StringComparison.Ordinal)).Should().BeEquivalentTo(
-            ["sf_account_inbox", "sf_account_inbox_pkey", "sf_account_inbox_entity_id", "sf_account_inbox_ready"]);
+            ["sf_account_inbox", "sf_account_inbox_pkey", "sf_account_inbox_ready"]);
 
         await SyncSchema.MigrateAsync(app.Contexts);
 
@@ -44,7 +44,8 @@ public sealed class SchemaTests(SyncFixture app)
             .ToDictionary(i => i.Name, i => i.Definition);
         foreach (var table in InboxTables)
         {
-            indexes[$"{table}_entity_id"].Should().StartWith("CREATE UNIQUE INDEX").And.EndWith($"{table} USING btree (entity_id)");
+            // The entity id is the primary key: its one unique index, and there is no other (no separate row id)
+            indexes[$"{table}_pkey"].Should().StartWith("CREATE UNIQUE INDEX").And.EndWith($"{table} USING btree (entity_id)");
             indexes[$"{table}_ready"].Should().EndWith($"{table} USING btree (next_attempt_at) WHERE (next_attempt_at IS NOT NULL)");
         }
 
@@ -72,7 +73,7 @@ public sealed class SchemaTests(SyncFixture app)
 
         var account = await Columns(SyncFixture.InboxTable());
         account.Select(c => c.Split(' ')[0]).Should().Equal(
-            "id", "entity_id", "payload", "event_time", "status", "attempt_count", "last_error", "last_error_code", "last_updated",
+            "entity_id", "payload", "event_time", "status", "attempt_count", "last_error", "last_error_code", "last_updated",
             "next_attempt_at", "lock_token");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await Columns(SyncFixture.InboxTable(SyncFixture.Contacts))).Should().Equal(account);

@@ -1,6 +1,5 @@
 ﻿using System;
 using Microsoft.EntityFrameworkCore.Migrations;
-using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
 
@@ -16,8 +15,6 @@ namespace SalesforceSync.Data.Migrations
                 name: "sf_account_inbox",
                 columns: table => new
                 {
-                    id = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.SerialColumn),
                     entity_id = table.Column<string>(type: "text", nullable: false),
                     payload = table.Column<string>(type: "jsonb", nullable: false),
                     event_time = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
@@ -31,7 +28,7 @@ namespace SalesforceSync.Data.Migrations
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("sf_account_inbox_pkey", x => x.id);
+                    table.PrimaryKey("sf_account_inbox_pkey", x => x.entity_id);
                 })
                 .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
                 .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
@@ -40,8 +37,6 @@ namespace SalesforceSync.Data.Migrations
                 name: "sf_account_relationship_inbox",
                 columns: table => new
                 {
-                    id = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.SerialColumn),
                     entity_id = table.Column<string>(type: "text", nullable: false),
                     payload = table.Column<string>(type: "jsonb", nullable: false),
                     event_time = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
@@ -55,7 +50,7 @@ namespace SalesforceSync.Data.Migrations
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("sf_account_relationship_inbox_pkey", x => x.id);
+                    table.PrimaryKey("sf_account_relationship_inbox_pkey", x => x.entity_id);
                 })
                 .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
                 .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
@@ -76,8 +71,6 @@ namespace SalesforceSync.Data.Migrations
                 name: "sf_contact_inbox",
                 columns: table => new
                 {
-                    id = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.SerialColumn),
                     entity_id = table.Column<string>(type: "text", nullable: false),
                     payload = table.Column<string>(type: "jsonb", nullable: false),
                     event_time = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
@@ -91,7 +84,7 @@ namespace SalesforceSync.Data.Migrations
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("sf_contact_inbox_pkey", x => x.id);
+                    table.PrimaryKey("sf_contact_inbox_pkey", x => x.entity_id);
                 })
                 .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", 0.02)
                 .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
@@ -128,34 +121,16 @@ namespace SalesforceSync.Data.Migrations
                 values: new object[] { "salesforce", null, null, null, null, null, 2.0, null, null, 5.0, null, null, 2.0, 5.0, null });
 
             migrationBuilder.CreateIndex(
-                name: "sf_account_inbox_entity_id",
-                table: "sf_account_inbox",
-                column: "entity_id",
-                unique: true);
-
-            migrationBuilder.CreateIndex(
                 name: "sf_account_inbox_ready",
                 table: "sf_account_inbox",
                 column: "next_attempt_at",
                 filter: "next_attempt_at is not null");
 
             migrationBuilder.CreateIndex(
-                name: "sf_account_relationship_inbox_entity_id",
-                table: "sf_account_relationship_inbox",
-                column: "entity_id",
-                unique: true);
-
-            migrationBuilder.CreateIndex(
                 name: "sf_account_relationship_inbox_ready",
                 table: "sf_account_relationship_inbox",
                 column: "next_attempt_at",
                 filter: "next_attempt_at is not null");
-
-            migrationBuilder.CreateIndex(
-                name: "sf_contact_inbox_entity_id",
-                table: "sf_contact_inbox",
-                column: "entity_id",
-                unique: true);
 
             migrationBuilder.CreateIndex(
                 name: "sf_contact_inbox_ready",

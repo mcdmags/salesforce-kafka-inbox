@@ -298,7 +298,7 @@ public sealed class SalesforceBatchSyncService(
     {
         foreach (var invalid in batch.Invalid)
         {
-            log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", invalid.RowId, invalid.Code, invalid.Error);
+            log.LogWarning("Dead-lettered event {Id} ({Code}): {Error}", invalid.EntityId, invalid.Code, invalid.Error);
         }
 
         foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure))

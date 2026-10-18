@@ -25,7 +25,7 @@ public sealed class EngineFlowTests
     public async Task The_consumer_stores_an_event_with_the_time_it_read_from_meta_time()
     {
         var sync = new EntitySyncService<AccountEvent, AccountInboxRow>(Engine(), _inbox, Accounts);
-        var json = Row(1, "ACC-1", "2026-10-14T03:02:03.1234567+02:00").Payload;
+        var json = Row("ACC-1", "2026-10-14T03:02:03.1234567+02:00").Payload;
 
         sync.TryReadEvent(json, out var entityId, out var eventTime, out var problem).Should().BeTrue("the event is valid, but: {0}", problem);
         await sync.StoreEventAsync(entityId!, eventTime, json, CancellationToken.None);
@@ -37,7 +37,7 @@ public sealed class EngineFlowTests
     public async Task Nothing_is_claimed_while_there_is_no_capacity()
     {
         _gate.Open = false;
-        _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
+        _inbox.Rows.Add(Row("ACC-1", "2026-10-14T01:00:00Z"));
 
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
 
@@ -58,8 +58,8 @@ public sealed class EngineFlowTests
     {
         _inbox.Rows.AddRange(
         [
-            Row(2, "ACC-1", "2026-10-14T02:00:00Z", "new"),
-            Invalid(3, "ACC-2"),
+            Row("ACC-1", "2026-10-14T02:00:00Z", "new"),
+            Invalid("ACC-2"),
         ]);
 
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
@@ -67,8 +67,8 @@ public sealed class EngineFlowTests
         ((string?)_org.FindByExternalId("Account", "ACC-1")!["Name"]).Should().Be("new");
         _inbox.Calls.Should().Equal("claim", "record");
         var outcomes = _inbox.Recorded!;
-        outcomes.Synced.Should().Equal([2L]);
-        outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.RowId == 3 && f.Code == SalesforceErrors.InvalidEvent);
+        outcomes.Synced.Should().Equal(["ACC-1"]);
+        outcomes.Dead.Should().ContainSingle().Which.Should().Match<FailedEvent>(f => f.EntityId == "ACC-2" && f.Code == SalesforceErrors.InvalidEvent);
         outcomes.Failed.Should().BeEmpty();
         _gate.Released.Should().Be(1);
     }
@@ -76,7 +76,7 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task A_write_whose_answer_is_lost_holds_every_claimed_row()
     {
-        _inbox.Rows.AddRange([Row(1, "ACC-1", "2026-10-14T01:00:00Z"), Row(2, "ACC-2", "2026-10-14T02:00:00Z")]);
+        _inbox.Rows.AddRange([Row("ACC-1", "2026-10-14T01:00:00Z"), Row("ACC-2", "2026-10-14T02:00:00Z")]);
         _org.LoseResponsesFor("Account", "ACC-1", 1);
 
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
@@ -87,7 +87,7 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task A_rate_limited_batch_is_deferred_and_counts_as_no_progress()
     {
-        _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
+        _inbox.Rows.Add(Row("ACC-1", "2026-10-14T01:00:00Z"));
         _http.Throw = new RateLimitedException(TimeSpan.FromSeconds(7));
 
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(0);
@@ -98,7 +98,7 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task A_batch_that_fails_before_anything_is_written_is_retried_as_a_whole()
     {
-        _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
+        _inbox.Rows.Add(Row("ACC-1", "2026-10-14T01:00:00Z"));
         _http.Throw = new HttpRequestException(HttpRequestError.ConnectionError, "refused");
 
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
@@ -109,7 +109,7 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task Rows_with_nothing_to_write_are_recorded_without_calling_Salesforce()
     {
-        _inbox.Rows.Add(Invalid(1, "ACC-1"));
+        _inbox.Rows.Add(Invalid("ACC-1"));
         _http.Throw = new InvalidOperationException("Salesforce must not be called");
 
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
@@ -124,13 +124,13 @@ public sealed class EngineFlowTests
     {
         await CreateAccountAsync("ACC-9");
         _org.InjectFault("Contact", "C-2", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "rejected", 1);
-        _inbox.Rows.AddRange([Contact(1, "C-1", "ACC-9"), Contact(2, "C-2", "ACC-9")]);
+        _inbox.Rows.AddRange([Contact("C-1", "ACC-9"), Contact("C-2", "ACC-9")]);
         var before = _org.GetStats();
 
         (await Engine().SyncBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
 
         _inbox.Calls.Should().Equal("claim", "record");
-        _inbox.Recorded!.Synced.Should().Equal([1L], "C-1's row");
+        _inbox.Recorded!.Synced.Should().Equal(["C-1"], "C-1's row");
         _inbox.Recorded.Dead.Should().ContainSingle().Which.Code.Should().Be("FIELD_CUSTOM_VALIDATION_EXCEPTION");
         _http.Writes.Should().Be(1, "both contacts in one upsert call");
         (_org.GetStats().UpsertRequests - before.UpsertRequests).Should().Be(1, "a new Contact on an existing Account needs no reference");
@@ -140,7 +140,7 @@ public sealed class EngineFlowTests
     public async Task A_contact_upsert_whose_answer_is_lost_holds_every_claimed_row()
     {
         await CreateAccountAsync("ACC-9");
-        _inbox.Rows.AddRange([Contact(1, "C-1", "ACC-9"), Contact(2, "C-2", "ACC-9")]);
+        _inbox.Rows.AddRange([Contact("C-1", "ACC-9"), Contact("C-2", "ACC-9")]);
         _org.LoseResponsesFor("Contact", "C-1", 1);
 
         (await Engine().SyncBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
@@ -151,16 +151,16 @@ public sealed class EngineFlowTests
     /// <summary>The contacts' Account, synced through the account strategy.</summary>
     private async Task CreateAccountAsync(string account)
     {
-        _inbox.Rows.Add(Row(9, account, "2026-10-14T01:00:00Z"));
+        _inbox.Rows.Add(Row(account, "2026-10-14T01:00:00Z"));
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(1);
         _inbox.Rows.Clear();
         _inbox.Calls.Clear();
         _http.Writes = 0;
     }
 
-    private static InboxEvent Contact(long id, string contact, string account)
+    private static InboxEvent Contact(string contact, string account)
     {
-        return new(id, contact,
+        return new(contact,
             $$"""{ "meta": { "time": "2026-10-14T01:00:00Z", "type": "inserted" }, "contact": { "externalId": "{{contact}}", "accountExternalId": "{{account}}", "lastName": "Doe" } }""",
             DateTimeOffset.Parse("2026-10-14T01:00:00Z"));
     }
@@ -192,7 +192,7 @@ public sealed class EngineFlowTests
         (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(3);
 
         _http.Writes.Should().Be(1, "NEW is unchanged now: only OLD's and KIDS's changes are written, in one Composite request");
-        _inbox.Recorded!.Synced.Should().BeEquivalentTo([1L, 2L, 3L], "NEW's, OLD's and KIDS's rows");
+        _inbox.Recorded!.Synced.Should().BeEquivalentTo(["NEW", "OLD", "KIDS"], "NEW's, OLD's and KIDS's rows");
         _org.History("Account", "NEW").Should().ContainSingle("NEW was written once, not twice");
     }
 
@@ -221,12 +221,12 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task An_Account_and_Profile_write_whose_answer_is_lost_holds_the_whole_batch()
     {
-        _inbox.Rows.AddRange([AccountRow(1, "ACC-1", "2026-10-14T01:00:00Z", "One", "Gold"), AccountRow(2, "ACC-2", "2026-10-14T01:00:00Z", "Two", "Gold")]);
+        _inbox.Rows.AddRange([AccountRow("ACC-1", "2026-10-14T01:00:00Z", "One", "Gold"), AccountRow("ACC-2", "2026-10-14T01:00:00Z", "Two", "Gold")]);
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
         _inbox.Rows.Clear();
         _inbox.Calls.Clear();
         _http.Writes = 0;
-        _inbox.Rows.AddRange([AccountRow(3, "ACC-1", "2026-10-14T02:00:00Z", "One!", "Gold"), AccountRow(4, "ACC-2", "2026-10-14T02:00:00Z", "Two", "Silver")]);
+        _inbox.Rows.AddRange([AccountRow("ACC-1", "2026-10-14T02:00:00Z", "One!", "Gold"), AccountRow("ACC-2", "2026-10-14T02:00:00Z", "Two", "Silver")]);
         _org.LoseResponsesFor("Profile__c", "ACC-2", 1);
 
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
@@ -240,7 +240,7 @@ public sealed class EngineFlowTests
         (await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None)).Should().Be(2);
 
         _http.Writes.Should().Be(0, "the read finds both writes applied, the lost one included");
-        _inbox.Recorded!.Synced.Should().BeEquivalentTo([3L, 4L], "ACC-1's and ACC-2's rows");
+        _inbox.Recorded!.Synced.Should().BeEquivalentTo(["ACC-1", "ACC-2"], "ACC-1's and ACC-2's rows");
     }
 
     // ---------- Failures of the read ----------
@@ -249,7 +249,7 @@ public sealed class EngineFlowTests
     public async Task A_read_rejecting_a_field_fails_the_batch_and_forces_a_fresh_describe()
     {
         var engine = Engine();
-        _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
+        _inbox.Rows.Add(Row("ACC-1", "2026-10-14T01:00:00Z"));
         await engine.SyncBatchAsync(Accounts, _inbox, CancellationToken.None); // describes are cached now
         _inbox.Calls.Clear();
         _http.OnRead = request => new HttpResponseMessage(HttpStatusCode.OK)
@@ -272,7 +272,7 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task A_read_cut_off_by_the_lease_is_retried_not_held_because_nothing_was_written()
     {
-        _inbox.Rows.Add(Row(1, "ACC-1", "2026-10-14T01:00:00Z"));
+        _inbox.Rows.Add(Row("ACC-1", "2026-10-14T01:00:00Z"));
         _http.OnRead = _ => throw new TaskCanceledException("The lease cutoff");
 
         await Engine().SyncBatchAsync(Accounts, _inbox, CancellationToken.None);
@@ -285,13 +285,13 @@ public sealed class EngineFlowTests
     [Fact]
     public void Outcomes_are_grouped_by_what_the_inbox_does_with_them()
     {
-        static Work Entity(string id, long eventId)
+        static Work Entity(string id)
         {
-            return new(id, new SyncUnit([]), eventId);
+            return new(id, new SyncUnit([]));
         }
 
-        var batch = new PreparedBatch([Entity("A", 1), Entity("B", 2), Entity("C", 3), Entity("D", 4), Entity("E", 5)],
-            [new FailedEvent(8, "bad", SalesforceErrors.InvalidEvent)]);
+        var batch = new PreparedBatch([Entity("A"), Entity("B"), Entity("C"), Entity("D"), Entity("E")],
+            [new FailedEvent("BAD", "bad", SalesforceErrors.InvalidEvent)]);
         SalesforceError[] error = [new(null, "PROCESSING_HALTED", "x"), new("acct", "SOME_CODE", "why")];
 
         var outcomes = batch.Outcomes(new Dictionary<string, SyncResult>
@@ -303,12 +303,12 @@ public sealed class EngineFlowTests
             ["E"] = new("E", SyncOutcome.TransientFailure, error)
         });
 
-        outcomes.Synced.Should().Equal(1L, 2L);
-        outcomes.Synced.Concat(outcomes.Dead.Concat(outcomes.Failed).Select(f => f.RowId)).Should().NotContain(3L,
+        outcomes.Synced.Should().Equal("A", "B");
+        outcomes.Synced.Concat(outcomes.Dead.Concat(outcomes.Failed).Select(f => f.EntityId)).Should().NotContain("C",
             "C was not attempted: it gets no outcome, its lease ends and it is due again");
-        outcomes.Dead.Should().Equal(new FailedEvent(8, "bad", SalesforceErrors.InvalidEvent),
-            new FailedEvent(4, "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));
-        outcomes.Failed.Should().Equal(new FailedEvent(5, "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));
+        outcomes.Dead.Should().Equal(new FailedEvent("BAD", "bad", SalesforceErrors.InvalidEvent),
+            new FailedEvent("D", "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));
+        outcomes.Failed.Should().Equal(new FailedEvent("E", "PROCESSING_HALTED x; acct: SOME_CODE why", "SOME_CODE"));
     }
 
     // ---------- Helpers ----------
@@ -341,7 +341,7 @@ public sealed class EngineFlowTests
     private async Task CreateOldAsync()
     {
         await CreateAccountAsync("KIDS");
-        _inbox.Rows.AddRange([Row(8, "OLD", "2026-10-14T01:00:00Z", "Gold"), Row(9, "KIDS", "2026-10-14T01:00:00Z", "Gold")]);
+        _inbox.Rows.AddRange([Row("OLD", "2026-10-14T01:00:00Z", "Gold"), Row("KIDS", "2026-10-14T01:00:00Z", "Gold")]);
         (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
         _inbox.Recorded!.Synced.Should().HaveCount(2);
         _inbox.Rows.Clear();
@@ -353,8 +353,8 @@ public sealed class EngineFlowTests
     /// <param name="processed">What the engine returns: 0 when the batch is deferred (no progress).</param>
     private async Task TwoCallBatchAsync(int processed = 3)
     {
-        _inbox.Rows.AddRange([Row(1, "NEW", "2026-10-14T02:00:00Z", "Gold"), Row(2, "OLD", "2026-10-14T02:00:00Z", "Silver"),
-            Row(3, "KIDS", "2026-10-14T02:00:00Z", "Silver")]);
+        _inbox.Rows.AddRange([Row("NEW", "2026-10-14T02:00:00Z", "Gold"), Row("OLD", "2026-10-14T02:00:00Z", "Silver"),
+            Row("KIDS", "2026-10-14T02:00:00Z", "Silver")]);
         var before = _org.GetStats().WriteRequests;
 
         (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(processed);
@@ -371,24 +371,24 @@ public sealed class EngineFlowTests
     }
 
     /// <summary>An account event with its Profile (keyed like the account).</summary>
-    private static InboxEvent AccountRow(long id, string account, string time, string name, string tier)
+    private static InboxEvent AccountRow(string account, string time, string name, string tier)
     {
-        return new(id, account,
+        return new(account,
         $$"""{ "meta": { "time": "{{time}}", "type": "updated" }, "account": { "externalId": "{{account}}", "name": "{{name}}", "profile": { "tier": "{{tier}}" } } }""",
             DateTimeOffset.Parse(time));
     }
 
-    private static InboxEvent Row(long id, string account, string time, string name = "Acme")
+    private static InboxEvent Row(string account, string time, string name = "Acme")
     {
-        return new(id, account,
+        return new(account,
         $$"""{ "meta": { "time": "{{time}}", "type": "inserted" }, "account": { "externalId": "{{account}}", "name": "{{name}}" } }""",
             DateTimeOffset.Parse(time));
     }
 
     /// <summary>A row whose payload can't be read.</summary>
-    private static InboxEvent Invalid(long id, string account)
+    private static InboxEvent Invalid(string account)
     {
-        return new(id, account, "not json", DateTimeOffset.UnixEpoch);
+        return new(account, "not json", DateTimeOffset.UnixEpoch);
     }
 
     /// <summary>Lets requests through to the org, or fails all of them, the read, or the Nth write.</summary>

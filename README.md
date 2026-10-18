@@ -3,7 +3,7 @@
 Kafka change events → Postgres inbox → Salesforce, with per-entity ordering, atomic multi-record upserts,
 type-aware change-only updates and a shared, limit-aware rate limiter. One generic engine syncs every object;
 each object only defines its typed payload, its Salesforce sObject class, the mapper between them and its queries.
-Written in C# / .NET 8.
+Written in C# / .NET 10.
 
 ## The problem
 
@@ -316,8 +316,7 @@ it; no table is shared by the types. The tables the migrations create:
 
 ```sql
 CREATE TABLE sf_account_inbox (                 -- and sf_account_relationship_inbox, sf_contact_inbox, ...
-  id              bigserial   PRIMARY KEY,
-  entity_id       text        NOT NULL,          -- the entity's id, read from the typed event by the consumer
+  entity_id       text        PRIMARY KEY,       -- the entity's id, read from the typed event by the consumer; one row per entity
   payload         jsonb       NOT NULL,          -- the entity's event, split from the Kafka message; never read by SQL
   status          text        NOT NULL DEFAULT 'pending',  -- pending | done | dead
   attempt_count   int         NOT NULL DEFAULT 0,          -- times this event failed (a newer event starts at 0)
@@ -328,14 +327,13 @@ CREATE TABLE sf_account_inbox (                 -- and sf_account_relationship_i
   next_attempt_at timestamptz,            -- null: nothing to do (not pending); else claimable from then on (backoff and lease included)
   lock_token      uuid                    -- which claim holds the lease (until next_attempt_at)
 );
-CREATE UNIQUE INDEX sf_account_inbox_entity_id ON sf_account_inbox (entity_id);
 CREATE INDEX sf_account_inbox_ready ON sf_account_inbox (next_attempt_at) WHERE next_attempt_at IS NOT NULL;
 ```
 
 The inboxes vacuum after 2% of their rows changed (`autovacuum_vacuum_scale_factor = 0.02`, threshold 1,000), not
 the default 20%: every event, every claim and every outcome updates them.
 
-**One row per entity.** `entity_id` is unique: an inbox row is an entity's newest event and what became of it, not
+**One row per entity.** `entity_id` is the primary key, with no separate row id: an inbox row is an entity's newest event and what became of it, not
 one event. Every event is the full record, so keeping only the newest loses nothing the sync needs (Kafka, within its
 retention, is the history). A newer event overwrites the row, whatever its status, as a new event: pending, no
 attempts, no error. An older one changes nothing. One as new (a Kafka redelivery) changes nothing either if the row
@@ -372,8 +370,8 @@ before another worker's lease on it commits re-checks the row when it locks it, 
 (`ClaimRaceTests`). Storing an event locks the row too, so a claim skips an entity whose event is being stored, and a
 second event of the entity waits until the first has committed, and then overwrites it.
 
-**Plans.** Every lookup is by key: a primary key (`= ANY` of an array, never a join the planner could turn into a
-scan), the unique `entity_id` index, or the front of the ready index. The claim on `sf_sync_state` before this design
+**Plans.** Every lookup is by key: a primary key (`entity_id`, `= ANY` of an array, never a join the planner could turn into a
+scan), or the front of the ready index. The claim on `sf_sync_state` before this design
 was checked with `EXPLAIN ANALYZE` (generic plans) against statistics taken while everything was idle and then a
 100,000-entity backlog, and against statistics taken during a backlog that had since drained: the same index plans
 each time, so no planner settings are pinned. The statements on the inbox row have the same shapes (the claim's due
@@ -392,7 +390,7 @@ lease ended (`EndLease`): due again at once, or when the deferral ends, with no 
 [A newer event while an entity is being synced](#a-newer-event-while-an-entity-is-being-synced)). The lease keeps other
 workers away from an entity, not the consumer: a newer event can overwrite the row while the worker writes the event it
 claimed. So every outcome statement updates only the claimed rows that still hold the `event_time` the claim read
-(`InboxSql.Template.StillClaimed`, part of each statement's WHERE: the claim's row ids and times, `unnest(@ids, @times)`, each
+(`InboxSql.Template.StillClaimed`, part of each statement's WHERE: the claim's entity ids and times, `unnest(@entityIds, @times)`, each
 row looked up by primary key and compared timestamptz to timestamptz, exactly: the times are the microseconds read
 back from the column) and records outcomes on those only: done, retried, dead, held. An overwritten row stays
 pending with the newer event, not marked done, and the transaction's last statement (`EndLease`, run only if the
@@ -1332,7 +1330,7 @@ sql/
 
 ## Run everything with Aspire
 
-Requires Docker (or OrbStack/Colima) and the .NET 8+ SDK.
+Requires Docker (or OrbStack/Colima) and the .NET 10 SDK.
 
 ```bash
 dotnet run --project src/SalesforceSync.AppHost
@@ -1365,7 +1363,7 @@ To sync to a Salesforce sandbox instead of the mock org, see [Run against the sa
 
 ## Tests
 
-Requires the .NET 8 SDK; the integration tests also need **Docker** (Docker Desktop, OrbStack or Colima), nothing
+Requires the .NET 10 SDK; the integration tests also need **Docker** (Docker Desktop, OrbStack or Colima), nothing
 else: no Aspire, no local Postgres, Kafka or Redis, no ports to free up. Images are pulled on first run (`postgres:17`,
 `apache/kafka:3.9.1`, `redis:7.4-alpine`).
 
