@@ -24,20 +24,9 @@ public sealed class SalesforceLimitsTests
     // ---------- Startup validation ----------
 
     [Fact]
-    public void Defaults_with_a_daily_allocation_are_valid()
+    public void Defaults_are_valid()
     {
         Validate(Limits()).Succeeded.Should().BeTrue();
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    public void A_missing_or_non_positive_daily_allocation_fails_startup(long allocation)
-    {
-        var result = Validate(new SalesforceLimitsOptions { DailyApiAllocation = allocation });
-
-        result.Failed.Should().BeTrue();
-        result.FailureMessage.Should().Contain("SalesforceLimits:DailyApiAllocation");
     }
 
     [Fact]
@@ -70,33 +59,6 @@ public sealed class SalesforceLimitsTests
 
         result.Failed.Should().BeTrue();
         result.FailureMessage.Should().Contain("API timeout");
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(1.5)]
-    public void Daily_budget_share_must_be_a_fraction(double share)
-    {
-        Validate(Limits(), rate: new RateLimitOptions { DailyBudgetShare = share }).Failed.Should().BeTrue();
-    }
-
-    [Theory]
-    [InlineData("1.00:00:00", "00:10:00", true)]
-    [InlineData("01:00:00", "00:01:00", true)]
-    [InlineData("01:00:00", "01:00:00", false)]
-    [InlineData("01:00:00", "00:00:00", false)]
-    [InlineData("00:00:00", "-00:01:00", false)]
-    public void The_budget_window_must_be_longer_than_a_positive_usage_bucket(string window, string bucket, bool valid)
-    {
-        var rate = new RateLimitOptions { BudgetWindow = TimeSpan.Parse(window), UsageBucket = TimeSpan.Parse(bucket) };
-
-        var result = Validate(Limits(), rate: rate);
-
-        result.Succeeded.Should().Be(valid);
-        if (!valid)
-        {
-            result.FailureMessage.Should().Contain("RateLimit:UsageBucket");
-        }
     }
 
     // ---------- Row type limits ----------
@@ -187,44 +149,6 @@ public sealed class SalesforceLimitsTests
     // ---------- Throttle decisions ----------
 
     [Fact]
-    public void Daily_budget_is_the_share_of_the_org_allocation()
-    {
-        Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 })
-                .DailyBudget.Should().Be(57_500, "it is half of 115,000");
-    }
-
-    [Fact]
-    public void A_lower_allocation_reported_by_Salesforce_lowers_the_budget()
-    {
-        // Configured: 115,000 calls; Salesforce reports 5,000
-        var info = SalesforceLimitInfo.Parse("api-usage=25/5000;")!;
-
-        Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 })
-            .BudgetFor(info.ApiUsage!.Max).Should().Be(2_500, "it is half of the reported 5,000");
-    }
-
-    [Fact]
-    public void The_configured_allocation_is_the_maximum_whatever_Salesforce_reports()
-    {
-        Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 })
-                .BudgetFor(1_000_000).Should().Be(57_500, "it is half of the configured 115,000");
-    }
-
-    [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData("api-usage=garbled")]
-    [InlineData("per-app-api-usage=17/250(appName=sync)")]
-    public void Without_a_reported_allocation_the_budget_follows_the_configuration(string? header)
-    {
-        var reported = SalesforceLimitInfo.Parse(header)?.ApiUsage?.Max;
-
-        reported.Should().BeNull();
-        Limiter(new RateLimitOptions { DailyBudgetShare = 0.5 })
-            .BudgetFor(reported).Should().Be(57_500, "the configured allocation applies when the header is missing or unreadable");
-    }
-
-    [Fact]
     public void The_limit_header_is_read_whatever_its_case()
     {
         using var response = new HttpResponseMessage();
@@ -235,23 +159,13 @@ public sealed class SalesforceLimitsTests
     }
 
     [Fact]
-    public void Own_usage_of_the_budget_slows_down_even_when_the_org_has_room()
+    public void Org_usage_slows_down_and_then_pauses()
     {
         var limiter = Limiter(new RateLimitOptions());
-        var orgAt10Percent = new SalesforceLimitInfo(new LimitCounter(10_000, 100_000), null, null, null);
 
-        limiter.Decide(orgAt10Percent, ownDailyRatio: 0.5).Speed.Should().Be(1.0);
-        limiter.Decide(orgAt10Percent, ownDailyRatio: 0.85).Speed.Should().Be(0.25, "own usage is past DailySoftRatio");
-        limiter.Decide(orgAt10Percent, ownDailyRatio: 0.96).Pause.Should().Be(TimeSpan.FromMinutes(15), "own usage is past DailyHardRatio");
-    }
-
-    [Fact]
-    public void Org_usage_slows_down_even_when_own_budget_has_room()
-    {
-        var limiter = Limiter(new RateLimitOptions());
-        var orgAt85Percent = new SalesforceLimitInfo(new LimitCounter(85_000, 100_000), null, null, null);
-
-        limiter.Decide(orgAt85Percent, ownDailyRatio: 0.1).Speed.Should().Be(0.25, "the org is past DailySoftRatio");
+        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(10_000, 100_000), null, null, null)).Should().Be(SalesforceRateLimiter.ThrottleDecision.Normal);
+        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(85_000, 100_000), null, null, null)).Speed.Should().Be(0.25, "the org is past DailySoftRatio");
+        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(96_000, 100_000), null, null, null)).Pause.Should().Be(TimeSpan.FromMinutes(15), "the org is past DailyHardRatio");
     }
 
     [Fact]
@@ -284,10 +198,10 @@ public sealed class SalesforceLimitsTests
         new SyncOptionsValidator().Validate(null, new SyncOptions()).Succeeded.Should().BeTrue();
     }
 
-    /// <summary>The worker's default allocation (appsettings.json).</summary>
+    /// <summary>The worker's default limits (appsettings.json).</summary>
     private static SalesforceLimitsOptions Limits(int concurrentLongRunningLimit = 25)
     {
-        return new() { DailyApiAllocation = 115_000, ConcurrentLongRunningLimit = concurrentLongRunningLimit };
+        return new() { ConcurrentLongRunningLimit = concurrentLongRunningLimit };
     }
 
     private static ValidateOptionsResult Validate(SalesforceLimitsOptions limits, SyncOptions? sync = null,

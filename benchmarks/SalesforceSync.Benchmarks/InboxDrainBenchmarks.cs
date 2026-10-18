@@ -241,9 +241,6 @@ public abstract class DrainBenchmarkBase
             o.MaxRetries = 50;
         });
         services.Configure<RateLimitOptions>(_ => { });
-        // Required by the limiter (0 is a budget of nothing); the budget is then the mock org's reported limit
-        services.Configure<SalesforceLimitsOptions>(o => o.DailyApiAllocation = 1_000_000_000);
-
         services.AddSalesforceClient()
             .AddSalesforceRateLimiting() // the bucket is opened up per iteration (SetupAsync)
             .ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
@@ -261,12 +258,12 @@ public abstract class DrainBenchmarkBase
         {
             await db.Database.ExecuteAsync($"TRUNCATE {table} RESTART IDENTITY", default);
         }
-        await db.Database.ExecuteAsync("TRUNCATE sf_api_usage; TRUNCATE sf_claim_audit", default);
-        // Effectively unlimited bucket and no daily budget: measure the pipeline, not the throttle
+        await db.Database.ExecuteAsync("TRUNCATE sf_claim_audit", default);
+        // Effectively unlimited bucket: measure the pipeline, not the throttle
         await db.Database.ExecuteAsync("""
             UPDATE sf_rate_limit
             SET tokens = 1e9, capacity = 1e9, base_refill_per_sec = 1e9, refill_per_sec = 1e9,
-                daily_budget = NULL, paused_until = NULL, updated_at = clock_timestamp()
+                paused_until = NULL, updated_at = clock_timestamp()
             WHERE name = 'salesforce'
             """, default);
 

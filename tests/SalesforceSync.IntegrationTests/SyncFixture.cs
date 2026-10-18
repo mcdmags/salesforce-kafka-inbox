@@ -104,7 +104,7 @@ public class SyncFixture : IAsyncLifetime
     protected Dictionary<string, string?> FakeOrgSettings { get; } = new()
     {
         ["FakeSalesforce:Latency"] = "00:00:00",
-        // The worker's SalesforceLimits:DailyApiAllocation (appsettings.json)
+        // The daily API limit the mock org reports in Sforce-Limit-Info
         ["FakeSalesforce:DailyApiLimit"] = "115000",
         // An org whose automation refuses to delete an Account that records still name (Salesforce itself wouldn't,
         // with Text foreign keys): DeleteTests covers the Account's delete waiting for its children (DEPENDENCY_NOT_SYNCED)

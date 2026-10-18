@@ -16,12 +16,13 @@ public sealed class SchemaTests(SyncFixture app)
     {
         // The worker already migrated at startup; a restart against a persisted volume migrates again
         var before = await TablesAndIndexesAsync();
-        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_contact_inbox", "sf_rate_limit", "sf_api_usage",
+        before.Should().Contain(["sf_account_inbox", "sf_account_relationship_inbox", "sf_contact_inbox", "sf_rate_limit",
             "__EFMigrationsHistory"]);
         before.Should().Contain([
             "sf_account_inbox_pkey", "sf_account_relationship_inbox_pkey", "sf_contact_inbox_pkey",
             "sf_account_relationship_inbox_ready", "sf_contact_inbox_ready"]);
         before.Should().NotContain("sf_sync_state", "every entity's state is in its inbox row");
+        before.Should().NotContain("sf_api_usage", "the daily allocation is read from Sforce-Limit-Info, not counted");
         before.Where(r => r.StartsWith("sf_account_inbox", StringComparison.Ordinal)).Should().BeEquivalentTo(
             ["sf_account_inbox", "sf_account_inbox_pkey", "sf_account_inbox_ready"]);
 

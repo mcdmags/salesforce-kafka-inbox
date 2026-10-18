@@ -214,22 +214,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
                 });
 
-            modelBuilder.Entity("SalesforceSync.Data.RateLimiting.ApiUsageBucket", b =>
-                {
-                    b.Property<DateTimeOffset>("Bucket")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("bucket");
-
-                    b.Property<long>("Calls")
-                        .HasColumnType("bigint")
-                        .HasColumnName("calls");
-
-                    b.HasKey("Bucket")
-                        .HasName("sf_api_usage_pkey");
-
-                    b.ToTable("sf_api_usage", (string)null);
-                });
-
             modelBuilder.Entity("SalesforceSync.Data.RateLimiting.RateLimitState", b =>
                 {
                     b.Property<string>("Name")
@@ -271,10 +255,6 @@ namespace SalesforceSync.Data.Migrations
                     b.Property<double>("Capacity")
                         .HasColumnType("double precision")
                         .HasColumnName("capacity");
-
-                    b.Property<long?>("DailyBudget")
-                        .HasColumnType("bigint")
-                        .HasColumnName("daily_budget");
 
                     b.Property<DateTimeOffset?>("PausedUntil")
                         .HasColumnType("timestamp with time zone")

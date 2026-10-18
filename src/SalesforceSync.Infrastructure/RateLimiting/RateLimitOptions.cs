@@ -14,41 +14,14 @@ public sealed class RateLimitOptions
     public double BurstCapacity { get; set; } = 5;
 
     /// <summary>
-    /// Fraction of the org's daily API allocation this integration may use per rolling 24 hours. The allocation is
-    /// <see cref="SalesforceLimitsOptions.DailyApiAllocation"/>, or the limit Salesforce reports in
-    /// <c>Sforce-Limit-Info: api-usage=used/limit</c> when that is lower. The allocation is shared by every integration and user of the
-    /// org, so leave room for them. Enforced as a hard cap across all processes.
-    /// </summary>
-    public double DailyBudgetShare { get; set; } = 0.5;
-
-    /// <summary>
-    /// The rolling period <see cref="DailyBudgetShare"/> is counted over: this integration makes at most that many
-    /// calls in any window of this length. 24 hours, as Salesforce counts the allocation. A shorter window doesn't
-    /// scale the budget down, so it allows more calls per 24 hours.
-    /// </summary>
-    public TimeSpan BudgetWindow { get; set; } = TimeSpan.FromHours(24);
-
-    /// <summary>
-    /// The granularity of the usage count (rows of sf_api_usage). Every bucket that overlaps the window counts in full,
-    /// so usage is over- rather than under-counted by up to one bucket.
-    /// </summary>
-    public TimeSpan UsageBucket { get; set; } = TimeSpan.FromMinutes(10);
-
-    /// <summary>
-    /// How far back calls are counted: the window plus the whole bucket that straddles its start. Older buckets are
-    /// deleted.
-    /// </summary>
-    internal TimeSpan CountedWindow => BudgetWindow + UsageBucket;
-
-    /// <summary>
     /// Pause after REQUEST_LIMIT_EXCEEDED for too many concurrent long-running requests
     /// (clears as soon as one of them finishes).
     /// </summary>
     public TimeSpan ConcurrentLimitPause { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Daily usage ratio at which to slow down: the highest of the org's usage, the connected app's usage
-    /// (both from Sforce-Limit-Info) and this integration's own usage of its <see cref="DailyBudgetShare"/>.
+    /// Daily usage ratio at which to slow down: the higher of the org's usage and the connected app's usage
+    /// (both from Sforce-Limit-Info).
     /// </summary>
     public double DailySoftRatio { get; set; } = 0.80;
 

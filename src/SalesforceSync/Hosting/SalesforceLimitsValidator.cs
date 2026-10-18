@@ -12,12 +12,6 @@ public sealed class SalesforceLimitsValidator(IOptions<SyncOptions> sync, IOptio
     {
         var errors = new List<string>();
 
-        if (o.DailyApiAllocation <= 0)
-        {
-            errors.Add($"{SalesforceLimitsOptions.Section}:DailyApiAllocation ({o.DailyApiAllocation}) must be set to the org's daily API " +
-                       "allocation, a positive number (Setup: System Overview, API Requests, Last 24 Hours).");
-        }
-
         if (o.ConcurrentLongRunningLimit <= 0)
         {
             errors.Add($"{SalesforceLimitsOptions.Section}:ConcurrentLongRunningLimit ({o.ConcurrentLongRunningLimit}) must be the " +
@@ -56,18 +50,6 @@ public sealed class SalesforceLimitsValidator(IOptions<SyncOptions> sync, IOptio
         if (rate.Value.BurstCapacity < 1)
         {
             errors.Add($"{RateLimitOptions.Section}:BurstCapacity must be at least 1.");
-        }
-
-        var share = rate.Value.DailyBudgetShare;
-        if (share is <= 0 or > 1)
-        {
-            errors.Add($"{RateLimitOptions.Section}:DailyBudgetShare ({share}) must be in (0, 1].");
-        }
-
-        if (rate.Value.UsageBucket <= TimeSpan.Zero || rate.Value.BudgetWindow <= rate.Value.UsageBucket)
-        {
-            errors.Add($"{RateLimitOptions.Section}:UsageBucket ({rate.Value.UsageBucket}) must be > 0 and shorter than " +
-                       $"{RateLimitOptions.Section}:BudgetWindow ({rate.Value.BudgetWindow}).");
         }
 
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);

@@ -2,8 +2,7 @@ namespace SalesforceSync.Infrastructure.RateLimiting;
 
 /// <summary>
 /// The org's Platform API limits, from "API Request Limits and Allocations" in the Salesforce Developer Limits and
-/// Allocations Quick Reference. <see cref="DailyApiAllocation"/> is the maximum: when Salesforce reports a lower limit
-/// in <c>Sforce-Limit-Info</c>, the budget follows that.
+/// Allocations Quick Reference. The daily allocation is not configured: Salesforce reports it in <c>Sforce-Limit-Info</c>.
 /// </summary>
 public sealed class SalesforceLimitsOptions
 {
@@ -11,12 +10,6 @@ public sealed class SalesforceLimitsOptions
 
     /// <summary>Salesforce stops REST calls (a composite request as a whole) after this long.</summary>
     public static readonly TimeSpan MaxApiTimeout = TimeSpan.FromMinutes(10);
-
-    /// <summary>
-    /// The org's total calls per rolling 24 hours (all integrations and users together), as shown in Setup (System
-    /// Overview, API Requests, Last 24 Hours). Required and positive.
-    /// </summary>
-    public long DailyApiAllocation { get; set; }
 
     /// <summary>
     /// The org's max concurrent inbound requests lasting <see cref="LongRunningThreshold"/> or longer: 25 for

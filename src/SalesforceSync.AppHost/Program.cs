@@ -47,20 +47,14 @@ var sync = builder.AddProject<Projects.SalesforceSync>("salesforce-sync")
 // (README: Using a real Salesforce org); otherwise the mock org, which accepts any credentials. Either way the worker
 // gets the same settings; only Salesforce:InstanceUrl differs.
 var realOrg = builder.Configuration.GetSection("Salesforce");
-// The worker's SalesforceLimits:DailyApiAllocation (appsettings.json), which the mock org reports as its limit
-const string DefaultDailyApiAllocation = "115000";
+// The daily API limit the mock org reports in Sforce-Limit-Info (a real org reports its own)
+const string MockDailyApiLimit = "115000";
 var useRealOrg = !string.IsNullOrEmpty(realOrg["ClientSecret"]);
 sync.WithEnvironment("Salesforce__ClientId", realOrg["ClientId"] ?? "fake-client")
     .WithEnvironment("Salesforce__ClientSecret",
         builder.AddParameter("salesforce-client-secret", realOrg["ClientSecret"] ?? "fake-secret", secret: true));
 if (useRealOrg)
 {
-    // The limits go to the migrate step too: it writes them to the shared rate-limit row
-    foreach (var project in new[] { sync, migrate })
-    {
-        project.WithEnvironment("SalesforceLimits__DailyApiAllocation",
-            builder.Configuration["SalesforceLimits:DailyApiAllocation"] ?? DefaultDailyApiAllocation);
-    }
     sync.WithEnvironment("Salesforce__InstanceUrl", realOrg["InstanceUrl"]);
 }
 else
@@ -68,7 +62,7 @@ else
     // Mock Salesforce org (HTTP service; inspect it at /__fake/stats and /__fake/records/{sobject})
     var salesforce = builder.AddProject<Projects.SalesforceSync_FakeSalesforce_Server>("fake-salesforce")
         .WithEnvironment("FakeSalesforce__Latency", testMode ? "00:00:00" : "00:00:00.050")
-        .WithEnvironment("FakeSalesforce__DailyApiLimit", DefaultDailyApiAllocation)
+        .WithEnvironment("FakeSalesforce__DailyApiLimit", MockDailyApiLimit)
         .WithHttpHealthCheck("/health");
     sync.WaitFor(salesforce)
         .WithEnvironment("Salesforce__InstanceUrl", salesforce.GetEndpoint("http"));

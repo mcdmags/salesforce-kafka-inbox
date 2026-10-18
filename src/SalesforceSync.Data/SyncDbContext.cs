@@ -11,7 +11,7 @@ namespace SalesforceSync.Data;
 /// <summary>
 /// The sync's tables, defined here and created by EF migrations (Data/Migrations, applied at startup by
 /// <see cref="SyncSchema"/>): one inbox table per synced object type, and the rate limiter's
-/// sf_rate_limit and sf_api_usage. The claim's statements are raw SQL (<see cref="InboxSql"/>) run through
+/// sf_rate_limit. The claim's statements are raw SQL (<see cref="InboxSql"/>) run through
 /// <c>Database.SqlQueryRaw</c>, since FOR UPDATE SKIP LOCKED and UPDATE ... RETURNING have no LINQ form.
 /// <para>
 /// To sync another object: a subclass of <see cref="InboxRow"/> with its limits (<see cref="IInboxRow"/>) and its
@@ -61,8 +61,8 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
         modelBuilder.Entity<ContactInboxRow>(entity => ConfigureInbox(entity, "sf_contact_inbox"));
 
-        // The shared token bucket and daily budget guard: one row, created here. Bucket size, refill rate and budget
-        // are set from configuration by the deploy's migrate step.
+        // The shared token bucket and pause: one row, created here. Bucket size and refill rate are set from
+        // configuration by the deploy's migrate step.
         modelBuilder.Entity<RateLimitState>(entity =>
         {
             entity.ToTable("sf_rate_limit");
@@ -72,12 +72,6 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
             entity.HasData(new { Name = "salesforce", Tokens = 5.0, Capacity = 5.0, BaseRefillPerSec = 2.0, RefillPerSec = 2.0 });
         });
         modelBuilder.HasDbFunction(() => RateLimitSql.ClockTimestamp()).HasName("clock_timestamp").IsBuiltIn();
-
-        modelBuilder.Entity<ApiUsageBucket>(entity =>
-        {
-            entity.ToTable("sf_api_usage");
-            entity.HasKey(u => u.Bucket).HasName("sf_api_usage_pkey");
-        });
 
         // Every column is its property's name in snake_case (EntityId -> entity_id)
         foreach (var property in modelBuilder.Model.GetEntityTypes().SelectMany(e => e.GetProperties()))
