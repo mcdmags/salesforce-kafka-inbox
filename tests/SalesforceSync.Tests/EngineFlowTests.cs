@@ -17,7 +17,8 @@ public sealed class EngineFlowTests
     private static readonly SyncStrategy<AccountEvent> Accounts = AccountSync.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
-    private readonly RecordingInbox _inbox = new();
+    private readonly RecordingInbox<AccountInboxRow> _inbox = new();
+    private readonly RecordingInbox<OneRecordPerWriteRow> _narrow = new();
     private readonly Gate _gate = new();
     private readonly Interceptor _http = new();
 
@@ -175,7 +176,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal(["claim", "fail all: refused ()"],
+        _narrow.Calls.Should().Equal(["claim", "fail all: refused ()"],
             "every event is retried and none is marked done, not even NEW's, whose call succeeded");
     }
 
@@ -185,14 +186,14 @@ public sealed class EngineFlowTests
         await CreateOldAsync();
         _http.FailWrite = (2, new HttpRequestException(HttpRequestError.ConnectionError, "refused"));
         await TwoCallBatchAsync();
-        _inbox.Calls.Clear();
+        _narrow.Calls.Clear();
         _http.FailWrite = null;
         _http.Writes = 0;
 
-        (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(3);
+        (await Engine().SyncBatchAsync(ThreeObjects, _narrow, CancellationToken.None)).Should().Be(3);
 
-        _http.Writes.Should().Be(1, "NEW is unchanged now: only OLD's and KIDS's changes are written, in one Composite request");
-        _inbox.Recorded!.Synced.Should().BeEquivalentTo(["NEW", "OLD", "KIDS"], "NEW's, OLD's and KIDS's rows");
+        _http.Writes.Should().Be(1, "NEW is unchanged now: only OLD's change is written, in one Composite request");
+        _narrow.Recorded!.Synced.Should().BeEquivalentTo(["NEW", "OLD", "KIDS"], "NEW's, OLD's and KIDS's rows");
         _org.History("Account", "NEW").Should().ContainSingle("NEW was written once, not twice");
     }
 
@@ -200,11 +201,11 @@ public sealed class EngineFlowTests
     public async Task A_later_call_whose_answer_is_lost_holds_the_whole_batch()
     {
         await CreateOldAsync();
-        _org.LoseResponsesFor("Contact", "C-KIDS", 1);
+        _org.LoseResponsesFor("Account", "OLD", 1);
 
         await TwoCallBatchAsync();
 
-        _inbox.Calls.Should().Equal("claim", "hold");
+        _narrow.Calls.Should().Equal("claim", "hold");
     }
 
     [Fact]
@@ -215,7 +216,7 @@ public sealed class EngineFlowTests
 
         await TwoCallBatchAsync(processed: 0);
 
-        _inbox.Calls.Should().Equal("claim", "defer 00:00:07");
+        _narrow.Calls.Should().Equal("claim", "defer 00:00:07");
     }
 
     [Fact]
@@ -325,14 +326,14 @@ public sealed class EngineFlowTests
         [
             .. key == "KIDS" ? [] : new[] { new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = e.Account!.Name }) },
             new SObjectRecord("contact", "Contact", "ExternalId__c", $"C-{key}", new Dictionary<string, object?> { ["LastName"] = e.Account!.Name },
-                [new SObjectLookup("AccountId", "Account", "ExternalId__c", key)]),
+                ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", key)]),
             new SObjectRecord("prof", "Profile__c", "ExternalId__c", $"P-{key}",
                 new Dictionary<string, object?> { ["Tier__c"] = e.Account.Name, ["AccountId__c"] = key },
-                ForeignKeys: [new SObjectLookup("AccountId__c", "Account", "ExternalId__c", key)])
+                ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", key)])
         ]),
         units =>
         [
-            new SoqlQuery("Account", "ExternalId__c", SoqlQuery.LookupIdsOf(units, "Account")),
+            new SoqlQuery("Account", "ExternalId__c", SoqlQuery.ParentIdsOf(units, "Account")),
             new SoqlQuery("Contact", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Contact")),
             new SoqlQuery("Profile__c", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Profile__c"))
         ]);
@@ -341,23 +342,26 @@ public sealed class EngineFlowTests
     private async Task CreateOldAsync()
     {
         await CreateAccountAsync("KIDS");
-        _inbox.Rows.AddRange([Row("OLD", "2026-10-14T01:00:00Z", "Gold"), Row("KIDS", "2026-10-14T01:00:00Z", "Gold")]);
-        (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(2);
-        _inbox.Recorded!.Synced.Should().HaveCount(2);
-        _inbox.Rows.Clear();
-        _inbox.Calls.Clear();
+        _narrow.Rows.AddRange([Row("OLD", "2026-10-14T01:00:00Z", "Gold"), Row("KIDS", "2026-10-14T01:00:00Z", "Gold")]);
+        (await Engine().SyncBatchAsync(ThreeObjects, _narrow, CancellationToken.None)).Should().Be(2);
+        _narrow.Recorded!.Synced.Should().HaveCount(2);
+        _narrow.Rows.Clear();
+        _narrow.Calls.Clear();
         _http.Writes = 0;
     }
 
-    /// <summary>NEW and a change of OLD (rows 1 and 2, the first call) and of KIDS's Contact and Profile (row 3, the second call).</summary>
+    /// <summary>
+    /// NEW, a change of OLD and a change of KIDS's Contact and Profile, one record per write: NEW and KIDS go in the
+    /// first call (they need no collection in common), OLD's Account update in the second.
+    /// </summary>
     /// <param name="processed">What the engine returns: 0 when the batch is deferred (no progress).</param>
     private async Task TwoCallBatchAsync(int processed = 3)
     {
-        _inbox.Rows.AddRange([Row("NEW", "2026-10-14T02:00:00Z", "Gold"), Row("OLD", "2026-10-14T02:00:00Z", "Silver"),
+        _narrow.Rows.AddRange([Row("NEW", "2026-10-14T02:00:00Z", "Gold"), Row("OLD", "2026-10-14T02:00:00Z", "Silver"),
             Row("KIDS", "2026-10-14T02:00:00Z", "Silver")]);
         var before = _org.GetStats().WriteRequests;
 
-        (await Engine().SyncBatchAsync(ThreeObjects, _inbox, CancellationToken.None)).Should().Be(processed);
+        (await Engine().SyncBatchAsync(ThreeObjects, _narrow, CancellationToken.None)).Should().Be(processed);
 
         _http.Writes.Should().Be(2, "the batch stops at its failed second call");
         _org.FindByExternalId("Account", "NEW").Should().NotBeNull("the first call's records are in Salesforce");
@@ -442,7 +446,14 @@ public sealed class EngineFlowTests
         }
     }
 
-    private sealed class RecordingInbox : IRepository<AccountInboxRow>
+    private sealed class OneRecordPerWriteRow : InboxRow, IInboxRow
+    {
+        public static int MaxValuesPerQuery => 100;
+        public static int MaxRecordsPerWrite => 1;
+    }
+
+    private sealed class RecordingInbox<TRow> : IRepository<TRow>
+        where TRow : InboxRow, IInboxRow, new()
     {
         public List<InboxEvent> Rows { get; } = [];
         public List<string> Calls { get; } = [];

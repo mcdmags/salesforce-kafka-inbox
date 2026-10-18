@@ -26,7 +26,7 @@ public sealed class WriteStepsTests
         new SalesforceField("AccountId__c", "string", 255, 0, 0, true, true, true)
     ]);
 
-    /// <summary>A lookup: AccountId holds the Account's Salesforce Id.</summary>
+    /// <summary>A lookup: AccountId holds the Account's Salesforce Id, so it can't be a foreign key.</summary>
     private static readonly SObjectSchema Contact = new("Contact",
     [
         new SalesforceField("Id", "id", 18, 0, 0, false, false, false),
@@ -64,9 +64,9 @@ public sealed class WriteStepsTests
             new SObjectRecord("acct", "Account", "ExternalId__c", "A1",
                 new Dictionary<string, object?> { ["Name"] = "too long", ["Nope__c"] = 1 }),
             new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1", new Dictionary<string, object?>(),
-                [new SObjectLookup("ExternalId__c", "Account", "ExternalId__c", "A1")]),
+                ForeignKeys: [new ForeignKey("AccountId__c", "Account", "Missing__c", "A1")]),
             new SObjectRecord("contact", "Contact", "ExternalId__c", "C1", new Dictionary<string, object?>(),
-                ForeignKeys: [new SObjectLookup("AccountId", "Account", "ExternalId__c", "A1")])
+                ForeignKeys: [new ForeignKey("AccountId", "Account", "ExternalId__c", "A1")])
         ]);
 
         RecordNormalizer.Normalize("A1", unit, Schemas, out var problems);
@@ -75,7 +75,7 @@ public sealed class WriteStepsTests
         [
             ("acct", "STRING_TOO_LONG"), ("acct", "INVALID_FIELD"), ("prof", "INVALID_FIELD"), ("contact", "INVALID_FIELD")
         ]);
-        problems.Should().Contain(p => p.Message!.Contains("Profile__c.ExternalId__c is not a lookup"))
+        problems.Should().Contain(p => p.Message!.Contains("Account.Missing__c doesn't exist"))
             .And.Contain(p => p.Message!.Contains("Contact.AccountId is a lookup, not a foreign key"));
     }
 
@@ -83,14 +83,13 @@ public sealed class WriteStepsTests
     public void A_foreign_key_is_normalized_and_compared_like_any_text_field()
     {
         var unit = new SyncUnit([new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1",
-            new Dictionary<string, object?> { ["AccountId__c"] = "A1" }, ForeignKeys: [new SObjectLookup("AccountId__c", "Account", "ExternalId__c", "A1")])]);
+            new Dictionary<string, object?> { ["AccountId__c"] = "A1" }, ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", "A1")])]);
 
         var normalized = RecordNormalizer.Normalize("P1", unit, Schemas, out var problems);
 
         problems.Should().BeEmpty();
         normalized.Records[0].Fields.Should().ContainSingle().Which.Should().Be(
             new KeyValuePair<SalesforceField, object?>(Profile.Fields["AccountId__c"], "A1"));
-        normalized.Records[0].Lookups.Should().BeEmpty("never resolved to an Id");
     }
 
     // ---------- Record types ----------
@@ -169,15 +168,14 @@ public sealed class WriteStepsTests
     // ---------- ReadQueryBuilder ----------
 
     [Fact]
-    public void A_query_selects_what_the_diff_and_the_lookups_need_and_is_chunked_by_100_values()
+    public void A_query_selects_what_the_diff_needs_and_is_chunked_by_100_values()
     {
         var units = Normalized(new SyncUnit(
         [
             AccountRecord("A1", "Acme"),
-            new SObjectRecord("contact", "Contact", "ExternalId__c", "C1", new Dictionary<string, object?>(),
-                [new SObjectLookup("AccountId", "Account", "ExternalId__c", "A1")]),
+            new SObjectRecord("contact", "Contact", "ExternalId__c", "C1", new Dictionary<string, object?>()),
             new SObjectRecord("prof", "Profile__c", "ExternalId__c", "P1", new Dictionary<string, object?> { ["AccountId__c"] = "A1" },
-                ForeignKeys: [new SObjectLookup("AccountId__c", "Account", "ExternalId__c", "A1")])
+                ForeignKeys: [new ForeignKey("AccountId__c", "Account", "ExternalId__c", "A1")])
         ]));
         var ids = Enumerable.Range(0, 150).Select(i => $"A{i}").ToList();
 
@@ -189,7 +187,7 @@ public sealed class WriteStepsTests
         queries.Select(q => (q.Query.ReferenceId, q.SObject)).Should().Equal(("q0", "Account"), ("q1", "Account"), ("q2", "Contact"), ("q3", "Profile__c"));
         queries[0].Query.Soql.Should().StartWith("SELECT Name,ExternalId__c,Id FROM Account WHERE ExternalId__c IN ('A0',");
         queries[1].Query.Soql.Should().Contain("'A149'").And.NotContain("'A99'");
-        queries[2].Query.Soql.Should().Be("SELECT AccountId,ExternalId__c,Id FROM Contact WHERE ExternalId__c IN ('C1')");
+        queries[2].Query.Soql.Should().Be("SELECT ExternalId__c,Id FROM Contact WHERE ExternalId__c IN ('C1')");
         queries[3].Query.Soql.Should().Be("SELECT AccountId__c,ExternalId__c,Id FROM Profile__c WHERE ExternalId__c IN ('P1')",
             "a foreign key is selected as the field it is");
     }
@@ -260,12 +258,12 @@ public sealed class WriteStepsTests
         SalesforceRestClient.FitsUrlLimit(new string('a', SalesforceRestClient.MaxUrlBytes - 1) + "é").Should().BeFalse("bytes count, not characters");
     }
 
-    // ---------- CompositeWrite.Pack ----------
+    // ---------- WriteRequest.Pack ----------
 
     [Fact]
     public void Units_that_need_the_same_collections_share_one_request_parents_first()
     {
-        var (requests, tooLarge) = CompositeWrite.Pack(
+        var (requests, tooLarge) = WriteRequest.Pack(
         [
             new PlannedUnit("NEW", [Write("Account", create: true), Write("Profile__c", create: true, depth: 1)]),
             new PlannedUnit("OLD", [Write("Account", create: false), Write("Profile__c", create: false, depth: 1)]),
@@ -282,7 +280,7 @@ public sealed class WriteStepsTests
     [Fact]
     public void A_unit_that_does_not_fit_the_requests_so_far_starts_another_and_stays_whole()
     {
-        var (requests, _) = CompositeWrite.Pack(
+        var (requests, _) = WriteRequest.Pack(
         [
             new PlannedUnit("A", [Write("Account", true), Write("Account", false, 1), Write("Profile__c", true, 1), Write("Profile__c", false, 2)]),
             new PlannedUnit("B", [Write("Account_Relationship__c", true), Write("Account_Relationship__c", false, 1)]),
@@ -299,7 +297,7 @@ public sealed class WriteStepsTests
         var units = Enumerable.Range(0, SalesforceRestClient.MaxCollectionRecords + 1)
             .Select(i => new PlannedUnit($"A{i}", [Write("Account", create: true)])).ToList();
 
-        var (requests, _) = CompositeWrite.Pack(units, SalesforceRestClient.MaxCollectionRecords);
+        var (requests, _) = WriteRequest.Pack(units, SalesforceRestClient.MaxCollectionRecords);
 
         requests.Select(r => r.Units.Count).Should().Equal(SalesforceRestClient.MaxCollectionRecords, 1);
     }
@@ -307,7 +305,7 @@ public sealed class WriteStepsTests
     [Fact]
     public void Writes_are_split_at_the_given_number_of_records_per_collection()
     {
-        var (requests, tooLarge) = CompositeWrite.Pack(
+        var (requests, tooLarge) = WriteRequest.Pack(
             [.. Enumerable.Range(0, 3).Select(i => new PlannedUnit($"A{i}", [Write("Account", create: true)]))], maxRecordsPerWrite: 2);
 
         tooLarge.Should().BeEmpty();
@@ -317,7 +315,7 @@ public sealed class WriteStepsTests
     [Fact]
     public void A_unit_with_more_records_of_an_object_than_a_collection_takes_fails_alone()
     {
-        var (requests, tooLarge) = CompositeWrite.Pack(
+        var (requests, tooLarge) = WriteRequest.Pack(
             [new PlannedUnit("BIG", [Write("Account", true), Write("Account", false)]), new PlannedUnit("OK", [Write("Account", true)])],
             maxRecordsPerWrite: 1);
 
@@ -330,7 +328,7 @@ public sealed class WriteStepsTests
     {
         var tooMany = Enumerable.Range(0, SalesforceRestClient.MaxCompositeCollections + 1).Select(depth => Write("Account", true, depth)).ToList();
 
-        var (requests, tooLarge) = CompositeWrite.Pack([new PlannedUnit("BIG", tooMany), new PlannedUnit("OK", [Write("Account", true)])],
+        var (requests, tooLarge) = WriteRequest.Pack([new PlannedUnit("BIG", tooMany), new PlannedUnit("OK", [Write("Account", true)])],
             MaxRecordsPerWrite);
 
         var failed = tooLarge.Should().ContainSingle().Subject;
@@ -392,8 +390,7 @@ public sealed class WriteStepsTests
         var record = new NormalizedRecord(
             new SObjectRecord("r", sobject, "ExternalId__c", "X", new Dictionary<string, object?>()),
             new SObjectSchema(sobject, [new SalesforceField("ExternalId__c", "string", 255, 0, 0, true, true, true)]),
-            new Dictionary<SalesforceField, object?>(), []);
-        return new PlannedWrite(record, create ? null : "001000000000001AAA", new Dictionary<string, object?>(), [], [],
-            new HashSet<string>(), depth);
+            new Dictionary<SalesforceField, object?>());
+        return new PlannedWrite(record, create ? null : "001000000000001AAA", new Dictionary<string, object?>(), [], depth);
     }
 }

@@ -31,6 +31,22 @@ namespace SalesforceSync.Sync;
 /// every claimed entity is held (the write's outcome is unknown), deferred (rate limited) or retried. An entity whose
 /// row a newer event overwrote meanwhile gets no outcome: its row stays pending and due.</item>
 /// </list>
+/// <para>
+/// From an event to Salesforce, step by step (event objects and SObjects are two different classes):
+/// </para>
+/// <list type="number">
+/// <item><b>Event object</b> (<c>AccountEvent</c>, <c>ContactEvent</c>, ...): the inbox payload as the source sent it
+/// (camelCase names, its own shape). Only the strategy's <c>Map</c> reads it.</item>
+/// <item><b>SObject</b> (<c>AccountSObject</c>, <c>ContactSObject</c>, ...): the same data as Salesforce names it (API
+/// field names, <c>[SObject]</c> attributes). <c>Map</c> builds one per Salesforce record and
+/// <see cref="SObjectRecord.From{TSObject}"/> turns it into a plain <see cref="SObjectRecord"/>: that is where the event stops
+/// and Salesforce's side begins, and the engine never sees an event object again.</item>
+/// <item>The records of one entity are its <see cref="SyncUnit"/>.</item>
+/// <item><b>Diff</b> (<see cref="WritePlanner"/>): each record is compared with what the read found in Salesforce, and
+/// becomes a create (all its fields), an update (only the fields that differ), a delete or nothing.</item>
+/// <item><b>Collections</b> (<see cref="WriteRequest"/>): the creates and updates are grouped into one upsert per object
+/// and level (parents first), and the units packed into as few API calls as the limits allow.</item>
+/// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="PreparedBatch"/> and the
 /// ones in <c>Sync/Write</c>); Salesforce is reached only through <see cref="ISalesforceRestClient"/> and the inbox only
 /// through <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
@@ -154,7 +170,7 @@ public sealed class SalesforceBatchSyncService(
     /// and writes only what still differs. A Composite subrequest that fails as a whole fails only its records (retried).
     /// </remarks>
     /// <param name="units">At most <see cref="SyncOptions.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
-    /// <param name="queries">The strategy's reads: the units' records and the records their lookups and foreign keys point at.</param>
+    /// <param name="queries">The strategy's reads: the units' records and the records their foreign keys point at.</param>
     /// <param name="maxValuesPerQuery">The row type's <see cref="IInboxRow.MaxValuesPerQuery"/>.</param>
     /// <param name="maxRecordsPerWrite">The row type's <see cref="IInboxRow.MaxRecordsPerWrite"/>.</param>
     /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
@@ -189,18 +205,17 @@ public sealed class SalesforceBatchSyncService(
         // 3. Read: one Composite call with the strategy's queries (more only if long ids split them into more than 5)
         var current = await ReadCurrentAsync(ReadQueryBuilder.Build(normalized, queries, schemas, maxValuesPerQuery, salesforce.DataPath), schemas.Keys, ct);
 
-        // 4. Decide per record: unchanged, create, update or delete (by what the read found), and how each lookup is
-        // linked; the writes are grouped into collections and Composite requests
+        // 4. Diff: per record unchanged, create, update or delete (by what the read found); parents are ordered before
+        // the children that hold their external id; the writes are grouped into collections and requests
         var plan = WritePlanner.Plan(normalized, current, maxRecordsPerWrite);
         results.AddRange(plan.NotSent);
 
         // 5. Send. A request of one collection is that Collections upsert or delete; a request of several (Accounts and
-        // their Profiles, a new child linked to its new parent by a lookup's @{reference}, upserts and deletes) is one
-        // Composite request of them, parents first and the delete last. Either way one call per request, and a delete
+        // their Profiles, upserts and deletes) is one Composite request of them, parents first and the delete last. Either way one call per request, and a delete
         // whose answer is lost is held like an upsert: a late delete must not remove a record a newer event recreated.
         // 6. Per-record results -> one outcome per unit, the same way for all; a unit with writes in several collections
-        // gets one outcome from all of them. Inside a Composite request a child is sent even if its new parent failed
-        // in an earlier subrequest: the org decides, and the parent's result decides the unit.
+        // gets one outcome from all of them. A child is sent even if its new parent failed in an
+        // earlier subrequest: the org decides, and the parent's result decides the unit.
         foreach (var request in plan.Requests)
         {
             var collections = request.BuildRequests();

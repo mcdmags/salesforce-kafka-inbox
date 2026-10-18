@@ -45,7 +45,7 @@ public sealed class InboxEventTests
         profile.Fields.Should().Contain("Tier__c", "Gold").And.Contain("Score__c", (decimal)score).And.Contain("Notes__c", null);
         profile.Fields.Should().Contain("AccountId__c", key, "the Account's key, as text");
         profile.ForeignKeys.Should().ContainSingle()
-            .Which.Should().Be(new SObjectLookup("AccountId__c", "Account", "ExternalId__c", key));
+            .Which.Should().Be(new ForeignKey("AccountId__c", "Account", "ExternalId__c", key));
     }
 
     [Theory, AutoData]
@@ -104,8 +104,8 @@ public sealed class InboxEventTests
             ["Active__c"] = null
         });
         rel.ForeignKeys.Should().Equal(
-            new SObjectLookup("AccountId__c", "Account", "ExternalId__c", account),
-            new SObjectLookup("RelatedAccountId__c", "Account", "ExternalId__c", related));
+            new ForeignKey("AccountId__c", "Account", "ExternalId__c", account),
+            new ForeignKey("RelatedAccountId__c", "Account", "ExternalId__c", related));
     }
 
     [Theory]
@@ -132,7 +132,7 @@ public sealed class InboxEventTests
         (contact.SObject, contact.ExternalIdField, contact.ExternalId, contact.RecordType).Should()
             .Be(("Contact", "ExternalId__c", key, "Standard"));
         contact.Fields.Should().Contain("LastName", lastName).And.Contain("Email", null).And.Contain("AccountId__c", account);
-        contact.ForeignKeys.Should().Equal(new SObjectLookup("AccountId__c", "Account", "ExternalId__c", account));
+        contact.ForeignKeys.Should().Equal(new ForeignKey("AccountId__c", "Account", "ExternalId__c", account));
         ContactSync.Strategy.Queries([unit]).Select(q => (q.SObject, q.WhereField, q.Values.Single())).Should()
             .Equal(("Contact", "ExternalId__c", key), ("Account", "ExternalId__c", account));
     }

@@ -7,8 +7,8 @@ namespace SalesforceSync.Sync.Write;
 internal sealed record ReadQuery(CompositeQuery Query, string SObject);
 
 /// <summary>
-/// Builds the batch's read: the strategy's queries as SOQL, each selecting every field the diff compares and the Ids
-/// the lookups need (or the external ids that show a parent exists), split into chunks of at most the row type's
+/// Step 3 of a batch: builds the read. The strategy's queries become SOQL, each selecting every field the diff compares,
+/// the Id (a delete needs it) and the external ids that show a parent exists, split into chunks of at most the row type's
 /// <see cref="Data.Inbox.IInboxRow.MaxValuesPerQuery"/> values whose URL fits a call (<see cref="SalesforceRestClient.MaxUrlBytes"/>).
 /// </summary>
 internal static class ReadQueryBuilder
@@ -82,14 +82,13 @@ internal static class ReadQueryBuilder
     }
 
     /// <summary>
-    /// Every field of <paramref name="target"/> the diff compares, the external ids its records and the lookups and
-    /// foreign keys to it are matched by, the field the query filters on, and the Id.
+    /// Every field of <paramref name="target"/> the diff compares, the external ids its records and the foreign keys to
+    /// it are matched by, the field the query filters on, and the Id.
     /// </summary>
     private static List<string> FieldsToSelect(SObjectSchema target, SoqlQuery query, IReadOnlyList<NormalizedRecord> records)
     {
         var ownFields = records.Where(r => r.Schema == target)
             .SelectMany(r => r.Fields.Keys.Select(f => f.Name)
-                .Concat(r.Lookups.Select(l => l.Field.Name))
                 .Append(r.Record.ExternalIdField));
         var lookedUpBy = records.SelectMany(r => r.Record.Parents)
             .Where(l => target.Name.Equals(l.SObject, StringComparison.OrdinalIgnoreCase))
@@ -108,9 +107,6 @@ internal sealed class CurrentRecord(Dictionary<string, JsonElement> fields)
 {
     /// <summary>The Id as Salesforce returned it; an update addresses the record by it.</summary>
     public string Id => fields["Id"].GetString()!;
-
-    /// <summary>The Id in its 18-character form, which is how lookup values are compared and sent.</summary>
-    public string? Id18 => FieldValues.To18CharId(Id);
 
     public IEnumerable<KeyValuePair<string, JsonElement>> Fields => fields;
 
@@ -162,9 +158,9 @@ internal sealed class CurrentRecords
         return Find(record.SObject, record.ExternalIdField, record.ExternalId);
     }
 
-    /// <summary>The record a lookup or foreign key points at, or null if it isn't in Salesforce.</summary>
-    public CurrentRecord? Find(SObjectLookup lookup)
+    /// <summary>The record a foreign key points at, or null if it isn't in Salesforce.</summary>
+    public CurrentRecord? Find(ForeignKey parent)
     {
-        return Find(lookup.SObject, lookup.ExternalIdField, lookup.ExternalId);
+        return Find(parent.SObject, parent.ExternalIdField, parent.ExternalId);
     }
 }

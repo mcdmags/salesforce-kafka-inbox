@@ -7,7 +7,7 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 {
     /// <summary>
-    /// Our own code (not Salesforce's): a lookup target or a foreign key's parent, e.g. the Account of a relationship,
+    /// Our own code (not Salesforce's): a foreign key's parent, e.g. the Account of a relationship,
     /// isn't in Salesforce yet. Transient: it is expected to arrive through its own sync.
     /// </summary>
     public const string DependencyNotSynced = "DEPENDENCY_NOT_SYNCED";
