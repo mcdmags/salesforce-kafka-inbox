@@ -24,7 +24,7 @@ public static class SyncServiceCollectionExtensions
 {
     /// <summary>
     /// The worker: options (validated at startup), the Postgres data source (<c>ConnectionStrings:inboxdb</c>), the
-    /// database schema (migrated at startup), the rate-limited Salesforce client (OAuth and REST over HTTP to
+    /// rate-limited Salesforce client (OAuth and REST over HTTP to
     /// <c>Salesforce:InstanceUrl</c>, a real org or the mock one) with its Describe cache shared through Redis (when
     /// <c>ConnectionStrings:redis</c> is set), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the
     /// worker loops.
@@ -49,7 +49,7 @@ public static class SyncServiceCollectionExtensions
         // Salesforce client, rate limited through Postgres (all pods share one bucket, budget and pause).
         // Handler order: rate limiter (outermost, so every attempt costs a token) -> gzip -> auth.
         var salesforce = services.AddSalesforceClient()
-            .AddSalesforceRateLimiting(); // its initializer runs before the workers
+            .AddSalesforceRateLimiting();
         UseSalesforceOrg(salesforce);
 
         // Kafka -> inbox (only when a Kafka connection string is configured)
@@ -66,16 +66,25 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// The schema migration as its own run (<c>SalesforceSync --migrate</c>), the step a deploy pipeline performs once
-    /// before the pods roll out: Postgres and the context factory, nothing else. See <see cref="MigrateAsync"/>.
+    /// The deploy's migrate step (<c>SalesforceSync --migrate</c>), performed once before the pods roll out: applies the
+    /// migrations, then the configured rate limits to the shared row when they changed
+    /// (<see cref="SalesforceRateLimiter.ApplyConfigurationAsync"/>). Needs only Postgres and the limit settings.
     /// </summary>
     public static async Task MigrateAsync(this IHostApplicationBuilder builder)
     {
-        builder.Services.Configure<PostgresRetryOptions>(builder.Configuration.GetSection(PostgresRetryOptions.Section));
+        var services = builder.Services;
+        var config = builder.Configuration;
+        services.Configure<PostgresRetryOptions>(config.GetSection(PostgresRetryOptions.Section));
+        AddValidatedOptions<SyncOptions, SyncOptionsValidator>(services, config.GetSection(SyncOptions.Section));
+        AddValidatedOptions<SalesforceLimitsOptions, SalesforceLimitsValidator>(services, config.GetSection(SalesforceLimitsOptions.Section));
+        services.Configure<RateLimitOptions>(config.GetSection(RateLimitOptions.Section));
         builder.AddNpgsqlDataSource("inboxdb");
-        builder.Services.AddInboxSync();
+        services.AddInboxSync();
+        services.AddSingleton<RateLimitRepository>();
+        services.AddSingleton<SalesforceRateLimiter>();
         using var host = ((HostApplicationBuilder)builder).Build();
         await SyncSchema.MigrateAsync(host.Services.GetRequiredService<IDbContextFactory<SyncDbContext>>());
+        await host.Services.GetRequiredService<SalesforceRateLimiter>().ApplyConfigurationAsync(CancellationToken.None);
     }
 
     private static void AddWorkerOptions(IServiceCollection services, IConfiguration config)
@@ -167,8 +176,8 @@ public static class SyncServiceCollectionExtensions
 
     /// <summary>
     /// Rate limiting shared through Postgres, for the client from <see cref="AddSalesforceClient"/>: the token bucket,
-    /// daily budget and pause (<see cref="SalesforceRateLimiter"/>, configured at startup by
-    /// <see cref="RateLimitInitializer"/>), the global concurrency slots (advisory locks, at most
+    /// daily budget and pause (<see cref="SalesforceRateLimiter"/>, configured by the migrate step,
+    /// <see cref="MigrateAsync"/>), the global concurrency slots (advisory locks, at most
     /// <see cref="SyncOptions.MaxConcurrentRequests"/> batches across all pods) and <see cref="SalesforceRateLimitHandler"/>,
     /// inserted as the outermost handler whatever else is added, so every attempt costs a token:
     /// rate limiter -> gzip -> auth. Register it before the worker loops
@@ -180,7 +189,6 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton<RateLimitRepository>();
         services.AddSingleton<SalesforceRateLimiter>();
         services.AddSingleton<ISalesforceRateLimiter>(sp => sp.GetRequiredService<SalesforceRateLimiter>());
-        services.AddHostedService<RateLimitInitializer>();
         services.AddSingleton(sp => new SalesforceConcurrencySlots(
             sp.GetRequiredService<IDbContextFactory<SyncDbContext>>(),
             sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests,

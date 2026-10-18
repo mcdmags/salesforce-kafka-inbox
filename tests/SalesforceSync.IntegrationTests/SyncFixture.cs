@@ -155,10 +155,8 @@ public class SyncFixture : IAsyncLifetime
         ConnectionString = inbox;
         _db = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(inbox) { ApplicationName = TestsApplicationName }.ConnectionString);
 
-        // The deploy pipeline's migrate step, once before the pods start (the pods never migrate)
-        await SyncSchema.MigrateAsync(SyncDbContext.CreateFactory(_db), ct);
-
         var instanceUrl = _org.Url.GetLeftPart(UriPartial.Authority);
+        var migrated = false;
         for (var i = 0; i < Pods; i++)
         {
             var settings = new Dictionary<string, string?>(WorkerSettings)
@@ -170,6 +168,12 @@ public class SyncFixture : IAsyncLifetime
                 ["Salesforce:UserAgentInstance"] = $"pod-{i}",
                 ["ConnectionStrings:redis"] = _redis?.GetConnectionString()
             };
+            if (!migrated)
+            {
+                // The deploy pipeline's migrate step, once before the pods start (the pods never migrate)
+                await WorkerPod.MigrateAsync(settings);
+                migrated = true;
+            }
             _pods.Add(await WorkerPod.StartAsync(settings, ct));
         }
 
