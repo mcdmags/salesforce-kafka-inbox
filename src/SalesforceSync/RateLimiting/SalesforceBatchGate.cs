@@ -1,6 +1,7 @@
+using SalesforceSync.Data.RateLimiting;
 using SalesforceSync.Infrastructure.RateLimiting;
 
-namespace SalesforceSync.Data.RateLimiting;
+namespace SalesforceSync.RateLimiting;
 
 /// <summary>A batch runs while it holds a global concurrency slot, and none starts during a shared pause (rate limits).</summary>
 public sealed class SalesforceBatchGate(SalesforceConcurrencySlots slots, SalesforceRateLimiter limiter) : ISalesforceBatchGate

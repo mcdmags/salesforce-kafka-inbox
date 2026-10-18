@@ -1,5 +1,6 @@
 using SalesforceSync.Data.RateLimiting;
 using SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.RateLimiting;
 
 namespace SalesforceSync.Tests;
 
@@ -86,9 +87,9 @@ public sealed class TokenBucketTests
     [Fact]
     public void Calls_are_counted_in_the_bucket_their_time_falls_in()
     {
-        TokenBucket.BucketOf(Now, TimeSpan.FromMinutes(10)).Should().Be(new DateTimeOffset(2026, 10, 16, 12, 30, 0, TimeSpan.Zero));
-        TokenBucket.BucketOf(Now, TimeSpan.FromHours(1)).Should().Be(new DateTimeOffset(2026, 10, 16, 12, 0, 0, TimeSpan.Zero));
-        TokenBucket.BucketOf(Now.ToOffset(TimeSpan.FromHours(2)), TimeSpan.FromMinutes(10)).Offset.Should().Be(TimeSpan.Zero);
+        ApiUsageBucket.BucketOf(Now, TimeSpan.FromMinutes(10)).Should().Be(new DateTimeOffset(2026, 10, 16, 12, 30, 0, TimeSpan.Zero));
+        ApiUsageBucket.BucketOf(Now, TimeSpan.FromHours(1)).Should().Be(new DateTimeOffset(2026, 10, 16, 12, 0, 0, TimeSpan.Zero));
+        ApiUsageBucket.BucketOf(Now.ToOffset(TimeSpan.FromHours(2)), TimeSpan.FromMinutes(10)).Offset.Should().Be(TimeSpan.Zero);
     }
 
     /// <summary>The default bucket: capacity 5, 2 tokens/s.</summary>

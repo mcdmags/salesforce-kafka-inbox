@@ -22,7 +22,6 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="SalesforceSync" />
-    <InternalsVisibleTo Include="SalesforceSync.Data" />
     <InternalsVisibleTo Include="SalesforceSync.Benchmarks" />
     <InternalsVisibleTo Include="SalesforceSync.Tests" />
   </ItemGroup>

@@ -2,7 +2,6 @@ using System.Globalization;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Data.Inbox;
 
@@ -110,7 +109,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             times = claim.EventTimes,
             token = claim.Token,
             error,
-            code = UnknownOutcomeException.Code,
+            code = InboxRow.UnknownOutcomeCode,
             hold
         }), ct);
     }

@@ -2,7 +2,7 @@
 namespace SalesforceSync.Data.RateLimiting;
 
 /// <summary>
-/// The statements of <see cref="SalesforceRateLimiter"/> that LINQ can't express: locking the shared
+/// The statements of <see cref="RateLimitRepository"/> that LINQ can't express: locking the shared
 /// <c>sf_rate_limit</c> row and reading the database clock, which every pod shares (theirs may differ).
 /// </summary>
 internal static class RateLimitSql

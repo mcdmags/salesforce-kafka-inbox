@@ -2,7 +2,7 @@ namespace SalesforceSync.Data.RateLimiting;
 
 /// <summary>
 /// A row of sf_rate_limit: the token bucket and daily budget all pods share, and what Salesforce last reported in
-/// Sforce-Limit-Info. Read and written by <see cref="SalesforceRateLimiter"/>, always under the row lock
+/// Sforce-Limit-Info. Read and written by <c>SalesforceRateLimiter</c>, always under the row lock
 /// (<see cref="RateLimitSql.Lock"/>).
 /// </summary>
 public sealed class RateLimitState
@@ -60,4 +60,10 @@ public sealed class ApiUsageBucket
     public DateTimeOffset Bucket { get; set; }
 
     public long Calls { get; set; }
+
+    /// <summary>The start of the usage bucket <paramref name="now"/> falls in.</summary>
+    public static DateTimeOffset BucketOf(DateTimeOffset now, TimeSpan bucketSize)
+    {
+        return new DateTimeOffset(now.UtcTicks - (now.UtcTicks % bucketSize.Ticks), TimeSpan.Zero);
+    }
 }
