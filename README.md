@@ -109,29 +109,27 @@ no LINQ form. The rate limiter's `RateLimitSql` only locks its row (`FOR UPDATE`
 
 The only metadata of the org the sync reads is its record types' Ids (Salesforce takes `RecordTypeId` as an Id, which
 differs between orgs). `RecordTypeCache` reads them with one SOQL query per object that has a record type
-(`SELECT Id, DeveloperName, IsActive FROM RecordType WHERE SobjectType IN ('Account')`) and keeps the active ones by
-developer name, in two layers:
+(`SELECT Id, DeveloperName, IsActive FROM RecordType WHERE SobjectType IN ('Account')`, rows read into a typed
+`RecordTypeRow` by `SelectAsync<TRow>`) and keeps the active ones in a `HybridCache`
+(`Microsoft.Extensions.Caching.Hybrid`), which is two layers:
 
 | Layer | What it holds | Shared by |
 |---|---|---|
-| In process | The snapshot every worker loop reads without I/O; one read in flight per object (a `SemaphoreSlim`) | The pod's worker loops |
-| `IDistributedCache` (Redis) | The same snapshot as JSON: the Ids by developer name and when they were read | Every pod |
+| In memory | The Ids of an object, read without I/O; one query in flight per object | The pod's worker loops |
+| `IDistributedCache` (Redis) | The same entry as JSON | Every pod |
 
-A pod whose own snapshot is missing or older than `Salesforce:RecordTypeRefreshInterval` (15 min) first looks in Redis. An
-entry read within the interval (by any pod) is used as it is, without calling Salesforce, so the org is asked about once
-per interval in total rather than once per pod, and a new pod starts warm. Otherwise the pod queries the org and writes
-the result back.
+Both layers keep an entry for `Salesforce:RecordTypeRefreshInterval` (15 min). A pod that has none looks in Redis first,
+so the org is asked about once per interval in total rather than once per pod, and a new pod starts warm.
 
 - **Key**: `salesforce-sync:recordtypes:{org host}:{API version}:{object, lower case}`, e.g.
   `salesforce-sync:recordtypes:acme.my.salesforce.com:v62.0:account`. Different orgs and API versions never share one.
-- **Expiry**: 1 day (absolute); an entry older than the refresh interval is never trusted, only replaced.
 - **Invalidation**: when a developer name is missing, or Salesforce rejects a `RecordTypeId` (`INVALID_RECORD_TYPE`), the
-  object's entry is invalidated in the pod **and removed from Redis**, so every pod reads it again.
-- **Failures**: the shared layer only saves calls. If Redis is unreachable, slower than 2 seconds, or holds an entry
-  that can't be read, the pod logs a warning (at most once a minute) and reads the org as if the entry were missing.
-  Syncing never waits for or fails because of Redis.
+  object's entry is removed (`RemoveAsync`: from Redis and from this pod's memory), so the next batch reads it again.
+  Other pods drop their in-memory copy when it expires, at most one interval later.
+- **Failures**: Redis only saves calls. `HybridCache` logs a failed read and treats it as a miss, and logs a failed write
+  without throwing, so syncing never waits for or fails because of Redis.
 - **Configuration**: `ConnectionStrings:redis` (Aspire injects it; elsewhere set `ConnectionStrings__redis`, e.g.
-  `redis:6379`). Without it the shared layer is an in-memory cache of the process (`AddDistributedMemoryCache`), so
+  `redis:6379`). Without it the second layer is an in-memory cache of the process (`AddDistributedMemoryCache`), so
   tests, benchmarks and single-process runs need no Redis.
 
 Two pods that miss at the same moment may both query once; that costs a call, never correctness.
@@ -1245,8 +1243,8 @@ one named `Standard` (see [step 4](#4-create-the-objects-and-fields)), or change
 
 **Why `SemaphoreSlim` isn't used for parallel batches:** it limits concurrency within one process, while
 Salesforce's limits are org-wide. Parallelism comes from competing worker loops in every pod pulling from the
-shared inbox, kept under Salesforce's concurrent limit by `Sync:Workers` x pods and paced by each process's token bucket. (The record type cache
-does use a `SemaphoreSlim`, as an in-process single-flight so concurrent workers don't all read the record types at once.)
+shared inbox, kept under Salesforce's concurrent limit by `Sync:Workers` x pods and paced by each process's token bucket. (The record type cache's `HybridCache` runs one query per
+object at a time, so concurrent workers don't all read the record types at once.)
 
 ## Repository layout
 

@@ -157,7 +157,8 @@ public static class SyncServiceCollectionExtensions
     {
         services.AddSingleton(TimeProvider.System);
         services.AddDistributedMemoryCache(); // only if no IDistributedCache (Redis) is registered
-        services.AddSingleton<RecordTypeCache>(); // record type Ids, shared by all workers in the process (and pods)
+        services.AddHybridCache(); // in process, and in the IDistributedCache (Redis) shared by the pods
+        services.AddSingleton<RecordTypeCache>(); // record type Ids
         services.AddSingleton<SalesforceErrors>();
         services.AddTransient<GzipRequestHandler>();
 

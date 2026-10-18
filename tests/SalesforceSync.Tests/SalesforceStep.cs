@@ -1,6 +1,8 @@
 using System.Net.Http.Headers;
 using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Hybrid;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data.Inbox;
@@ -43,12 +45,13 @@ internal static class SalesforceStep
     }
 
     /// <summary>A record type cache reading through <paramref name="http"/>; with <paramref name="shared"/>, a pod sharing that cache with others.</summary>
-    public static RecordTypeCache RecordTypes(HttpClient http, IDistributedCache? shared = null,
-        TimeProvider? clock = null)
+    public static RecordTypeCache RecordTypes(HttpClient http, IDistributedCache? shared = null)
     {
-        return new(clock ?? TimeProvider.System, Client(http), shared ?? new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())),
-            Options.Create(new SalesforceOptions { InstanceUrl = OrgUrl, BaseApiPath = Org.BaseApiPath, ApiVersion = Org.ApiVersion }),
-            NullLogger<RecordTypeCache>.Instance);
+        var services = new ServiceCollection();
+        services.AddSingleton(shared ?? new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())));
+        services.AddHybridCache();
+        return new(services.BuildServiceProvider().GetRequiredService<HybridCache>(), Client(http),
+            Options.Create(new SalesforceOptions { InstanceUrl = OrgUrl, BaseApiPath = Org.BaseApiPath, ApiVersion = Org.ApiVersion }));
     }
 
     /// <summary>

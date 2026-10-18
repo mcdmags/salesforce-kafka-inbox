@@ -407,6 +407,11 @@ public sealed class WriteRulesTests
             throw new NotSupportedException();
         }
 
+        public Task<List<TRow>> SelectAsync<TRow>(string soql, CancellationToken ct)
+        {
+            throw new NotSupportedException();
+        }
+
         public Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdField, IReadOnlyList<SObjectBody> records,
             CancellationToken ct)
         {

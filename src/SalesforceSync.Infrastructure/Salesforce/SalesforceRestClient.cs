@@ -73,11 +73,18 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
 
     /// <summary>Runs one SOQL query: all its rows.</summary>
     /// <exception cref="ArgumentException">The query's URL is longer than <see cref="MaxUrlBytes"/>.</exception>
-    public async Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct)
+    public Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct)
+    {
+        return SelectAsync<JsonElement>(soql, ct);
+    }
+
+    /// <summary>Runs one SOQL query: all its rows, each read into a <typeparamref name="TRow"/>.</summary>
+    /// <exception cref="ArgumentException">The query's URL is longer than <see cref="MaxUrlBytes"/>.</exception>
+    public async Task<List<TRow>> SelectAsync<TRow>(string soql, CancellationToken ct)
     {
         // Checked before anything is sent: an over-long URL is rejected by Salesforce (414/431), but the rejected call is
         // still counted against the allocation
-        var page = await GetPageAsync(EnsureFits(QueryUrl(soql)), ct);
+        var page = await GetPageAsync<TRow>(EnsureFits(QueryUrl(soql)), ct);
         var rows = page.Records;
 
         // Lookups by unique external id return at most one row per id, far below a query page (2,000), so this loop
@@ -85,18 +92,18 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
         // one extra call, and the engine would then treat a record that exists as missing and create a duplicate
         for (var next = page.NextRecordsUrl; next is not null;)
         {
-            var more = await GetPageAsync(EnsureFits(next), ct);
+            var more = await GetPageAsync<TRow>(EnsureFits(next), ct);
             rows.AddRange(more.Records);
             next = more.NextRecordsUrl;
         }
         return rows;
     }
 
-    private async Task<QueryPage> GetPageAsync(string url, CancellationToken ct)
+    private async Task<QueryPage<TRow>> GetPageAsync<TRow>(string url, CancellationToken ct)
     {
         using var res = await http.GetAsync(url, ct);
         await EnsureSuccessAsync(res, ct);
-        return await res.Content.ReadFromJsonAsync<QueryPage>(Json, ct) ?? throw new InvalidOperationException("Empty query result");
+        return await res.Content.ReadFromJsonAsync<QueryPage<TRow>>(Json, ct) ?? throw new InvalidOperationException("Empty query result");
     }
 
     /// <summary>
@@ -207,5 +214,5 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
 
     // ---------- DTOs ----------
 
-    private sealed record QueryPage(List<JsonElement> Records, string? NextRecordsUrl);
+    private sealed record QueryPage<TRow>(List<TRow> Records, string? NextRecordsUrl);
 }

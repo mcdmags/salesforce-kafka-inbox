@@ -20,6 +20,32 @@ public sealed class ClientCallsTests
         rows.Single().GetProperty("Name").GetString().Should().Be("Acme");
     }
 
+    private sealed record Account
+    {
+        public required string Id { get; init; }
+        public required string Name { get; init; }
+    }
+
+    [Fact]
+    public async Task A_typed_select_reads_each_row_into_the_type_whatever_the_case_of_the_names()
+    {
+        var (client, _) = Client(HttpStatusCode.OK, /*lang=json,strict*/ """{"totalSize":1,"done":true,"records":[{"attributes":{"type":"Account"},"id":"001X","NAME":"Acme"}]}""");
+
+        var rows = await client.SelectAsync<Account>("SELECT Id, Name FROM Account", CancellationToken.None);
+
+        rows.Should().Equal(new Account { Id = "001X", Name = "Acme" });
+    }
+
+    [Fact]
+    public async Task A_typed_select_of_a_row_without_a_required_property_fails_naming_it()
+    {
+        var (client, _) = Client(HttpStatusCode.OK, /*lang=json,strict*/ """{"totalSize":1,"done":true,"records":[{"Id":"001X"}]}""");
+
+        var select = () => client.SelectAsync<Account>("SELECT Id, Name FROM Account", CancellationToken.None);
+
+        (await select.Should().ThrowAsync<System.Text.Json.JsonException>()).Which.Message.Should().Contain("Name");
+    }
+
     [Fact]
     public async Task An_upsert_is_one_PATCH_of_the_records_by_external_id_that_never_stops_at_the_first_failure()
     {

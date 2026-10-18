@@ -2,7 +2,7 @@ using System.Text.Json.Nodes;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.StackExchangeRedis;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Caching.Hybrid;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Infrastructure.Salesforce;
 
@@ -25,8 +25,11 @@ public sealed class SharedRecordTypeCacheTests(MultiPodFixture app)
 
         // A pod that has read nothing itself: everything it needs is in Redis, so the org is not asked
         var queriesBefore = (await app.GetStatsAsync()).GetProperty("recordTypeQueries").GetInt64();
-        var newPod = new RecordTypeCache(TimeProvider.System, services.GetRequiredService<ISalesforceRestClient>(), redis,
-            services.GetRequiredService<IOptions<SalesforceOptions>>(), NullLogger<RecordTypeCache>.Instance);
+        var newPodServices = new ServiceCollection();
+        newPodServices.AddSingleton(redis);
+        newPodServices.AddHybridCache();
+        var newPod = new RecordTypeCache(newPodServices.BuildServiceProvider().GetRequiredService<HybridCache>(),
+            services.GetRequiredService<ISalesforceRestClient>(), services.GetRequiredService<IOptions<SalesforceOptions>>());
 
         (await newPod.IdOfAsync("Account", "Business", CancellationToken.None)).Should().NotBeNull();
         (await newPod.IdOfAsync("Profile__c", "Standard", CancellationToken.None)).Should().NotBeNull();

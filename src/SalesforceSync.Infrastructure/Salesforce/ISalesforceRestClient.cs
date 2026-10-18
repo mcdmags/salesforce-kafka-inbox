@@ -23,6 +23,13 @@ public interface ISalesforceRestClient
     Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct);
 
     /// <summary>
+    /// <see cref="SelectAsync(string, CancellationToken)"/> with each row read into a <typeparamref name="TRow"/> (names matched
+    /// without regard to case): the shape of the rows is declared once, and a row that doesn't fit fails with a
+    /// <see cref="JsonException"/> naming the property, not with a lookup that throws further on.
+    /// </summary>
+    Task<List<TRow>> SelectAsync<TRow>(string soql, CancellationToken ct);
+
+    /// <summary>
     /// Creates or updates up to 200 records of one object. <paramref name="externalIdFieldName"/> is the NAME of the field
     /// the records are matched by (e.g. <c>ExternalId__c</c>), the same for the whole call; each record carries its own
     /// VALUE of that field (<c>"ExternalId__c": "A1"</c>), and is updated if a record has that value, else created.
