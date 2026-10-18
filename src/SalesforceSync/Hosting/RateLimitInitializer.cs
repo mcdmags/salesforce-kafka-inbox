@@ -3,8 +3,8 @@ using SalesforceSync.RateLimiting;
 namespace SalesforceSync.Hosting;
 
 /// <summary>
-/// Applies the configured Salesforce limits to the shared rate-limit row. Registered after
-/// <see cref="SyncSchemaInitializer"/> and before the workers (hosted services start in registration order).
+/// Applies the configured Salesforce limits to the shared rate-limit row. Registered before the
+/// workers (hosted services start in registration order). The schema must already be migrated (<c>--migrate</c>).
 /// </summary>
 public sealed class RateLimitInitializer(SalesforceRateLimiter limiter) : IHostedService
 {

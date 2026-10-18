@@ -670,9 +670,10 @@ design into this one) was deleted and `InitialSchema` regenerated from the model
 earlier migrations doesn't match it**: its `__EFMigrationsHistory` names migrations that no longer exist. Start from a
 fresh database (or drop the sync's tables and `__EFMigrationsHistory`).
 
-At startup `SyncSchemaInitializer` (registered before the workers) runs `SyncSchema.MigrateAsync`: under a
-session-level advisory lock (`0x5346_5348`), so pods that start together migrate one at a time and each finds the work
-of the one before done, it applies the pending migrations with `Database.MigrateAsync()`. (EF 9 also locks its history
+The pods never migrate. Migrating is its own step, once per deploy: `SalesforceSync --migrate` applies the pending
+migrations (`SyncSchema.MigrateAsync`) and exits, and the pods roll out after it. The AppHost mimics the pipeline: its
+`migrate-database` resource runs that step and `salesforce-sync` waits for it to complete. `MigrateAsync` takes a
+session-level advisory lock (`0x5346_5348`), so two overlapping runs migrate one at a time. (EF 9 also locks its history
 table while it migrates.) Changing the model:
 
 ```bash
@@ -1271,7 +1272,7 @@ src/
   SalesforceSync/                 The entry project, the worker: the only project that references the other two
                                   (Program, DI wiring):
     Inbox/                        Kafka consumer, worker loops
-    Hosting/                      The startup hosted services (SyncSchemaInitializer migrates, RateLimitInitializer) and
+    Hosting/                      The startup hosted services (RateLimitInitializer) and
                                   the options validators
     RateLimiting/                 The rate limiter's decisions: SalesforceRateLimiter (token bucket, daily budget,
                                   throttle, pause), TokenBucket, SalesforceBatchGate; it reads and writes its state
@@ -1388,7 +1389,7 @@ starts its own environment once, shared by the tests in that collection:
   OAuth token, gzip, the REST client.
 - **Worker pods**: each pod is its own in-process `IHost` built with `AddSalesforceSyncWorker()`, the exact
   registrations `Program.cs` uses (options and validation, Npgsql, the Salesforce client with the rate limiter,
-  auth handler and token provider, `KafkaInboxConsumer`, `SyncSchemaInitializer`, `RateLimitInitializer`,
+  auth handler and token provider, `KafkaInboxConsumer`, `RateLimitInitializer`,
   `InboxWorkerService`). A pod has its own connection pool, Kafka consumer (all pods share the consumer group),
   token cache, rate limiter (sharing the Postgres bucket, budget and slots), HTTP stack and worker loops, so
   several pods behave like replicas. Pods read the worker's `appsettings.json` plus the fixture's settings, never
