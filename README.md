@@ -670,11 +670,22 @@ design into this one) was deleted and `InitialSchema` regenerated from the model
 earlier migrations doesn't match it**: its `__EFMigrationsHistory` names migrations that no longer exist. Start from a
 fresh database (or drop the sync's tables and `__EFMigrationsHistory`).
 
-The pods never migrate. Migrating is its own step, once per deploy: `SalesforceSync --migrate` applies the pending
-migrations (`SyncSchema.MigrateAsync`) and exits, and the pods roll out after it. The AppHost mimics the pipeline: its
-`migrate-database` resource runs that step and `salesforce-sync` waits for it to complete. `MigrateAsync` takes a
-session-level advisory lock (`0x5346_5348`), so two overlapping runs migrate one at a time. (EF 9 also locks its history
-table while it migrates.) Changing the model:
+The pods never migrate or write the rate-limit row. Deploying is two steps, before the pods roll out:
+
+```bash
+# 1. The schema: an EF migrations bundle (build it once per release)
+dotnet ef migrations bundle --project src/SalesforceSync.Data --self-contained -r linux-x64 --output efbundle
+./efbundle --connection "$CONNECTION"
+
+# 2. The rate limits: the RateLimit / SalesforceLimits settings, written to the sf_rate_limit row only if they changed
+psql "$CONNECTION" -v capacity=5 -v rate=2 -v allocation=115000 -v share=0.5 -f sql/apply-rate-limits.sql
+```
+
+A change to a rate-limit setting takes effect when step 2 runs, not on a pod restart. The AppHost mimics the pipeline:
+its `migrate-database` resource runs `SalesforceSync --migrate`, which applies the migrations (`SyncSchema.MigrateAsync`)
+and the same SQL file with the values from the same settings, and `salesforce-sync` waits for it to complete.
+`MigrateAsync` takes a session-level advisory lock (`0x5346_5348`), so two overlapping runs migrate one at a time.
+(EF 9 also locks its history table while it migrates.) Changing the model:
 
 ```bash
 dotnet tool restore

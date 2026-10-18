@@ -17,6 +17,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The deploy's SQL for the rate limits: also run by the migrate step -->
+    <EmbeddedResource Include="..\..\sql\apply-rate-limits.sql" LogicalName="apply-rate-limits.sql" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="SalesforceSync" />
     <InternalsVisibleTo Include="SalesforceSync.Benchmarks" />
     <InternalsVisibleTo Include="SalesforceSync.Tests" />

@@ -54,35 +54,15 @@ public sealed class SalesforceRateLimiter(
 
     /// <summary>
     /// Writes the configured bucket size, rate and daily budget to the shared row, the budget capped by the allocation
-    /// Salesforce last reported, when they differ from what the row holds (the deploy's migrate step runs this; nothing
-    /// is written when the limits haven't changed). The current throttle factor and stored tokens are kept.
+    /// Salesforce last reported, when they differ from what the row holds: the deploy's <c>sql/apply-rate-limits.sql</c>
+    /// (the migrate step runs it; nothing is written when the limits haven't changed). The current throttle factor and
+    /// stored tokens are kept.
     /// </summary>
     /// <returns>Whether the row was changed.</returns>
     public async Task<bool> ApplyConfigurationAsync(CancellationToken ct)
     {
-        var changed = false;
-        await UpdateAsync((row, _) =>
-        {
-            // Keeps the current throttle factor (refill_per_sec / base_refill_per_sec) under the new base rate. The
-            // budget is the configured one, lowered to the share of the allocation Salesforce last reported.
-            var factor = row.BaseRefillPerSec > 0 ? row.RefillPerSec / row.BaseRefillPerSec : 1;
-            var capacity = _opt.BurstCapacity;
-            var tokens = Math.Min(row.Tokens, capacity);
-            var refill = _opt.MaxRequestsPerSecond * factor;
-            var budget = BudgetFor(row.ApiMax);
-
-            changed = row.Capacity != capacity || row.Tokens != tokens || row.DailyBudget != budget
-                      || Math.Abs(row.RefillPerSec - refill) > 1e-9
-                      || Math.Abs(row.BaseRefillPerSec - _opt.MaxRequestsPerSecond) > 1e-9;
-            if (changed)
-            {
-                row.Capacity = capacity;
-                row.Tokens = tokens;
-                row.RefillPerSec = refill;
-                row.BaseRefillPerSec = _opt.MaxRequestsPerSecond;
-                row.DailyBudget = budget;
-            }
-        }, ct);
+        var changed = await repository.ApplyLimitsAsync(_opt.BurstCapacity, _opt.MaxRequestsPerSecond,
+            _limits.DailyApiAllocation, _opt.DailyBudgetShare, ct);
 
         log.LogInformation(
             "Salesforce limits {Outcome}: at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls " +
