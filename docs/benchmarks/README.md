@@ -5,9 +5,10 @@ Salesforce client and rate limiter real; only the Salesforce HTTP endpoint mocke
 [main README](../../README.md#benchmarks).
 
 These numbers come from the claim and outcome tuning merged in PR #13, re-measured after the move to EF Core
-(PR #12). [Latest run](#latest-run-main-at-3ff8ae1) re-measures everything on `main` at 3ff8ae1 (PR #67 to #69, the split into
-projects);
-the [run before it](#latest-run-main-at-93b4ace) measured `main` at 93b4ace (PR #67);
+(PR #12). [Latest run](#latest-run-main-at-df2c269) re-measures everything on `main` at df2c269 (PR #70, migrations once per
+deploy);
+the [run before it](#latest-run-main-at-3ff8ae1) measured `main` at 3ff8ae1 (PR #67 to #69, the split into projects);
+the [run before that](#latest-run-main-at-93b4ace) measured `main` at 93b4ace (PR #67);
 the [run before that](#latest-run-main-at-3f68779) measured `main` at 3f68779 (PR #66);
 the [run before that](#latest-run-main-at-b5950c1) measured `main` at b5950c1 (PR #47 to #65);
 the [run before that](#latest-run-main-at-2d20c16) measured `main` at 2d20c16 (PR #35 to #46);
@@ -353,6 +354,65 @@ A claim of 75 entities locks them (LockHeads) in about 2 ms (median over the 108
 median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest single run 21.5 ms, under load. Leasing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
+
+## Latest run: main at df2c269
+
+All 36 benchmarks (`--run full`) on `main` at df2c269, after PR #70 moved the schema migration out of the pods (the
+`SyncSchemaInitializer` hosted service is gone; `SalesforceSync --migrate` runs once per deploy), on 2026-10-18. It
+measures the same workload and environment as the [3ff8ae1 run](#latest-run-main-at-3ff8ae1), so the two compare. The
+database was recreated. The run took 7 minutes. The change only affects process startup, which the benchmarks don't
+time (they migrate once themselves, before measuring), so no difference is expected.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures: 0 overlapping claims, 0 entities not `done`, 0 stale
+rows, 0 wrong values, 0 write-history regressions, 0 failed records.
+
+Preloaded drain, 5,000 events. The means are BenchmarkDotNet's; the work counts are the medians of the iterations
+without a Describe, at 0 ms latency:
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 205.8 ms | 1,219.0 ms | 33.27 MB | 30 | 15 | 6.28 | 1,028 | 38 |
+| 1 | 1 | 1,000 | 2,113 | 732.0 ms | 3,856.0 ms | 101.95 MB | 78 | 33 | 1.90 | 3,279 | 1166 |
+| 1 | 3 | 100 | 990 | 107.4 ms | 389.1 ms | 35.4 MB | 31 | 15 | 6.08 | 1,062 | 72 |
+| 1 | 3 | 1,000 | 2,113 | 421.9 ms | 1,125.8 ms | 107.46 MB | 83 | 36 | 1.90 | 3,282 | 1169 |
+| 4 | 1 | 100 | 990 | 108.1 ms | 316.0 ms | 36.46 MB | 32 | 15 | 5.77 | 1,118 | 128 |
+| 4 | 1 | 1,000 | 2,113 | 370.5 ms | 788.0 ms | 107.89 MB | 81 | 35 | 1.90 | 3,288 | 1175 |
+| 4 | 3 | 100 | 990 | 175.2 ms | 221.4 ms | 53.29 MB | 39 | 17 | 4.52 | 1,428 | 438 |
+| 4 | 3 | 1,000 | 2,113 | 417.6 ms | 488.4 ms | 130.89 MB | 89 | 39 | 1.84 | 3,384 | 1271 |
+| 8 | 1 | 100 | 990 | 132.3 ms | 238.9 ms | 46.92 MB | 34 | 15 | 4.88 | 1,320 | 330 |
+| 8 | 1 | 1,000 | 2,113 | 315.9 ms | 548.6 ms | 115.81 MB | 86 | 36 | 1.81 | 3,445 | 1332 |
+| 8 | 3 | 100 | 990 | 274.6 ms | 276.8 ms | 84.43 MB | 45 | 17 | 3.63 | 1,779 | 789 |
+| 8 | 3 | 1,000 | 2,113 | 480.2 ms | 527.7 ms | 161.71 MB | 100 | 43 | 1.74 | 3,581 | 1468 |
+
+Streaming (50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 2.913 s | 413.07 MB | 1,290 | 643 | 1.70 | 3,796 | 3 |
+| 4 | 3 | 4.459 s | 875.99 MB | 3,075 | 1,531 | 1.38 | 4,682 | 4 |
+| 8 | 1 | 4.267 s | 792.91 MB | 2,952 | 1,470 | 1.32 | 4,876 | 3 |
+| 8 | 3 | 4.948 s | 1040.72 MB | 3,078 | 1,530 | 1.67 | 3,881 | 9 |
+
+- **Same work as 3ff8ae1**: the entity counts (990 and 2,113 preloaded, 762 streaming) and the call counts with one
+  worker and one pod (30 and 78 API calls) are the same; streaming call counts are within 3% (1,290 against 1,325 with
+  4 x 1). Runs with more workers or pods differ by a few calls and claims between any two runs.
+- **Same speed within noise**: 1 x 1 at 100 accounts, 205.8 ms against 208.2 ms; 4 workers x 1 pod, 108.1 ms against
+  108.4 ms; streaming 4 x 1, 2.913 s against 2.976 s. The larger cases moved both ways by up to 20% (4 x 3 with 100
+  accounts: 175.2 ms against 160.0 ms; 8 x 3 with 1,000 accounts: 480.2 ms against 567.6 ms), the same spread as
+  between the earlier runs. Memory is the same (33.27 MB against 33.07 MB for 1 x 1 at 100 accounts).
+
+Micro benchmarks (match the earlier runs within noise):
+
+| Method | Mean | Allocated |
+|---|--:|--:|
+| ParseLimitHeader | 630.48 ns | 2832 B |
+| PrepareTenEntities | 18,829.47 ns | 41472 B |
+| ReadAndValidateEvent | 1,224.31 ns | 1616 B |
+| MapAccountEvent | 1,689.40 ns | 4016 B |
+| MapPayloadToSObject | 21.52 ns | 200 B |
+| MapSObjectToRecord | 273.02 ns | 1008 B |
+| DiffNumber | 127.24 ns | 32 B |
+| DiffDateTime | 244.04 ns | 192 B |
 
 ## Latest run: main at 3ff8ae1
 
