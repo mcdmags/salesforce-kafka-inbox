@@ -416,8 +416,8 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// The write requests the mock org received (the most recent ones, oldest first: upserts, and Composite requests of
-    /// upserts) that mention any of <paramref name="texts"/>: every record carries its external id.
+    /// The write requests the mock org received (the most recent ones, oldest first: upserts and deletes) that mention any of
+    /// <paramref name="texts"/>: every record carries its external id.
     /// </summary>
     public async Task<List<JsonObject>> GetWriteRequestsAsync(params string[] texts)
     {

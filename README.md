@@ -69,9 +69,9 @@ Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per 
                                                                 ▼
                               SalesforceBatchSyncService.SyncBatchAsync<TEvent, TRow>(strategy, IRepository<TRow>)
                                 claim → each entity's newest event → map
-                                → describe → normalize → 1 composite read → decide (diff + parents)
+                                → describe → normalize → 1 query per object → decide (diff + parents)
                                 → write: 1 collections upsert per level and object, parents first, and
-                                  1 collections delete (by Id) last: 1 collection → alone, 2+ → 1 composite
+                                  1 collections delete (by Id) last
                                 → per-record results → outcome per entity → record outcomes
                                                        │  inbox: IRepository<TRow> (EF Core + raw SQL, PostgresRetryStrategy)
                                                        │  in-memory token bucket + pause + Sforce-Limit-Info throttle
@@ -1014,13 +1014,6 @@ same chapters is linked where it is cited):
   ... were specified"; a request that isn't well formed `400`. A **malformed Id fails alone**, as one of the results,
   without an `id` (`MALFORMED_ID`, the guide's example). With `allOrNone=true` the answer is still `200`, the other
   records failing with `ALL_OR_NONE_OPERATION_ROLLED_BACK`.
-- [Composite](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_composite_composite.htm): the
-  sObject Collections resource can be a subrequest (API version 43.0 and later); at most 25 subrequests, of which 5
-  collections or queries; a subrequest's result is `{ body, httpHeaders, httpStatusCode, referenceId }`, a collection's
-  `200` with its per-record results even when records failed. Unrelated subrequests are **collated** by default from
-  version 49.0 ("the order of execution is not guaranteed"), unless
-  [`collateSubrequests`](https://developer.salesforce.com/docs/platform/api-rest/guide/requests-composite.html) is false; a reference id
-  holds only letters, digits and underscores (from 52.0 anything else fails the whole request, `400 JSON_PARSER_ERROR`).
 - [Delete by external id](https://developer.salesforce.com/docs/platform/api-rest/guide/resources-sobject-upsert-delete.html)
   (`DELETE /sobjects/{SObject}/{ExternalIdField}/{value}`) and
   [by Id](https://developer.salesforce.com/docs/platform/api-rest/guide/resources-sobject-retrieve-delete.html) delete
@@ -1082,7 +1075,7 @@ named by records, that relationship keeps the Account's delete waiting: retried 
 `Sync:MaxRetries`, then dead-lettered, until the other aggregate removes it.
 
 **Confirmed from the guides** (above): the call, its limits and its `200` per-Id answer in Id order, a malformed Id
-failing alone, `allOrNone=true`, a Collections delete as a Composite subrequest and its result, the Recycle Bin left
+failing alone, `allOrNone=true`, the Recycle Bin left
 out of queries, what cascades.
 
 **Unconfirmed** (not checked in a real org; the mock org does what is said here):
@@ -1295,12 +1288,12 @@ src/
     Inbox/                        InboxRow and one row type per object, IRepository (and the claim and outcome
                                   types), InboxRepository, InboxSql, SyncOptions
     Migrations/                   EF migrations (InitialSchema: the tables)
-  SalesforceSync.FakeSalesforce/  In-memory Salesforce (OAuth sessions, describe, query pages, composite, sObject
+  SalesforceSync.FakeSalesforce/  In-memory Salesforce (OAuth sessions, describe, query pages, sObject
                                   Collections upsert and delete, allOrNone, a Recycle Bin, Salesforce-like value
                                   storage, Text foreign keys checked like the org's automation on write (and, opted
                                   in, on delete), error injection, write history, Sforce-Limit-Info): FakeSalesforceStore
                                   is the org's surface and lock; FakeRecords, FakeSoql, FakeCollectionWriter,
-                                  CompositeReferences, FakeFaults and FakeCounters are its parts
+                                  FakeFaults and FakeCounters are its parts
   SalesforceSync.FakeSalesforce.Server/  The in-memory org as an HTTP service (+ /__fake inspection API); the worker
                                   never references the fake: it reaches it, like a real org, at Salesforce:InstanceUrl
   SalesforceSync.LoadGenerator/   Produces account aggregates (before and after, with bursts; children added, changed
@@ -1332,7 +1325,7 @@ The dashboard shows:
 - **kafka** (+ Kafka UI)
 - **redis** (+ Redis Insight): the Describe cache shared by the sync's pods ([The Describe cache](#the-describe-cache))
 - **fake-salesforce**: mock Salesforce org over HTTP (OAuth token, describe, query, sObject Collections upsert by
-  external id, gzip; it also answers Composite requests, which the sync no longer sends). Its Text foreign keys (`AccountId__c`,
+  external id and delete by Id, gzip). Its Text foreign keys (`AccountId__c`,
   `RelatedAccountId__c`) are stored as plain text, and a create or update whose key names an Account that doesn't
   exist is rejected (`FIELD_CUSTOM_VALIDATION_EXCEPTION` "Parent record not found"), as the org's automation would.
   Collections deletes by Id (`DELETE /composite/sobjects?ids=...`) move records
@@ -1499,8 +1492,7 @@ told apart, a 15-character Id, `allOrNone=true` rolling back (`ALL_OR_NONE_OPERA
 Ids or records failing as a whole, a deleted record left out of queries and its external id upserted again as a new
 record, an Account's delete cascading to the contacts of the standard lookup but not to those a Text key names, the
 opt-in refusal; upsert records sharing an external id all failing, a failed
-update without an `id`, an upsert with `allOrNone` true writing nothing; reference ids of other than letters,
-digits and underscores, and a Composite `allOrNone` true, refused; query pages of 2,000 followed by the client
+update without an `id`, an upsert with `allOrNone` true writing nothing; query pages of 2,000 followed by the client
 through `nextRecordsUrl`; a call without the current token answered 401 `INVALID_SESSION_ID`, and the client
 getting a new token after the session expired. The benchmarks' workload (`AggregateWorkloadTests`, the file
 compiled in from `benchmarks/`): its expected end state is what its split aggregates lead to, it removes, re-adds

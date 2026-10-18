@@ -56,7 +56,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = "only" }, new JsonObject { ["tier"] = "Gold" });
 
-        // Held, then picked up again: the lost Composite request had saved the Account and its Profile, so the retry's
+        // Held, then picked up again: the lost upserts had saved the Account and its Profile, so the retry's
         // read finds nothing to change and writes nothing
         await Eventually.ValueAsync(() => app.GetInboxRowAsync(acct),
             row => row?.ErrorCode == "UNKNOWN_OUTCOME", "the hold");

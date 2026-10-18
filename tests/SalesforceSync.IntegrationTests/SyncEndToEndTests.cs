@@ -388,7 +388,6 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         }
 
         Delta("apiCalls").Should().Be(4, "a batch is a query per object, then an upsert per object: the Account's and the Profile's");
-        Delta("compositeRequests").Should().Be(0);
         Delta("queries").Should().Be(2, "the Account and Profile__c queries");
         Delta("writeRequests").Should().Be(2, "the Account, then the Profile with the Account's key");
         Delta("upsertRequests").Should().Be(2);

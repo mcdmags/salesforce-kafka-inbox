@@ -8,7 +8,7 @@ public sealed class SalesforceLimitsOptions
 {
     public const string Section = "SalesforceLimits";
 
-    /// <summary>Salesforce stops REST calls (a composite request as a whole) after this long.</summary>
+    /// <summary>Salesforce stops REST calls after this long.</summary>
     public static readonly TimeSpan MaxApiTimeout = TimeSpan.FromMinutes(10);
 
     /// <summary>
@@ -22,7 +22,7 @@ public sealed class SalesforceLimitsOptions
 
     /// <summary>
     /// Client timeout per Salesforce call, including the wait for a rate-limit token. Salesforce stops REST calls
-    /// (a composite request as a whole) after 10 minutes, so this must not exceed that.
+    /// after 10 minutes, so this must not exceed that.
     /// </summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(90);
 }

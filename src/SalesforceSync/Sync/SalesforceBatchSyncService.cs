@@ -12,7 +12,7 @@ namespace SalesforceSync.Sync;
 /// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds each entity's newest
 /// event, and the strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
 /// <list type="number">
-/// <item>Takes a global concurrency slot and respects a shared pause (rate limits, all pods).</item>
+/// <item>Starts nothing while this process is paused (Salesforce asked for it: rate limits).</item>
 /// <item>Claims up to <see cref="SyncOptions.BatchSize"/> due entities: each one's inbox row is locked with FOR UPDATE
 /// SKIP LOCKED, leased and read, so no two workers in any pod ever process the same entity at once.</item>
 /// <item>Per entity, reads the claimed event: the newest one stored (events carry the full record, and a newer event

@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Web;
@@ -8,16 +7,15 @@ namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
 /// In-memory Salesforce org: OAuth tokens, sObject Describe, SOQL "WHERE field IN (...)" queries (in pages of 2,000),
-/// and sObject Collections upserts by external id and deletes by Id, as calls of their own or as Composite subrequests
-/// (per-record results, allOrNone false or true, references between subrequests), modelled on the REST API Developer
-/// Guide (and, for per-record codes, the SOAP API Developer Guide). Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
+/// and sObject Collections upserts by external id and deletes by Id (per-record results, allOrNone false or true),
+/// modelled on the REST API Developer Guide (and, for per-record codes, the SOAP API Developer Guide). Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
 /// values are stored the way Salesforce stores them. Every committed create/update is kept in a per-record write
 /// history (stored values), so tests can check what reached the org and in which order. Errors can be injected per
 /// record. Thread-safe (single lock), which also mimics Salesforce serializing writes to the same rows.
 /// <para>
 /// This class is the org's surface and its lock. The parts are their own classes: <see cref="FakeRecords"/> (data and
 /// write history), <see cref="FakeSoql"/> (queries), <see cref="FakeCollectionWriter"/> (upserts),
-/// <see cref="CompositeReferences"/> (references between subrequests), <see cref="FakeFaults"/> (injected failures)
+/// <see cref="FakeFaults"/> (injected failures)
 /// and <see cref="FakeCounters"/> (stats).
 /// </para>
 /// </summary>
@@ -25,10 +23,7 @@ public sealed partial class FakeSalesforceStore
 {
     public const string ExternalIdField = "ExternalId__c";
 
-    private const int MaxCompositeSubrequests = 25;
-    private const int MaxCompositeCollectionsAndQueries = 5;
-
-    /// <summary>A call's URI and headers together, at most (a Composite subrequest's URL is held to it alone).</summary>
+    /// <summary>A call's URI and headers together, at most.</summary>
     public const int MaxUriAndHeadersBytes = 16_384;
 
     private const int MaxRecordedWrites = 200;
@@ -154,8 +149,7 @@ public sealed partial class FakeSalesforceStore
     }
 
     /// <summary>
-    /// The write requests, oldest first (the last <see cref="MaxRecordedWrites"/>), as received: Composite requests
-    /// that contained writes (<c>{ "allOrNone", "compositeRequest": [...] }</c>), upserts as
+    /// The write requests, oldest first (the last <see cref="MaxRecordedWrites"/>), as received: upserts as
     /// <c>{ "method": "PATCH", "url", "body": { "allOrNone", "records" } }</c> and deletes as
     /// <c>{ "method": "DELETE", "url" }</c> (the Ids in the URL).
     /// </summary>
@@ -323,7 +317,7 @@ public sealed partial class FakeSalesforceStore
         return page;
     }
 
-    /// <summary>Whether a call or subrequest is a query or a query's next page (<c>GET .../query</c>, <c>.../query/{locator}</c>).</summary>
+    /// <summary>Whether a call is a query or a query's next page (<c>GET .../query</c>, <c>.../query/{locator}</c>).</summary>
     public static bool IsQuery(string path)
     {
         return QueryUrl().IsMatch(path);
@@ -331,76 +325,6 @@ public sealed partial class FakeSalesforceStore
 
     [GeneratedRegex(@"^(?<base>/services/data/v\d+\.\d+)/query(?:/(?<locator>[^/]+))?/?$", RegexOptions.IgnoreCase)]
     private static partial Regex QueryUrl();
-
-    // ---------- Composite ----------
-
-    /// <summary>
-    /// Composite: the subrequests run one after another and the whole request is one API call. Supported subrequests:
-    /// SOQL queries (GET .../query), sObject Collections upserts (PATCH .../composite/sobjects/{SObject}/{ExternalIdField},
-    /// as <see cref="Upsert"/>) and deletes (DELETE .../composite/sobjects?ids=, as <see cref="Delete"/>). A later subrequest can use an earlier one's result as
-    /// <c>@{referenceId.field}</c> or <c>@{referenceId[i].field}</c> (case-sensitive); a reference id may hold only
-    /// letters, digits and underscores (from API version 52.0 another fails the whole request, 400 JSON_PARSER_ERROR).
-    /// Subrequests always run in the order sent, as with collateSubrequests false: Salesforce may reorder unrelated
-    /// subrequests when it is true (the default), which the fake doesn't model. allOrNone true on the Composite request
-    /// is refused, not modelled (the sync never sends it); a collection's own allOrNone is.
-    /// (REST API Developer Guide, "Composite".)
-    /// </summary>
-    public JsonObject ExecuteComposite(JsonObject payload)
-    {
-        var subrequests = payload["compositeRequest"]?.AsArray()
-                          ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing 'compositeRequest'");
-        if (subrequests.Count > MaxCompositeSubrequests)
-        {
-            throw new FakeSalesforceException(400, "LIMIT_EXCEEDED", $"A maximum of {MaxCompositeSubrequests} subrequests is allowed");
-        }
-
-        if (subrequests.Count(r => IsQuery(r) || IsCollection(r)) > MaxCompositeCollectionsAndQueries)
-        {
-            throw new FakeSalesforceException(400, "LIMIT_EXCEEDED",
-                $"A maximum of {MaxCompositeCollectionsAndQueries} query and sObject Collections subrequests is allowed");
-        }
-
-        if (subrequests.Select(r => r?["referenceId"]?.GetValue<string>() ?? "").FirstOrDefault(id => !ReferenceId().IsMatch(id)) is { } invalid)
-        {
-            throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", $"Provided referenceId ('{invalid}') must start with a letter or " +
-                "a number, and it can contain only letters, numbers and underscores ('_').");
-        }
-
-        if (FakeCollectionWriter.IsTrue(payload["allOrNone"]))
-        {
-            throw new FakeSalesforceException(400, "NOT_SUPPORTED", "The fake does not model a Composite request with allOrNone true");
-        }
-
-        var responses = new JsonArray();
-        var results = new Dictionary<string, JsonNode?>(StringComparer.Ordinal); // referenceId -> response body
-        bool lost;
-
-        lock (_gate)
-        {
-            _faults.LoseResponse = false;
-            _counters.CompositeRequests++;
-            if (subrequests.Any(IsCollection))
-            {
-                RecordWriteRequest(payload);
-            }
-
-            foreach (var sub in subrequests)
-            {
-                var referenceId = sub!["referenceId"]!.GetValue<string>();
-                var (status, body) = ExecuteSubrequest(sub.AsObject(), results);
-                responses.Add(SubResponse(referenceId, status, body));
-                results[referenceId] = body;
-            }
-
-            lost = _faults.LoseResponse;
-        }
-
-        // Everything above is committed; only the answer goes missing
-        return lost ? throw new FakeResponseLostException() : new JsonObject { ["compositeResponse"] = responses };
-    }
-
-    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9_]*$")]
-    private static partial Regex ReferenceId();
 
     // ---------- sObject Collections upsert ----------
 
@@ -441,24 +365,19 @@ public sealed partial class FakeSalesforceStore
         {
             _faults.LoseResponse = false;
             RecordWriteRequest(new JsonObject { ["method"] = "DELETE", ["url"] = url.PathAndQuery });
-            results = DeleteLocked(ids, allOrNone);
+            _counters.DeleteRequests++;
+            results = _collections.Delete(ids, allOrNone);
             lost = _faults.LoseResponse;
         }
 
         return lost ? throw new FakeResponseLostException() : results;
     }
 
-    /// <summary>Whether a call or subrequest is a Collections delete (<c>DELETE .../composite/sobjects?ids=</c>).</summary>
+    /// <summary>Whether a call is a Collections delete (<c>DELETE .../composite/sobjects?ids=</c>).</summary>
     public static bool IsDelete(string method, string path)
     {
         return method.Equals("DELETE", StringComparison.OrdinalIgnoreCase)
                && path.TrimEnd('/').EndsWith("/composite/sobjects", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private JsonArray DeleteLocked(IReadOnlyList<string> ids, bool allOrNone)
-    {
-        _counters.DeleteRequests++;
-        return _collections.Delete(ids, allOrNone);
     }
 
     /// <summary>The Ids of a delete (<c>ids</c>, comma-separated) and its <c>allOrNone</c> (false when absent).</summary>
@@ -469,7 +388,7 @@ public sealed partial class FakeSalesforceStore
             FakeCollectionWriter.IsTrue(query["allOrNone"]));
     }
 
-    /// <summary>The SOQL of a query call or subrequest (its <c>q</c> parameter).</summary>
+    /// <summary>The SOQL of a query call (its <c>q</c> parameter).</summary>
     internal static string QueryOf(Uri url)
     {
         return HttpUtility.ParseQueryString(url.Query)["q"] ?? throw new FakeSalesforceException(400, "MALFORMED_QUERY", "Missing q");
@@ -503,57 +422,6 @@ public sealed partial class FakeSalesforceStore
         if (_recordedWrites.Count > MaxRecordedWrites)
         {
             _recordedWrites.RemoveAt(0);
-        }
-    }
-
-    private static bool IsQuery(JsonNode? sub)
-    {
-        return IsQuery(new Uri(new Uri("https://fake"), sub?["url"]?.GetValue<string>() ?? "/").AbsolutePath);
-    }
-
-    private static bool IsCollection(JsonNode? sub)
-    {
-        return (sub?["url"]?.GetValue<string>() ?? "").Contains("/composite/sobjects", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private (int Status, JsonNode? Body) ExecuteSubrequest(JsonObject sub, Dictionary<string, JsonNode?> results)
-    {
-        var method = sub["method"]!.GetValue<string>().ToUpperInvariant();
-        var url = new Uri(new Uri("https://fake"), sub["url"]!.GetValue<string>());
-        try
-        {
-            if (Encoding.UTF8.GetByteCount(url.PathAndQuery) > MaxUriAndHeadersBytes)
-            {
-                throw new FakeSalesforceException(414, "URI_TOO_LONG", $"The URI exceeds the {MaxUriAndHeadersBytes:N0}-byte limit");
-            }
-
-            if (method == "GET" && IsQuery(url.AbsolutePath))
-            {
-                return (200, Query(url));
-            }
-
-            if (method == "PATCH" && UpsertTarget(url.AbsolutePath) is (var sobject, var externalIdField))
-            {
-                var field = ExternalIdFieldOf(sobject, externalIdField);
-                var body = sub["body"] as JsonObject ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Missing body");
-                body = body.DeepClone().AsObject();
-                if (CompositeReferences.Resolve(body, results) is { } unresolved)
-                {
-                    // As the guide shows a reference without a value answered ("Composite", illegal reference ids)
-                    return (400, Errors("PROCESSING_HALTED",
-                        $"Invalid reference specified. No value for {unresolved} found in {unresolved.Split('.', '[')[0]}."));
-                }
-
-                return (200, _collections.Upsert(sobject, field, body));
-            }
-
-            return IsDelete(method, url.AbsolutePath) && DeleteIdsOf(url) is var (ids, allOrNone)
-                ? (200, DeleteLocked(ids, allOrNone))
-                : throw new FakeSalesforceException(400, "NOT_SUPPORTED", $"Fake composite does not support {method} {url.AbsolutePath}");
-        }
-        catch (FakeSalesforceException ex)
-        {
-            return (ex.Status, Errors(ex.ErrorCode, ex.Message));
         }
     }
 }

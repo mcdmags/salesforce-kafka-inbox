@@ -46,7 +46,7 @@ public static class SyncServiceCollectionExtensions
             builder.AddRedisDistributedCache("redis");
         }
 
-        // Salesforce client, rate limited through Postgres (all pods share one bucket, budget and pause).
+        // Salesforce client, rate limited in memory (each process has its own bucket and pause).
         // Handler order: rate limiter (outermost, so every attempt costs a token) -> gzip -> auth.
         var salesforce = services.AddSalesforceClient()
             .AddSalesforceRateLimiting();

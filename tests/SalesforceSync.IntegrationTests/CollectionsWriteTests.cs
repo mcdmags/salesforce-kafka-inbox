@@ -159,13 +159,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
     /// <summary>The upserts of Accounts that wrote <paramref name="acct"/> (its Profile's carry its key too).</summary>
     private async Task<List<JsonObject>> AccountWritesAsync(string acct)
     {
-        return [.. (await app.GetWriteRequestsAsync(acct)).SelectMany(Upserts).Where(w => (string?)w["url"] == AccountUpsert)];
-    }
-
-    /// <summary>The upserts of a recorded write: the subrequests of a Composite request, or the upsert itself.</summary>
-    private static List<JsonObject> Upserts(JsonObject write)
-    {
-        return write["compositeRequest"] is JsonArray subrequests ? [.. subrequests.Select(s => s!.AsObject())] : [write];
+        return [.. (await app.GetWriteRequestsAsync(acct)).Where(w => (string?)w["url"] == AccountUpsert)];
     }
 
     private static List<JsonObject> Records(JsonNode collection)

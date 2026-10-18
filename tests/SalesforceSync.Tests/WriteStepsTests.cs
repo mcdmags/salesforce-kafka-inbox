@@ -8,7 +8,7 @@ namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The pure steps of <see cref="SalesforceBatchSyncService"/>'s Salesforce step on their own: normalizing against the schema, building the
-/// read and packing writes into Composite requests. No org, no HTTP.
+/// read and the limits of a call. No org, no HTTP.
 /// </summary>
 public sealed class WriteStepsTests
 {

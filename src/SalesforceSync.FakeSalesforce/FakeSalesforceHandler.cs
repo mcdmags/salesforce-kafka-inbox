@@ -101,8 +101,6 @@ public sealed partial class FakeSalesforceHandler(FakeSalesforceStore store) : H
                         ? Json(request, HttpStatusCode.OK, store.Delete(uri))
                         : request.Method == HttpMethod.Get && FakeSalesforceStore.IsQuery(path)
                         ? Json(request, HttpStatusCode.OK, store.Query(uri))
-                        : request.Method == HttpMethod.Post && path.EndsWith("/composite", StringComparison.OrdinalIgnoreCase)
-                        ? Json(request, HttpStatusCode.OK, store.ExecuteComposite(await ReadJsonAsync(request, ct)))
                         : Json(request, HttpStatusCode.NotFound,
                         FakeJson.Errors("NOT_FOUND", $"Fake does not support {request.Method} {path}"));
                 }

@@ -16,18 +16,6 @@ internal static class FakeJson
         });
     }
 
-    /// <summary>One subrequest's entry in a Composite response.</summary>
-    public static JsonObject SubResponse(string referenceId, int status, JsonNode? body)
-    {
-        return new()
-        {
-            ["body"] = body,
-            ["httpHeaders"] = new JsonObject(),
-            ["httpStatusCode"] = status,
-            ["referenceId"] = referenceId
-        };
-    }
-
     /// <summary>
     /// The node's value if it is a JSON string, else null. TryGetValue, not GetValueKind: on a value the org stored
     /// (not parsed from JSON), .NET 8's GetValueKind serializes it to find its kind, and record lookups call this for

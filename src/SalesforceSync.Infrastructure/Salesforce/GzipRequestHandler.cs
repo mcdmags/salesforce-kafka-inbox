@@ -5,7 +5,7 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
 /// Gzips request bodies of at least <see cref="SalesforceOptions.CompressRequestsLargerThan"/> bytes
-/// (Salesforce REST accepts Content-Encoding: gzip). Composite payloads are repetitive JSON and shrink several-fold.
+/// (Salesforce REST accepts Content-Encoding: gzip). Collections payloads are repetitive JSON and shrink several-fold.
 /// Responses are decompressed by the primary handler (AutomaticDecompression).
 /// </summary>
 public sealed class GzipRequestHandler(IOptions<SalesforceOptions> options) : DelegatingHandler

@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 namespace SalesforceSync.FakeSalesforce.Server;
 
 /// <summary>
-/// What clients sent: requests that read or wrote records (Composite requests and sObject Collections upserts) per
+/// What clients sent: requests that wrote records (sObject Collections upserts and deletes) per
 /// client (User-Agent), to show which worker pods did the work,
 /// and how many Salesforce API requests arrived gzip-compressed / accepted a compressed response.
 /// </summary>

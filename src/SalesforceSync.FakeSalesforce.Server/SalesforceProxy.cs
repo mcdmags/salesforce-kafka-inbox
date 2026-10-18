@@ -14,8 +14,7 @@ public static class SalesforceProxy
     {
         var invoker = ctx.RequestServices.GetRequiredService<HttpMessageInvoker>();
         var path = ctx.Request.Path.Value ?? "";
-        if (path.EndsWith("/composite", StringComparison.OrdinalIgnoreCase)
-            || path.Contains("/composite/sobjects/", StringComparison.OrdinalIgnoreCase))
+        if (path.Contains("/composite/sobjects", StringComparison.OrdinalIgnoreCase))
         {
             ctx.RequestServices.GetRequiredService<ClientLog>().RecordDataRequest(ctx.Request.Headers.UserAgent);
         }

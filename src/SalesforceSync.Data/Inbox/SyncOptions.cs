@@ -15,17 +15,16 @@ public sealed class SyncOptions
     public int Workers { get; set; } = 4;
 
     /// <summary>
-    /// Entities per batch, 1 to <see cref="MaxEntitiesPerBatch"/>: with the default cap a batch is read with one
-    /// Composite request, which carries 5 queries of up to 100 external ids (very long ids split the read over more).
+    /// Entities per batch, 1 to <see cref="MaxEntitiesPerBatch"/>: a batch is read with one query per object (up to 100
+    /// external ids each; very long ids split the read over more) and written with one upsert per object and one delete.
     /// </summary>
     public int BatchSize { get; set; } = 75;
 
     /// <summary>
     /// The most entities one batch may hold, the ceiling of <see cref="BatchSize"/>. Not a Salesforce limit of its own:
-    /// with the row types' 100 external ids per query, 100 keeps a batch's read to one Composite request while the ids
-    /// are short (5 queries of 100 ids, where an entity can need up to 3 ids: a relationship, itself and two Accounts).
-    /// Raise it to batch more entities per claim: ids then split the read over more calls, not a failure, and the write
-    /// side would allow more (5 collections of the row types' 180 records).
+    /// with the row types' 100 external ids per query, 100 entities are read with one query per object while an entity
+    /// needs one id of an object (a relationship needs up to 3: itself and two Accounts). Raise it to batch more entities
+    /// per claim: ids then split the read over more queries, not a failure, and a write call takes the row types' 180 records.
     /// </summary>
     public int MaxEntitiesPerBatch { get; set; } = 100;
 
@@ -70,7 +69,7 @@ public sealed class SyncOptions
 }
 
 /// <summary>
-/// Fails startup on values that would make the workers silently do nothing (no slots, no loops) or exceed what
+/// Fails startup on values that would make the workers silently do nothing (no loops) or exceed what
 /// one batch can carry.
 /// </summary>
 public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>

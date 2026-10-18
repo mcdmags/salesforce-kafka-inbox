@@ -10,7 +10,7 @@ namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The mock org against what the REST API Developer Guide (and, for per-record codes, the SOAP API Developer Guide)
-/// documents, over HTTP as a client sees it: sObject Collections deletes and upserts, Composite, query pages and
+/// documents, over HTTP as a client sees it: sObject Collections deletes and upserts, query pages and
 /// OAuth sessions. The engine's own use of them is covered by <see cref="SalesforceBatchSyncServiceTests"/>.
 /// </summary>
 public sealed class FakeSalesforceTests
@@ -132,22 +132,6 @@ public sealed class FakeSalesforceTests
         ((bool)deleted.Single()!["success"]!).Should().BeTrue();
     }
 
-    [Fact]
-    public async Task A_delete_as_a_Composite_subrequest_answers_200_with_its_per_Id_results()
-    {
-        var a1 = await UpsertAccountsAsync("A1");
-
-        var sub = (await CompositeAsync(new JsonObject
-        {
-            ["method"] = "DELETE",
-            ["url"] = $"{Data}/composite/sobjects?ids={a1},001BAD&allOrNone=false",
-            ["referenceId"] = "delete"
-        }))["compositeResponse"]![0]!;
-
-        ((int)sub["httpStatusCode"]!).Should().Be(200);
-        sub["body"]!.AsArray().Select(r => (bool)r!["success"]!).Should().Equal(true, false);
-    }
-
     // ---------- sObject Collections upsert ----------
 
     [Fact]
@@ -194,36 +178,6 @@ public sealed class FakeSalesforceTests
 
         res.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         ((string?)JsonNode.Parse(await res.Content.ReadAsStringAsync())![0]!["errorCode"]).Should().Be("EXCEEDED_ID_LIMIT");
-    }
-
-    // ---------- Composite ----------
-
-    [Theory]
-    [InlineData("ref[1]")]
-    [InlineData("_ref")]
-    [InlineData("ref-1")]
-    public async Task A_reference_id_with_other_than_letters_digits_and_underscores_fails_the_whole_Composite_request(string referenceId)
-    {
-        using var res = await PostCompositeAsync(new JsonObject
-        {
-            ["compositeRequest"] = new JsonArray(new JsonObject
-            {
-                ["method"] = "GET",
-                ["url"] = $"{Data}/query?q={Uri.EscapeDataString("SELECT Id FROM Account WHERE ExternalId__c IN ('A1')")}",
-                ["referenceId"] = referenceId
-            })
-        });
-
-        res.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        ((string?)JsonNode.Parse(await res.Content.ReadAsStringAsync())![0]!["errorCode"]).Should().Be("JSON_PARSER_ERROR");
-    }
-
-    [Fact]
-    public async Task A_Composite_request_with_allOrNone_true_is_refused_rather_than_run_as_false()
-    {
-        using var res = await PostCompositeAsync(new JsonObject { ["allOrNone"] = true, ["compositeRequest"] = new JsonArray() });
-
-        res.StatusCode.Should().Be(HttpStatusCode.BadRequest, "the fake doesn't model it, and must not silently run it as false");
     }
 
     // ---------- Query ----------
@@ -324,17 +278,6 @@ public sealed class FakeSalesforceTests
     {
         using var res = await _http.DeleteAsync($"{Data}/composite/sobjects?ids={ids}&allOrNone={(allOrNone ? "true" : "false")}");
         return (res.StatusCode, JsonNode.Parse(await res.Content.ReadAsStringAsync())!.AsArray());
-    }
-
-    private async Task<JsonNode> CompositeAsync(params JsonObject[] subrequests)
-    {
-        using var res = await PostCompositeAsync(new JsonObject { ["allOrNone"] = false, ["compositeRequest"] = new JsonArray([.. subrequests]) });
-        return JsonNode.Parse(await res.Content.ReadAsStringAsync())!;
-    }
-
-    private Task<HttpResponseMessage> PostCompositeAsync(JsonObject payload)
-    {
-        return SendAsync(HttpMethod.Post, $"{Data}/composite", payload);
     }
 
     private Task<HttpResponseMessage> SendAsync(HttpMethod method, string url, JsonNode body)

@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -12,7 +11,7 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The generic Salesforce half of the engine (Describe, composite read, diff, foreign keys, collections
+/// The generic Salesforce half of the engine (Describe, read, diff, foreign keys, collections
 /// write, classification) driven by the real Account, AccountRelationship and Contact strategies and mappings (Text
 /// foreign keys), against the in-memory org.
 /// Events are written as the source sends them (camelCase payload names, full records); assertions read Salesforce names.
@@ -69,7 +68,6 @@ public sealed class SalesforceBatchSyncServiceTests
 
         var after = _org.GetStats();
         (after.ApiCalls - before.ApiCalls).Should().Be(4, "a read of the Accounts and one of the Profiles, then an upsert of each");
-        (after.CompositeRequests - before.CompositeRequests).Should().Be(0);
         (after.UpsertRequests - before.UpsertRequests).Should().Be(2, "the Accounts' and the Profiles'");
         (after.RecordsSucceeded - before.RecordsSucceeded).Should().Be(4, "two Accounts and two Profiles");
         (after.Describes - before.Describes).Should().Be(0, "Describe results are cached");
@@ -472,23 +470,10 @@ public sealed class SalesforceBatchSyncServiceTests
     public async Task The_mock_org_refuses_a_URI_over_16384_bytes_as_Salesforce_does()
     {
         var http = SalesforceStep.Http(new FakeSalesforceHandler(_org));
-        var subrequest = new JsonObject
-        {
-            ["compositeRequest"] = new JsonArray(new JsonObject
-            {
-                ["method"] = "GET",
-                ["url"] = $"/services/data/v62.0/query?q={new string('a', FakeSalesforceStore.MaxUriAndHeadersBytes)}",
-                ["referenceId"] = "q0"
-            })
-        };
-
         using var direct = await http.GetAsync($"/services/data/v62.0/query?q={new string('a', FakeSalesforceStore.MaxUriAndHeadersBytes)}");
-        using var composite = await http.PostAsync("/services/data/v62.0/composite",
-            new StringContent(subrequest.ToJsonString(), Encoding.UTF8, "application/json"));
 
         direct.StatusCode.Should().Be(HttpStatusCode.RequestUriTooLong);
-        var answer = JsonNode.Parse(await composite.Content.ReadAsStringAsync())!["compositeResponse"]![0]!;
-        ((int)answer["httpStatusCode"]!, (string?)answer["body"]![0]!["errorCode"]).Should().Be((414, "URI_TOO_LONG"));
+        ((string?)JsonNode.Parse(await direct.Content.ReadAsStringAsync())![0]!["errorCode"]).Should().Be("URI_TOO_LONG");
     }
 
     // ---------- Record types ----------
@@ -1114,17 +1099,14 @@ public sealed class SalesforceBatchSyncServiceTests
 
     /// <summary>
     /// The records of the sObject Collections upsert of <paramref name="sobject"/> by ExternalId__c in a recorded write:
-    /// the write itself, or its subrequest if it is a Composite request.
+    /// the write itself.
     /// </summary>
     private static List<JsonObject> Upserted(JsonObject write, string sobject)
     {
         var url = $"/services/data/v62.0/composite/sobjects/{sobject}/ExternalId__c";
-        var upsert = write["compositeRequest"] is JsonArray subrequests
-            ? subrequests.Select(s => s!.AsObject()).Should().ContainSingle(s => (string?)s["url"] == url).Subject
-            : write;
-        ((string?)upsert["method"], (string?)upsert["url"]).Should().Be(("PATCH", url), $"the write is an upsert of {sobject}");
-        upsert["body"]!["allOrNone"]!.GetValue<bool>().Should().BeFalse("allOrNone is sent explicitly");
-        var records = Records(upsert);
+        ((string?)write["method"], (string?)write["url"]).Should().Be(("PATCH", url), $"the write is an upsert of {sobject}");
+        write["body"]!["allOrNone"]!.GetValue<bool>().Should().BeFalse("allOrNone is sent explicitly");
+        var records = Records(write);
         records.Should().OnlyContain(r => (string?)r["attributes"]!["type"] == sobject).And.OnlyContain(r => !r.ContainsKey("id"));
         return records;
     }

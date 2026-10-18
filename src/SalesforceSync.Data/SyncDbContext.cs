@@ -9,9 +9,8 @@ namespace SalesforceSync.Data;
 
 /// <summary>
 /// The sync's tables, defined here and created by EF migrations (Data/Migrations, applied at startup by
-/// <see cref="SyncSchema"/>): one inbox table per synced object type, and the rate limiter's
-/// sf_rate_limit. The claim's statements are raw SQL (<see cref="InboxSql"/>) run through
-/// <c>Database.SqlQueryRaw</c>, since FOR UPDATE SKIP LOCKED and UPDATE ... RETURNING have no LINQ form.
+/// <see cref="SyncSchema"/>): one inbox table per synced object type. The claim's statements are raw SQL
+/// (<see cref="InboxSql"/>) run through <c>Database.SqlQueryRaw</c>, since FOR UPDATE SKIP LOCKED and UPDATE ... RETURNING have no LINQ form.
 /// <para>
 /// To sync another object: a subclass of <see cref="InboxRow"/> with its limits (<see cref="IInboxRow"/>) and its
 /// <see cref="ConfigureInbox{TRow}"/> line in <see cref="OnModelCreating"/>, with its table; then a migration

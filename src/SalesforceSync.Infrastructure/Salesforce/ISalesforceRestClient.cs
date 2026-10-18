@@ -7,8 +7,8 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// rather than on <see cref="SalesforceRestClient"/> so it can be exercised without HTTP, and another transport could
 /// replace the REST one.
 /// <para>
-/// There is no call for one record: it would cost one API call per record against the daily budget
-/// (<c>SalesforceLimits:DailyApiAllocation</c>), where a read takes up to 2,000 external ids and an upsert or a delete up
+/// There is no call for one record: it would cost one API call per record against the org's daily API
+/// allocation, where a read takes up to 2,000 external ids and an upsert or a delete up
 /// to 200 records. The limits and URL helpers (<see cref="SalesforceRestClient.MaxUrlBytes"/>,
 /// <see cref="SalesforceRestClient.Soql"/>) are static on the REST client: they are Salesforce's rules, not behaviour a
 /// substitute would change.

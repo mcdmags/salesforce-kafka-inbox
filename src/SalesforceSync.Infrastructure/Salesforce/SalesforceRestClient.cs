@@ -12,7 +12,7 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// is <c>SalesforceBatchSyncService</c>'s.
 /// <para>
 /// There is deliberately no call for one record (get, update, delete or upsert by id): each costs one API call per record,
-/// and the integration lives on a daily call budget (<c>SalesforceLimits:DailyApiAllocation</c>). A read takes up to
+/// and the org's daily API allocation is shared by every integration. A read takes up to
 /// 2,000 external ids, an upsert or a delete up to 200 records. Writing 200 records one by one would spend 200 calls
 /// where <see cref="UpsertAsync"/> spends one.
 /// </para>
@@ -63,12 +63,11 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     /// The part of <see cref="MaxUriAndHeadersBytes"/> left to the headers this client sends: Authorization (a Bearer
     /// access token, about 100 bytes opaque, a JWT-based one a few times that), Host (the instance), User-Agent,
     /// Accept-Encoding, Content-Type, Content-Length, Content-Encoding, If-Modified-Since, and their framing. They come
-    /// to well under 1 KB; 4 KB leaves room for a long token or a proxy's additions. A Composite subrequest's URL is
-    /// held to the same budget: it is sent with the outer request's headers.
+    /// to well under 1 KB; 4 KB leaves room for a long token or a proxy's additions.
     /// </summary>
     public const int HeaderAllowanceBytes = 4_096;
 
-    /// <summary>The longest URL (path and query) a call or Composite subrequest is sent with.</summary>
+    /// <summary>The longest URL (path and query) a call is sent with.</summary>
     public const int MaxUrlBytes = MaxUriAndHeadersBytes - HeaderAllowanceBytes;
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
@@ -105,7 +104,7 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     public async Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct)
     {
         // Checked before anything is sent: an over-long URL is rejected by Salesforce (414/431), but the rejected call is
-        // still counted against the budget
+        // still counted against the allocation
         var page = await GetPageAsync(EnsureFits(QueryUrl(soql)), ct);
         var rows = page.Records;
 
@@ -183,7 +182,7 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
         }
     }
 
-    /// <summary>The URL a query is sent with, as a Composite subrequest or a call of its own.</summary>
+    /// <summary>The URL a query is sent with.</summary>
     internal string QueryUrl(string soql)
     {
         return QueryUrl(DataPath, soql);
