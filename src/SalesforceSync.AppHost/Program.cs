@@ -102,7 +102,7 @@ if (!testMode)
         .WithExplicitStart()
         .WithCommand("run-benchmarks", "Run benchmarks...", async c =>
         {
-            var choice = await c.ServiceProvider.GetRequiredService<IInteractionService>().PromptInputAsync(
+            var choice = await c.Services.GetRequiredService<IInteractionService>().PromptInputAsync(
                 "Run benchmarks", "Which run? Times are for an idle machine.",
                 new InteractionInput
                 {
@@ -123,7 +123,7 @@ if (!testMode)
                 return CommandResults.Canceled();
             }
             benchmarkRun = choice.Data.Value!;
-            return await c.ServiceProvider.GetRequiredService<ResourceCommandService>()
+            return await c.Services.GetRequiredService<ResourceCommandService>()
                 .ExecuteCommandAsync(c.ResourceName, KnownResourceCommands.StartCommand, c.CancellationToken);
         }, new CommandOptions
         {
