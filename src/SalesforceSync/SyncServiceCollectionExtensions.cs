@@ -168,7 +168,7 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton<SalesforceErrors>();
         services.AddTransient<GzipRequestHandler>();
 
-        return services.AddHttpClient<SalesforceRestClient>((sp, c) =>
+        return services.AddHttpClient<ISalesforceRestClient, SalesforceRestClient>((sp, c) =>
             {
                 var o = sp.GetRequiredService<IOptions<SalesforceOptions>>().Value;
                 c.BaseAddress = new Uri(o.InstanceUrl);

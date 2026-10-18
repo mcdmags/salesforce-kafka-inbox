@@ -17,7 +17,7 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// Writing 200 records one by one would spend 200 calls where <see cref="WriteAsync"/> spends one.
 /// </para>
 /// </summary>
-public sealed class SalesforceRestClient
+public sealed class SalesforceRestClient : ISalesforceRestClient
 {
     private readonly HttpClient http;
 

@@ -32,12 +32,12 @@ namespace SalesforceSync.Sync;
 /// row a newer event overwrote meanwhile gets no outcome: its row stays pending and due.</item>
 /// </list>
 /// This class is the flow. The rules it applies are small classes without I/O (<see cref="PreparedBatch"/> and the
-/// ones in <c>Sync/Write</c>); Salesforce is reached only through <see cref="SalesforceRestClient"/> and the inbox only
+/// ones in <c>Sync/Write</c>); Salesforce is reached only through <see cref="ISalesforceRestClient"/> and the inbox only
 /// through <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
 /// </summary>
 public sealed class SalesforceBatchSyncService(
     ISalesforceBatchGate gate,
-    SalesforceRestClient salesforce,
+    ISalesforceRestClient salesforce,
     SalesforceSchemaCache schemaCache,
     SalesforceErrors errors,
     IOptions<SalesforceOptions> salesforceOptions,
