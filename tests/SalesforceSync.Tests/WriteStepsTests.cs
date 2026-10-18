@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Options;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
@@ -95,8 +94,9 @@ public sealed class WriteStepsTests
         await normalizer.NormalizeAsync([("A3", Business("A3"))], CancellationToken.None);
         _org.GetStats().Queries.Should().Be(1, "cached");
 
-        normalizer.InvalidateRecordTypes([("A1", Business("A1"))],
-            [new SyncResult("A1", SyncOutcome.TransientFailure, [new SalesforceError("acct", SalesforceErrors.InvalidRecordType, "refused")])]);
+        await normalizer.InvalidateRecordTypesAsync([("A1", Business("A1"))],
+            [new SyncResult("A1", SyncOutcome.TransientFailure, [new SalesforceError("acct", SalesforceErrors.InvalidRecordType, "refused")])],
+            CancellationToken.None);
         await normalizer.NormalizeAsync([("A4", Business("A4"))], CancellationToken.None);
 
         _org.GetStats().Queries.Should().Be(2, "read again");
@@ -247,6 +247,6 @@ public sealed class WriteStepsTests
     private Normalizer Normalizer()
     {
         var http = SalesforceStep.Http(new FakeSalesforceHandler(_org));
-        return new Normalizer(SalesforceStep.RecordTypes(http, Options.Create(new SalesforceOptions())));
+        return new Normalizer(SalesforceStep.RecordTypes(http));
     }
 }

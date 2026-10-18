@@ -1,0 +1,36 @@
+using System.Text.Json.Nodes;
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.StackExchangeRedis;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using SalesforceSync.Infrastructure.Salesforce;
+
+namespace SalesforceSync.IntegrationTests;
+
+/// <summary>The pods' record type Ids in Redis: what one pod read from the org, any other pod (a new one too) can use.</summary>
+[Collection(MultiPodCollection.Name)]
+public sealed class SharedRecordTypeCacheTests(MultiPodFixture app)
+{
+    [Fact]
+    public async Task Pods_share_their_record_types_through_Redis_so_a_new_pod_starts_warm()
+    {
+        var acct = SyncFixture.NewAccountId();
+        await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Shared ") }, new JsonObject { ["tier"] = "Gold" });
+        (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
+
+        var services = app.RunningPods[0].Services;
+        var redis = services.GetRequiredService<IDistributedCache>();
+        redis.Should().BeAssignableTo<RedisCache>("ConnectionStrings:redis is set");
+
+        // A pod that has read nothing itself: everything it needs is in Redis, so the org is not asked
+        var queriesBefore = (await app.GetStatsAsync()).GetProperty("recordTypeQueries").GetInt64();
+        var newPod = new RecordTypeCache(TimeProvider.System, services.GetRequiredService<ISalesforceRestClient>(), redis,
+            services.GetRequiredService<IOptions<SalesforceOptions>>(), NullLogger<RecordTypeCache>.Instance);
+
+        (await newPod.IdOfAsync("Account", "Business", CancellationToken.None)).Should().NotBeNull();
+        (await newPod.IdOfAsync("Profile__c", "Standard", CancellationToken.None)).Should().NotBeNull();
+
+        (await app.GetStatsAsync()).GetProperty("recordTypeQueries").GetInt64().Should().Be(queriesBefore);
+    }
+}

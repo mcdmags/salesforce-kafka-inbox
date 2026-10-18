@@ -1,4 +1,6 @@
 using System.Net.Http.Headers;
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data.Inbox;
@@ -35,15 +37,18 @@ internal static class SalesforceStep
     public static SalesforceBatchSyncService Service(HttpClient http, IOptions<SalesforceOptions> options,
         ISalesforceRateLimiter? limiter = null)
     {
-        return new(limiter ?? new NotPaused(), Client(http), RecordTypes(http, options),
+        return new(limiter ?? new NotPaused(), Client(http), RecordTypes(http),
                 new SalesforceErrors(options), Options.Create(new SyncOptions()),
                 NullLogger<SalesforceBatchSyncService>.Instance);
     }
 
-    /// <summary>A record type cache of its own, reading through <paramref name="http"/>.</summary>
-    public static RecordTypeCache RecordTypes(HttpClient http, IOptions<SalesforceOptions> options, TimeProvider? clock = null)
+    /// <summary>A record type cache reading through <paramref name="http"/>; with <paramref name="shared"/>, a pod sharing that cache with others.</summary>
+    public static RecordTypeCache RecordTypes(HttpClient http, IDistributedCache? shared = null,
+        TimeProvider? clock = null)
     {
-        return new(clock ?? TimeProvider.System, Client(http), options);
+        return new(clock ?? TimeProvider.System, Client(http), shared ?? new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())),
+            Options.Create(new SalesforceOptions { InstanceUrl = OrgUrl, BaseApiPath = Org.BaseApiPath, ApiVersion = Org.ApiVersion }),
+            NullLogger<RecordTypeCache>.Instance);
     }
 
     /// <summary>

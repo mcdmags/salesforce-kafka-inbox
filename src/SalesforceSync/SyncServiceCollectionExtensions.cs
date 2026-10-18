@@ -25,7 +25,8 @@ public static class SyncServiceCollectionExtensions
     /// <summary>
     /// The worker: options (validated at startup), the Postgres data source (<c>ConnectionStrings:inboxdb</c>), the
     /// rate-limited Salesforce client (OAuth and REST over HTTP to
-    /// <c>Salesforce:InstanceUrl</c>, a real org or the mock one), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the
+    /// <c>Salesforce:InstanceUrl</c>, a real org or the mock one) with its record type cache shared through Redis (when
+    /// <c>ConnectionStrings:redis</c> is set), the Kafka consumer (when <c>ConnectionStrings:kafka</c> is set) and the
     /// worker loops.
     /// </summary>
     public static IHostApplicationBuilder AddSalesforceSyncWorker(this IHostApplicationBuilder builder)
@@ -37,6 +38,13 @@ public static class SyncServiceCollectionExtensions
 
         // Postgres (ConnectionStrings:inboxdb, injected by Aspire, appsettings or the tests)
         builder.AddNpgsqlDataSource("inboxdb");
+
+        // Record type Ids shared by all pods (ConnectionStrings:redis, injected by Aspire); without it each process
+        // keeps its own (AddSalesforceClient falls back to an in-memory IDistributedCache)
+        if (!string.IsNullOrWhiteSpace(config.GetConnectionString("redis")))
+        {
+            builder.AddRedisDistributedCache("redis");
+        }
 
         // Salesforce client, rate limited in memory (each process has its own bucket and pause).
         // Handler order: rate limiter (outermost, so every attempt costs a token) -> gzip -> auth.
@@ -139,14 +147,17 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Salesforce REST client and what the engine's Salesforce step needs (record type Ids, error classification).
+    /// Salesforce REST client and what the engine's Salesforce step needs (record type cache, error classification). The
+    /// record type cache's shared layer is the registered <see cref="Microsoft.Extensions.Caching.Distributed.IDistributedCache"/>,
+    /// or an in-memory one (this process only) when none is.
     /// Handler order: gzip -> (auth and primary handler, added by the caller); <see cref="AddSalesforceRateLimiting"/>
     /// puts the rate limiter in front.
     /// </summary>
     public static IHttpClientBuilder AddSalesforceClient(this IServiceCollection services)
     {
         services.AddSingleton(TimeProvider.System);
-        services.AddSingleton<RecordTypeCache>(); // record type Ids, shared by all workers in the process
+        services.AddDistributedMemoryCache(); // only if no IDistributedCache (Redis) is registered
+        services.AddSingleton<RecordTypeCache>(); // record type Ids, shared by all workers in the process (and pods)
         services.AddSingleton<SalesforceErrors>();
         services.AddTransient<GzipRequestHandler>();
 

@@ -13,11 +13,12 @@ using SalesforceSync.Data.Inbox;
 using SalesforceSync.IntegrationTests.Hosting;
 using Testcontainers.Kafka;
 using Testcontainers.PostgreSql;
+using Testcontainers.Redis;
 
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// The whole sync, started once per xUnit collection: Postgres and Kafka in containers (Testcontainers), the mock
+/// The whole sync, started once per xUnit collection: Postgres and Kafka (and Redis, if asked) in containers (Testcontainers), the mock
 /// Salesforce org on Kestrel in this process, and <see cref="Pods"/> worker pods, each an in-process
 /// <see cref="Microsoft.Extensions.Hosting.IHost"/> wired by the worker's own registrations. Tests produce to Kafka
 /// and assert on the mock org and the Postgres inbox. Subclasses reshape the deployment (pods, per-pod settings, the
@@ -56,6 +57,9 @@ public class SyncFixture : IAsyncLifetime
 
     private readonly KafkaContainer _kafka = new KafkaBuilder("apache/kafka:3.9.1").Build();
 
+    /// <summary>Only with <see cref="SharedRecordTypeCache"/>.</summary>
+    private RedisContainer? _redis;
+
     private readonly List<WorkerPod> _pods = [];
     private FakeOrgHost? _org;
     private IProducer<string, string>? _producer;
@@ -74,6 +78,12 @@ public class SyncFixture : IAsyncLifetime
     }
 
     public int Pods { get; }
+
+    /// <summary>
+    /// The pods share their record type cache through Redis (a container, <c>ConnectionStrings:redis</c>), as in production;
+    /// otherwise each pod has its own in-memory one.
+    /// </summary>
+    protected bool SharedRecordTypeCache { get; init; }
 
     /// <summary>
     /// Configuration every pod gets on top of the worker's appsettings.json (like the environment variables of a
@@ -126,7 +136,8 @@ public class SyncFixture : IAsyncLifetime
         var ct = cts.Token;
 
         var org = FakeOrgHost.StartAsync(FakeOrgSettings, ct);
-        await Task.WhenAll(_postgres.StartAsync(ct), _kafka.StartAsync(ct), org);
+        _redis = SharedRecordTypeCache ? new RedisBuilder("redis:7.4-alpine").Build() : null;
+        await Task.WhenAll(_postgres.StartAsync(ct), _kafka.StartAsync(ct), org, _redis?.StartAsync(ct) ?? Task.CompletedTask);
         _org = await org;
         Salesforce = new HttpClient { BaseAddress = _org.Url };
 
@@ -153,7 +164,8 @@ public class SyncFixture : IAsyncLifetime
                 ["ConnectionStrings:kafka"] = kafka,
                 ["Salesforce:InstanceUrl"] = instanceUrl,
                 // Pods share a process here, so name them apart (the mock org counts requests per User-Agent)
-                ["Salesforce:UserAgentInstance"] = $"pod-{i}"
+                ["Salesforce:UserAgentInstance"] = $"pod-{i}",
+                ["ConnectionStrings:redis"] = _redis?.GetConnectionString()
             };
             if (!migrated)
             {
@@ -188,7 +200,8 @@ public class SyncFixture : IAsyncLifetime
             await _org.DisposeAsync();
         }
 
-        await Task.WhenAll(_kafka.DisposeAsync().AsTask(), _postgres.DisposeAsync().AsTask());
+        await Task.WhenAll(_kafka.DisposeAsync().AsTask(), _postgres.DisposeAsync().AsTask(),
+            _redis?.DisposeAsync().AsTask() ?? Task.CompletedTask);
     }
 
     /// <summary>
@@ -466,6 +479,12 @@ public class SyncFixture : IAsyncLifetime
     /// <summary>The account inbox through the worker's own repository, to play a worker by hand.</summary>
     public IRepository<AccountInboxRow> AccountInbox => new InboxRepository<AccountInboxRow>(Contexts, Options.Create(new SyncOptions()));
 
+    /// <summary>
+    /// The state of an inbox row, as an operator would read it from its columns: waiting (a due time), done (idle, no error)
+    /// or dead (idle, with the error that ended it).
+    /// </summary>
+    public const string StatusSql = "CASE WHEN next_attempt_at IS NOT NULL THEN 'pending' WHEN last_error IS NULL THEN 'done' ELSE 'dead' END";
+
     /// <summary>(version, status) of the entity's inbox row, or null if it has none (version N = meta.time BaseTime + N ms).</summary>
     public async Task<(long Version, string Status)?> GetInboxAsync(string key, string entityType = Accounts)
     {
@@ -480,7 +499,7 @@ public class SyncFixture : IAsyncLifetime
     {
         await using var conn = await Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<StoredRow>(
-            $"SELECT payload::text, status, attempt_count, last_error_code, next_attempt_at, lock_token FROM {InboxTable(entityType)} WHERE entity_id = @key",
+            $"SELECT payload::text, {StatusSql} AS status, attempt_count, last_error_code, next_attempt_at, lock_token FROM {InboxTable(entityType)} WHERE entity_id = @key",
             new { key });
         return rows.Select(r => new InboxRowState(VersionOf(r.Payload), r.Status, r.AttemptCount, r.ErrorCode, r.NextAttemptAt, r.LockToken))
             .SingleOrDefault();

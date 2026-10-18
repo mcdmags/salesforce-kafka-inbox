@@ -66,7 +66,7 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
         {
             await using var c = await app.Db.OpenConnectionAsync();
             return await c.QuerySingleAsync<long>(
-                $"SELECT count(*) FROM {SyncFixture.InboxTable()} WHERE status = 'done' AND entity_id = ANY(@ids)", new { ids });
+                $"SELECT count(*) FROM {SyncFixture.InboxTable()} WHERE {SyncFixture.StatusSql} = 'done' AND entity_id = ANY(@ids)", new { ids });
         }
     }
 }

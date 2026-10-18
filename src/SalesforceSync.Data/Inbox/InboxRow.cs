@@ -21,9 +21,6 @@ public abstract class InboxRow
     /// <summary>The event's time (its meta.time), cut to the microsecond (<see cref="ToWholeMicroseconds"/>); set by the consumer.</summary>
     public DateTimeOffset EventTime { get; set; }
 
-    /// <summary>pending | done | dead. Null on a new row: the database default ('pending') applies.</summary>
-    public string Status { get; set; } = null!;
-
     /// <summary>
     /// Times this event failed transiently (a newer event starts again at 0); it is dead-lettered at
     /// <see cref="SyncOptions.MaxRetries"/>. A claim, a release, a deferral, a hold or a lost lease spends none.

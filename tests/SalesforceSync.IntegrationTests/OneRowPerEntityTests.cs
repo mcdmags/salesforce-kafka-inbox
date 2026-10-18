@@ -30,8 +30,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var inbox = Inbox();
         var entity = SyncFixture.NewAccountId();
         await StoreAsync(inbox, entity, 1);
-        await ExecuteAsync(db, $"UPDATE {Table} SET status = @status, attempt_count = 3, last_error = 'failed', last_error_code = 'SOME_CODE'",
-            new { status });
+        await ExecuteAsync(db, $"UPDATE {Table} SET attempt_count = 3, {InState(status)}, last_error_code = 'SOME_CODE'");
         var before = await RowAsync(db, entity);
 
         await StoreAsync(inbox, entity, 2);
@@ -80,7 +79,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var inbox = Inbox();
         var entity = SyncFixture.NewAccountId();
         await StoreAsync(inbox, entity, 2);
-        await ExecuteAsync(db, $"UPDATE {Table} SET status = 'done'");
+        await ExecuteAsync(db, $"UPDATE {Table} SET next_attempt_at = NULL, last_error = NULL, last_error_code = NULL");
         var before = await RowAsync(db, entity);
 
         await StoreAsync(inbox, entity, 1);
@@ -114,7 +113,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var inbox = Inbox();
         var entity = SyncFixture.NewAccountId();
         await StoreAsync(inbox, entity, 1);
-        await ExecuteAsync(db, $"UPDATE {Table} SET status = @status, attempt_count = 3, last_error = 'failed', next_attempt_at = NULL", new { status });
+        await ExecuteAsync(db, $"UPDATE {Table} SET attempt_count = 3, {InState(status)}");
 
         await StoreAsync(inbox, entity, 1);
 
@@ -184,11 +183,17 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         return new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions { UnknownOutcomeHold = TimeSpan.FromMilliseconds(200) }));
     }
 
+    /// <summary>The columns an inbox row has in the state: waiting for its next try, or ended by its error (dead).</summary>
+    private static string InState(string status)
+    {
+        return status == "pending" ? "last_error = 'failed'" : status == "dead" ? "last_error = 'failed', next_attempt_at = NULL" : "last_error = NULL, next_attempt_at = NULL";
+    }
+
     private static async Task<Row> RowAsync(NpgsqlDataSource db, string entity)
     {
         await using var conn = await db.OpenConnectionAsync();
         var row = await conn.QuerySingleAsync<StoredRow>(
-            $"SELECT payload::text, status, attempt_count, last_error, last_error_code, event_time, last_updated FROM {Table} WHERE entity_id = @entity",
+            $"SELECT payload::text, {SyncFixture.StatusSql} AS status, attempt_count, last_error, last_error_code, event_time, last_updated FROM {Table} WHERE entity_id = @entity",
             new { entity });
         return new Row(SyncFixture.VersionOf(row.Payload), row.Status, row.AttemptCount, row.Error, row.ErrorCode, row.EventTime, row.LastUpdated);
     }

@@ -65,13 +65,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnType("jsonb")
                         .HasColumnName("payload");
 
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("text")
-                        .HasColumnName("status")
-                        .HasDefaultValueSql("'pending'");
-
                     b.HasKey("EntityId")
                         .HasName("sf_account_inbox_pkey");
 
@@ -129,13 +122,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnType("jsonb")
                         .HasColumnName("payload");
 
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("text")
-                        .HasColumnName("status")
-                        .HasDefaultValueSql("'pending'");
-
                     b.HasKey("EntityId")
                         .HasName("sf_account_relationship_inbox_pkey");
 
@@ -192,13 +178,6 @@ namespace SalesforceSync.Data.Migrations
                         .IsRequired()
                         .HasColumnType("jsonb")
                         .HasColumnName("payload");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("text")
-                        .HasColumnName("status")
-                        .HasDefaultValueSql("'pending'");
 
                     b.HasKey("EntityId")
                         .HasName("sf_contact_inbox_pkey");

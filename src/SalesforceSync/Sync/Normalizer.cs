@@ -53,9 +53,10 @@ internal sealed class Normalizer(RecordTypeCache recordTypes)
 
     /// <summary>
     /// A record type the org rejected or didn't have may just have been created, activated or assigned: the objects
-    /// are read again next time.
+    /// are read again next time, in every pod.
     /// </summary>
-    internal void InvalidateRecordTypes(IReadOnlyList<(string Key, SyncUnit Unit)> units, IEnumerable<SyncResult> results)
+    internal async Task InvalidateRecordTypesAsync(IReadOnlyList<(string Key, SyncUnit Unit)> units, IEnumerable<SyncResult> results,
+        CancellationToken ct)
     {
         var failed = results
             .SelectMany(r => r.Errors.Where(e => e.Code == SalesforceErrors.InvalidRecordType).Select(e => (r.Key, e.ReferenceId)))
@@ -65,7 +66,7 @@ internal sealed class Normalizer(RecordTypeCache recordTypes)
                      .Select(r => r.SObject)
                      .Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            recordTypes.Invalidate(sobject);
+            await recordTypes.InvalidateAsync(sobject, ct);
         }
     }
 

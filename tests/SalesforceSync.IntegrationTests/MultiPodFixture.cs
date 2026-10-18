@@ -2,7 +2,7 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// The same sync, scaled out like a Kubernetes deployment: several worker pods, each running several worker loops,
-/// all sharing one Postgres inbox, one Kafka consumer group and one Salesforce org.
+/// all sharing one Postgres inbox, one Kafka consumer group, one Redis record type cache and one Salesforce org.
 /// <para>
 /// Salesforce itself does nothing to stop an out-of-order write, so any race lands in the mock org's write
 /// history. The rate limiter is opened up and batches are kept small so workers contend for the same accounts
@@ -16,6 +16,7 @@ public sealed class MultiPodFixture : SyncFixture
 
     public MultiPodFixture() : base(PodCount)
     {
+        SharedRecordTypeCache = true;   // the pods share their record type cache through Redis, like replicas in production
         WorkerSettings["Sync:Workers"] = WorkersPerPod.ToString();
         WorkerSettings["Sync:BatchSize"] = "10";
         WorkerSettings["Sync:IdleDelay"] = "00:00:00.050";

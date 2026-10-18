@@ -248,7 +248,7 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<(string Status, long Count)>(
-            $"SELECT status, count(*) FROM {SyncFixture.InboxTable()} WHERE entity_id = ANY(@ids) AND event_time = @time GROUP BY status",
+            $"SELECT {SyncFixture.StatusSql} AS status, count(*) FROM {SyncFixture.InboxTable()} WHERE entity_id = ANY(@ids) AND event_time = @time GROUP BY 1",
             new { ids, time = SyncFixture.BaseTime.AddMilliseconds(newest).UtcDateTime });
         return rows.ToDictionary(r => r.Status, r => r.Count);
     }

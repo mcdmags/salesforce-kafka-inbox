@@ -43,7 +43,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
         await using (var conn = await app.Db.OpenConnectionAsync())
         {
             var (status, code) = await conn.QuerySingleAsync<(string, string?)>(
-                $"SELECT status, last_error_code FROM {SyncFixture.InboxTable()} WHERE entity_id = @acct", new { acct });
+                $"SELECT {SyncFixture.StatusSql}, last_error_code FROM {SyncFixture.InboxTable()} WHERE entity_id = @acct", new { acct });
             status.Should().Be("pending", "the entity is not synced while one of its records is missing");
             code.Should().BeOneOf("UNABLE_TO_LOCK_ROW", null);
         }

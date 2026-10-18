@@ -69,7 +69,7 @@ public sealed class SchemaTests(SyncFixture app)
 
         var account = await Columns(SyncFixture.InboxTable());
         account.Select(c => c.Split(' ')[0]).Should().Equal(
-            "entity_id", "payload", "event_time", "status", "attempt_count", "last_error", "last_error_code", "last_updated",
+            "entity_id", "payload", "event_time", "attempt_count", "last_error", "last_error_code", "last_updated",
             "next_attempt_at", "lock_token");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await Columns(SyncFixture.InboxTable(SyncFixture.Contacts))).Should().Equal(account);

@@ -109,18 +109,38 @@ no LINQ form. The rate limiter's `RateLimitSql` only locks its row (`FOR UPDATE`
 
 The only metadata of the org the sync reads is its record types' Ids (Salesforce takes `RecordTypeId` as an Id, which
 differs between orgs). `RecordTypeCache` reads them with one SOQL query per object that has a record type
-(`SELECT Id, DeveloperName, IsActive FROM RecordType WHERE SobjectType IN ('Account')`), keeps the active ones by developer
-name in the process for `Salesforce:RecordTypeRefreshInterval` (15 min), and shares one in-flight read per object between
-the worker loops (a `SemaphoreSlim`). When a developer name is missing, or Salesforce rejects a `RecordTypeId`
-(`INVALID_RECORD_TYPE`), the object's entry is dropped and read again by the next batch. Two pods, or two objects, read
-independently: that costs one call per object per pod per interval, never correctness. Nothing is shared between pods
-and nothing needs Redis.
+(`SELECT Id, DeveloperName, IsActive FROM RecordType WHERE SobjectType IN ('Account')`) and keeps the active ones by
+developer name, in two layers:
+
+| Layer | What it holds | Shared by |
+|---|---|---|
+| In process | The snapshot every worker loop reads without I/O; one read in flight per object (a `SemaphoreSlim`) | The pod's worker loops |
+| `IDistributedCache` (Redis) | The same snapshot as JSON: the Ids by developer name and when they were read | Every pod |
+
+A pod whose own snapshot is missing or older than `Salesforce:RecordTypeRefreshInterval` (15 min) first looks in Redis. An
+entry read within the interval (by any pod) is used as it is, without calling Salesforce, so the org is asked about once
+per interval in total rather than once per pod, and a new pod starts warm. Otherwise the pod queries the org and writes
+the result back.
+
+- **Key**: `salesforce-sync:recordtypes:{org host}:{API version}:{object, lower case}`, e.g.
+  `salesforce-sync:recordtypes:acme.my.salesforce.com:v62.0:account`. Different orgs and API versions never share one.
+- **Expiry**: 1 day (absolute); an entry older than the refresh interval is never trusted, only replaced.
+- **Invalidation**: when a developer name is missing, or Salesforce rejects a `RecordTypeId` (`INVALID_RECORD_TYPE`), the
+  object's entry is invalidated in the pod **and removed from Redis**, so every pod reads it again.
+- **Failures**: the shared layer only saves calls. If Redis is unreachable, slower than 2 seconds, or holds an entry
+  that can't be read, the pod logs a warning (at most once a minute) and reads the org as if the entry were missing.
+  Syncing never waits for or fails because of Redis.
+- **Configuration**: `ConnectionStrings:redis` (Aspire injects it; elsewhere set `ConnectionStrings__redis`, e.g.
+  `redis:6379`). Without it the shared layer is an in-memory cache of the process (`AddDistributedMemoryCache`), so
+  tests, benchmarks and single-process runs need no Redis.
+
+Two pods that miss at the same moment may both query once; that costs a call, never correctness.
 
 ### Why the sync does not call Describe
 
-The sync used to read each object's Describe (cached per process, shared through Redis, revalidated with
+The sync used to read each object's Describe (cached per process and shared through Redis, revalidated with
 `If-Modified-Since`). Caching Describe is what Salesforce recommends when metadata is needed, but the sync can do without
-it, and the cache, the Redis layer and the rules built on it were a lot of code for little: Salesforce checks every
+it, and the schema types and the rules built on them were a lot of code for little: Salesforce checks every
 write itself, so the sync now sends what the mapping says and reads Salesforce's answer.
 
 | | With Describe | Without |
@@ -131,7 +151,7 @@ write itself, so the sync now sends what the mapping says and reads Salesforce's
 | Number scale, checkbox, id case, multi-select order | Normalized to what Salesforce stores | Compared by the .NET value: a value Salesforce stores differently is written again until the mapping sends it as stored |
 | Record type Ids | From the cached Describe | One `RecordType` query per object per interval |
 | Calls | One Describe (or 304) per object per interval | One `RecordType` query per object that has one, per interval |
-| Moving parts | Cache, shared Redis layer, schema types | A small cache of Ids |
+| Moving parts | Cache of the whole schema (in process and Redis), schema types, validation rules | The same two-layer cache, of Ids only |
 
 ## Event format
 
@@ -285,13 +305,12 @@ it; no table is shared by the types. The tables the migrations create:
 CREATE TABLE sf_account_inbox (                 -- and sf_account_relationship_inbox, sf_contact_inbox, ...
   entity_id       text        PRIMARY KEY,       -- the entity's id, read from the typed event by the consumer; one row per entity
   payload         jsonb       NOT NULL,          -- the entity's event, split from the Kafka message; never read by SQL
-  status          text        NOT NULL DEFAULT 'pending',  -- pending | done | dead
   attempt_count   int         NOT NULL DEFAULT 0,          -- times this event failed (a newer event starts at 0)
   last_error      text,
   last_error_code text,
   last_updated    timestamptz NOT NULL DEFAULT now(),
   event_time      timestamptz NOT NULL,                    -- the event's meta.time, read by the consumer
-  next_attempt_at timestamptz,            -- null: nothing to do (not pending); else claimable from then on (backoff and lease included)
+  next_attempt_at timestamptz,            -- null: idle (done, or dead with last_error); else claimable from then on (backoff and lease included)
   lock_token      uuid                    -- which claim holds the lease (until next_attempt_at)
 );
 CREATE INDEX sf_account_inbox_ready ON sf_account_inbox (next_attempt_at) WHERE next_attempt_at IS NOT NULL;
@@ -302,9 +321,9 @@ the default 20%: every event, every claim and every outcome updates them.
 
 **One row per entity.** `entity_id` is the primary key, with no separate row id: an inbox row is an entity's newest event and what became of it, not
 one event. Every event is the full record, so keeping only the newest loses nothing the sync needs (Kafka, within its
-retention, is the history). A newer event overwrites the row, whatever its status, as a new event: pending, no
+retention, is the history). A newer event overwrites the row, whatever became of the old one, as a new event: due, no
 attempts, no error. An older one changes nothing. One as new (a Kafka redelivery) changes nothing either if the row
-is `done`: that time is in Salesforce already, so there is nothing to claim or write. Otherwise (the event pending,
+is done (idle, `next_attempt_at` and `last_error` null): that time is in Salesforce already, so there is nothing to claim or write. Otherwise (the event pending,
 being written, retried or dead) it overwrites the row like a newer one. A rule on the payload instead would wrongly
 drop the last event of A → B → A; by time, the last A is newer than B and is written.
 
@@ -319,7 +338,7 @@ consumer, which two events count as equally new (the store compares their times)
 event, never by how a time is rounded on its way in.
 
 **Store** (`InboxRepository.StoreSql`, one statement): insert the event into the entity's row (`ON CONFLICT (entity_id) DO
-UPDATE ... WHERE event_time < excluded.event_time OR (event_time = excluded.event_time AND status <> 'done')`),
+UPDATE ... WHERE event_time < excluded.event_time OR (event_time = excluded.event_time AND (next_attempt_at IS NOT NULL OR last_error IS NOT NULL))`),
 keeping any lease on it. A new entity, or an idle one (`next_attempt_at` null), becomes due at once, and one that
 is already due, backing off, deferred, held or leased keeps its time (a leased row's is the lease's end). The events
 of an entity that arrive before it is claimed overwrite its row one after the other, and only the last is written.
@@ -368,10 +387,10 @@ Postgres's row lock orders them (see below).
 ```sql
 -- Dead letters of one type, by cause
 SELECT entity_id, payload -> 'meta' ->> 'time' AS time, last_error_code, last_error
-FROM sf_account_inbox WHERE status = 'dead' ORDER BY id DESC;
+FROM sf_account_inbox WHERE next_attempt_at IS NULL AND last_error IS NOT NULL ORDER BY last_updated DESC;
 
 -- What an inbox holds for one entity: its newest event
-SELECT id, status, attempt_count, last_error_code, payload
+SELECT entity_id, next_attempt_at, attempt_count, last_error_code, payload
 FROM sf_account_inbox WHERE entity_id = 'ACC-000001';
 
 -- Its state: due when, leased by whom
@@ -593,12 +612,12 @@ permanent, dead-lettered). For a real Lookup field, Salesforce's own `INVALID_CR
 To re-queue dead letters once the cause is fixed (e.g. the missing Account now exists):
 
 ```sql
-UPDATE sf_account_relationship_inbox SET status = 'pending', attempt_count = 0, next_attempt_at = now()
-WHERE status = 'dead' AND last_error_code = 'DEPENDENCY_NOT_SYNCED';
+UPDATE sf_account_relationship_inbox SET attempt_count = 0, next_attempt_at = now()
+WHERE next_attempt_at IS NULL AND last_error IS NOT NULL AND last_error_code = 'DEPENDENCY_NOT_SYNCED';
 ```
 
 (`sf_account_inbox` and `sf_contact_inbox` the same way. Setting `next_attempt_at` is what makes the rows due again;
-a row is claimed only while it has one, so a row changed by hand is pending exactly when it has a `next_attempt_at`.)
+a row is claimed only while it has one, so a row changed by hand is waiting exactly when it has a `next_attempt_at`; without one it is done, or dead when it has a `last_error`.)
 
 A newer event of a dead-lettered entity needs no re-queue: it overwrites the dead row, which is pending again (and the dead
 letter's error is gone with the old event).
@@ -1290,6 +1309,7 @@ The dashboard shows:
 
 - **postgres / inboxdb / benchdb** (+ pgAdmin)
 - **kafka** (+ Kafka UI)
+- **redis** (+ Redis Insight): the record type cache shared by the sync's pods ([The record type cache](#the-record-type-cache))
 - **fake-salesforce**: mock Salesforce org over HTTP (OAuth token, query, sObject Collections upsert by
   external id and delete by Id, gzip). Its Text foreign keys (`AccountId__c`,
   `RelatedAccountId__c`) are stored as plain text, and a create or update whose key names an Account that doesn't
@@ -1313,8 +1333,8 @@ To sync to a Salesforce sandbox instead of the mock org, see [Run against the sa
 ## Tests
 
 Requires the .NET 10 SDK; the integration tests also need **Docker** (Docker Desktop, OrbStack or Colima), nothing
-else: no Aspire, no local Postgres or Kafka, no ports to free up. Images are pulled on first run (`postgres:17`,
-`apache/kafka:3.9.1`).
+else: no Aspire, no local Postgres, Kafka or Redis, no ports to free up. Images are pulled on first run (`postgres:17`,
+`apache/kafka:3.9.1`, `redis:7.4-alpine`).
 
 ```bash
 dotnet test                                      # everything
@@ -1329,7 +1349,7 @@ are warnings, so `dotnet build -warnaserror` fails on them. Undocumented public 
 Libraries: **xUnit** (2.x), **FluentAssertions** (pinned to 7.x, `[7.2.2]`: version 8 needs a commercial license),
 **AutoFixture** (+ `AutoFixture.Xunit2` for `[AutoData]`) for values that only need to exist or be unique (keys,
 names, numbers that are written and read back; documented examples stay
-literal), and **Testcontainers** (`Testcontainers.PostgreSql`, `Testcontainers.Kafka`) for the integration tests.
+literal), and **Testcontainers** (`Testcontainers.PostgreSql`, `Testcontainers.Kafka`, `Testcontainers.Redis`) for the integration tests.
 
 ### Integration tests
 
@@ -1338,7 +1358,9 @@ Each xUnit collection fixture (`SyncFixture`, `MultiPodFixture`, `FewRetriesFixt
 starts its own environment once, shared by the tests in that collection:
 
 - **Postgres** (`postgres:17`) and **Kafka** (KRaft) in containers, removed when the collection finishes. The
-  topic is created up front with 6 partitions, like production.
+  topic is created up front with 6 partitions, like production. `MultiPodFixture` also starts **Redis**
+  (`redis:7.4-alpine`), so its pods share their record type cache like replicas in production; the other fixtures'
+  pods use the in-memory fallback.
 - **The mock Salesforce org**: the `SalesforceSync.FakeSalesforce.Server` app itself (`FakeSalesforceServer.Build`,
   the same code its `Program.cs` runs) on Kestrel at a random loopback port, so the worker goes through real HTTP:
   OAuth token, gzip, the REST client.
@@ -1356,7 +1378,7 @@ org (`FakeSalesforce:Latency`, `LongRunningThreshold`, `ConcurrentLongRunningLim
 with `Eventually`; the only fixed delays check that nothing more happens. Tests
 publish account aggregates to Kafka (`SyncFixture.PublishAggregateAsync`; `PublishAsync`, `PublishRelationshipAsync`
 and `PublishContactAsync` publish an aggregate whose only change is that one entity) and assert on the records in
-the mock org and the inbox rows' status. `LeaseTests` play a worker by hand
+the mock org and the inbox rows' state (waiting, done or dead, read from their columns). `LeaseTests` play a worker by hand
 with the worker's own SQL, so a lease lasts exactly as long as the test wants.
 
 Covered: create Account + linked Profile, a full record in which one field changed (only that field is sent), a
@@ -1380,7 +1402,8 @@ relationship event is dead-lettered alone. Contacts (`ContactTests`): upserted w
 has found the Account, an unchanged contact not written and a changed one sent with only what differs; a contact that arrives
 before its Account waits (`DEPENDENCY_NOT_SYNCED`, found by the read) and syncs once it exists; a contact without `lastName` or its
 Account refused by Salesforce and dead-lettered alone; a lost upsert answer held, then ending at the newest event. Every record
-ends with its class's `RecordTypeId`. Writes are checked with the mock's per-record write history
+ends with its class's `RecordTypeId`. Pods share their
+record type Ids through Redis, so a pod that has read none finds them there (`SharedRecordTypeCacheTests`). Writes are checked with the mock's per-record write history
 (`/__fake/history/{sobject}/{externalId}`) and with the requests it received (`/__fake/requests`).
 
 The write itself (`CollectionsWriteTests`): a new Account and Profile as two upserts, the Account's first,
@@ -1889,7 +1912,10 @@ end `done`. A `dead` row's `last_error` says what Salesforce rejected. Delete th
 afterwards: `ACC-…`, `PRF-…`, `REL-…` and `CON-…`.
 
 To run the worker without Aspire (a server or Kubernetes), give it the same settings as environment variables
-(`Salesforce__InstanceUrl`, `Salesforce__ClientId`, `Salesforce__ClientSecret`), plus `ConnectionStrings__inboxdb` and `ConnectionStrings__kafka`. The replicas share nothing but Postgres.
+(`Salesforce__InstanceUrl`, `Salesforce__ClientId`, `Salesforce__ClientSecret`), plus `ConnectionStrings__inboxdb` and `ConnectionStrings__kafka`, and
+`ConnectionStrings__redis` so the replicas share their record type Ids (optional: without it each process reads them on
+its own; see [The record type cache](#the-record-type-cache)). With Aspire, Redis needs no setup: the AppHost starts it and
+passes the connection string.
 
 ### 6. Tune and check
 

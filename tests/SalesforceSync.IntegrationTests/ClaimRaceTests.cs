@@ -208,7 +208,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         public async Task<(DateTimeOffset EventTime, string Status, int AttemptCount, string? Error)> RowAsync()
         {
             var (time, status, attempts, error) = await observer.QuerySingleAsync<(DateTime, string, int, string?)>(
-                $"SELECT event_time, status, attempt_count, last_error FROM {Table} WHERE entity_id = @Entity", new { Entity });
+                $"SELECT event_time, {SyncFixture.StatusSql}, attempt_count, last_error FROM {Table} WHERE entity_id = @Entity", new { Entity });
             return (new DateTimeOffset(time), status, attempts, error);
         }
 

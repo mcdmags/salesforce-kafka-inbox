@@ -89,7 +89,6 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         entity.Property(r => r.Payload).HasColumnType("jsonb");
         // No default: every insert sets it from the event (InboxRepository.StoreSql)
         entity.Property(r => r.EventTime).IsRequired();
-        entity.Property(r => r.Status).HasDefaultValueSql("'pending'");
         entity.Property(r => r.AttemptCount).HasDefaultValue(0);
         entity.Property(r => r.LastUpdated).HasDefaultValueSql("now()");
         // The claim (InboxRepository.ClaimSql): the due rows, the longest-waiting first. Idle rows (null) are not in the index.

@@ -13,7 +13,7 @@ namespace SalesforceSync.Data.Inbox;
 /// An inbox has one row per entity (entity_id is unique) that holds the entity's newest event, a newer event overwriting it
 /// (<see cref="StoreSql"/>), and the entity's sync state: when it is due (next_attempt_at), the lease of the worker
 /// processing it (lock_token; the lease ends at next_attempt_at, after which the row is simply due again) and what
-/// became of its event (status). No statement reads inside the payload: an event's entity is its entity_id column, its
+/// became of its event (attempt_count, last_error; an idle row, next_attempt_at null, is done without a last_error, else dead). No statement reads inside the payload: an event's entity is its entity_id column, its
 /// time its event_time column (both set by the consumer). An entity is claimed by locking and leasing its row, so two
 /// workers can never hold one entity: they would lock the same row.
 /// </para>
@@ -61,10 +61,11 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         INSERT INTO {inbox} AS i (entity_id, event_time, payload, next_attempt_at)
         VALUES (@entityId, @eventTime, @payload::jsonb, now())
         ON CONFLICT (entity_id) DO UPDATE
-        SET payload = excluded.payload, event_time = excluded.event_time, status = 'pending', attempt_count = 0,
+        SET payload = excluded.payload, event_time = excluded.event_time, attempt_count = 0,
             last_error = NULL, last_error_code = NULL, last_updated = now(),
             next_attempt_at = coalesce(i.next_attempt_at, excluded.next_attempt_at)
-        WHERE i.event_time < excluded.event_time OR (i.event_time = excluded.event_time AND i.status <> 'done')
+        WHERE i.event_time < excluded.event_time
+           OR (i.event_time = excluded.event_time AND (i.next_attempt_at IS NOT NULL OR i.last_error IS NOT NULL))
         """;
 
     /// <summary>
@@ -118,7 +119,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// </summary>
     public const string DoneSql = $$"""
         UPDATE {inbox} i
-        SET status = 'done', last_updated = now(), last_error = NULL, last_error_code = NULL,
+        SET last_updated = now(), last_error = NULL, last_error_code = NULL,
             next_attempt_at = NULL, lock_token = NULL
         WHERE {{StillClaimedSql}}
         """;
@@ -136,7 +137,6 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         SET last_updated = now(), attempt_count = i.attempt_count + 1,
             last_error = (SELECT @errors::jsonb) -> i.entity_id ->> 0,
             last_error_code = (SELECT @errors::jsonb) -> i.entity_id ->> 1,
-            status = CASE WHEN i.attempt_count + 1 >= @maxRetries THEN 'dead' ELSE 'pending' END,
             next_attempt_at = CASE WHEN i.attempt_count + 1 < @maxRetries
                                    THEN now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) END,
             lock_token = NULL

@@ -206,7 +206,7 @@ public abstract class DrainBenchmarkBase
     {
         await using var db = await _contexts.CreateDbContextAsync(ct);
         return await db.Database.QuerySingleAsync<bool>(
-            "SELECT " + string.Join(" OR ", InboxTables.Select(t => $"EXISTS (SELECT 1 FROM {t} WHERE status = 'pending')")), ct);
+            "SELECT " + string.Join(" OR ", InboxTables.Select(t => $"EXISTS (SELECT 1 FROM {t} WHERE next_attempt_at IS NOT NULL)")), ct);
     }
 
     // ---------- Setup ----------
@@ -347,9 +347,9 @@ public abstract class DrainBenchmarkBase
             return await db.Database.QuerySingleAsync<long>(sql, default);
         }
         // One query over both inbox tables, one row per entity
-        var inbox = string.Join(" UNION ALL ", InboxTables.Select(t => $"SELECT entity_id, event_time, status, attempt_count FROM {t}"));
+        var inbox = string.Join(" UNION ALL ", InboxTables.Select(t => $"SELECT entity_id, event_time, next_attempt_at, attempt_count FROM {t}"));
         var rows = await Count($"SELECT count(*) FROM ({inbox}) i");
-        var notDone = await Count($"SELECT count(*) FROM ({inbox}) i WHERE status <> 'done'");
+        var notDone = await Count($"SELECT count(*) FROM ({inbox}) i WHERE next_attempt_at IS NOT NULL");
         // Every entity's row holds its newest event (the entity ids of the types never collide: ACC-, REL- and CON-)
         var stale = (await db.Database.QueryAsync<StoredEvent>($"SELECT entity_id AS EntityId, event_time AS EventTime FROM ({inbox}) i", default))
             .Count(r => _newest.GetValueOrDefault(r.EntityId) != r.EventTime);

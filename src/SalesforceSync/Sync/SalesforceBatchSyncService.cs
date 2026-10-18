@@ -220,7 +220,7 @@ public sealed class SalesforceBatchSyncService(
             results.AddRange(written);
         }
 
-        _normalizer.InvalidateRecordTypes(units, results);
+        await _normalizer.InvalidateRecordTypesAsync(units, results, ct);
         return results;
     }
 
