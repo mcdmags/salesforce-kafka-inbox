@@ -1272,8 +1272,7 @@ src/
   SalesforceSync/                 The entry project, the worker: the only project that references the other two
                                   (Program, DI wiring):
     Inbox/                        Kafka consumer, worker loops
-    Hosting/                      The startup hosted services (RateLimitInitializer) and
-                                  the options validators
+    Hosting/                      The options validators
     RateLimiting/                 The rate limiter's decisions: SalesforceRateLimiter (token bucket, daily budget,
                                   throttle, pause), TokenBucket, SalesforceBatchGate; it reads and writes its state
                                   through Data's RateLimitRepository and serves Infrastructure's ports
@@ -1389,7 +1388,7 @@ starts its own environment once, shared by the tests in that collection:
   OAuth token, gzip, the REST client.
 - **Worker pods**: each pod is its own in-process `IHost` built with `AddSalesforceSyncWorker()`, the exact
   registrations `Program.cs` uses (options and validation, Npgsql, the Salesforce client with the rate limiter,
-  auth handler and token provider, `KafkaInboxConsumer`, `RateLimitInitializer`,
+  auth handler and token provider, `KafkaInboxConsumer`,
   `InboxWorkerService`). A pod has its own connection pool, Kafka consumer (all pods share the consumer group),
   token cache, rate limiter (sharing the Postgres bucket, budget and slots), HTTP stack and worker loops, so
   several pods behave like replicas. Pods read the worker's `appsettings.json` plus the fixture's settings, never

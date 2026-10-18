@@ -53,29 +53,43 @@ public sealed class SalesforceRateLimiter(
     }
 
     /// <summary>
-    /// Writes the configured bucket size, rate and daily budget to the shared row (every process applies the same
-    /// configuration at startup), the budget capped by the allocation Salesforce last reported. The current throttle
-    /// factor and stored tokens are kept.
+    /// Writes the configured bucket size, rate and daily budget to the shared row, the budget capped by the allocation
+    /// Salesforce last reported, when they differ from what the row holds (the deploy's migrate step runs this; nothing
+    /// is written when the limits haven't changed). The current throttle factor and stored tokens are kept.
     /// </summary>
-    public async Task ApplyConfigurationAsync(CancellationToken ct)
+    /// <returns>Whether the row was changed.</returns>
+    public async Task<bool> ApplyConfigurationAsync(CancellationToken ct)
     {
+        var changed = false;
         await UpdateAsync((row, _) =>
         {
             // Keeps the current throttle factor (refill_per_sec / base_refill_per_sec) under the new base rate. The
             // budget is the configured one, lowered to the share of the allocation Salesforce last reported.
             var factor = row.BaseRefillPerSec > 0 ? row.RefillPerSec / row.BaseRefillPerSec : 1;
-            row.Capacity = _opt.BurstCapacity;
-            row.Tokens = Math.Min(row.Tokens, row.Capacity);
-            row.RefillPerSec = _opt.MaxRequestsPerSecond * factor;
-            row.BaseRefillPerSec = _opt.MaxRequestsPerSecond;
-            row.DailyBudget = BudgetFor(row.ApiMax);
+            var capacity = _opt.BurstCapacity;
+            var tokens = Math.Min(row.Tokens, capacity);
+            var refill = _opt.MaxRequestsPerSecond * factor;
+            var budget = BudgetFor(row.ApiMax);
+
+            changed = row.Capacity != capacity || row.Tokens != tokens || row.DailyBudget != budget
+                      || Math.Abs(row.RefillPerSec - refill) > 1e-9
+                      || Math.Abs(row.BaseRefillPerSec - _opt.MaxRequestsPerSecond) > 1e-9;
+            if (changed)
+            {
+                row.Capacity = capacity;
+                row.Tokens = tokens;
+                row.RefillPerSec = refill;
+                row.BaseRefillPerSec = _opt.MaxRequestsPerSecond;
+                row.DailyBudget = budget;
+            }
         }, ct);
 
         log.LogInformation(
-            "Salesforce limits: at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls " +
+            "Salesforce limits {Outcome}: at most {Allocation} calls/24h for the org (lower if Salesforce reports less), budget {Budget} calls " +
             "per {Window} for this integration ({Share:P0}), {Rate} calls/s, burst {Burst}, max {Concurrent} concurrent long-running requests",
-            _limits.DailyApiAllocation, DailyBudget, _opt.BudgetWindow, _opt.DailyBudgetShare,
+            changed ? "updated" : "unchanged", _limits.DailyApiAllocation, DailyBudget, _opt.BudgetWindow, _opt.DailyBudgetShare,
             _opt.MaxRequestsPerSecond, _opt.BurstCapacity, _limits.ConcurrentLongRunningLimit);
+        return changed;
     }
 
     /// <summary>

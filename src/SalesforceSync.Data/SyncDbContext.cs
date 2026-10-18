@@ -62,7 +62,7 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         modelBuilder.Entity<ContactInboxRow>(entity => ConfigureInbox(entity, "sf_contact_inbox"));
 
         // The shared token bucket and daily budget guard: one row, created here. Bucket size, refill rate and budget
-        // are set from configuration at worker startup (RateLimitInitializer).
+        // are set from configuration by the deploy's migrate step.
         modelBuilder.Entity<RateLimitState>(entity =>
         {
             entity.ToTable("sf_rate_limit");

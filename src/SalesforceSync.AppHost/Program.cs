@@ -55,9 +55,13 @@ sync.WithEnvironment("Salesforce__ClientId", realOrg["ClientId"] ?? "fake-client
         builder.AddParameter("salesforce-client-secret", realOrg["ClientSecret"] ?? "fake-secret", secret: true));
 if (useRealOrg)
 {
-    sync.WithEnvironment("Salesforce__InstanceUrl", realOrg["InstanceUrl"])
-        .WithEnvironment("SalesforceLimits__DailyApiAllocation",
+    // The limits go to the migrate step too: it writes them to the shared rate-limit row
+    foreach (var project in new[] { sync, migrate })
+    {
+        project.WithEnvironment("SalesforceLimits__DailyApiAllocation",
             builder.Configuration["SalesforceLimits:DailyApiAllocation"] ?? DefaultDailyApiAllocation);
+    }
+    sync.WithEnvironment("Salesforce__InstanceUrl", realOrg["InstanceUrl"]);
 }
 else
 {
