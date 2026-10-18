@@ -5,13 +5,16 @@ using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 using static SalesforceSync.Sync.SalesforceBatchSyncService;
+using static SalesforceSync.Sync.SalesforceBatchSyncService.Differ;
+using static SalesforceSync.Sync.SalesforceBatchSyncService.Normalizer;
+using static SalesforceSync.Sync.SalesforceBatchSyncService.Reader;
 
 namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The write path's rules on their own, from hand-built Salesforce state and results: the diff and the plan
-/// (<see cref="SalesforceBatchSyncService.Plan"/>), the calls (<see cref="SalesforceBatchSyncService.WriteAsync"/>, on a stub client) and the reading of the answers
-/// (<see cref="SalesforceBatchSyncService.Interpret"/>). No org, no HTTP.
+/// (<see cref="SalesforceBatchSyncService.Differ.Plan"/>), the calls (<see cref="SalesforceBatchSyncService.Sender.WriteAsync"/>, on a stub client) and the reading of the answers
+/// (<see cref="SalesforceBatchSyncService.Interpreter.Interpret"/>). No org, no HTTP.
 /// </summary>
 public sealed class WriteRulesTests
 {
@@ -106,7 +109,7 @@ public sealed class WriteRulesTests
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"OLD","Name":"Acme","Active__c":false}"""),
             ("Account", /*lang=json,strict*/ """{"Id":"001000000000002AAA","ExternalId__c":"SAME","Name":"Same","Active__c":false}"""));
 
-        var plan = Plan(
+        var plan = Differ.Plan(
             [Normalized(Account("NEW", "New")), Normalized(Account("OLD", "Changed")), Normalized(Account("SAME", "Same"))], current);
 
         plan.Decided.Should().ContainSingle().Which.Should().Match<SyncResult>(r => r.Key == "SAME" && r.Outcome == SyncOutcome.Unchanged);
@@ -121,10 +124,10 @@ public sealed class WriteRulesTests
     {
         var accountInSalesforce = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false}"""));
 
-        Plan([Normalized(AccountWithProfile("A1"))], CurrentRecords.None).Decided.Should().BeEmpty("the unit creates its Account");
-        Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "A1")]))], accountInSalesforce).Decided.Should().BeEmpty();
+        Differ.Plan([Normalized(AccountWithProfile("A1"))], CurrentRecords.None).Decided.Should().BeEmpty("the unit creates its Account");
+        Differ.Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "A1")]))], accountInSalesforce).Decided.Should().BeEmpty();
 
-        var plan = Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "MISSING")]))], CurrentRecords.None);
+        var plan = Differ.Plan([Normalized(new SyncUnit([Profile("P1", "Gold", "MISSING")]))], CurrentRecords.None);
 
         var result = plan.Decided.Should().ContainSingle().Subject;
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.TransientFailure, SalesforceErrors.DependencyNotSynced));
@@ -137,7 +140,7 @@ public sealed class WriteRulesTests
     {
         var current = Rows(("Account", $$"""{"Id":"{{AccountId}}","ExternalId__c":"A1","Name":"Acme","Active__c":false,"Locked__c":"old"}"""));
 
-        var plan = Plan([Normalized(Account("A1", "Acme", locked: "new"))], current);
+        var plan = Differ.Plan([Normalized(Account("A1", "Acme", locked: "new"))], current);
 
         var result = plan.Decided.Should().ContainSingle().Subject;
         (result.Outcome, result.PrimaryError!.Code).Should().Be((SyncOutcome.PermanentFailure, "INVALID_FIELD_FOR_INSERT_UPDATE"));
@@ -148,7 +151,7 @@ public sealed class WriteRulesTests
     {
         var current = Rows(("Contact", $$"""{"Id":"{{ContactId}}","ExternalId__c":"C1"}"""));
 
-        var plan = Plan([Normalized(Deleting("C1")), Normalized(Deleting("C2"))], current);
+        var plan = Differ.Plan([Normalized(Deleting("C1")), Normalized(Deleting("C2"))], current);
 
         var change = plan.Planned.Single().Changes.Single();
         (change.IsDelete, change.Id).Should().Be((true, ContactId));
@@ -423,8 +426,8 @@ public sealed class WriteRulesTests
     private static async Task<List<SyncResult>> Write(StubSalesforce salesforce, IReadOnlyList<NormalizedUnit> units,
         CurrentRecords? current = null, int maxRecordsPerWrite = 200)
     {
-        var plan = Plan(units, current ?? CurrentRecords.None);
-        return await Service(salesforce).WriteAsync(plan.Planned, maxRecordsPerWrite, CancellationToken.None);
+        var plan = Differ.Plan(units, current ?? CurrentRecords.None);
+        return await new Sender(salesforce, new Interpreter(new SalesforceErrors(Options.Create(new SalesforceOptions())))).WriteAsync(plan.Planned, maxRecordsPerWrite, CancellationToken.None);
     }
 
     /// <summary>A change of a record Salesforce has (an update).</summary>
@@ -445,14 +448,7 @@ public sealed class WriteRulesTests
 
     private static (SyncOutcome Status, List<SalesforceError> Errors) Interpret(Change change, RecordResult? result, SalesforceOptions? options = null)
     {
-        return Service(options: options ?? new SalesforceOptions()).Interpret(change, result);
-    }
-
-    private static SalesforceBatchSyncService Service(ISalesforceRestClient? salesforce = null, SalesforceOptions? options = null)
-    {
-        return new SalesforceBatchSyncService(null!, salesforce ?? new StubSalesforce(), null!,
-            new SalesforceErrors(Options.Create(options ?? new SalesforceOptions())), Options.Create(options ?? new SalesforceOptions()),
-            Options.Create(new SyncOptions()), NullLogger<SalesforceBatchSyncService>.Instance);
+        return new Interpreter(new SalesforceErrors(Options.Create(options ?? new SalesforceOptions()))).Interpret(change, result);
     }
 
     private static RecordResult Ok()

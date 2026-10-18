@@ -82,7 +82,7 @@ public class MicroBenchmarks
     [Benchmark]
     public int PrepareTenEntities()
     {
-        return PreparedBatch.Prepare(Accounts, _tenEvents).Work.Count;
+        return SalesforceBatchSyncService.PreparedBatch.Prepare(Accounts, _tenEvents).Work.Count;
     }
 
     /// <summary>What the consumer does per message: typed read + validation (entity id, event time).</summary>

@@ -359,6 +359,46 @@ median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest sing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
 
+## Latest run: plain-crud with the mapping-error halt, at 15a8e22
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at 15a8e22, on 2026-10-19, against the
+[run before it](#latest-run-plain-crud-with-lease-slots-at-aff3247). Since then: a mapping error stops the inbox (its rows
+are held with the error on them), which adds nothing to the normal path, and the write path was trimmed. Same workload
+and environment; the database was recreated.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures.
+
+Preloaded drain, 5,000 events (medians of the iterations without a Describe, at 0 ms latency):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 258.7 ms | 1,741.2 ms | 29.34 MB | 47 | 17 | 6.28 | 1,028 | 38 |
+| 1 | 1 | 1,000 | 2,113 | 813.7 ms | 6,290.9 ms | 89.9 MB | 151 | 47 | 1.90 | 3,279 | 1166 |
+| 1 | 3 | 100 | 990 | 109.8 ms | 565.1 ms | 30.76 MB | 49 | 17 | 6.07 | 1,063 | 73 |
+| 1 | 3 | 1,000 | 2,113 | 439.5 ms | 1,863.9 ms | 91.73 MB | 155 | 49 | 1.90 | 3,274 | 1161 |
+| 4 | 1 | 100 | 990 | 115.5 ms | 464.4 ms | 31.68 MB | 51 | 17 | 5.77 | 1,119 | 129 |
+| 4 | 1 | 1,000 | 2,113 | 398.9 ms | 1,307.1 ms | 94.86 MB | 155 | 49 | 1.91 | 3,260 | 1147 |
+| 4 | 3 | 100 | 990 | 165.7 ms | 276.2 ms | 37.87 MB | 60 | 17 | 4.29 | 1,505 | 515 |
+| 4 | 3 | 1,000 | 2,113 | 442.8 ms | 589.5 ms | 97.24 MB | 165 | 54 | 1.89 | 3,293 | 1180 |
+| 8 | 1 | 100 | 990 | 144.0 ms | 314.0 ms | 38.06 MB | 56 | 16 | 4.64 | 1,392 | 402 |
+| 8 | 1 | 1,000 | 2,113 | 366.3 ms | 824.3 ms | 94.59 MB | 161 | 49 | 1.85 | 3,363 | 1250 |
+| 8 | 3 | 100 | 990 | 255.0 ms | 318.6 ms | 40.68 MB | 71 | 19 | 3.71 | 1,740 | 750 |
+| 8 | 3 | 1,000 | 2,113 | 516.2 ms | 563.9 ms | 93.86 MB | 163 | 51 | 1.94 | 3,219 | 1106 |
+
+Streaming (50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 2.322 s | 248.3 MB | 1,119 | 507 | 2.60 | 2,477 | 11 |
+| 4 | 3 | 3.293 s | 444.45 MB | 2,481 | 1,083 | 1.85 | 3,494 | 6 |
+| 8 | 1 | 3.183 s | 440.17 MB | 2,456 | 1,076 | 1.78 | 3,628 | 4 |
+| 8 | 3 | 3.628 s | 414.7 MB | 2,344 | 1,009 | 2.22 | 2,907 | 8 |
+
+- **No change from the halt.** With one worker and one pod the API calls are the same as before (47 and 151) and the
+  means are within noise (259 and 814 ms at 0 ms latency, 1.74 s and 6.29 s at 25 ms).
+- The 8 x 1 streaming run, which had a wide spread last time (4.965 s), is 3.183 s here, in line with the other
+  configurations.
+
 ## Latest run: plain-crud with lease slots, at aff3247
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at aff3247, on 2026-10-19, against the

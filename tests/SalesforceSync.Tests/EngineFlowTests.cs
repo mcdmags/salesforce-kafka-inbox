@@ -5,6 +5,7 @@ using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
+using static SalesforceSync.Sync.SalesforceBatchSyncService;
 
 namespace SalesforceSync.Tests;
 

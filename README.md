@@ -88,7 +88,7 @@ The sync is three layers, each with one job:
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `SelectAsync`, and `UpsertAsync` and `DeleteAsync` for Collections upserts and deletes); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryStrategy`); `SalesforceBatchGate` (concurrency slot + shared pause) | Sends requests and returns raw results. Decides nothing. |
 | **Business flow** | `SalesforceBatchSyncService` | `SyncBatchAsync` is the sync as a list of steps: claim → map each entity's event → `WriteToSalesforceAsync` (describe → normalize → read → diff → send) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | `PreparedBatch.Prepare` (read, map) and `PreparedBatch.Outcomes` (entity results → inbox outcomes), and, as static methods of `SalesforceBatchSyncService`, `Normalize` (values against Describe, via `FieldValues`), `BuildReadQueries` (the read's SOQL) and `CurrentRecords` (what the read found), `Plan` (the diff: changed fields, create / update / delete / unchanged, `DEPENDENCY_NOT_SYNCED`), `WriteAsync` (one upsert per object, parents first, then the delete; an entity that failed is not sent again) and `Interpret` (one record's answer → saved, retry or dead-letter); and `AccountAggregate` (a Kafka aggregate → the changed entities' events) | Pure and deterministic, except `WriteAsync`, which calls the client; unit-tested without a database or HTTP. |
+| **Rules, no I/O** | in `SalesforceBatchSyncService`, one nested class per step, in file order: `PreparedBatch` (`Prepare`: read and map; `Outcomes`: entity results → inbox outcomes), `Describer` (field metadata, cached), `Normalizer` (values against Describe, via `FieldValues`), `Reader` (the read's SOQL and what it found), `Differ` (the diff: changed fields, create / update / delete / unchanged, `DEPENDENCY_NOT_SYNCED`), `Sender` (one upsert per object, parents first, then the delete; an entity that failed is not sent again) and `Interpreter` (one record's answer → saved, retry or dead-letter); and `AccountAggregate` (a Kafka aggregate → the changed entities' events) | Pure and deterministic, except `Describer`, `Reader` and `Sender`, which call the client; unit-tested without a database or HTTP. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`). The
 model defines every table in `OnModelCreating` (partial indexes with `HasFilter`, autovacuum settings with
@@ -749,18 +749,18 @@ has no migration.
 A batch is written with plain, bulk calls: **one sObject Collections upsert per object**
 (`PATCH /composite/sobjects/{SObject}/{ExternalIdFieldName}`, parents first), then **one sObject Collections delete** by
 Id for the records to delete (`DELETE /composite/sobjects?ids=...`, [Deletes](#deletes)). Each is one call and takes up
-to 200 records; there is no Composite request. The steps, in the order the code reads (`SalesforceBatchSyncService`, top to bottom):
+to 200 records; there is no Composite request. The steps, in the order the code reads (`SalesforceBatchSyncService`, top to bottom, one nested class per step):
 
-1. **Normalize** (`Normalize`): each record is checked against Describe and its values put in the form Salesforce
+1. **Normalize** (`Normalizer`): each record is checked against Describe and its values put in the form Salesforce
    stores. A record Salesforce would reject fails its entity here, before any call.
-2. **Read** (`BuildReadQueries`, `CurrentRecords`): one query per object (`SelectAsync`), by external id, for what the
+2. **Read** (`Reader`): one query per object (`SelectAsync`), by external id, for what the
    diff compares.
-3. **Diff** (`Plan`): each record becomes a create (all its non-empty fields), an update (only the fields that
+3. **Diff** (`Differ`): each record becomes a create (all its non-empty fields), an update (only the fields that
    differ), a delete (by the Id the read found) or nothing. An entity with nothing to send is `Unchanged`; one whose
    parent is in neither Salesforce nor the entity waits (`DEPENDENCY_NOT_SYNCED`).
-4. **Send** (`WriteAsync`): the objects with changes, each after the objects its records point at, one `UpsertAsync` each
+4. **Send** (`Sender`): the objects with changes, each after the objects its records point at, one `UpsertAsync` each
    (200 records a call at most), then the deletes. An entity that failed in a call is left out of the next ones.
-5. **Interpret** (`Interpret`): each record's answer says saved, retry or dead-letter; an entity's outcome is
+5. **Interpret** (`Interpreter`): each record's answer says saved, retry or dead-letter; an entity's outcome is
    its worst record's.
 
 **The external id in an upsert: the field's name once, each record's value.** In
@@ -792,7 +792,7 @@ written as the text when it differs (an unchanged key is not sent), never resolv
 The attribute is used for two things only:
 
 - **Order.** The org's automation rejects a child whose parent doesn't exist yet, so an object is upserted after the
-  objects its records point at (`WriteAsync`): the Accounts' upsert, then the Profiles' upsert carrying `AccountId__c` = the
+  objects its records point at (`Sender`): the Accounts' upsert, then the Profiles' upsert carrying `AccountId__c` = the
   account key. The order is of objects, not of records: it is the same for every entity of the batch.
 - **Parent check, when the parent comes from another inbox** (a relationship's two Accounts, a contact's Account).
   The strategy's queries read the parent's object by external id
@@ -815,7 +815,7 @@ batch); relationships: `Account_Relationship__c` and `Account` (the parents' exi
 call's URI and headers together (414 / 431 over it). The client keeps 4,096 of them for the headers
 (`SalesforceRestClient.HeaderAllowanceBytes`: the bearer token, Host, User-Agent and the rest) and holds every URL it
 sends to the remaining 12,288 bytes (`MaxUrlBytes`), counted as sent, after percent-encoding (`'`, `,` and spaces take 3
-bytes, a non-ASCII character up to 12). `BuildReadQueries` fills a query with up to the row type's `MaxValuesPerQuery`
+bytes, a non-ASCII character up to 12). `Reader` fills a query with up to the row type's `MaxValuesPerQuery`
 external ids (100 for the built-in objects; at most 2,000, a query's result page, `SalesforceRestClient.MaxQueryValues`)
 while its URL still fits, then starts the next. Short ids give one query per object; 100 ids of 250 characters take 3
 queries per object. A query that doesn't fit even with one id (an absurd field list) fails the batch with a message
@@ -1289,7 +1289,7 @@ src/
     RateLimiting/                 The rate limiter's decisions: SalesforceRateLimiter (token bucket, daily budget,
                                   throttle, pause), TokenBucket, SalesforceBatchGate; it reads and writes its state
                                   through Data's RateLimitRepository and serves Infrastructure's ports
-    Sync/                         The engine (SalesforceBatchSyncService: the flow and the write path's steps), PreparedBatch, EntitySyncService, the
+    Sync/                         The engine (SalesforceBatchSyncService: the flow, PreparedBatch and the write path's steps), EntitySyncService, the
                                   strategy and event meta, the engine's model types, AccountAggregate (a Kafka
                                   aggregate → the changed entities' events), and one file per synced object
                                   (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy)
