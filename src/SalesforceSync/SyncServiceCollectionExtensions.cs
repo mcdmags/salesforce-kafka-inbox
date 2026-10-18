@@ -38,7 +38,6 @@ public static class SyncServiceCollectionExtensions
 
         // Postgres (ConnectionStrings:inboxdb, injected by Aspire, appsettings or the tests)
         builder.AddNpgsqlDataSource("inboxdb");
-        services.AddHostedService<SyncSchemaInitializer>(); // migrates the database; must be registered before the workers
 
         // Describe results shared by all pods (ConnectionStrings:redis, injected by Aspire); without it each process
         // keeps its own (AddSalesforceClient falls back to an in-memory IDistributedCache)
@@ -50,7 +49,7 @@ public static class SyncServiceCollectionExtensions
         // Salesforce client, rate limited through Postgres (all pods share one bucket, budget and pause).
         // Handler order: rate limiter (outermost, so every attempt costs a token) -> gzip -> auth.
         var salesforce = services.AddSalesforceClient()
-            .AddSalesforceRateLimiting(); // its initializer runs after the schema's, before the workers
+            .AddSalesforceRateLimiting(); // its initializer runs before the workers
         UseSalesforceOrg(salesforce);
 
         // Kafka -> inbox (only when a Kafka connection string is configured)
@@ -64,6 +63,19 @@ public static class SyncServiceCollectionExtensions
         services.AddHostedService<InboxWorkerService>();
 
         return builder;
+    }
+
+    /// <summary>
+    /// The schema migration as its own run (<c>SalesforceSync --migrate</c>), the step a deploy pipeline performs once
+    /// before the pods roll out: Postgres and the context factory, nothing else. See <see cref="MigrateAsync"/>.
+    /// </summary>
+    public static async Task MigrateAsync(this IHostApplicationBuilder builder)
+    {
+        builder.Services.Configure<PostgresRetryOptions>(builder.Configuration.GetSection(PostgresRetryOptions.Section));
+        builder.AddNpgsqlDataSource("inboxdb");
+        builder.Services.AddInboxSync();
+        using var host = ((HostApplicationBuilder)builder).Build();
+        await SyncSchema.MigrateAsync(host.Services.GetRequiredService<IDbContextFactory<SyncDbContext>>());
     }
 
     private static void AddWorkerOptions(IServiceCollection services, IConfiguration config)
@@ -159,7 +171,7 @@ public static class SyncServiceCollectionExtensions
     /// <see cref="RateLimitInitializer"/>), the global concurrency slots (advisory locks, at most
     /// <see cref="SyncOptions.MaxConcurrentRequests"/> batches across all pods) and <see cref="SalesforceRateLimitHandler"/>,
     /// inserted as the outermost handler whatever else is added, so every attempt costs a token:
-    /// rate limiter -> gzip -> auth. Register it after <see cref="SyncSchemaInitializer"/> and before the worker loops
+    /// rate limiter -> gzip -> auth. Register it before the worker loops
     /// (hosted services start in registration order). <see cref="SalesforceBatchSyncService"/> needs it.
     /// </summary>
     public static IHttpClientBuilder AddSalesforceRateLimiting(this IHttpClientBuilder salesforce)

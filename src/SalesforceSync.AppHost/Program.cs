@@ -31,9 +31,14 @@ if (!testMode)
     redis.WithRedisInsight();
 }
 
+// The deploy pipeline's migrate step: runs once, then exits; the sync waits for it to complete
+var migrate = builder.AddProject<Projects.SalesforceSync>("migrate-database")
+    .WithReference(inboxDb).WaitFor(inboxDb)
+    .WithArgs("--migrate");
+
 // Kafka -> Postgres inbox -> Salesforce, through the real OAuth + REST client
 var sync = builder.AddProject<Projects.SalesforceSync>("salesforce-sync")
-    .WithReference(inboxDb).WaitFor(inboxDb)
+    .WithReference(inboxDb).WaitFor(inboxDb).WaitForCompletion(migrate)
     .WithReference(kafka).WaitFor(kafka)
     .WithReference(redis).WaitFor(redis)
     .WithEnvironment("Sync__Workers", "4");
