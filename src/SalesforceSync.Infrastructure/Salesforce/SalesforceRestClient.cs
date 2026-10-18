@@ -129,17 +129,17 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     }
 
     /// <summary>
-    /// <c>PATCH /composite/sobjects/{object}/{externalIdField}</c>: up to 200 records created or updated by their external
-    /// id. <c>allOrNone: false</c>: every record succeeds or fails on its own, so one bad record doesn't cost the other
+    /// <c>PATCH /composite/sobjects/{object}/{externalIdFieldName}</c>: up to 200 records created or updated by their external
+    /// id. The field NAME is in the URL, once for the call; each record carries its own VALUE of that field. <c>allOrNone: false</c>: every record succeeds or fails on its own, so one bad record doesn't cost the other
     /// 199 (and the call that carried them) a retry.
     /// </summary>
     /// <returns>One result per record (HTTP 200 does not mean any record was saved), each with <c>created</c> set.</returns>
     /// <exception cref="ArgumentException">No records or more than <see cref="MaxCollectionRecords"/>, or a URL longer than <see cref="MaxUrlBytes"/>.</exception>
-    public Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdField, IReadOnlyList<SObjectBody> records,
+    public Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdFieldName, IReadOnlyList<SObjectBody> records,
         CancellationToken ct)
     {
         EnsureRecordCount(records.Count);
-        var request = new HttpRequestMessage(HttpMethod.Patch, EnsureFits($"{DataPath}/composite/sobjects/{sobject}/{externalIdField}"))
+        var request = new HttpRequestMessage(HttpMethod.Patch, EnsureFits($"{DataPath}/composite/sobjects/{sobject}/{externalIdFieldName}"))
         {
             Content = JsonContent.Create(new { allOrNone = false, records }, options: Json)
         };

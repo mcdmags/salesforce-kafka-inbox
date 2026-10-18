@@ -26,10 +26,12 @@ public interface ISalesforceRestClient
     Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct);
 
     /// <summary>
-    /// Creates or updates up to 200 records of one object, each matched by its value of <paramref name="externalIdField"/>:
-    /// one result per record, in order. Every record succeeds or fails on its own.
+    /// Creates or updates up to 200 records of one object. <paramref name="externalIdFieldName"/> is the NAME of the field
+    /// the records are matched by (e.g. <c>ExternalId__c</c>), the same for the whole call; each record carries its own
+    /// VALUE of that field (<c>"ExternalId__c": "A1"</c>), and is updated if a record has that value, else created.
+    /// One result per record, in order. Every record succeeds or fails on its own.
     /// </summary>
-    Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdField, IReadOnlyList<SObjectBody> records,
+    Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdFieldName, IReadOnlyList<SObjectBody> records,
         CancellationToken ct);
 
     /// <summary>Deletes up to 200 records, of any objects, by their Salesforce Ids: one result per record, in order.</summary>
