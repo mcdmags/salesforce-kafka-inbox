@@ -170,8 +170,6 @@ public sealed class SalesforceBatchSyncServiceTests
     /// field, but the generic engine must still reject one for whatever builds its records.
     /// </summary>
     [Theory]
-    [InlineData("No_Such_Field__c", "x", "INVALID_FIELD")]
-    [InlineData("LastModifiedDate", "2026-01-01T00:00:00Z", "INVALID_FIELD_FOR_INSERT_UPDATE")]
     [InlineData("Phone", "0123456789012345678901234567890123456789+", "STRING_TOO_LONG")]
     [InlineData("NumberOfEmployees", "lots", "INVALID_TYPE_ON_FIELD_IN_RECORD")]
     public async Task A_value_Salesforce_would_reject_fails_only_its_own_unit_before_any_call(string field, string value, string code)
@@ -194,6 +192,31 @@ public sealed class SalesforceBatchSyncServiceTests
         results.Should().ContainSingle(r => r.Key == "GOOD").Which.Outcome.Should().Be(SyncOutcome.Saved);
         _org.FindByExternalId("Account", "BAD").Should().BeNull();
         (_org.GetStats().ApiCalls - before.ApiCalls).Should().Be(2, "the bad unit didn't break the query");
+    }
+
+    /// <summary>
+    /// A field the code sends that the org doesn't have (or won't take) is the mapping's fault for every event of that
+    /// kind: the batch stops before any write, with the error and the entity it was found on.
+    /// </summary>
+    [Theory]
+    [InlineData("No_Such_Field__c", "x", "INVALID_FIELD")]
+    [InlineData("LastModifiedDate", "2026-01-01T00:00:00Z", "INVALID_FIELD_FOR_INSERT_UPDATE")]
+    public async Task A_mapping_error_stops_the_batch_before_any_write(string field, string value, string code)
+    {
+        var units = new List<(string Key, SyncUnit Unit)>
+        {
+            ("BAD", RawAccount("BAD", new() { ["Name"] = "Bad", [field] = value })),
+            ("GOOD", RawAccount("GOOD", new() { ["Name"] = "Good" }))
+        };
+
+        var stopped = await FluentActions.Awaiting(() => _engine.WriteToSalesforceAsync(units,
+                [.. AccountSync.Queries([.. units.Select(u => u.Unit)])],
+                AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None))
+            .Should().ThrowAsync<SalesforceBatchSyncService.MappingErrorException>();
+
+        stopped.Which.Errors.Should().ContainSingle().Which.Should().Match<(string Key, SalesforceError Error)>(e => e.Key == "BAD" && e.Error.Code == code);
+        _org.FindByExternalId("Account", "BAD").Should().BeNull();
+        _org.FindByExternalId("Account", "GOOD").Should().BeNull("nothing is written once the mapping is known to be wrong");
     }
 
     [Fact]

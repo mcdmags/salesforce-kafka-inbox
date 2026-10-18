@@ -463,6 +463,11 @@ public sealed class EngineFlowTests
             return Call("hold");
         }
 
+        public Task HaltAsync(InboxClaim claim, IReadOnlyList<FailedEvent> broken, string error, CancellationToken ct)
+        {
+            return Call("halt");
+        }
+
         public Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct)
         {
             return Call($"defer {delay}");

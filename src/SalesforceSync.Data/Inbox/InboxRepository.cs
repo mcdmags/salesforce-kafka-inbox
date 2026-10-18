@@ -114,6 +114,30 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     }
 
     /// <summary>
+    /// A mapping error stops the inbox: the claimed entities are held with the error on their rows (their own for the
+    /// <paramref name="broken"/> ones), then every other due row waits as long, in the same transaction.
+    /// </summary>
+    public Task HaltAsync(InboxClaim claim, IReadOnlyList<FailedEvent> broken, string error, CancellationToken ct)
+    {
+        var hold = _opt.MappingErrorHold;
+        return InTransactionAsync(claim, hold, async (db, sql, t) =>
+        {
+            var held = await db.Database.ExecuteAsync(sql.Halt, t, new
+            {
+                entityIds = claim.EntityIds,
+                times = claim.EventTimes,
+                token = claim.Token,
+                errors = ErrorsJson(broken),
+                error,
+                code = InboxRow.MappingErrorCode,
+                hold
+            });
+            await db.Database.ExecuteAsync(sql.HaltRest, t, new { hold });
+            return held;
+        }, ct);
+    }
+
+    /// <summary>
     /// Rate limited: hands the entities back, not before <paramref name="delay"/>, without spending an attempt: only
     /// their leases end (<see cref="InboxSql.Template.EndLease"/>).
     /// </summary>

@@ -124,6 +124,18 @@ public sealed class SalesforceBatchSyncService(
             ct.ThrowIfCancellationRequested();
             return claim.Events.Count;
         }
+        catch (MappingErrorException ex)
+        {
+            // Nothing was written. The inbox stops (every due row waits) with the error on the rows to fix, so nothing is
+            // dead-lettered and the rows go on after the deploy with no replay.
+            log.LogError(ex, "{Type} inbox stopped for {Hold} by {Count} mapping error(s), fix the mapping or add the field: {Errors}",
+                strategy.EntityType, _opt.MappingErrorHold, ex.Errors.Count,
+                string.Join("; ", ex.Errors.Select(e => $"{e.Key}: {e.Error.Code} {e.Error.Message}")));
+            await inbox.HaltAsync(claim, [.. ex.Errors.GroupBy(e => e.Key).Select(g => new FailedEvent(g.Key,
+                string.Join("; ", g.Select(e => $"{e.Error.Code}: {e.Error.Message}")), InboxRow.MappingErrorCode))],
+                $"Held: the {strategy.EntityType} inbox is stopped by a mapping error ({ex.Message})", ct);
+            return claim.Events.Count;
+        }
         catch (RateLimitedException ex)
         {
             log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}", claim.Events.Count, strategy.EntityType, ex.RetryAfter);
@@ -182,12 +194,22 @@ public sealed class SalesforceBatchSyncService(
 
         // A unit Salesforce would reject fails on its own, before any call
         var (normalized, rejected) = Normalize(units, schemas);
+        if (MappingErrors(rejected).Count > 0)
+        {
+            // The cached describe may just be out of date (a field was added to the org): describe again before stopping
+            await InvalidateAsync(schemas.Keys, ct);
+            schemas = await DescribeAsync(units, queries, ct);
+            (normalized, rejected) = Normalize(units, schemas);
+            await ThrowIfMappingErrorsAsync(rejected, schemas.Keys, ct);
+        }
+
         results.AddRange(rejected);
 
         if (normalized.Count > 0)
         {
             var current = await ReadCurrentAsync(BuildReadQueries(normalized, queries, schemas, maxValuesPerQuery), schemas.Keys, ct);
             var (planned, decided) = Plan(normalized, current);
+            await ThrowIfMappingErrorsAsync(decided, schemas.Keys, ct);
             results.AddRange(decided);
 
             try
@@ -204,6 +226,49 @@ public sealed class SalesforceBatchSyncService(
 
         await InvalidateRecordTypesAsync(units, results, ct);
         return results;
+    }
+
+    // ---------- Mapping errors ----------
+
+    /// <summary>
+    /// A field the code sends that Salesforce doesn't have, or won't let us set: the mapping is wrong, for every event of
+    /// that kind, so only a code change or a field in the org fixes it. Retrying or dead-lettering one entity at a time
+    /// would only spend attempts, so the caller stops the inbox instead.
+    /// </summary>
+    private static bool IsMappingError(SalesforceError e)
+    {
+        return e.Code is "INVALID_FIELD" or "INVALID_FIELD_FOR_INSERT_UPDATE";
+    }
+
+    private static List<(string Key, SalesforceError Error)> MappingErrors(IEnumerable<SyncResult> results)
+    {
+        return [.. results.SelectMany(r => r.Errors.Where(IsMappingError).Select(e => (r.Key, e)))];
+    }
+
+    /// <summary>Stops the batch, before any write, if a unit has a mapping error; the described objects are described again next time.</summary>
+    /// <exception cref="MappingErrorException">At least one unit has a mapping error.</exception>
+    private async Task ThrowIfMappingErrorsAsync(IEnumerable<SyncResult> results, IEnumerable<string> sobjects, CancellationToken ct)
+    {
+        if (MappingErrors(results) is { Count: > 0 } found)
+        {
+            await InvalidateAsync(sobjects, ct);
+            throw new MappingErrorException(found);
+        }
+    }
+
+    private async Task InvalidateAsync(IEnumerable<string> sobjects, CancellationToken ct)
+    {
+        foreach (var sobject in sobjects)
+        {
+            await schemaCache.InvalidateAsync(sobject, ct);
+        }
+    }
+
+    /// <summary>Units whose mapping Salesforce rejects, with what to fix. Thrown before any write.</summary>
+    internal sealed class MappingErrorException(IReadOnlyList<(string Key, SalesforceError Error)> errors)
+        : Exception($"{errors.Count} mapping error(s), e.g. {errors[0].Error.Code}: {errors[0].Error.Message}")
+    {
+        public IReadOnlyList<(string Key, SalesforceError Error)> Errors => errors;
     }
 
     // ---------- 1. Describe ----------
@@ -473,11 +538,7 @@ public sealed class SalesforceBatchSyncService(
         catch (SalesforceResponseException ex) when (ex.ErrorCode == "INVALID_FIELD")
         {
             // The cached describe is out of date (a field was removed or renamed): describe again next time
-            foreach (var sobject in describedSObjects)
-            {
-                await schemaCache.InvalidateAsync(sobject, ct);
-            }
-
+            await InvalidateAsync(describedSObjects, ct);
             throw;
         }
 

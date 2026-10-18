@@ -60,6 +60,8 @@ public sealed partial class InboxSql
         Done = Template.Done.Replace("{inbox}", table);
         Fail = Template.Fail.Replace("{inbox}", table);
         Hold = Template.Hold.Replace("{inbox}", table);
+        Halt = Template.Halt.Replace("{inbox}", table);
+        HaltRest = Template.HaltRest.Replace("{inbox}", table);
         EndLease = Template.EndLease.Replace("{inbox}", table);
     }
 
@@ -79,6 +81,12 @@ public sealed partial class InboxSql
 
     /// <inheritdoc cref="Template.Hold"/>
     public string Hold { get; }
+
+    /// <inheritdoc cref="Template.Halt"/>
+    public string Halt { get; }
+
+    /// <inheritdoc cref="Template.HaltRest"/>
+    public string HaltRest { get; }
 
     /// <inheritdoc cref="Template.EndLease"/>
     public string EndLease { get; }
@@ -197,6 +205,31 @@ public sealed partial class InboxSql
             SET last_updated = now(), last_error = @error, last_error_code = @code,
                 next_attempt_at = now() + @hold, lock_token = NULL
             WHERE {{StillClaimed}}
+            """;
+
+        /// <summary>
+        /// A mapping error stops the inbox: the claimed rows stay pending, no attempt spent, not due before @hold has
+        /// passed, with the error to fix on them: their own in @errors (a JSON object, entity id -> [error]) or, for the
+        /// healthy ones that were only held with them, @error. @code names the cause for a query on last_error_code.
+        /// </summary>
+        public const string Halt = $$"""
+            UPDATE {inbox} i
+            SET last_updated = now(),
+                last_error = coalesce((SELECT @errors::jsonb) -> i.entity_id ->> 0, @error),
+                last_error_code = @code, next_attempt_at = now() + @hold, lock_token = NULL
+            WHERE {{StillClaimed}}
+            """;
+
+        /// <summary>
+        /// The rest of a stopped inbox: every row that is due now waits @hold too (a leased row is not due, and a
+        /// worker that claims one meets the same error and stops the inbox again). Events stored meanwhile keep the
+        /// row's due time (<see cref="Store"/>), so nothing is lost or dead-lettered, and the rows go on after the fix
+        /// with no replay.
+        /// </summary>
+        public const string HaltRest = """
+            UPDATE {inbox}
+            SET next_attempt_at = now() + @hold
+            WHERE next_attempt_at <= now()
             """;
 
         /// <summary>

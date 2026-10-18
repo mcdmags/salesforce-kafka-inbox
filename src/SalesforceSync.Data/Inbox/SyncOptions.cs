@@ -44,6 +44,13 @@ public sealed class SyncOptions
     public TimeSpan UnknownOutcomeHold { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
+    /// How long an inbox is stopped after a mapping error (a field the code sends that Salesforce doesn't have or won't
+    /// take): the time to deploy the fix or add the field. Its due rows wait this long, then a claim tries again, and
+    /// stops the inbox again if the error is still there. Nothing is dead-lettered meanwhile.
+    /// </summary>
+    public TimeSpan MappingErrorHold { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
     /// Transient failures of an entity's event (its row's attempt_count, reset by each newer event) at which it is
     /// dead-lettered (permanent errors: immediately).
     /// </summary>
@@ -95,6 +102,7 @@ public sealed class SyncOptionsValidator : IValidateOptions<SyncOptions>
 
         Positive(nameof(o.Lease), o.Lease);
         Positive(nameof(o.UnknownOutcomeHold), o.UnknownOutcomeHold);
+        Positive(nameof(o.MappingErrorHold), o.MappingErrorHold);
         AtLeastOne(nameof(o.MaxRetries), o.MaxRetries);
         if (o.RetryBaseDelay < TimeSpan.Zero || o.MaxRetryDelay < o.RetryBaseDelay)
         {

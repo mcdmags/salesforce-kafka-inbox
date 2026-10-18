@@ -44,6 +44,37 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
     }
 
     [Fact]
+    public async Task A_mapping_error_holds_every_due_row_and_puts_the_error_on_the_broken_one()
+    {
+        var db = await SchemaAsync();
+        var inbox = Inbox();
+        string[] entities = [SyncFixture.NewAccountId(), SyncFixture.NewAccountId(), SyncFixture.NewAccountId()];
+        foreach (var entity in entities)
+        {
+            await StoreAsync(inbox, entity, 1);
+        }
+
+        // The worker claims two of the three (the batch size), and finds the mapping wrong on the first
+        var claim = await new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions { BatchSize = 2 })).ClaimAsync(CancellationToken.None);
+        var broken = claim.Events[0].EntityId;
+        await inbox.HaltAsync(claim, [new FailedEvent(broken, "INVALID_FIELD: No such column 'Rating'", InboxRow.MappingErrorCode)], "stopped", CancellationToken.None);
+
+        var rows = new List<(string Entity, Row Row, DateTime? NextAttemptAt, Guid? LockToken)>();
+        foreach (var entity in entities)
+        {
+            var (next, token) = await StateAsync(db, entity);
+            rows.Add((entity, await RowAsync(db, entity), next, token));
+        }
+
+        rows.Should().OnlyContain(r => r.Row.Status == "pending" && r.Row.AttemptCount == 0 && r.LockToken == null,
+            "nothing is dead-lettered, no attempt is spent");
+        rows.Single(r => r.Entity == broken).Row.Should().Match<Row>(r => r.Error == "INVALID_FIELD: No such column 'Rating'" && r.ErrorCode == InboxRow.MappingErrorCode);
+        rows.Where(r => r.Entity == claim.Events[1].EntityId).Should().ContainSingle().Which.Row.Error.Should().Be("stopped");
+        rows.Where(r => r.Entity == entities.Except(claim.EntityIds).Single()).Should().ContainSingle().Which.Row.Error.Should().BeNull("a row nobody claimed is only made to wait");
+        rows.Should().OnlyContain(r => r.NextAttemptAt > DateTime.UtcNow + TimeSpan.FromMinutes(4), "the default MappingErrorHold is 5 minutes");
+    }
+
+    [Fact]
     public async Task An_older_event_changes_nothing()
     {
         var db = await SchemaAsync();

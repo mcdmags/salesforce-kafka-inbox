@@ -26,6 +26,13 @@ public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
     /// </summary>
     Task HoldAsync(InboxClaim claim, string error, CancellationToken ct);
 
+    /// <summary>
+    /// A mapping error stops the inbox for <see cref="SyncOptions.MappingErrorHold"/>: every claimed entity is held with
+    /// no attempt spent, the ones in <paramref name="broken"/> with their own error and the rest with
+    /// <paramref name="error"/>, and so is every other row that is due. Nothing is dead-lettered.
+    /// </summary>
+    Task HaltAsync(InboxClaim claim, IReadOnlyList<FailedEvent> broken, string error, CancellationToken ct);
+
     /// <summary>Rate limited: hands every claimed entity back for <paramref name="delay"/> without spending an attempt.</summary>
     Task DeferAsync(InboxClaim claim, TimeSpan delay, CancellationToken ct);
 
