@@ -68,6 +68,7 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
             entity.ToTable("sf_rate_limit");
             entity.HasKey(r => r.Name).HasName("sf_rate_limit_pkey");
             entity.Property(r => r.UpdatedAt).HasDefaultValueSql("clock_timestamp()");
+            entity.Property(r => r.Slots).HasColumnType("jsonb").HasDefaultValue("[]");
             entity.HasData(new { Name = "salesforce", Tokens = 5.0, Capacity = 5.0, BaseRefillPerSec = 2.0, RefillPerSec = 2.0 });
         });
         modelBuilder.HasDbFunction(() => RateLimitSql.ClockTimestamp()).HasName("clock_timestamp").IsBuiltIn();

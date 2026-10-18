@@ -4,81 +4,45 @@ using Microsoft.Extensions.Logging;
 namespace SalesforceSync.Data.RateLimiting;
 
 /// <summary>
-/// Global cap on in-flight Salesforce batches using session-level advisory locks: a slot is a connection holding
-/// one of N lock keys for the duration of a batch. Requires direct or session-mode pooled connections
-/// (not PgBouncer transaction mode). If the connection drops, Postgres releases the lock with the session.
-/// The connection is a context's, opened explicitly and held (not returned to the pool) until the slot is disposed.
+/// Global cap on in-flight Salesforce batches, across all pods. A slot is a lease in the <c>slots</c> column of the shared
+/// <c>sf_rate_limit</c> row (<see cref="SlotSql"/>): taking and giving one back are each one short statement, so no
+/// connection or transaction is held while the batch runs, and the statements run on whatever context the caller has,
+/// scoped or from a factory. If a pod dies holding a slot, the lease simply ends and the slot is free again, as an
+/// entity's lease in the inbox does.
 /// </summary>
+/// <param name="contexts">Where the slot statements get their context (a short one per statement).</param>
+/// <param name="maxConcurrent">How many batches may hold a slot at once.</param>
+/// <param name="lease">How long a slot is held before it counts as free: longer than a batch takes (the sync's own lease).</param>
+/// <param name="log">Where a slot that could not be released says so.</param>
 public sealed class SalesforceConcurrencySlots(
     IDbContextFactory<SyncDbContext> contexts,
     int maxConcurrent,
+    TimeSpan lease,
     ILogger<SalesforceConcurrencySlots>? log = null)
 {
-    // Advisory lock keys share one number space per database with any other code that uses them, so ours sit in
-    // a distinctive range instead of small numbers like 1 or 42 that others pick:
-    // - high 16 bits 0x5346 are ASCII "SF" (Salesforce), the namespace; SyncSchema's migration lock is 0x5346_5348 "SFSH";
-    // - low 16 bits are the slot index, key = KeyBase + i (up to 65,536 slots; the org limit is at most 25);
-    // - the key fits in 32 bits, so pg_locks shows classid = 0 and objid = the key (1397096448 + slot).
-    // The value is a convention: it must only be identical in every pod and unused by other applications.
-    private const long KeyBase = 0x5346_0000;
-
-    /// <summary>
-    /// A retry (a transient failure while taking a slot) starts on a fresh session: the attempt's connection is closed
-    /// and opened again, so a lock taken by the failed attempt is gone with its session.
-    /// </summary>
     /// <returns>A held slot, or null when all are busy.</returns>
     public async Task<IAsyncDisposable?> TryAcquireAsync(CancellationToken ct)
     {
-        var db = await contexts.CreateDbContextAsync(ct);
-        try
-        {
-            var strategy = db.Database.CreateExecutionStrategy();
-            var key = await strategy.ExecuteAsync(async t =>
-            {
-                await db.Database.CloseConnectionAsync();
-                await db.Database.OpenConnectionAsync(t); // stays open: EF would otherwise release it after each statement
-                foreach (var i in Enumerable.Range(0, maxConcurrent).OrderBy(_ => Random.Shared.Next()))
-                {
-                    var candidate = KeyBase + i;
-                    if (await db.Database.QuerySingleAsync<bool>("SELECT pg_try_advisory_lock(@key)", t, new { key = candidate }))
-                    {
-                        return candidate;
-                    }
-                }
-                return (long?)null; // all slots busy
-            }, ct);
-
-            if (key is { } held)
-            {
-                return new Slot(db, held, log);
-            }
-        }
-        catch
-        {
-            await db.DisposeAsync(); // the session (and any lock it took) ends with it
-            throw;
-        }
-
-        await db.DisposeAsync();
-        return null;
+        // A fresh token per acquire. The statement removes a token's own lease first, so the execution strategy re-running
+        // it after a lost answer takes no second slot
+        var token = Guid.NewGuid().ToString("N");
+        var taken = await contexts.RunAsync((db, t) => db.Database.ExecuteAsync(SlotSql.Acquire, t,
+            new { token, lease, max = maxConcurrent }), ct);
+        return taken > 0 ? new Slot(contexts, token, log) : null;
     }
 
-    private sealed class Slot(SyncDbContext db, long key, ILogger? log) : IAsyncDisposable
+    private sealed class Slot(IDbContextFactory<SyncDbContext> contexts, string token, ILogger? log) : IAsyncDisposable
     {
         public async ValueTask DisposeAsync()
         {
             try
             {
-                await db.Database.ExecuteAsync("SELECT pg_advisory_unlock(@key)", CancellationToken.None, new { key });
+                await contexts.RunAsync((db, t) => db.Database.ExecuteAsync(SlotSql.Release, t, new { token }), CancellationToken.None);
             }
-            catch (Exception ex) when (PostgresRetryStrategy.IsTransient(ex) || ex is InvalidOperationException)
+            catch (Exception ex) when (PostgresRetryStrategy.IsTransient(ex))
             {
-                // The connection broke while the batch ran; its session, and so the lock, is already gone
-                log?.LogDebug(ex, "Slot {Key} connection was lost; lock released with the session", key);
-            }
-            finally
-            {
-                await db.DisposeAsync();
+                // The lease ends by itself
+                log?.LogDebug(ex, "Slot {Token} could not be released; its lease will end", token);
             }
         }
     }

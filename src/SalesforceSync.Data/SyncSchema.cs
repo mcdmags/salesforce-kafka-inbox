@@ -7,8 +7,8 @@ namespace SalesforceSync.Data;
 /// </summary>
 public static class SyncSchema
 {
-    // Advisory lock key in the "SF" namespace (see SalesforceConcurrencySlots.KeyBase): ASCII "SFSH", SF schema.
-    // Its low 16 bits (0x5348 = 21,320) are far above any concurrency slot index, so the two never collide.
+    // Advisory lock key in the "SF" namespace: ASCII "SFSH", SF schema. Advisory locks are per database, so no other
+    // application in it may use this number.
     private const long MigrationLockKey = 0x5346_5348;
 
     /// <summary>

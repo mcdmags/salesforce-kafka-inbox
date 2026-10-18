@@ -48,6 +48,13 @@ public sealed class RateLimitState
     /// configured allocation and api_max.
     /// </summary>
     public long? DailyBudget { get; set; }
+
+    /// <summary>
+    /// The leases of the concurrency slots (<see cref="SalesforceConcurrencySlots"/>): a JSON array of
+    /// <c>{ "token": ..., "until": ... }</c>, one element per batch calling Salesforce right now. Changed only by the
+    /// slot statements (<see cref="SlotSql"/>), never by the rate limiter, which doesn't touch this column.
+    /// </summary>
+    public string Slots { get; set; } = "[]";
 }
 
 /// <summary>

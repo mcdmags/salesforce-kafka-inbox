@@ -17,7 +17,7 @@ namespace SalesforceSync.Data.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "9.0.1")
+                .HasAnnotation("ProductVersion", "10.0.4")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -283,6 +283,13 @@ namespace SalesforceSync.Data.Migrations
                     b.Property<double>("RefillPerSec")
                         .HasColumnType("double precision")
                         .HasColumnName("refill_per_sec");
+
+                    b.Property<string>("Slots")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("[]")
+                        .HasColumnName("slots");
 
                     b.Property<double>("Tokens")
                         .HasColumnType("double precision")

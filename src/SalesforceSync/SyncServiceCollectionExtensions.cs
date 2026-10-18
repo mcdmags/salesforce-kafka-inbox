@@ -182,7 +182,7 @@ public static class SyncServiceCollectionExtensions
     /// <summary>
     /// Rate limiting shared through Postgres, for the client from <see cref="AddSalesforceClient"/>: the token bucket,
     /// daily budget and pause (<see cref="SalesforceRateLimiter"/>, configured by the migrate step,
-    /// <see cref="MigrateAsync"/>), the global concurrency slots (advisory locks, at most
+    /// <see cref="MigrateAsync"/>), the global concurrency slots (leases on the rate-limit row, at most
     /// <see cref="SyncOptions.MaxConcurrentRequests"/> batches across all pods) and <see cref="SalesforceRateLimitHandler"/>,
     /// inserted as the outermost handler whatever else is added, so every attempt costs a token:
     /// rate limiter -> gzip -> auth. Register it before the worker loops
@@ -194,10 +194,12 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton<RateLimitRepository>();
         services.AddSingleton<SalesforceRateLimiter>();
         services.AddSingleton<ISalesforceRateLimiter>(sp => sp.GetRequiredService<SalesforceRateLimiter>());
-        services.AddSingleton(sp => new SalesforceConcurrencySlots(
-            sp.GetRequiredService<IDbContextFactory<SyncDbContext>>(),
-            sp.GetRequiredService<IOptions<SyncOptions>>().Value.MaxConcurrentRequests,
-            sp.GetRequiredService<ILogger<SalesforceConcurrencySlots>>()));
+        services.AddSingleton(sp =>
+        {
+            var sync = sp.GetRequiredService<IOptions<SyncOptions>>().Value;
+            return new SalesforceConcurrencySlots(sp.GetRequiredService<IDbContextFactory<SyncDbContext>>(),
+                sync.MaxConcurrentRequests, sync.Lease, sp.GetRequiredService<ILogger<SalesforceConcurrencySlots>>());
+        });
         services.AddSingleton<ISalesforceBatchGate, SalesforceBatchGate>();
         services.AddTransient<SalesforceRateLimitHandler>();
 
