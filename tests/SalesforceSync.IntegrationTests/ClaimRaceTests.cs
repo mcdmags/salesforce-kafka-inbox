@@ -18,7 +18,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
 {
     private const string Schema = "claim_race_test";
     private static readonly string Table = SyncFixture.InboxTable();
-    private static readonly InboxSql Sql = InboxSql.For(Table);
+    private static readonly InboxStatements Sql = InboxStatements.For(Table);
     private IDbContextFactory<SyncDbContext>? _contexts;
 
     [Fact]

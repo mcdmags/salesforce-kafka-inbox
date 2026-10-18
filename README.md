@@ -38,7 +38,7 @@ account, is deleted in Salesforce. Several things make this harder than "consume
 | Durable, replayable intake | One topic (`account-changes`) of **account aggregates** (the Account with its Profile, relationships and contacts, `before` and `after`). The Kafka consumer splits each one (`AccountAggregate.TrySplit`) into the events of the entities that changed, deletes included (an unchanged child or Account is not stored: no row, no claim, no Salesforce read), and writes each event's **JSON** to its object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, marking the entity due on that row in the same statement, before storing the message's offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. An inbox keeps **one row per entity**, holding its newest event: a newer event overwrites it, an older one changes nothing, and neither does a redelivery of an event that is synced already, so a crash halfway through a message is safe (the redelivery stores its events again). A message that isn't a valid aggregate (see below) is logged with its offset and skipped, rather than blocking its partition. |
 | Ordering across parallel batches | Workers claim **entities, not events**: every entity has one inbox row, which holds its sync state too (due time, lease), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due rows, which it then leases (`lock_token`, and `next_attempt_at` moved to the lease's end, so a leased row is not due until then) and reads, in one statement. Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
 | Bursts of updates to one entity | Pending events for an entity are **coalesced** in the inbox: every event carries the full record, so an event with a newer `meta.time` (or the same, stored later) overwrites the entity's row, and what a claim writes is the newest event stored before it. Five updates in five seconds become one Salesforce write with the newest data. An event that overwrites a row while a worker writes the event it claimed is not lost: that worker's outcome is recorded only on rows that still hold the event time it claimed, and the newer event is claimed next. |
-| Late or replayed older events | **Never stored**: the entity's row is overwritten only by an event newer than the one it holds, or as new while that one is not `done` yet (`InboxSql.Store`, by `event_time`). An older event, or a redelivery of an event already in Salesforce, changes nothing and is never claimed, so it can't be written. Nothing is stored in Salesforce for this. |
+| Late or replayed older events | **Never stored**: the entity's row is overwritten only by an event newer than the one it holds, or as new while that one is not `done` yet (`InboxRepository.StoreSql`, by `event_time`). An older event, or a redelivery of an event already in Salesforce, changes nothing and is never claimed, so it can't be written. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can't record anything: every outcome statement is conditional on its `lock_token` on the entity's row. |
 | Mapping errors | A field the code sends that Salesforce doesn't have (`INVALID_FIELD`) or won't let us set (`INVALID_FIELD_FOR_INSERT_UPDATE`) is wrong for every event of that kind, so it **stops the inbox** instead of dead-lettering one entity at a time. Before any write, the batch's rows and every other due row of that inbox are held (`MAPPING_ERROR`) for `Sync:MappingErrorHold` (5 minutes), with the error on the row (`last_error`: the field and the object) and an ERROR in the log. Nothing is dead-lettered and no attempt is spent, so after the fix is deployed (or the field added) the rows go on with no replay. The cached Describe is dropped first and read again once, so a field that was only just added to the org does not stop anything. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
@@ -85,7 +85,7 @@ The sync is three layers, each with one job:
 
 | Layer | Classes | Does |
 |---|---|---|
-| **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `SelectAsync`, and `UpsertAsync` and `DeleteAsync` for Collections upserts and deletes); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext`, `InboxSql` and `PostgresRetryStrategy`) | Sends requests and returns raw results. Decides nothing. |
+| **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `DescribeAsync`, `SelectAsync`, and `UpsertAsync` and `DeleteAsync` for Collections upserts and deletes); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext` and `PostgresRetryStrategy`) | Sends requests and returns raw results. Decides nothing. |
 | **Business flow** | `SalesforceBatchSyncService` | `SyncBatchAsync` is the sync as a list of steps: claim → map each entity's event → `WriteToSalesforceAsync` (describe → normalize → read → diff → send) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
 | **Rules, no I/O** | in `Sync/`, one file per step, in the order a batch runs them: `PreparedBatch` (`Prepare`: read and map; `Outcomes`: entity results → inbox outcomes), then `Describer` (field metadata, cached), `Normalizer` (values against Describe, via `FieldValues`), `Reader` (the read's SOQL and what it found), `Differ` (the diff: changed fields, create / update / delete / unchanged, `DEPENDENCY_NOT_SYNCED`), `Sender` (one upsert per object, parents first, then the delete; an entity that failed is not sent again) and `Interpreter` (one record's answer → saved, retry or dead-letter); and `AccountAggregate` (a Kafka aggregate → the changed entities' events) | Pure and deterministic, except `Describer`, `Reader` and `Sender`, which call the client; unit-tested without a database or HTTP. |
 
@@ -100,7 +100,7 @@ name their tables (independent entity types, no shared table) and their batch's 
 from the EF model, the batch's query and write sizes from the row type (`IInboxRow`'s static `MaxValuesPerQuery` and
 `MaxRecordsPerWrite`). What EF can express is LINQ (the rate limiter's usage count and writes); storing an event, the
 claim, every outcome (done, fail, dead-letter, hold) and the end of a lease (of rows released or deferred, and of a
-lost claim attempt's leases) are the SQL texts of `InboxSql` run unchanged through
+lost claim attempt's leases) are the SQL texts of `InboxRepository` run unchanged through
 `Database.SqlQueryRaw` / `ExecuteSqlRaw`, their `@name` parameters bound from an anonymous object's properties
 (`new { ids, times, token }`), since `FOR UPDATE SKIP LOCKED`, `UPDATE ... RETURNING` and `INSERT ... ON CONFLICT` have
 no LINQ form. The rate limiter's `RateLimitSql` only locks its row (`FOR UPDATE`) and reads the database clock.
@@ -351,14 +351,14 @@ bookkeeping is in the row's own columns.
 consumer, which two events count as equally new (the store compares their times) is decided the same way for every
 event, never by how a time is rounded on its way in.
 
-**Store** (`InboxSql.Store`, one statement): insert the event into the entity's row (`ON CONFLICT (entity_id) DO
+**Store** (`InboxRepository.StoreSql`, one statement): insert the event into the entity's row (`ON CONFLICT (entity_id) DO
 UPDATE ... WHERE event_time < excluded.event_time OR (event_time = excluded.event_time AND status <> 'done')`),
 keeping any lease on it. A new entity, or an idle one (`next_attempt_at` null), becomes due at once, and one that
 is already due, backing off, deferred, held or leased keeps its time (a leased row's is the lease's end). The events
 of an entity that arrive before it is claimed overwrite its row one after the other, and only the last is written.
 The lock the store takes on the existing row is what orders it against a claim or an outcome of the same entity.
 
-**Claim** (`InboxSql.Claim`, the same statement for every type), in a transaction of its own, so the rows are read
+**Claim** (`InboxRepository.ClaimSql`, the same statement for every type), in a transaction of its own, so the rows are read
 before the commit is sent: lock up to `Sync:BatchSize` of the inbox's rows that are due (`next_attempt_at <= now()`),
 longest-waiting first, off the ready index, `FOR UPDATE SKIP LOCKED`; lease them (`lock_token`, `next_attempt_at =
 now() + Sync:Lease`), and return them with their payloads and their `event_time`. Only pending rows are due: every
@@ -390,7 +390,7 @@ lease ended (`EndLease`): due again at once, or when the deferral ends, with no 
 [A newer event while an entity is being synced](#a-newer-event-while-an-entity-is-being-synced)). The lease keeps other
 workers away from an entity, not the consumer: a newer event can overwrite the row while the worker writes the event it
 claimed. So every outcome statement updates only the claimed rows that still hold the `event_time` the claim read
-(`InboxSql.Template.StillClaimed`, part of each statement's WHERE: the claim's entity ids and times, `unnest(@entityIds, @times)`, each
+(`InboxRepository.StillClaimedSql`, part of each statement's WHERE: the claim's entity ids and times, `unnest(@entityIds, @times)`, each
 row looked up by primary key and compared timestamptz to timestamptz, exactly: the times are the microseconds read
 back from the column) and records outcomes on those only: done, retried, dead, held. An overwritten row stays
 pending with the newer event, not marked done, and the transaction's last statement (`EndLease`, run only if the
@@ -671,7 +671,7 @@ the entity were released and a newer event synced in the meantime, the late writ
 | An event stored while its entity's lease ends is not left behind | storing and ending a lease update the same row, so its lock orders them; a store keeps a due row's time and makes an idle row due, and the lease of an overwritten row ends with it due now (`EndLease`), not at the lease's end | `ClaimRaceTests.An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due` |
 | An event arriving while its entity is being processed is not claimed until the lease is released or expires, then wins if newer | a leased row is not due until its lease ends (its `next_attempt_at`) | `LeaseTests.Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer` |
 | Events out of `meta.time` order, over any partition and consumer, end at the newest; an older record is never written after a newer one | a row is overwritten only by a newer event, or one as new while its event is not done | `ConcurrencyTests.Events_out_of_time_order_over_any_partition_and_pod_end_at_the_newest_time`, `SyncEndToEndTests.The_Kafka_key_is_not_used_and_arrival_order_does_not_matter` |
-| An event stored while its entity's older event is being written is not lost: the older one's outcome isn't recorded on it, and it is written next | every outcome statement updates only claimed rows whose `event_time` is still the one the claim read (`InboxSql.Template.StillClaimed`, in its WHERE); storing updates the same row, so the row lock orders the two, and an outcome that waited for a store re-checks its WHERE on the row the store left (READ COMMITTED); `EndLease` ends the overwritten row's lease and leaves it due | `OneRowPerEntityTests.An_outcome_for_a_claimed_event_is_not_recorded_on_the_newer_event_that_overwrote_it` and `ClaimRaceTests.An_outcome_that_waits_for_a_store_of_a_newer_event_is_not_recorded_on_it` (done, failed, dead, released, failed all, deferred, held), `LeaseTests.A_newer_event_stored_while_the_claimed_one_is_written_is_written_next_whatever_the_claimed_ones_outcome`, `ClaimRaceTests.An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due` |
+| An event stored while its entity's older event is being written is not lost: the older one's outcome isn't recorded on it, and it is written next | every outcome statement updates only claimed rows whose `event_time` is still the one the claim read (`InboxRepository.StillClaimedSql`, in its WHERE); storing updates the same row, so the row lock orders the two, and an outcome that waited for a store re-checks its WHERE on the row the store left (READ COMMITTED); `EndLease` ends the overwritten row's lease and leaves it due | `OneRowPerEntityTests.An_outcome_for_a_claimed_event_is_not_recorded_on_the_newer_event_that_overwrote_it` and `ClaimRaceTests.An_outcome_that_waits_for_a_store_of_a_newer_event_is_not_recorded_on_it` (done, failed, dead, released, failed all, deferred, held), `LeaseTests.A_newer_event_stored_while_the_claimed_one_is_written_is_written_next_whatever_the_claimed_ones_outcome`, `ClaimRaceTests.An_event_stored_while_the_outcome_transaction_has_the_row_overwrites_it_and_leaves_it_due` |
 | A worker whose lease expired can't record outcomes | every statement is conditional on the `lock_token` of the entity's row | `LeaseTests.Worker_whose_lease_expired_can_record_nothing`, `LeaseTests.Done_completes_an_event_only_under_its_lease_and_only_once` |
 | Dropped Postgres connections cause no overlap, loss or regression | `PostgresRetryStrategy` (EF execution strategy), idempotent statements | `ConcurrencyTests.Pods_survive_their_Postgres_connections_being_dropped` |
 | A write with an unknown outcome can't be overtaken by a newer write | the hold | `UnknownOutcomeTests.Entity_is_held_after_a_write_with_an_unknown_outcome_and_ends_at_the_newest_event` |
@@ -694,7 +694,7 @@ than the row when it arrived, leaves no trace in Postgres; Kafka, within its ret
 `SyncDbContext.OnModelCreating` defines every table: the inboxes (one `ConfigureInbox` call per inbox row type),
 the claim audit table, with the column names in snake_case, the partial indexes (`HasFilter`) and the autovacuum
 settings (`HasStorageParameter`). EF migrations in `src/SalesforceSync.Data/Migrations` create them. Queries stay raw SQL
-(`InboxSql`) where LINQ can't express them. Rate limiting has no tables: it is in memory.
+(in `InboxRepository`) where LINQ can't express them. Rate limiting has no tables: it is in memory.
 
 `InitialSchema` creates the inboxes (one row per entity, with its due time and lease); later migrations add and then
 drop the rate-limit tables (`DropApiUsageAndBudget`, `DropRateLimitTables`). The earlier history (a chain of migrations that evolved the first
@@ -703,7 +703,7 @@ earlier migrations doesn't match it**: its `__EFMigrationsHistory` names migrati
 fresh database (or drop the sync's tables and `__EFMigrationsHistory`).
 
 **A custom schema.** The tables live in whatever schema is first on the connection's `search_path` (`public` by
-default). `HasDefaultSchema("x")` only changes the SQL that EF generates; the raw statements (`InboxSql`)
+default). `HasDefaultSchema("x")` only changes the SQL that EF generates; the raw statements (`InboxRepository`)
 name their tables unqualified, so with a schema that is not on the path they fail with `relation "sf_account_inbox" does not
 exist` while EF's own queries and migrations work. The fix is on the connection string, once for everything:
 
@@ -1286,7 +1286,7 @@ src/
     (root)                        SyncDbContext (the EF model: every table), SyncSchema (migrates at startup),
                                   PostgresRetryStrategy, raw-SQL helpers
     Inbox/                        InboxRow and one row type per object, IRepository (and the claim and outcome
-                                  types), InboxRepository, InboxSql, SyncOptions
+                                  types), InboxRepository (with its SQL), SyncOptions
     Migrations/                   EF migrations (InitialSchema: the tables)
   SalesforceSync.FakeSalesforce/  In-memory Salesforce (OAuth sessions, describe, query pages, sObject
                                   Collections upsert and delete, allOrNone, a Recycle Bin, Salesforce-like value

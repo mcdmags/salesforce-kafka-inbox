@@ -10,7 +10,7 @@ namespace SalesforceSync.Data;
 /// <summary>
 /// The sync's tables, defined here and created by EF migrations (Data/Migrations, applied at startup by
 /// <see cref="SyncSchema"/>): one inbox table per synced object type. The claim's statements are raw SQL
-/// (<see cref="InboxSql"/>) run through <c>Database.SqlQueryRaw</c>, since FOR UPDATE SKIP LOCKED and UPDATE ... RETURNING have no LINQ form.
+/// (the statements of <c>InboxRepository</c>) run through <c>Database.SqlQueryRaw</c>, since FOR UPDATE SKIP LOCKED and UPDATE ... RETURNING have no LINQ form.
 /// <para>
 /// To sync another object: a subclass of <see cref="InboxRow"/> with its limits (<see cref="IInboxRow"/>) and its
 /// <see cref="ConfigureInbox{TRow}"/> line in <see cref="OnModelCreating"/>, with its table; then a migration
@@ -83,16 +83,16 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
         // index, where the dead index entries those updates leave behind collect. The default lets that grow with the table.
         entity.HasStorageParameter("autovacuum_vacuum_scale_factor", 0.02);
         entity.HasStorageParameter("autovacuum_vacuum_threshold", 1000);
-        // The entity id is the key: one row per entity (InboxSql.Store's on conflict), so no surrogate id and no second
+        // The entity id is the key: one row per entity (InboxRepository.StoreSql's on conflict), so no surrogate id and no second
         // unique index. Every claim and outcome finds its rows by it.
         entity.HasKey(r => r.EntityId).HasName($"{table}_pkey");
         entity.Property(r => r.Payload).HasColumnType("jsonb");
-        // No default: every insert sets it from the event (InboxSql.Store)
+        // No default: every insert sets it from the event (InboxRepository.StoreSql)
         entity.Property(r => r.EventTime).IsRequired();
         entity.Property(r => r.Status).HasDefaultValueSql("'pending'");
         entity.Property(r => r.AttemptCount).HasDefaultValue(0);
         entity.Property(r => r.LastUpdated).HasDefaultValueSql("now()");
-        // The claim (InboxSql.Claim): the due rows, the longest-waiting first. Idle rows (null) are not in the index.
+        // The claim (InboxRepository.ClaimSql): the due rows, the longest-waiting first. Idle rows (null) are not in the index.
         entity.HasIndex(r => r.NextAttemptAt).HasDatabaseName($"{table}_ready").HasFilter("next_attempt_at is not null");
     }
 }

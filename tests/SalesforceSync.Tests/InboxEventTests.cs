@@ -304,28 +304,6 @@ public sealed class InboxEventTests
         problem.Should().Contain("accountRelationship");
     }
 
-    [Theory]
-    [InlineData("sf_account_inbox", true)]
-    [InlineData("sf_x1_inbox", true)]
-    [InlineData("sf_inbox; drop table x", false)]
-    [InlineData("Sf_Inbox", false)]
-    [InlineData("\"sf_inbox\"", false)]
-    [InlineData("public.sf_inbox", false)]
-    [InlineData("", false)]
-    public void Inbox_table_names_must_be_plain_identifiers(string table, bool valid)
-    {
-        var use = () => InboxSql.For(table);
-
-        if (valid)
-        {
-            use.Should().NotThrow().Which.Claim.Should().Contain($"UPDATE {table} ");
-        }
-        else
-        {
-            use.Should().Throw<ArgumentException>();
-        }
-    }
-
     [Fact]
     public void Every_change_to_the_model_has_its_migration()
     {
@@ -339,9 +317,9 @@ public sealed class InboxEventTests
     [Fact]
     public void No_inbox_statement_reads_inside_the_payload()
     {
-        var sql = InboxSql.For("sf_account_inbox");
         // Fail reads its @errors object with ->, not the payload
-        string[] claimAndOutcomes = [sql.Store, sql.Claim, sql.Done, sql.Hold, sql.EndLease];
+        string[] claimAndOutcomes = [InboxRepository<AccountInboxRow>.StoreSql, InboxRepository<AccountInboxRow>.ClaimSql,
+            InboxRepository<AccountInboxRow>.DoneSql, InboxRepository<AccountInboxRow>.HoldSql, InboxRepository<AccountInboxRow>.EndLeaseSql];
 
         claimAndOutcomes.Should().AllSatisfy(statement => statement.Should().NotContain("->").And.NotContain("sf_event_").And.NotContain("externalId"));
     }

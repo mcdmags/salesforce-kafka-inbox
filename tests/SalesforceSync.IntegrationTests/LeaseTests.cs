@@ -5,13 +5,13 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// The lease, tested by playing a worker by hand: the test claims an entity with the worker's own statements
-/// (<see cref="InboxSql"/> and the repository) while the real pods run, so "another worker is in the middle of its Salesforce call"
+/// (<see cref="InboxStatements"/> and the repository) while the real pods run, so "another worker is in the middle of its Salesforce call"
 /// lasts exactly as long as the test wants.
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class LeaseTests(SyncFixture app)
 {
-    private static readonly InboxSql Sql = InboxSql.For(SyncFixture.InboxTable());
+    private static readonly InboxStatements Sql = InboxStatements.For(SyncFixture.InboxTable());
 
     [Fact]
     public async Task Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer()
@@ -146,7 +146,7 @@ public sealed class LeaseTests(SyncFixture app)
     }
 
     /// <summary>
-    /// Stores the event and leases its row in one transaction, as InboxSql.Claim would lease it, so no pod can get in
+    /// Stores the event and leases its row in one transaction, as the claim statement would lease it, so no pod can get in
     /// between (the new row is theirs to see only once it is committed, leased). The claim is what the worker's own claim
     /// returns: the entity's row with the event_time it read.
     /// </summary>

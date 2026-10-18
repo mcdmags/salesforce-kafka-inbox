@@ -33,12 +33,12 @@ public static class PgSql
     }
 
     /// <summary>
-    /// One event into an inbox table as the consumer stores it, with its time, its entity made due (InboxSql.Store).
+    /// One event into an inbox table as the consumer stores it, with its time, its entity made due (InboxRepository.StoreSql).
     /// </summary>
     public static Task<int> StoreAsync(this NpgsqlConnection conn, string table, string entityId, DateTimeOffset eventTime, string payload,
         NpgsqlTransaction? transaction = null)
     {
-        return conn.ExecuteAsync(Data.Inbox.InboxSql.For(table).Store,
+        return conn.ExecuteAsync(InboxStatements.For(table).Store,
             new { entityId, eventTime = eventTime.ToUniversalTime(), payload }, transaction);
     }
 

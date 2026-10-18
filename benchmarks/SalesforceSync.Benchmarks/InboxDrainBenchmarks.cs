@@ -301,7 +301,7 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// Loads the events as storing them one after the other would leave the inbox (InboxSql.Store): per entity one row,
+    /// Loads the events as storing them one after the other would leave the inbox (InboxRepository.StoreSql): per entity one row,
     /// its newest event (of two as new, the one stored later), and the entity due. Copied into a temporary table first,
     /// since one insert can't overwrite a row twice.
     /// </summary>
