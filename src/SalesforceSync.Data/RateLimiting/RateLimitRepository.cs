@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 
 namespace SalesforceSync.Data.RateLimiting;
@@ -78,6 +81,28 @@ public sealed class RateLimitRepository(IDbContextFactory<SyncDbContext> context
             change(row, now);
             await db.SaveChangesAsync(t);
         }, ct);
+    }
+
+    /// <summary>
+    /// Runs <c>sql/apply-rate-limits.sql</c>, the deploy's script for the limits, with these values (psql's
+    /// <c>-v name=value</c>, substituted as numbers): writes them to the shared row if they differ from what it holds.
+    /// </summary>
+    /// <returns>Whether the row was changed.</returns>
+    public async Task<bool> ApplyLimitsAsync(double capacity, double ratePerSec, long allocation, double share, CancellationToken ct)
+    {
+        var values = new Dictionary<string, string>
+        {
+            ["capacity"] = capacity.ToString("R", CultureInfo.InvariantCulture),
+            ["rate"] = ratePerSec.ToString("R", CultureInfo.InvariantCulture),
+            ["allocation"] = allocation.ToString(CultureInfo.InvariantCulture),
+            ["share"] = share.ToString("R", CultureInfo.InvariantCulture)
+        };
+        await using var script = Assembly.GetExecutingAssembly().GetManifestResourceStream("apply-rate-limits.sql")!;
+        using var reader = new StreamReader(script);
+        // ":capacity::double precision" is a variable followed by a cast; "::" itself is not a variable
+        var sql = Regex.Replace(await reader.ReadToEndAsync(ct), @"(?<!:):(capacity|rate|allocation|share)\b", m => values[m.Groups[1].Value]);
+        var changed = await contexts.RunAsync((db, t) => db.Database.ExecuteAsync(sql, t), ct);
+        return changed > 0;
     }
 
     /// <summary>Whether a shared pause is in force now.</summary>
