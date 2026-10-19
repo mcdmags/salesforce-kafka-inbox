@@ -11,7 +11,16 @@ namespace SalesforceSync.Sync;
 /// </summary>
 public sealed partial class EventMeta
 {
-    /// <summary>As sent. Text, so offset-less times can be spotted and rejected.</summary>
+    /// <summary>
+    /// As sent. Text on purpose, read through <see cref="Timestamp"/>:
+    /// <list type="bullet">
+    /// <item>As a DateTimeOffset, the JSON reader would accept a time without an offset and apply the reading machine's
+    /// time zone, so pods in different zones could order the same entity's events differently.</item>
+    /// <item>A bad time fails only this check, with a clear reason ("event time"), not the whole JSON read.</item>
+    /// <item>Child events copy the text unchanged (<see cref="AggregateChange"/>): meta.time may have 9 fraction digits,
+    /// DateTimeOffset keeps 7, so a parse and rewrite would change it and could make two times equal.</item>
+    /// </list>
+    /// </summary>
     public string? Time { get; set; }
 
     /// <summary>
