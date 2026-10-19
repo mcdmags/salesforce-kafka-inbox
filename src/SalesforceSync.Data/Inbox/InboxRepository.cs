@@ -5,13 +5,42 @@ using Microsoft.Extensions.Options;
 namespace SalesforceSync.Data.Inbox;
 
 /// <summary>
-/// <see cref="IRepository{TRow}"/> on Postgres, raw SQL through EF. No transactions: each statement commits alone.
-/// Units retry (<see cref="PostgresRetryStrategy"/>), so every statement is safe to repeat: store again is harmless, a
-/// lost claim's rows wait for lease expiry, and an outcome or lease end run again finds the row no longer under the
-/// claim's lease (<see cref="InboxEvent.LeaseEnd"/>), so it does nothing. Crash between outcome statements: rest of
-/// claim waits lease expiry.
+/// <see cref="IRepository{TRow}"/> on Postgres, raw SQL through EF.
 /// <para>
-/// Lookups by key only, never join back to table: big backlog stats turned that into hash join over all rows.
+/// <b>Claim = receipt.</b> <see cref="ClaimAsync"/> leases due rows (next_attempt_at = lease end), returns per row: id,
+/// event_time read, lease end set (<see cref="InboxEvent"/>). Every later statement of the batch
+/// (<see cref="MarkDoneAsync"/>, <see cref="MarkFailedAsync"/>, <see cref="ReleaseAsync"/>, <see cref="EndLeasesAsync"/>)
+/// sends receipt back for its claimed ids (<see cref="InboxClaim.Of"/>: only claimed ids, values from claim, never
+/// re-read). Postgres applies it only where row still matches (<see cref="StillClaimed"/>). Why: Salesforce calls run
+/// between claim and outcome, no transaction, nothing holds row; receipt tells "still ours" from "changed".
+/// </para>
+/// <para>
+/// <b>What changes a leased row:</b>
+/// <list type="bullet">
+/// <item>Newer event stored (new event_time, attempts reset). Store keeps next_attempt_at (lease end): now would let
+/// 2nd worker claim mid-write. Outcome skips row (event_time differs): newer event never marked done unsent, old
+/// failure not counted on it. Skipped row's lease ended (lease end still matches): newer event due now, not at expiry.
+/// After <see cref="ReleaseAsync"/>: due after release delay (hold must not race write Salesforce may still apply).</item>
+/// <item>Lease ran out, other worker claimed (new lease end). Our outcomes, lease ends match nothing: late worker can't
+/// record on or end other's lease. Rare: Salesforce call cancelled at 80% of lease.</item>
+/// <item>Same statement ran already (reply lost, unit retried). 1st run replaced lease end (done: null, failed:
+/// backoff): rerun matches nothing, failure counted once.</item>
+/// </list>
+/// Store + outcome same row same moment: row lock orders them; READ COMMITTED re-checks outcome WHERE on row store left.
+/// </para>
+/// <para>
+/// <b>No transactions:</b> each statement commits alone. Claim 1 round trip not 3 (BEGIN, statement, COMMIT), rows leased
+/// shorter (streaming 8 workers x 3 pods: 4.6 s vs 6.4 s). Safe: receipt makes every statement OK to run twice or late.
+/// Accepted cost: lost claim commit, or crash between outcome statements, leaves rows leased till expiry (delayed, not
+/// lost).
+/// </para>
+/// <para>
+/// <b>Lease end, not lock_token column:</b> during lease only a claim changes next_attempt_at, 2 claims never same
+/// microsecond: already identifies lease, no extra column.
+/// </para>
+/// <para>
+/// <b>Key lookups only</b>, never join back to table: big backlog stats turned that into hash join over all rows. Hence
+/// entity_id = ANY(@entityIds) beside receipt's unnest.
 /// </para>
 /// </summary>
 public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TRow>
