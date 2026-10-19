@@ -165,6 +165,35 @@ public sealed class ClaimRaceTests(SyncFixture app)
         (await race.DueAsync()).Should().BeTrue("v3 is due now, not when v1's lease would have ended");
     }
 
+    /// <summary>
+    /// A store of a newer event and the end of the old lease can start in the same microsecond (a transaction's now() is its
+    /// start time). The lease must end all the same: ending it may not depend on the row's last_updated. Played in one
+    /// transaction, so both statements have the very same now().
+    /// </summary>
+    [Fact]
+    public async Task A_lease_ends_on_a_row_a_store_updated_at_the_very_same_time()
+    {
+        await using var race = await StartAsync();
+        await race.StoreAsync(race.Consumer1, 1);
+        List<InboxEvent> claimed;
+        await using (var tx = await race.WorkerA.BeginTransactionAsync())
+        {
+            claimed = await race.ClaimAsync(race.WorkerA, tx);
+            await tx.CommitAsync();
+        }
+
+        await using (var tx = await race.Consumer1.BeginTransactionAsync())
+        {
+            await race.StoreAsync(race.Consumer1, 2, tx);
+            var ended = await race.Consumer1.ExecuteAsync(Sql.EndLease,
+                new { entityIds = claimed.Select(e => e.EntityId).ToArray(), delay = TimeSpan.Zero }, tx);
+            ended.Should().Be(1, "the row is pending under a lease whatever its last_updated is");
+            await tx.CommitAsync();
+        }
+
+        (await race.DueAsync()).Should().BeTrue("v2 is due now, not when v1's lease would have ended");
+    }
+
     /// <summary>The test's schema, migrated, with no rows, and a race in it.</summary>
     private async Task<Race> StartAsync()
     {

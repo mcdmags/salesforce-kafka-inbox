@@ -462,7 +462,8 @@ that time.
    `WHERE next_attempt_at IS NOT NULL`, so a worker whose entity another worker finished changes nothing, and only
    rows that still hold the event the claim read (see [Overwritten while claimed](#the-inbox)). Each statement also
    ends the lease of its rows and sets `next_attempt_at`: null for a finished row, else when it is due again (the end
-   of the backoff or hold). Its last statement (`EndLeasesAsync`) ends the lease of the rows left, those not attempted and
+   of the backoff or hold). Its last statement (`EndLeasesAsync`) ends the lease of the rows left (the claimed ids the outcome
+   statements did not return), those not attempted and
    those a newer event overwrote meanwhile (a store keeps a leased row's `next_attempt_at`, the lease's end), and
    makes them due now (held: when the hold ends). A deferral is that statement alone, due when the deferral ends.
    An event stored at the same moment is never left behind: the store and the outcome update the same row, so either

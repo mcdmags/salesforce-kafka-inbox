@@ -52,7 +52,7 @@ public sealed class InboxStatements
         EndLease = $"""
             UPDATE {table} i
             SET next_attempt_at = now() + @delay, last_updated = now()
-            WHERE i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL AND i.last_updated <> now()
+            WHERE i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL
             """;
     }
 
