@@ -44,9 +44,13 @@ namespace SalesforceSync.Data.Inbox;
 /// are delayed, never lost.
 /// </para>
 /// <para>
-/// <b>Why the lease end instead of a lock_token column.</b> While a lease runs, only a claim changes next_attempt_at,
-/// and two claims never set the same microsecond. So the lease end already identifies the lease, with no extra column
-/// to maintain.
+/// <b>Why the lease end instead of a lock_token column.</b> Earlier versions had a lock_token column: each claim wrote
+/// a new random token on its rows, every outcome matched lock_token = @token, and finishing a row cleared it. It was
+/// dropped (migration DropInboxLockToken) to keep the row to the columns the sync needs; for a while outcomes then
+/// only checked that the row was pending and held the claimed event, which let a late worker or a retried statement
+/// touch a lease that was no longer its own. Matching the lease end restores what the token gave, with no extra
+/// column: while a lease runs, only a claim changes next_attempt_at, and two claims never set the same microsecond,
+/// so the lease end already identifies the lease.
 /// </para>
 /// <para>
 /// <b>Why rows are found by primary key only.</b> Every statement finds its rows with entity_id = ANY(@entityIds): one
