@@ -5,30 +5,24 @@ namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
 /// Account + its Profile__c, written in the same batch (Accounts first). The Profile names its Account by the Account's
-/// external id (a Text foreign key).
-/// Typed event -> mapping -> sObjects -> records. An event without a <c>profile</c> writes only the Account.
-/// The mapping from the event (<see cref="AccountEvent"/>) to the sObjects (<c>AccountSObjects.cs</c>) is here.
+/// external id (a Text foreign key). An event without a <c>profile</c> writes only the Account. All this type says is
+/// which records an event asks for (<see cref="Map"/>); the writer sends them.
 /// </summary>
-public sealed class AccountSync : IEntitySync
+public sealed class AccountSync(SalesforceBatchSyncService batch, RecordWriter writer, IRepository<AccountInboxRow> inbox) : IEntitySync
 {
     public const string Type = AccountEvent.Type;
-
-    private readonly SalesforceBatchSyncService _engine;
-    private readonly IRepository<AccountInboxRow> _inbox;
-    private readonly SyncStrategy<AccountEvent> _strategy;
-
-    public AccountSync(SalesforceBatchSyncService engine, IRepository<AccountInboxRow> inbox)
-    {
-        _engine = engine;
-        _inbox = inbox;
-        _strategy = new(AccountEvent.Reader, Map, Queries);
-    }
 
     public string EntityType => Type;
 
     public Task<int> SyncBatchAsync(CancellationToken ct)
     {
-        return _engine.SyncBatchAsync(_strategy, _inbox, ct);
+        return batch.SyncBatchAsync(AccountEvent.Reader, inbox, Send, ct);
+    }
+
+    /// <summary>What this type does with a batch: map its events to records and let the writer send them.</summary>
+    private Task<Dictionary<string, List<Failure>>> Send(IReadOnlyList<ReadEvent<AccountEvent>> events, CancellationToken ct)
+    {
+        return writer.WriteAsync(events, Map, AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, ct);
     }
 
     /// <summary>
@@ -37,75 +31,51 @@ public sealed class AccountSync : IEntitySync
     /// keys; the contacts' and relationships' own deletes come through their inboxes.
     /// Any other event upserts the Account and, if the event has one, its Profile.
     /// </summary>
-    public SyncUnit Map(string accountKey, AccountEvent e)
+    private static IReadOnlyList<Rec> Map(string accountKey, AccountEvent e)
     {
         if (e.Meta?.IsDelete() == true)
         {
-            return new SyncUnit([SObjectRecord.Deleting<ProfileSObject>("prof", e.Account?.Profile?.ExternalId ?? accountKey),
-                SObjectRecord.Deleting<AccountSObject>("acct", accountKey)]);
+            return [Rec.Deleting("Profile__c", e.Account?.Profile?.ExternalId ?? accountKey), Rec.Deleting("Account", accountKey)];
         }
 
-        var payload = e.Account ?? throw new ArgumentException("account is required");
-        var records = new List<SObjectRecord> { SObjectRecord.From("acct", ToAccount(payload)) };
+        var a = e.Account ?? throw new ArgumentException("account is required");
+        List<Rec> records =
+        [
+            new Rec("Account", accountKey, new Dictionary<string, object?>
+            {
+                ["Name"] = a.Name,
+                ["Rating"] = a.Rating,
+                ["Industry"] = a.Industry,
+                ["Description"] = a.Description,
+                ["AnnualRevenue"] = a.AnnualRevenue,
+                ["NumberOfEmployees"] = a.NumberOfEmployees,
+                ["Phone"] = a.Phone,
+                ["Website"] = a.Website,
+                ["Active__c"] = a.IsActive,
+                // A list in the event, a ';'-separated multi-select picklist in Salesforce
+                ["Tags__c"] = a.Tags is null ? null : string.Join(';', a.Tags),
+                ["Customer_Since__c"] = a.CustomerSince,
+                ["Last_Contacted__c"] = a.LastContactedAt
+            }, RecordType: "Business")
+        ];
 
-        if (payload.Profile is not null)
+        if (a.Profile is { } p)
         {
-            var profile = ToProfile(payload.Profile);
-            // What the profile takes from its account: its id (unless it has its own) and the Account it belongs to
-            profile.ExternalId ??= accountKey;
-            profile.AccountId = accountKey;
-            records.Add(SObjectRecord.From("prof", profile));
+            // Its id defaults to the account's, and it belongs to the event's account. Its Account is written in the
+            // same batch, before it, so it has no parent to wait for
+            records.Add(new Rec("Profile__c", p.ExternalId ?? accountKey, new Dictionary<string, object?>
+            {
+                ["Name"] = p.Name,
+                ["AccountId__c"] = accountKey,
+                ["Tier__c"] = p.Tier,
+                ["Score__c"] = p.Score,
+                ["Discount__c"] = p.DiscountPercent,
+                ["Notes__c"] = p.Notes,
+                ["Opt_In__c"] = p.OptIn,
+                ["Start_Date__c"] = p.StartDate
+            }, RecordType: "Standard"));
         }
-        return new SyncUnit(records);
-    }
 
-    public IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
-    {
-        return [SoqlQuery.RecordsOf<AccountSObject>(units), SoqlQuery.RecordsOf<ProfileSObject>(units)];
-    }
-
-    /// <summary>
-    /// Inbox payload (the source system's shape and names) -> Salesforce sObject (the org's shape and names). Written by
-    /// hand, one line per field, so a renamed or retyped field is a compile error, not a silent mismatch. Values
-    /// pass through as they are, nulls included (null = empty). The mapping converts only where the two sides differ in type.
-    /// </summary>
-    public AccountSObject ToAccount(AccountPayload payload)
-    {
-        return new()
-        {
-            ExternalId = payload.ExternalId,
-            Name = payload.Name,
-            Rating = payload.Rating,
-            Industry = payload.Industry,
-            Description = payload.Description,
-            AnnualRevenue = payload.AnnualRevenue,
-            NumberOfEmployees = payload.NumberOfEmployees,
-            Phone = payload.Phone,
-            Website = payload.Website,
-            Active = payload.IsActive,
-            // A list in the event, a ';'-separated multi-select picklist in Salesforce
-            Tags = payload.Tags is null ? null : string.Join(';', payload.Tags),
-            CustomerSince = payload.CustomerSince,
-            LastContacted = payload.LastContactedAt
-        };
-    }
-
-    /// <summary>
-    /// The profile on its own. <see cref="Map"/>, which has both, fills in what it takes from its account (the default
-    /// external id and the Account's key).
-    /// </summary>
-    public ProfileSObject ToProfile(ProfilePayload payload)
-    {
-        return new()
-        {
-            ExternalId = payload.ExternalId,
-            Name = payload.Name,
-            Tier = payload.Tier,
-            Score = payload.Score,
-            Discount = payload.DiscountPercent,
-            Notes = payload.Notes,
-            OptIn = payload.OptIn,
-            StartDate = payload.StartDate
-        };
+        return records;
     }
 }

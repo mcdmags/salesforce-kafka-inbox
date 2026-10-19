@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Benchmarks;
@@ -59,11 +60,11 @@ public sealed class AggregateWorkloadTests
     {
         var workload = AggregateWorkload.Generate(1_000, 20);
         var org = new FakeSalesforceStore(new FakeSalesforceOptions { EnforceDailyLimit = false });
-        var engine = SalesforceStep.Service(SalesforceStep.Http(new FakeSalesforceHandler(org)), Options.Create(new SalesforceOptions()));
+        var syncs = new Syncs3(org);
         var events = Split(workload).ToList();
         foreach (var (key, e) in events)
         {
-            await ApplyAsync(engine, key, e);
+            await syncs.ApplyAsync(key, e);
         }
 
         var (passedWrong, passedRegressions) = workload.Check(org);
@@ -72,7 +73,7 @@ public sealed class AggregateWorkloadTests
         // A removed contact of an account that stays, written again (its Account exists, so the org takes it)
         var removed = workload.Final.First(e => e.Key.Type == ContactSync.Type && !e.Value.Present
                                                 && workload.Final[(AccountSync.Type, OwnerOf(e.Key.Key))].Present).Key;
-        await ApplyAsync(engine, removed, events.Last(e => e.Key == removed && !IsDelete(e.Event)).Event);
+        await syncs.ApplyAsync(removed, events.Last(e => e.Key == removed && !IsDelete(e.Event)).Event);
         var (wrong, regressions) = workload.Check(org);
 
         passedWrong.Should().BeEmpty();
@@ -81,24 +82,51 @@ public sealed class AggregateWorkloadTests
         regressions.Should().Be(1, "v1 after a newer version");
     }
 
-    /// <summary>An entity event through the engine minus the inbox, as a worker syncs a claimed row: read, map, write.</summary>
-    private static Task ApplyAsync(SalesforceBatchSyncService engine, (string Type, string Key) entity, JsonObject e)
+    /// <summary>The three syncs over in-memory inboxes: an entity event goes through them as a claimed row does.</summary>
+    private sealed class Syncs3
     {
-        return entity.Type switch
-        {
-            AccountSync.Type => ApplyAsync(engine, Syncs.AccountStrategy, entity.Key, e),
-            AccountRelationshipSync.Type => ApplyAsync(engine, Syncs.RelationshipStrategy, entity.Key, e),
-            _ => ApplyAsync(engine, Syncs.ContactStrategy, entity.Key, e)
-        };
-    }
+        private readonly InMemoryInbox<AccountInboxRow> _accounts = new();
+        private readonly InMemoryInbox<AccountRelationshipInboxRow> _relationships = new();
+        private readonly InMemoryInbox<ContactInboxRow> _contacts = new();
+        private readonly AccountSync _account;
+        private readonly AccountRelationshipSync _relationship;
+        private readonly ContactSync _contact;
 
-    private static async Task ApplyAsync<TEvent>(SalesforceBatchSyncService engine, SyncStrategy<TEvent> strategy, string key, JsonObject e)
-    {
-        strategy.TryRead(e.ToJsonString(), out var read, out var problem).Should().BeTrue(problem);
-        var unit = strategy.Map(key, read!.Event);
-        var result = (await engine.WriteToSalesforceAsync([(key, unit)], [.. strategy.Queries([unit])],
-            ContactInboxRow.MaxValuesPerQuery, ContactInboxRow.MaxRecordsPerWrite, CancellationToken.None)).Single();
-        result.Outcome.Should().BeOneOf([SyncOutcome.Saved, SyncOutcome.Unchanged], $"{key}: {result.PrimaryError?.Message}");
+        public Syncs3(FakeSalesforceStore org)
+        {
+            var flow = SalesforceStep.Flow();
+            var writer = SalesforceStep.Writer(SalesforceStep.Http(new FakeSalesforceHandler(org)), Options.Create(new SalesforceOptions()));
+            _account = new AccountSync(flow, writer, _accounts);
+            _relationship = new AccountRelationshipSync(flow, writer, _relationships);
+            _contact = new ContactSync(flow, writer, _contacts);
+        }
+
+        /// <summary>An entity event synced as a worker syncs a claimed row.</summary>
+        public async Task ApplyAsync((string Type, string Key) entity, JsonObject e)
+        {
+            var json = e.ToJsonString();
+            var time = DateTimeOffset.Parse((string)e["meta"]!["time"]!, CultureInfo.InvariantCulture);
+            switch (entity.Type)
+            {
+                case AccountSync.Type:
+                    await ApplyAsync(_account, _accounts, entity.Key, time, json);
+                    break;
+                case AccountRelationshipSync.Type:
+                    await ApplyAsync(_relationship, _relationships, entity.Key, time, json);
+                    break;
+                default:
+                    await ApplyAsync(_contact, _contacts, entity.Key, time, json);
+                    break;
+            }
+        }
+
+        private static async Task ApplyAsync<TRow>(IEntitySync sync, InMemoryInbox<TRow> inbox, string key, DateTimeOffset time, string json)
+            where TRow : InboxRow, IInboxRow, new()
+        {
+            await inbox.AddAsync(key, time, json, CancellationToken.None);
+            await sync.SyncBatchAsync(CancellationToken.None);
+            inbox.Dead.Concat(inbox.Failed).Should().BeEmpty($"{key} was written");
+        }
     }
 
     /// <summary>The account a child's key names: REL-{account}-{other}, CON-{account}-{n}.</summary>

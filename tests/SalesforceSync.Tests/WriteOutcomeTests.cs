@@ -6,6 +6,7 @@ using SalesforceSync.Data.Inbox;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
+using SalesforceSync.Sync;
 using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
@@ -110,20 +111,20 @@ public sealed class WriteOutcomeTests
         (await upsert.Should().ThrowAsync<UnknownOutcomeException>()).WithInnerException<OperationCanceledException>();
     }
 
-    private static Task<List<SyncResult>> Upsert(SalesforceBatchSyncService engine, string key)
+    private static Task<Dictionary<string, List<Failure>>> Upsert(RecordWriter writer, string key)
     {
-        var unit = new SyncUnit([new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = "Acme" })]);
-        return engine.WriteToSalesforceAsync([(key, unit)], [.. Syncs.Account.Queries([unit])],
+        List<ReadEvent<string>> events = [new("", key, DateTimeOffset.UnixEpoch)];
+        return writer.WriteAsync(events, (k, _) => [new Rec("Account", k, new Dictionary<string, object?> { ["Name"] = "Acme" })],
             AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
     }
 
-    private static (SalesforceBatchSyncService, FakeSalesforceStore, FailingHandler) Engine()
+    private static (RecordWriter, FakeSalesforceStore, FailingHandler) Engine()
     {
         var org = new FakeSalesforceStore(new FakeSalesforceOptions { EnforceDailyLimit = false });
         var options = Options.Create(new SalesforceOptions { CompressRequestsLargerThan = 0 });
         var failing = new FailingHandler { InnerHandler = new FakeSalesforceHandler(org) };
         var http = SalesforceStep.Http(failing);
-        return (SalesforceStep.Service(http, options), org, failing);
+        return (SalesforceStep.Writer(http, options), org, failing);
     }
 
     /// <summary>

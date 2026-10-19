@@ -6,64 +6,52 @@ namespace SalesforceSync.ToSalesforce;
 /// <summary>
 /// Account_Relationship__c between two Accounts, named by their external ids (Text foreign keys). If either Account
 /// isn't in Salesforce yet, nothing is sent and the relationship is retried until the account sync creates it.
-/// Like <see cref="AccountSync"/>, the mapping is here and the sObject next to it.
 /// </summary>
-public sealed class AccountRelationshipSync : IEntitySync
+public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, RecordWriter writer, IRepository<AccountRelationshipInboxRow> inbox) : IEntitySync
 {
     public const string Type = AccountRelationshipEvent.Type;
-
-    private readonly SalesforceBatchSyncService _engine;
-    private readonly IRepository<AccountRelationshipInboxRow> _inbox;
-    private readonly SyncStrategy<AccountRelationshipEvent> _strategy;
-
-    public AccountRelationshipSync(SalesforceBatchSyncService engine, IRepository<AccountRelationshipInboxRow> inbox)
-    {
-        _engine = engine;
-        _inbox = inbox;
-        _strategy = new(AccountRelationshipEvent.Reader, Map, Queries);
-    }
 
     public string EntityType => Type;
 
     public Task<int> SyncBatchAsync(CancellationToken ct)
     {
-        return _engine.SyncBatchAsync(_strategy, _inbox, ct);
+        return batch.SyncBatchAsync(AccountRelationshipEvent.Reader, inbox, Send, ct);
+    }
+
+    /// <summary>What this type does with a batch: map its events to records and let the writer send them.</summary>
+    private Task<Dictionary<string, List<Failure>>> Send(IReadOnlyList<ReadEvent<AccountRelationshipEvent>> events, CancellationToken ct)
+    {
+        return writer.WriteAsync(events, Map, AccountRelationshipInboxRow.MaxValuesPerQuery, AccountRelationshipInboxRow.MaxRecordsPerWrite, ct);
     }
 
     /// <summary>
     /// A deleted event deletes the relationship by its key alone. Any other event upserts it, which needs both Accounts' keys.
     /// </summary>
-    public SyncUnit Map(string relationshipKey, AccountRelationshipEvent e)
+    private static IReadOnlyList<Rec> Map(string relationshipKey, AccountRelationshipEvent e)
     {
         if (e.Meta?.IsDelete() == true)
         {
-            return new SyncUnit([SObjectRecord.Deleting<AccountRelationshipSObject>("rel", relationshipKey)]);
+            return [Rec.Deleting("Account_Relationship__c", relationshipKey)];
         }
 
-        var payload = e.AccountRelationship;
-        return string.IsNullOrWhiteSpace(payload?.AccountExternalId) || string.IsNullOrWhiteSpace(payload.RelatedAccountExternalId)
+        var r = e.AccountRelationship;
+        return string.IsNullOrWhiteSpace(r?.AccountExternalId) || string.IsNullOrWhiteSpace(r.RelatedAccountExternalId)
             ? throw new ArgumentException("accountExternalId and relatedAccountExternalId are required")
-            : new SyncUnit([SObjectRecord.From("rel", ToRelationship(payload))]);
-    }
-
-    // Read the relationships (to diff) and the Accounts they point at (to know they exist)
-    public IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
-    {
-        return [SoqlQuery.RecordsOf<AccountRelationshipSObject>(units), SoqlQuery.ParentsOf<AccountSObject>(units)];
-    }
-
-    /// <summary>Payload -> sObject, one line per field (see <see cref="AccountSync.ToAccount"/>).</summary>
-    public AccountRelationshipSObject ToRelationship(AccountRelationshipPayload payload)
-    {
-        return new()
-        {
-            ExternalId = payload.ExternalId,
-            Name = payload.Name,
-            AccountId = payload.AccountExternalId,
-            RelatedAccountId = payload.RelatedAccountExternalId,
-            Type = payload.Type,
-            StartDate = payload.StartDate,
-            Active = payload.IsActive
-        };
+            :
+            [
+                new Rec("Account_Relationship__c", relationshipKey, new Dictionary<string, object?>
+                {
+                    ["Name"] = r.Name,
+                    ["AccountId__c"] = r.AccountExternalId,
+                    ["RelatedAccountId__c"] = r.RelatedAccountExternalId,
+                    ["Type__c"] = r.Type,
+                    ["Start_Date__c"] = r.StartDate,
+                    ["Active__c"] = r.IsActive
+                }, RecordType: "Standard", Parents:
+                [
+                    new Parent("AccountId__c", "Account", r.AccountExternalId),
+                    new Parent("RelatedAccountId__c", "Account", r.RelatedAccountExternalId)
+                ])
+            ];
     }
 }

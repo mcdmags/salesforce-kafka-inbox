@@ -8,7 +8,7 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// <summary>
 /// Salesforce REST transport, and the only class that talks to Salesforce. Every method is exactly one API call: it
 /// takes many records and returns each one's raw result. It decides nothing (what to write, what a result means);
-/// that is <c>SalesforceBatchSyncService</c>'s.
+/// that is the type's own (<c>RecordWriter</c> for the usual way).
 /// <para>
 /// There is deliberately no call for one record (get, update, delete or upsert by id): each costs one API call per
 /// record, and every integration shares the org's daily API allocation. A read takes up to 2,000 external ids, an

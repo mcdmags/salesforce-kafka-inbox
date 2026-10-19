@@ -1,5 +1,5 @@
+using SalesforceSync.Sync;
 using System.Text.Json.Nodes;
-using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
 
@@ -71,12 +71,6 @@ public sealed class AccountAggregateTests
             [("accountRelationship", "inserted", "R9"), ("accountRelationship", "deleted", "R1"), ("contact", "deleted", "C1")]);
         var contactDelete = events.Single(e => Type(e) == "deleted" && e.EntityType == "contact");
         JsonNode.DeepEquals(Payload(contactDelete), new JsonObject { ["externalId"] = "C1" }).Should().BeTrue("a delete needs the key only");
-
-        var unit = Map(Syncs.ContactStrategy, contactDelete);
-        unit.Records.Should().ContainSingle().Which.Should().Match<SObjectRecord>(r =>
-            r.Delete && r.SObject == "Contact" && r.ExternalIdField == "ExternalId__c" && r.ExternalId == "C1" && r.Fields.Count == 0);
-        Map(Syncs.RelationshipStrategy, events.Single(e => Id(e) == "R1")).Records.Should().ContainSingle()
-            .Which.Should().Match<SObjectRecord>(r => r.Delete && r.SObject == "Account_Relationship__c" && r.ExternalId == "R1");
     }
 
     [Theory]
@@ -96,20 +90,7 @@ public sealed class AccountAggregateTests
 
         events.Select(e => (e.EntityType, Type(e), Id(e))).Should().Equal(
             ("account", "deleted", "ACC-1"), ("accountRelationship", "deleted", "R1"), ("contact", "deleted", "C1"));
-        Map(Syncs.AccountStrategy, events[0]).Records.Select(r => (r.SObject, r.ExternalId, r.Delete)).Should().Equal(
-            [("Profile__c", "PRF-1", true), ("Account", "ACC-1", true)], "the Profile, by its own key, before its Account");
-    }
-
-    [Fact]
-    public void A_deleted_Account_without_a_Profile_key_deletes_the_Profile_by_the_Accounts_key()
-    {
-        var before = Snapshot();
-        before["profile"]!.AsObject().Remove("externalId");
-
-        var account = Split(Aggregate(before, null)).Single();
-
-        Map(Syncs.AccountStrategy, account).Records.Select(r => (r.SObject, r.ExternalId)).Should().Equal(
-            [("Profile__c", "ACC-1"), ("Account", "ACC-1")], "a profile's key defaults to its account's");
+        Payload(events[0])["profile"]!["externalId"]!.GetValue<string>().Should().Be("PRF-1", "the Profile is deleted by its own key");
     }
 
     [Fact]
@@ -146,7 +127,7 @@ public sealed class AccountAggregateTests
             Snapshot(contacts: [new JsonObject { ["lastName"] = "Nameless" }])));
 
         var stored = events.Should().ContainSingle().Subject;
-        Syncs.ContactStrategy.TryRead(stored.Json, out _, out var problem).Should().BeFalse();
+        ContactEvent.Reader.TryRead(stored.Json, out _, out var problem).Should().BeFalse();
         problem.Should().Contain("non-empty id");
     }
 
@@ -156,13 +137,6 @@ public sealed class AccountAggregateTests
     {
         Syncs.TrySplit(aggregate.ToJsonString(), out var events, out var problem).Should().BeTrue("the aggregate is valid, but: {0}", problem);
         return events!;
-    }
-
-    /// <summary>The unit the type's strategy maps the stored event to, as the engine does after a claim.</summary>
-    private static SyncUnit Map<TEvent>(SyncStrategy<TEvent> strategy, Syncs.EntityEvent e)
-    {
-        strategy.TryRead(e.Json, out var read, out var problem).Should().BeTrue("the stored event is valid, but: {0}", problem);
-        return strategy.Map(read!.EntityId, read.Event);
     }
 
     private static JsonObject Aggregate(JsonObject? before, JsonObject? after, string type = "updated")

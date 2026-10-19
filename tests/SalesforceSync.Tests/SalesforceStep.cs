@@ -14,8 +14,8 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The engine wired for its Salesforce step alone (<see cref="SalesforceBatchSyncService.WriteToSalesforceAsync"/>:
-/// normalize, read, decide, send, interpret): a real client on the given HTTP stack, its own record type cache, no database.
+/// The parts of the Salesforce half wired for tests: a real client on the given HTTP stack, its own record type cache,
+/// no database.
 /// </summary>
 internal static class SalesforceStep
 {
@@ -33,15 +33,16 @@ internal static class SalesforceStep
     /// <summary>The path of the REST calls with the default options.</summary>
     public static readonly string DataPath = Org.DataPath;
 
-    /// <param name="http">The HTTP stack to the org (see <see cref="Http"/>).</param>
-    /// <param name="options">The Salesforce options of the engine and its error classification.</param>
-    /// <param name="limiter">The rate limiter, for tests that run whole batches; the Salesforce step needs none.</param>
-    public static SalesforceBatchSyncService Service(HttpClient http, IOptions<SalesforceOptions> options,
-        ISalesforceRateLimiter? limiter = null)
+    /// <summary>The writer (read, decide, send, interpret) on <paramref name="http"/>: no database, its own record type cache.</summary>
+    public static RecordWriter Writer(HttpClient http, IOptions<SalesforceOptions> options)
     {
-        return new(limiter ?? new NotPaused(), Client(http), RecordTypes(http),
-                new SalesforceErrors(options), Options.Create(new SyncOptions()),
-                NullLogger<SalesforceBatchSyncService>.Instance);
+        return new(Client(http), RecordTypes(http), new SalesforceErrors(options));
+    }
+
+    /// <summary>The flow of a batch, with a rate limiter that is never paused unless told to be.</summary>
+    public static SalesforceBatchSyncService Flow(ISalesforceRateLimiter? limiter = null)
+    {
+        return new(limiter ?? new NotPaused(), Options.Create(new SyncOptions()), NullLogger<SalesforceBatchSyncService>.Instance);
     }
 
     /// <summary>A record type cache reading through <paramref name="http"/>; with <paramref name="shared"/>, a pod sharing that cache with others.</summary>

@@ -208,6 +208,7 @@ public static class SyncServiceCollectionExtensions
         services.AddPooledDbContextFactory<SyncDbContext>((sp, o) => SyncDbContext.Configure(o,
             sp.GetRequiredService<NpgsqlDataSource>(), sp.GetRequiredService<IOptions<PostgresRetryOptions>>().Value));
         services.AddSingleton(typeof(IRepository<>), typeof(InboxRepository<>)); // one per inbox row type
+        services.AddTransient<RecordWriter>();
         services.AddTransient<SalesforceBatchSyncService>();
 
         // The synced objects, parents first. Each has two halves: its ingest, which stores what it takes from an

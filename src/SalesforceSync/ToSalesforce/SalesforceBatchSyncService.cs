@@ -1,58 +1,37 @@
 using Microsoft.Extensions.Options;
-using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
+using SalesforceSync.Sync;
 
 namespace SalesforceSync.ToSalesforce;
 
+/// <summary>What went wrong with one record of an entity, and whether retrying the same data can help.</summary>
+public sealed record Failure(SalesforceError Error, bool Permanent);
+
 /// <summary>
-/// The one sync engine for every Salesforce object. <see cref="SyncBatchAsync{TEvent, TRow}"/>
-/// runs one batch end to end; the inbox repository (its row type is the type's inbox table) holds each entity's newest
-/// event, and the strategy says how to read one, how it maps to Salesforce records and what to read from Salesforce.
-/// <list type="number">
-/// <item>Starts nothing while this process is paused (Salesforce asked for it: rate limits).</item>
-/// <item>Claims up to <see cref="SyncOptions.BatchSize"/> due entities: each one's inbox row is locked with FOR UPDATE
-/// SKIP LOCKED, leased and read, so no two workers in any pod ever process the same entity at once.</item>
-/// <item>Per entity, reads the claimed event: the newest one stored (events carry the full record, and a newer event
-/// overwrites the entity's row; one not newer than a synced event is never stored). Arrival order plays no
-/// part: events may come out of order, over any partitions. An event that can't be read or mapped is
-/// dead-lettered on its own.</item>
-/// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
-/// reads the current records (one query per object), then sends what differs, one upsert per object with parents first,
-/// and last the records to delete that Salesforce has, in one delete.</item>
-/// <item>Records each entity's outcome in one transaction: done, released for the
-/// next claim, retried with backoff, or dead-lettered. A Salesforce call that fails as a whole fails the whole batch:
-/// every claimed entity is held (the write's outcome is unknown), deferred (rate limited) or retried. An entity whose
-/// row a newer event overwrote meanwhile gets no outcome: its row stays pending and due.</item>
-/// </list>
-/// <para>
-/// From an event to Salesforce, step by step (event objects and SObjects are two different classes):
-/// </para>
-/// <list type="number">
-/// <item><b>Event object</b> (<c>AccountEvent</c>, <c>ContactEvent</c>, ...): the inbox payload as the source sent it
-/// (camelCase names, its own shape). Only the strategy's <c>Map</c> reads it.</item>
-/// <item><b>SObject</b> (<c>AccountSObject</c>, <c>ContactSObject</c>, ...): the same data as Salesforce names it (API
-/// field names, <c>[SObject]</c> attributes). <c>Map</c> builds one per Salesforce record and
-/// <see cref="SObjectRecord.From{TSObject}"/> turns it into a plain <see cref="SObjectRecord"/>: the event stops
-/// there, Salesforce's side begins, and the engine never sees an event object again.</item>
-/// <item>The records of one entity are its <see cref="SyncUnit"/>.</item>
-/// <item><b>Diff</b> (<see cref="Differ.Plan"/>): each record is compared with what the read found in Salesforce, and
-/// becomes a create (all its fields), an update (only the fields that differ), a delete or nothing.</item>
-/// <item><b>Write</b> (<see cref="Sender.WriteAsync"/>): one upsert per object, parents first, then the deletes.</item>
-/// </list>
-/// This class is the flow (<see cref="SyncBatchAsync{TEvent, TRow}"/>) and, below it, the steps of
-/// <see cref="WriteToSalesforceAsync"/> in the order they run. The pure ones (normalize, build the read, diff) are static
-/// and do no I/O. Salesforce is reached only through <see cref="ISalesforceRestClient"/> and the inbox only through
-/// <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
+/// What a type does with a batch's valid events: send them to Salesforce, however it likes (see <see cref="RecordWriter"/>
+/// for the usual way).
 /// </summary>
-public sealed class SalesforceBatchSyncService(
-    ISalesforceRateLimiter limiter,
-    ISalesforceRestClient salesforce,
-    RecordTypeCache recordTypes,
-    SalesforceErrors errors,
-    IOptions<SyncOptions> options,
-    ILogger<SalesforceBatchSyncService> log)
+/// <returns>The entities that failed, by entity id, with why. An entity not in it is done.</returns>
+public delegate Task<Dictionary<string, List<Failure>>> SendStep<TEvent>(IReadOnlyList<ReadEvent<TEvent>> events, CancellationToken ct);
+
+/// <summary>
+/// The flow of one batch of one entity type, from the inbox to Salesforce and back; the same for every type. Only the
+/// flow is here. What happens with the events (how they map, what is read, written and how answers are read) is the
+/// type's own, passed in as the <see cref="SendStep{TEvent}"/>.
+/// <list type="number">
+/// <item>Nothing starts while this process is paused (Salesforce asked for it).</item>
+/// <item><b>Claim</b> up to <see cref="SyncOptions.BatchSize"/> due entities from the inbox table: leased to this
+/// worker, so no other worker (in any pod) takes them until the lease ends. One row per entity: its newest event.</item>
+/// <item><b>Parse</b> each row's event (<see cref="EventReader{TEvent}"/>). A row that can't be read is dead.</item>
+/// <item><b>Send</b>: the type's step. It runs outside any database transaction (Salesforce can't join one) and is
+/// given up on before the lease runs out, so another worker never takes an entity while this one can still write it.</item>
+/// <item><b>Record</b> each entity's outcome in the inbox: done, retried later, or dead. If the whole step fails, every
+/// claimed entity is held (the write's outcome is unknown), deferred (rate limited), stopped (a mapping error) or retried.</item>
+/// </list>
+/// </summary>
+public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, IOptions<SyncOptions> options, ILogger<SalesforceBatchSyncService> log)
 {
     /// <summary>
     /// Share of the lease a batch may spend before its Salesforce call is cancelled. The rest is margin for recording
@@ -65,56 +44,42 @@ public sealed class SalesforceBatchSyncService(
 
     private readonly SyncOptions _opt = options.Value;
 
-    // The steps of the Salesforce half of a batch, each a class below
-    private readonly Normalizer _normalizer = new(recordTypes);
-    private readonly Reader _reader = new(salesforce);
-    private readonly Sender _sender = new(salesforce, new Interpreter(errors));
-
-    /// <summary>Claims, writes (upserts and deletes) and records one batch of the strategy's entity type.</summary>
+    /// <param name="reader">Reads and validates the type's events.</param>
+    /// <param name="inbox">The type's inbox table.</param>
+    /// <param name="send">What the type does with the valid events.</param>
+    /// <param name="ct">Shutdown.</param>
     /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
-    public async Task<int> SyncBatchAsync<TEvent, TRow>(SyncStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
+    public async Task<int> SyncBatchAsync<TEvent, TRow>(EventReader<TEvent> reader, IRepository<TRow> inbox, SendStep<TEvent> send,
+        CancellationToken ct)
         where TRow : InboxRow, IInboxRow, new()
     {
-        // No batch starts while this process is paused (Salesforce asked for it). Nothing is claimed
         if (limiter.IsPaused)
         {
             return 0;
         }
 
-        // Give up on Salesforce before the lease runs out, so another worker never claims an entity while this one
-        // can still write to it. Started before the claim, so the margin is measured from when the lease began.
+        // Started before the claim, so the margin is measured from when the lease began
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
 
-        // 1. Claim entities and their rows from the inbox table (short transaction). The lease, not a transaction,
-        // protects the entities until step 4
         var claim = await inbox.ClaimAsync(ct);
         if (claim.Events.Count == 0)
         {
             return 0;
         }
 
-        // 2. Per entity: map its event to records
-        var batch = PreparedBatch.Prepare(strategy, claim.Events);
+        var (events, dead) = Parse(reader, claim.Events);
 
-        // 3. Salesforce (outside any transaction): read, decide, send, interpret. Outside on purpose: Salesforce
-        // can't join a Postgres transaction (a rollback can't undo a saved write), the execution strategy
-        // re-runs its whole delegate on a transient Postgres error (the HTTP calls would be sent again), and a
-        // transaction held for up to the request timeout keeps locks, a pooled connection per worker and autovacuum's
-        // horizon on a high-churn table. A crash between here and step 4 leaves the rows pending under an expiring
-        // lease. The retry reads Salesforce and writes only what still differs.
-        Dictionary<string, SyncResult> results;
+        Dictionary<string, List<Failure>> failures;
         try
         {
-            results = (await WriteToSalesforceAsync(batch.Units, [.. strategy.Queries([.. batch.Work.Select(w => w.Unit)])],
-                TRow.MaxValuesPerQuery, TRow.MaxRecordsPerWrite, leaseCts.Token)).ToDictionary(r => r.Key);
+            failures = await send(events, leaseCts.Token);
         }
         catch (UnknownOutcomeException ex)
         {
-            // Salesforce may still apply the write. Caught on shutdown too: an entity released now could be written
-            // by another worker before the lost write lands. If the hold can't be recorded (or the process is killed
-            // first), the lease is what still protects the entities.
-            log.LogWarning(ex, "{Type} batch: holding {Count} events for {Hold}", strategy.EntityType, claim.Events.Count, _opt.UnknownOutcomeHold);
+            // Salesforce may still apply the write, so the entities aren't written again for a while. Caught on
+            // shutdown too. If the hold can't be recorded (or the process is killed first), the lease still protects them
+            log.LogWarning(ex, "{Type} batch: holding {Count} events for {Hold}", reader.EntityType, claim.Events.Count, _opt.UnknownOutcomeHold);
             using var recording = new CancellationTokenSource(HoldRecordingTimeout);
             await inbox.ReleaseAsync(claim, new Release(_opt.UnknownOutcomeHold, $"UNKNOWN_OUTCOME: {ex.Message}"), recording.Token);
             ct.ThrowIfCancellationRequested();
@@ -123,147 +88,92 @@ public sealed class SalesforceBatchSyncService(
         catch (MappingErrorException ex)
         {
             // The inbox stops (every due row waits) with the error on the rows to fix. Nothing is dead-lettered and the
-            // rows go on after the deploy with no replay. If the read found it, nothing was written. If a write's
-            // answer found it, the records that were saved are read as unchanged next time.
+            // rows go on after the deploy with no replay
             log.LogError(ex, "{Type} inbox stopped for {Hold} by {Count} mapping error(s), fix the mapping or add the field: {Errors}",
-                strategy.EntityType, _opt.MappingErrorHold, ex.Errors.Count,
+                reader.EntityType, _opt.MappingErrorHold, ex.Errors.Count,
                 string.Join("; ", ex.Errors.Select(e => $"{e.Key}: {e.Error.Code} {e.Error.Message}")));
             await inbox.ReleaseAsync(claim, new Release(_opt.MappingErrorHold,
-                $"MAPPING_ERROR: the {strategy.EntityType} inbox is stopped by a mapping error ({ex.Message})",
-                [.. ex.Errors.GroupBy(e => e.Key).Select(g => new FailedEvent(g.Key,
-                    string.Join("; ", g.Select(e => $"{e.Error.Code}: {e.Error.Message}"))))],
+                $"MAPPING_ERROR: the {reader.EntityType} inbox is stopped by a mapping error ({ex.Message})",
+                [.. ex.Errors.GroupBy(e => e.Key).Select(g => new FailedEvent(g.Key, string.Join("; ", g.Select(e => $"{e.Error.Code}: {e.Error.Message}"))))],
                 StopInbox: true), ct);
             return claim.Events.Count;
         }
         catch (RateLimitedException ex)
         {
-            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}", claim.Events.Count, strategy.EntityType, ex.RetryAfter);
+            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}", claim.Events.Count, reader.EntityType, ex.RetryAfter);
             await inbox.ReleaseAsync(claim, new Release(ex.RetryAfter), ct);
             return 0;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // A request failed that Salesforce provably did not apply (the read or a write): every entity is
-            // retried. Records that earlier write requests of the batch saved are safe: the retry reads them and writes
-            // only what still differs. Shutdown (ct) is not caught: the failed request wrote nothing, and the lease
-            // expires.
-            log.LogError(ex, "{Type} batch failed", strategy.EntityType);
+            // A request failed that Salesforce provably did not apply (the read or a write): every entity is retried.
+            // Records saved by earlier calls of the batch are safe: the retry reads them and writes only what differs
+            log.LogError(ex, "{Type} batch failed", reader.EntityType);
             await inbox.FailAllAsync(claim, ex.Message, ct);
             return claim.Events.Count;
         }
 
-        // 4. Record every entity's outcome in the inbox
-        LogFailures(strategy.EntityType, batch, results.Values);
-        await inbox.RecordAsync(claim, batch.Outcomes(results), ct);
+        await inbox.RecordAsync(claim, Outcomes(reader.EntityType, events, dead, failures), ct);
         return claim.Events.Count;
     }
 
     /// <summary>
-    /// The Salesforce half of a batch, for any sObjects, in five steps: normalize, read (one query per object),
-    /// diff, send (one upsert per object, parents first, then one delete) and interpret the answers. Returns one outcome
-    /// per unit. Nothing here touches the inbox.
+    /// Each claimed row's event, read. A row that can't be read, or is about another entity than its row (the lease is on
+    /// the row's entity), is dead: retrying can't fix it.
     /// </summary>
-    /// <remarks>
-    /// A call that fails as a whole (the call, not records in it) throws, and the caller fails, holds or defers the whole
-    /// claim, even when an earlier call of the batch saved its records: the failed call's outcome decides, so an unknown
-    /// one holds every claimed entity. Nothing earlier calls learned is recorded, and nothing needs to be: every write is
-    /// matched by external id, so the retry reads Salesforce, finds what they saved and writes only what still differs.
-    /// </remarks>
-    /// <param name="units">At most <see cref="SyncOptions.MaxEntitiesPerBatch"/>, keyed by entity key.</param>
-    /// <param name="queries">The strategy's reads: the units' records and the records their foreign keys point at.</param>
-    /// <param name="maxValuesPerQuery">The row type's <see cref="IInboxRow.MaxValuesPerQuery"/>.</param>
-    /// <param name="maxRecordsPerWrite">The row type's <see cref="IInboxRow.MaxRecordsPerWrite"/>.</param>
-    /// <param name="ct">Cancels the calls; shutdown, not a failure.</param>
-    /// <exception cref="UnknownOutcomeException">The write call failed without proving that nothing was applied.</exception>
-    internal async Task<List<SyncResult>> WriteToSalesforceAsync(IReadOnlyList<(string Key, SyncUnit Unit)> units,
-        IReadOnlyList<SoqlQuery> queries, int maxValuesPerQuery, int maxRecordsPerWrite, CancellationToken ct)
+    private static (List<ReadEvent<TEvent>> Events, List<FailedEvent> Dead) Parse<TEvent>(EventReader<TEvent> reader, IReadOnlyList<InboxEvent> rows)
     {
-        if (units.Count > _opt.MaxEntitiesPerBatch)
+        List<ReadEvent<TEvent>> events = [];
+        List<FailedEvent> dead = [];
+        foreach (var row in rows)
         {
-            throw new ArgumentOutOfRangeException(nameof(units), $"At most {_opt.MaxEntitiesPerBatch} units per call");
-        }
-
-        var results = new List<SyncResult>(units.Count);
-        if (units.Count == 0)
-        {
-            return results;
-        }
-
-        // A unit whose record type the org doesn't have fails on its own, before any call that writes
-        var (normalized, rejected) = await _normalizer.NormalizeAsync(units, ct);
-        results.AddRange(rejected);
-
-        if (normalized.Count > 0)
-        {
-            var current = await _reader.ReadCurrentAsync(_reader.BuildReadQueries(normalized, queries, maxValuesPerQuery), normalized, ct);
-            var (planned, decided) = Differ.Plan(normalized, current);
-            results.AddRange(decided);
-
-            List<SyncResult> written;
-            try
+            if (!reader.TryRead(row.Payload, out var read, out var problem))
             {
-                written = await _sender.WriteAsync(planned, maxRecordsPerWrite, ct);
+                dead.Add(Invalid(reader, row, problem));
             }
-            catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
+            else if (!string.Equals(read.EntityId, row.EntityId, StringComparison.Ordinal))
             {
-                // Everything before the first write only read from Salesforce, so its failures are safe to retry. From
-                // here on Salesforce may have the write, and may still apply it after we stop waiting.
-                throw new UnknownOutcomeException(ex);
+                dead.Add(Invalid(reader, row, $"the event is about '{read.EntityId}', but the row's entity_id is '{row.EntityId}'"));
             }
-
-            ThrowIfMappingErrors(written);
-            results.AddRange(written);
+            else
+            {
+                events.Add(read);
+            }
         }
 
-        await _normalizer.InvalidateRecordTypesAsync(units, results, ct);
-        return results;
+        return (events, dead);
     }
 
-    // ---------- Mapping errors ----------
-
-    /// <summary>
-    /// A field the code sends that Salesforce lacks or won't let us set: the mapping is wrong for every event of
-    /// that kind, so only a code change or a field in the org fixes it. Retrying or dead-lettering one entity at a time
-    /// would only spend attempts, so the caller stops the inbox instead.
-    /// </summary>
-    private static bool IsMappingError(SalesforceError e)
+    private static FailedEvent Invalid<TEvent>(EventReader<TEvent> reader, InboxEvent row, string why)
     {
-        return e.Code is "INVALID_FIELD" or "INVALID_FIELD_FOR_INSERT_UPDATE";
+        return new FailedEvent(row.EntityId, $"{SalesforceErrors.InvalidEvent}: {reader.EntityType} {row.EntityId}: {why}");
     }
 
-    private static List<(string Key, SalesforceError Error)> MappingErrors(IEnumerable<SyncResult> results)
+    /// <summary>Done: no failure. Dead: a failure retrying can't fix, and the unreadable rows. Failed: the rest, retried with backoff.</summary>
+    private BatchOutcomes Outcomes<TEvent>(string entityType, List<ReadEvent<TEvent>> events, List<FailedEvent> dead,
+        Dictionary<string, List<Failure>> failures)
     {
-        return [.. results.SelectMany(r => r.Errors.Where(IsMappingError).Select(e => (r.Key, e)))];
-    }
-
-    /// <summary>Stops the batch if a write was refused for a mapping error: the field is not in the org, or not settable.</summary>
-    /// <exception cref="MappingErrorException">At least one unit has a mapping error.</exception>
-    private static void ThrowIfMappingErrors(IEnumerable<SyncResult> results)
-    {
-        if (MappingErrors(results) is { Count: > 0 } found)
-        {
-            throw new MappingErrorException(found);
-        }
-    }
-
-    private void LogFailures(string entityType, PreparedBatch batch, IEnumerable<SyncResult> results)
-    {
-        foreach (var invalid in batch.Invalid)
+        foreach (var invalid in dead)
         {
             log.LogWarning("Dead-lettered event {Id}: {Error}", invalid.EntityId, invalid.Error);
         }
 
-        foreach (var r in results.Where(r => r.Outcome is SyncOutcome.PermanentFailure or SyncOutcome.TransientFailure))
+        var done = new List<string>();
+        var failed = new List<FailedEvent>();
+        var allDead = new List<FailedEvent>(dead);
+        foreach (var key in events.Select(e => e.EntityId))
         {
-            log.LogWarning("{Type} {Key}: {Outcome} ({Code}) {Errors}", entityType, r.Key, r.Outcome,
-                r.PrimaryError?.Code, string.Join("; ", r.Errors));
-        }
-    }
-}
+            if (!failures.TryGetValue(key, out var list))
+            {
+                done.Add(key);
+                continue;
+            }
 
-/// <summary>Units whose mapping Salesforce rejects, with what to fix.</summary>
-internal sealed class MappingErrorException(IReadOnlyList<(string Key, SalesforceError Error)> errors)
-    : Exception($"{errors.Count} mapping error(s), e.g. {errors[0].Error.Code}: {errors[0].Error.Message}")
-{
-    public IReadOnlyList<(string Key, SalesforceError Error)> Errors => errors;
+            var failure = new FailedEvent(key, string.Join("; ", list.OrderByDescending(f => f.Permanent).Select(f => f.Error)));
+            log.LogWarning("{Type} {Key}: {Error}", entityType, key, failure.Error);
+            (list.Any(f => f.Permanent) ? allDead : failed).Add(failure);
+        }
+
+        return new BatchOutcomes(done, allDead, failed);
+    }
 }

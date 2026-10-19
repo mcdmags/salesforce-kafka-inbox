@@ -5,25 +5,18 @@ using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
-using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// CPU-only hot paths: header parsing, reading events, typed mapping (event JSON -> payload -> sObject -> record),
-/// type-aware normalize + compare.
+/// CPU-only hot paths: header parsing, reading events, type-aware normalize + compare.
 /// </summary>
 [MemoryDiagnoser]
 public class MicroBenchmarks
 {
     private const string LimitHeader = "api-usage=10018/100000; api-bursts=1/750; per-app-api-usage=17/250(appName=sync)";
 
-    private static readonly AccountSync AccountSyncer = new(null!, null!);
-    private static readonly SyncStrategy<AccountEvent> Accounts = new(AccountEvent.Reader, AccountSyncer.Map, AccountSyncer.Queries);
-
     private List<InboxEvent> _tenEvents = default!;
-    private AccountPayload _payload = default!;
-    private AccountSObject _sobject = default!;
     private JsonElement _number;
     private JsonElement _datetime;
 
@@ -65,9 +58,6 @@ public class MicroBenchmarks
             }.ToJsonString(),
             EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero)))];
 
-        _payload = JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, EventJson.Options)!.Account!;
-        _sobject = AccountSyncer.ToAccount(_payload);
-
         _number = JsonDocument.Parse("87.50").RootElement.Clone();
         _datetime = JsonDocument.Parse("\"2026-10-12T01:02:03.000+0000\"").RootElement.Clone();
     }
@@ -78,39 +68,11 @@ public class MicroBenchmarks
         return SalesforceLimitInfo.Parse(LimitHeader);
     }
 
-    /// <summary>What the engine does with the rows of a claim of ten entities: read each one's event and map it.</summary>
-    [Benchmark]
-    public int PrepareTenEntities()
-    {
-        return PreparedBatch.Prepare(Accounts, _tenEvents).Work.Count;
-    }
-
     /// <summary>What the consumer does per message: typed read + validation (entity id, event time).</summary>
     [Benchmark]
     public bool ReadAndValidateEvent()
     {
-        return Accounts.TryRead(_tenEvents[0].Payload, out _, out _);
-    }
-
-    /// <summary>What the engine does per entity: raw event JSON -> typed event -> mapping -> Account + Profile records.</summary>
-    [Benchmark]
-    public SyncUnit MapAccountEvent()
-    {
-        return Accounts.Map("ACC-000001", JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, EventJson.Options)!);
-    }
-
-    /// <summary>The hand-written mapping alone: payload -> sObject.</summary>
-    [Benchmark]
-    public AccountSObject MapPayloadToSObject()
-    {
-        return AccountSyncer.ToAccount(_payload);
-    }
-
-    /// <summary>sObject -> record through the cached attribute metadata (no reflection per call).</summary>
-    [Benchmark]
-    public SObjectRecord MapSObjectToRecord()
-    {
-        return SObjectRecord.From("acct", _sobject);
+        return AccountEvent.Reader.TryRead(_tenEvents[0].Payload, out _, out _);
     }
 
     [Benchmark]

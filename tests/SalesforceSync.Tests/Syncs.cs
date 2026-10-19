@@ -1,27 +1,17 @@
 using SalesforceSync.Persistence;
 using SalesforceSync.Sync;
-using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The three synced objects as the app builds them (it registers each once in DI): the ingests, the syncs and the
-/// strategies the engine runs for them. The tests that use only the mapping or the projection need neither inbox nor
-/// engine.
+/// The three ingests as the app builds them (it registers each once in DI), and the aggregate. The tests that use only
+/// the projection need no inbox.
 /// </summary>
 internal static class Syncs
 {
     public static readonly AccountIngest AccountIngest = new(null!);
     public static readonly AccountRelationshipIngest RelationshipIngest = new(null!);
     public static readonly ContactIngest ContactIngest = new(null!);
-
-    public static readonly AccountSync Account = new(null!, null!);
-    public static readonly AccountRelationshipSync Relationship = new(null!, null!);
-    public static readonly ContactSync Contact = new(null!, null!);
-
-    public static readonly SyncStrategy<AccountEvent> AccountStrategy = new(AccountEvent.Reader, Account.Map, Account.Queries);
-    public static readonly SyncStrategy<AccountRelationshipEvent> RelationshipStrategy = new(AccountRelationshipEvent.Reader, Relationship.Map, Relationship.Queries);
-    public static readonly SyncStrategy<ContactEvent> ContactStrategy = new(ContactEvent.Reader, Contact.Map, Contact.Queries);
 
     public static readonly AccountAggregate Aggregate = new();
 
@@ -39,9 +29,9 @@ internal static class Syncs
 
         events =
         [
-            .. AccountIngest.Project(change).Select(e => new EntityEvent(AccountSync.Type, AggregateProjection.Serialize(e))),
-            .. RelationshipIngest.Project(change).Select(e => new EntityEvent(AccountRelationshipSync.Type, AggregateProjection.Serialize(e))),
-            .. ContactIngest.Project(change).Select(e => new EntityEvent(ContactSync.Type, AggregateProjection.Serialize(e)))
+            .. AccountIngest.Project(change).Select(e => new EntityEvent(AccountEvent.Type, AggregateProjection.Serialize(e))),
+            .. RelationshipIngest.Project(change).Select(e => new EntityEvent(AccountRelationshipEvent.Type, AggregateProjection.Serialize(e))),
+            .. ContactIngest.Project(change).Select(e => new EntityEvent(ContactEvent.Type, AggregateProjection.Serialize(e)))
         ];
         return true;
     }

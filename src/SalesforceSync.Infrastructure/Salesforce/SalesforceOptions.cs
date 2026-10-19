@@ -58,7 +58,7 @@ public sealed class SalesforceOptions
 
     /// <summary>
     /// How the org says a record's parent is missing when a Text foreign key names the parent
-    /// (<see cref="SObjectForeignKeyAttribute"/>): the org's own automation rejects such a child (a validation rule,
+    /// (a parent in a Rec): the org's own automation rejects such a child (a validation rule,
     /// a trigger's addError or a flow's Custom Error: FIELD_CUSTOM_VALIDATION_EXCEPTION with the org's message; an
     /// unhandled trigger exception: CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY). A record error whose message contains one of
     /// these (case-insensitive) is <see cref="SalesforceErrors.DependencyNotSynced"/>, whatever its code: retried like
