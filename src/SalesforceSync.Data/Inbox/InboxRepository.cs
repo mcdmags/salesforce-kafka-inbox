@@ -49,8 +49,11 @@ namespace SalesforceSync.Data.Inbox;
 /// to maintain.
 /// </para>
 /// <para>
-/// <b>Why lookups go by key only.</b> We never join back to the table: with a large backlog's statistics such a join
-/// became a hash join over every row. That is why entity_id = ANY(@entityIds) sits next to the unnest of the receipt.
+/// <b>Why rows are found by primary key only.</b> Every statement finds its rows with entity_id = ANY(@entityIds): one
+/// index lookup per id, so the cost depends on the batch size, not the table size. Joining a list of ids back to the
+/// table means the same thing, but leaves the planner free to choose how. With a big backlog its estimates were off,
+/// and it read the whole table to update a few hundred rows. The unnest only checks the rows already found against
+/// the receipt.
 /// </para>
 /// </summary>
 public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TRow>
