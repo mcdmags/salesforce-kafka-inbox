@@ -113,7 +113,7 @@ public sealed class WriteOutcomeTests
     private static Task<List<SyncResult>> Upsert(SalesforceBatchSyncService engine, string key)
     {
         var unit = new SyncUnit([new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = "Acme" })]);
-        return engine.WriteToSalesforceAsync([(key, unit)], [.. AccountSync.Queries([unit])],
+        return engine.WriteToSalesforceAsync([(key, unit)], [.. Syncs.Account.Queries([unit])],
             AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
     }
 

@@ -10,18 +10,30 @@ namespace SalesforceSync.Sync;
 /// Everything particular to accounts is in this file: the event as the source sends it, the sObjects as the org
 /// has them, the mapping between the two, and the inbox row type.
 /// </summary>
-public static class AccountSync
+public sealed class AccountSync : IAggregateProjection
 {
     public const string Type = "account";
 
     /// <summary>The strategy the engine runs.</summary>
-    public static readonly SyncStrategy<AccountEvent> Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries, Project);
+    public SyncStrategy<AccountEvent> Strategy { get; }
+
+    public AccountSync()
+    {
+        Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries, Project);
+    }
+
+    string IAggregateProjection.EntityType => Type;
+
+    public IEnumerable<string> ProjectJson(AggregateChange change)
+    {
+        return Strategy.ProjectJson(change);
+    }
 
     /// <summary>
     /// The Account's event: the Account (with its Profile) when it changed or Before is missing; its delete, with its
     /// Profile if that has a key of its own, when it is gone.
     /// </summary>
-    public static IEnumerable<AccountEvent> Project(AggregateChange change)
+    public IEnumerable<AccountEvent> Project(AggregateChange change)
     {
         if (change.IsDelete)
         {
@@ -45,7 +57,7 @@ public static class AccountSync
     /// keys; the contacts' and relationships' own deletes come through their inboxes.
     /// Any other event upserts the Account and, if the event has one, its Profile.
     /// </summary>
-    public static SyncUnit Map(string accountKey, AccountEvent e)
+    public SyncUnit Map(string accountKey, AccountEvent e)
     {
         if (e.Meta?.IsDelete() == true)
         {
@@ -67,7 +79,7 @@ public static class AccountSync
         return new SyncUnit(records);
     }
 
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
+    public IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<AccountSObject>(units), SoqlQuery.RecordsOf<ProfileSObject>(units)];
     }
@@ -77,7 +89,7 @@ public static class AccountSync
     /// hand, one line per field, so a renamed or retyped field is a compile error, not a silent mismatch. Values
     /// pass through as they are, nulls included (null = empty). The mapping converts only where the two sides differ in type.
     /// </summary>
-    public static AccountSObject ToAccount(AccountPayload payload)
+    public AccountSObject ToAccount(AccountPayload payload)
     {
         return new()
         {
@@ -102,7 +114,7 @@ public static class AccountSync
     /// The profile on its own. <see cref="Map"/>, which has both, fills in what it takes from its account (the default
     /// external id and the Account's key).
     /// </summary>
-    public static ProfileSObject ToProfile(ProfilePayload payload)
+    public ProfileSObject ToProfile(ProfilePayload payload)
     {
         return new()
         {

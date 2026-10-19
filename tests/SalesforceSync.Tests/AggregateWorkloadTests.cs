@@ -86,9 +86,9 @@ public sealed class AggregateWorkloadTests
     {
         return entity.Type switch
         {
-            AccountSync.Type => ApplyAsync(engine, AccountSync.Strategy, entity.Key, e),
-            AccountRelationshipSync.Type => ApplyAsync(engine, AccountRelationshipSync.Strategy, entity.Key, e),
-            _ => ApplyAsync(engine, ContactSync.Strategy, entity.Key, e)
+            AccountSync.Type => ApplyAsync(engine, Syncs.Account.Strategy, entity.Key, e),
+            AccountRelationshipSync.Type => ApplyAsync(engine, Syncs.Relationship.Strategy, entity.Key, e),
+            _ => ApplyAsync(engine, Syncs.Contact.Strategy, entity.Key, e)
         };
     }
 
@@ -117,7 +117,7 @@ public sealed class AggregateWorkloadTests
     {
         foreach (var aggregate in workload.Aggregates)
         {
-            AccountAggregate.TrySplit(aggregate, out var events, out var problem).Should().BeTrue(problem);
+            Syncs.Aggregate.TrySplit(aggregate, out var events, out var problem).Should().BeTrue(problem);
             foreach (var e in events!)
             {
                 var json = JsonNode.Parse(e.Json)!.AsObject();

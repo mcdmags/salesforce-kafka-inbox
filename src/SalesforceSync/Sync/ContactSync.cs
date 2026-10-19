@@ -8,15 +8,27 @@ namespace SalesforceSync.Sync;
 /// yet, nothing is sent and the contact is retried until the account sync creates it. Like
 /// <see cref="AccountSync"/>, everything particular to contacts is in this file.
 /// </summary>
-public static class ContactSync
+public sealed class ContactSync : IAggregateProjection
 {
     public const string Type = "contact";
 
     /// <summary>The strategy the engine runs.</summary>
-    public static readonly SyncStrategy<ContactEvent> Strategy = new(Type, e => e.Contact?.ExternalId, e => e.Meta, Map, Queries, Project);
+    public SyncStrategy<ContactEvent> Strategy { get; }
+
+    public ContactSync()
+    {
+        Strategy = new(Type, e => e.Contact?.ExternalId, e => e.Meta, Map, Queries, Project);
+    }
+
+    string IAggregateProjection.EntityType => Type;
+
+    public IEnumerable<string> ProjectJson(AggregateChange change)
+    {
+        return Strategy.ProjectJson(change);
+    }
 
     /// <summary>The contacts of the aggregate that are new or changed, and a delete for each that went.</summary>
-    public static IEnumerable<ContactEvent> Project(AggregateChange change)
+    public IEnumerable<ContactEvent> Project(AggregateChange change)
     {
         return AggregateProjection.ChildEvents(change, s => s.Contacts, c => c.ExternalId,
             (c, accountKey) => c.AccountExternalId = accountKey, id => new ContactPayload { ExternalId = id },
@@ -26,7 +38,7 @@ public static class ContactSync
     /// <summary>
     /// A deleted event deletes the contact by its key alone. Any other event upserts it, which needs its Account's key.
     /// </summary>
-    public static SyncUnit Map(string contactKey, ContactEvent e)
+    public SyncUnit Map(string contactKey, ContactEvent e)
     {
         if (e.Meta?.IsDelete() == true)
         {
@@ -40,13 +52,13 @@ public static class ContactSync
     }
 
     // Read the contacts (to diff) and the Accounts they point at (to know they exist)
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
+    public IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<ContactSObject>(units), SoqlQuery.ParentsOf<AccountSObject>(units)];
     }
 
     /// <summary>Payload -> sObject, one line per field (see <see cref="AccountSync.ToAccount"/>).</summary>
-    public static ContactSObject ToContact(ContactPayload payload)
+    public ContactSObject ToContact(ContactPayload payload)
     {
         return new()
         {

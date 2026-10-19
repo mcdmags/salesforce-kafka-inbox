@@ -270,7 +270,7 @@ public abstract class DrainBenchmarkBase
         }
         await db.Database.ExecuteAsync("TRUNCATE sf_claim_audit", default);
 
-        (_workload, _events) = Generate(Events, Accounts, _syncs);
+        (_workload, _events) = Generate(Events, Accounts, _syncs, _pods[0].GetRequiredService<AccountAggregate>());
         // Per entity, its newest event: what its one inbox row must end with
         _newest = _events.GroupBy(e => e.EntityId).ToDictionary(g => g.Key, g => g.Max(e => e.EventTime), StringComparer.Ordinal);
         if (!StreamIngest)
@@ -285,13 +285,13 @@ public abstract class DrainBenchmarkBase
     /// relationship or contact may be claimed before its Account is in the org (DEPENDENCY_NOT_SYNCED, retried).
     /// </summary>
     private static (AggregateWorkload Workload, List<IngestRow> Events) Generate(int aggregates, int accounts,
-        Dictionary<string, ISalesforceEntitySync> syncs)
+        Dictionary<string, ISalesforceEntitySync> syncs, AccountAggregate accountAggregate)
     {
         var workload = AggregateWorkload.Generate(aggregates, accounts);
         var events = new List<IngestRow>();
         foreach (var aggregate in workload.Aggregates)
         {
-            if (!AccountAggregate.TrySplit(aggregate, out var split, out var problem))
+            if (!accountAggregate.TrySplit(aggregate, out var split, out var problem))
             {
                 throw new InvalidOperationException($"The workload made an invalid aggregate: {problem}");
             }

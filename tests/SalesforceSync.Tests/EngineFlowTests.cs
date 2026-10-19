@@ -14,7 +14,7 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class EngineFlowTests
 {
-    private static readonly SyncStrategy<AccountEvent> Accounts = AccountSync.Strategy;
+    private static readonly SyncStrategy<AccountEvent> Accounts = Syncs.Account.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly RecordingInbox _inbox = new();
@@ -125,7 +125,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.AddRange([Contact("C-1", "ACC-9"), Contact("C-2", "ACC-9")]);
         var before = _org.GetStats();
 
-        (await Engine().SyncBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().SyncBatchAsync(Syncs.Contact.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
 
         _inbox.Calls.Should().Equal("claim", "record");
         _inbox.Recorded!.Synced.Should().Equal(["C-1"], "C-1's row");
@@ -141,7 +141,7 @@ public sealed class EngineFlowTests
         _inbox.Rows.AddRange([Contact("C-1", "ACC-9"), Contact("C-2", "ACC-9")]);
         _org.LoseResponsesFor("Contact", "C-1", 1);
 
-        (await Engine().SyncBatchAsync(ContactSync.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
+        (await Engine().SyncBatchAsync(Syncs.Contact.Strategy, _inbox, CancellationToken.None)).Should().Be(2);
 
         _inbox.Calls.Should().Equal("claim", "hold");
     }

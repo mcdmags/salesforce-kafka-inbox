@@ -17,7 +17,8 @@ public class MicroBenchmarks
 {
     private const string LimitHeader = "api-usage=10018/100000; api-bursts=1/750; per-app-api-usage=17/250(appName=sync)";
 
-    private static readonly SyncStrategy<AccountEvent> Accounts = AccountSync.Strategy;
+    private static readonly AccountSync AccountSyncer = new();
+    private static readonly SyncStrategy<AccountEvent> Accounts = AccountSyncer.Strategy;
 
     private List<InboxEvent> _tenEvents = default!;
     private AccountPayload _payload = default!;
@@ -64,7 +65,7 @@ public class MicroBenchmarks
             EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero)))];
 
         _payload = JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchSyncService.EventJson)!.Account!;
-        _sobject = AccountSync.ToAccount(_payload);
+        _sobject = AccountSyncer.ToAccount(_payload);
 
         _number = JsonDocument.Parse("87.50").RootElement.Clone();
         _datetime = JsonDocument.Parse("\"2026-10-12T01:02:03.000+0000\"").RootElement.Clone();
@@ -101,7 +102,7 @@ public class MicroBenchmarks
     [Benchmark]
     public AccountSObject MapPayloadToSObject()
     {
-        return AccountSync.ToAccount(_payload);
+        return AccountSyncer.ToAccount(_payload);
     }
 
     /// <summary>sObject -> record through the cached attribute metadata (no reflection per call).</summary>

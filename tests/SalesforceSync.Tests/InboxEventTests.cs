@@ -14,9 +14,9 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class InboxEventTests
 {
-    private static readonly SyncStrategy<AccountEvent> Accounts = AccountSync.Strategy;
+    private static readonly SyncStrategy<AccountEvent> Accounts = Syncs.Account.Strategy;
 
-    private static readonly SyncStrategy<AccountRelationshipEvent> Relationships = AccountRelationshipSync.Strategy;
+    private static readonly SyncStrategy<AccountRelationshipEvent> Relationships = Syncs.Relationship.Strategy;
 
     // ---------- Mapping ----------
 
@@ -122,7 +122,7 @@ public sealed class InboxEventTests
     [Theory, AutoData]
     public void Contact_event_maps_to_a_Contact_looking_up_its_Account_and_reads_both(string key, string account, string lastName)
     {
-        var unit = ContactSync.Strategy.Map(key, Read<ContactEvent>(new JsonObject
+        var unit = Syncs.Contact.Strategy.Map(key, Read<ContactEvent>(new JsonObject
         {
             ["meta"] = new JsonObject { ["time"] = "2026-10-14T01:02:03.456Z", ["type"] = "inserted" },
             ["contact"] = new JsonObject { ["externalId"] = key, ["accountExternalId"] = account, ["lastName"] = lastName }
@@ -133,7 +133,7 @@ public sealed class InboxEventTests
             .Be(("Contact", "ExternalId__c", key, "Standard"));
         contact.Fields.Should().Contain("LastName", lastName).And.Contain("Email", null).And.Contain("AccountId__c", account);
         contact.ForeignKeys.Should().Equal(new ForeignKey("AccountId__c", "Account", "ExternalId__c", account));
-        ContactSync.Strategy.Queries([unit]).Select(q => (q.SObject, q.WhereField, q.Values.Single())).Should()
+        Syncs.Contact.Strategy.Queries([unit]).Select(q => (q.SObject, q.WhereField, q.Values.Single())).Should()
             .Equal(("Contact", "ExternalId__c", key), ("Account", "ExternalId__c", account));
     }
 
@@ -142,7 +142,7 @@ public sealed class InboxEventTests
     [InlineData(/*lang=json,strict*/ """{ "contact": { "externalId": "CON-1", "accountExternalId": " ", "lastName": "Doe" } }""")]
     public void Contact_without_its_account_cannot_be_mapped(string json)
     {
-        var map = () => ContactSync.Strategy.Map("CON-1", Read<ContactEvent>(json));
+        var map = () => Syncs.Contact.Strategy.Map("CON-1", Read<ContactEvent>(json));
 
         map.Should().ThrowExactly<ArgumentException>();
     }

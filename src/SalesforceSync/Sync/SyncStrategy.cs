@@ -33,8 +33,9 @@ public sealed record SyncStrategy<TEvent>(
     Func<TEvent, EventMeta?> Meta,
     Func<string, TEvent, SyncUnit> Map,
     Func<IReadOnlyCollection<SyncUnit>, IEnumerable<SoqlQuery>> Queries,
-    Func<AggregateChange, IEnumerable<TEvent>> Project) : IAggregateProjection
+    Func<AggregateChange, IEnumerable<TEvent>> Project)
 {
+    /// <summary>The events of this type that an aggregate calls for, as stored (JSON).</summary>
     public IEnumerable<string> ProjectJson(AggregateChange change)
     {
         return Project(change).Select(AggregateProjection.Serialize);

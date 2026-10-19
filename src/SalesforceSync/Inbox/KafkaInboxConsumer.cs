@@ -21,6 +21,7 @@ public sealed class KafkaInboxConsumer(
     IConsumer<string, string> consumer,
     IServiceScopeFactory scopes,
     IConfiguration config,
+    AccountAggregate aggregate,
     ILogger<KafkaInboxConsumer> log) : BackgroundService
 {
     private static readonly TimeSpan StoreRetryDelay = TimeSpan.FromSeconds(2);
@@ -94,7 +95,7 @@ public sealed class KafkaInboxConsumer(
     {
         // Retrying can't fix an invalid event and would block every later event on the partition. Log where it is
         // (to fix or replay at the source) and move on
-        if (!AccountAggregate.TryRead(message.Message.Value, out var change, out var problem))
+        if (!aggregate.TryRead(message.Message.Value, out var change, out var problem))
         {
             log.LogError("Skipping malformed account aggregate at {Offset}: {Problem}", message.TopicPartitionOffset, problem);
             StoreOffset(message);

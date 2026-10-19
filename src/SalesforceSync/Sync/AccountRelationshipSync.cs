@@ -8,16 +8,27 @@ namespace SalesforceSync.Sync;
 /// isn't in Salesforce yet, nothing is sent and the relationship is retried until the account sync creates it.
 /// Like <see cref="AccountSync"/>, everything particular to relationships is in this file.
 /// </summary>
-public static class AccountRelationshipSync
+public sealed class AccountRelationshipSync : IAggregateProjection
 {
     public const string Type = "accountRelationship";
 
     /// <summary>The strategy the engine runs.</summary>
-    public static readonly SyncStrategy<AccountRelationshipEvent> Strategy =
-        new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta, Map, Queries, Project);
+    public SyncStrategy<AccountRelationshipEvent> Strategy { get; }
+
+    public AccountRelationshipSync()
+    {
+        Strategy = new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta, Map, Queries, Project);
+    }
+
+    string IAggregateProjection.EntityType => Type;
+
+    public IEnumerable<string> ProjectJson(AggregateChange change)
+    {
+        return Strategy.ProjectJson(change);
+    }
 
     /// <summary>The relationships of the aggregate that are new or changed, and a delete for each that went.</summary>
-    public static IEnumerable<AccountRelationshipEvent> Project(AggregateChange change)
+    public IEnumerable<AccountRelationshipEvent> Project(AggregateChange change)
     {
         return AggregateProjection.ChildEvents(change, s => s.AccountRelationships, r => r.ExternalId,
             (r, accountKey) => r.AccountExternalId = accountKey, id => new AccountRelationshipPayload { ExternalId = id },
@@ -27,7 +38,7 @@ public static class AccountRelationshipSync
     /// <summary>
     /// A deleted event deletes the relationship by its key alone. Any other event upserts it, which needs both Accounts' keys.
     /// </summary>
-    public static SyncUnit Map(string relationshipKey, AccountRelationshipEvent e)
+    public SyncUnit Map(string relationshipKey, AccountRelationshipEvent e)
     {
         if (e.Meta?.IsDelete() == true)
         {
@@ -41,13 +52,13 @@ public static class AccountRelationshipSync
     }
 
     // Read the relationships (to diff) and the Accounts they point at (to know they exist)
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
+    public IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<AccountRelationshipSObject>(units), SoqlQuery.ParentsOf<AccountSObject>(units)];
     }
 
     /// <summary>Payload -> sObject, one line per field (see <see cref="AccountSync.ToAccount"/>).</summary>
-    public static AccountRelationshipSObject ToRelationship(AccountRelationshipPayload payload)
+    public AccountRelationshipSObject ToRelationship(AccountRelationshipPayload payload)
     {
         return new()
         {

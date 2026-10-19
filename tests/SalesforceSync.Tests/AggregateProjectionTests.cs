@@ -19,9 +19,9 @@ public sealed class AggregateProjectionTests
               "contacts": [ { "externalId": "C1", "lastName": "Doe" }, { "externalId": "C2", "lastName": "Roe" } ] } }
             """);
 
-        AccountSync.Project(change).Select(e => e.Account!.ExternalId).Should().Equal("ACC-1");
-        AccountRelationshipSync.Project(change).Select(e => e.AccountRelationship!.ExternalId).Should().Equal("R1");
-        ContactSync.Project(change).Select(e => (e.Contact!.ExternalId, e.Contact.AccountExternalId)).Should()
+        Syncs.Account.Project(change).Select(e => e.Account!.ExternalId).Should().Equal("ACC-1");
+        Syncs.Relationship.Project(change).Select(e => e.AccountRelationship!.ExternalId).Should().Equal("R1");
+        Syncs.Contact.Project(change).Select(e => (e.Contact!.ExternalId, e.Contact.AccountExternalId)).Should()
             .Equal(("C1", "ACC-1"), ("C2", "ACC-1"));
     }
 
@@ -34,9 +34,9 @@ public sealed class AggregateProjectionTests
               "after": { "externalId": "ACC-1", "name": "Acme", "contacts": [ { "externalId": "C1", "lastName": "Changed" } ] } }
             """);
 
-        AccountSync.Project(change).Should().BeEmpty("the account is the same");
-        AccountRelationshipSync.Project(change).Should().BeEmpty();
-        ContactSync.Project(change).Should().ContainSingle().Which.Meta!.Type.Should().Be("updated");
+        Syncs.Account.Project(change).Should().BeEmpty("the account is the same");
+        Syncs.Relationship.Project(change).Should().BeEmpty();
+        Syncs.Contact.Project(change).Should().ContainSingle().Which.Meta!.Type.Should().Be("updated");
     }
 
     [Fact]
@@ -47,10 +47,10 @@ public sealed class AggregateProjectionTests
               "accountRelationships": [ { "externalId": "R1" } ], "contacts": [ { "externalId": "C1" } ] }, "after": null }
             """);
 
-        var account = AccountSync.Project(change).Should().ContainSingle().Subject;
+        var account = Syncs.Account.Project(change).Should().ContainSingle().Subject;
         (account.Meta!.Type, account.Account!.ExternalId, account.Account.Profile!.ExternalId).Should().Be(("deleted", "ACC-1", "PRF-1"));
-        AccountRelationshipSync.Project(change).Select(e => (e.Meta!.Type, e.AccountRelationship!.ExternalId)).Should().Equal(("deleted", "R1"));
-        ContactSync.Project(change).Select(e => (e.Meta!.Type, e.Contact!.ExternalId)).Should().Equal(("deleted", "C1"));
+        Syncs.Relationship.Project(change).Select(e => (e.Meta!.Type, e.AccountRelationship!.ExternalId)).Should().Equal(("deleted", "R1"));
+        Syncs.Contact.Project(change).Select(e => (e.Meta!.Type, e.Contact!.ExternalId)).Should().Equal(("deleted", "C1"));
     }
 
     [Fact]
@@ -58,15 +58,15 @@ public sealed class AggregateProjectionTests
     {
         var change = Read($$"""{ "meta": {{Meta}}, "after": { "externalId": "ACC-1", "contacts": [ { "externalId": "C1", "lastName": "Doe" } ] } }""");
 
-        var json = ContactSync.Strategy.ProjectJson(change).Should().ContainSingle().Subject;
+        var json = Syncs.Contact.Strategy.ProjectJson(change).Should().ContainSingle().Subject;
 
-        ContactSync.Strategy.TryRead(json, out var read, out var problem).Should().BeTrue(problem);
+        Syncs.Contact.Strategy.TryRead(json, out var read, out var problem).Should().BeTrue(problem);
         (read!.EntityId, read.Time).Should().Be(("C1", DateTimeOffset.Parse("2026-10-14T01:02:03.456Z")));
     }
 
     private static AggregateChange Read(string json)
     {
-        AccountAggregate.TryRead(json, out var change, out var problem).Should().BeTrue(problem);
+        Syncs.Aggregate.TryRead(json, out var change, out var problem).Should().BeTrue(problem);
         return change!;
     }
 }

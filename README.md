@@ -173,7 +173,9 @@ in an event is a Salesforce name):
 events of the entities it changed (`Project` in its file: `AccountSync`, `AccountRelationshipSync`, `ContactSync`) and
 stores each in its own inbox (`ISalesforceEntitySync.IngestAsync`), all with the aggregate's `meta.time`. The snapshots
 are compared as the typed payloads they are read into (property order doesn't matter, list order does), children
-matched by `externalId`. `AccountAggregate.TrySplit` runs all the projections and returns their events (tests, benchmarks):
+matched by `externalId`. `AccountAggregate` is a singleton that gets the `IAggregateProjection`s injected: each synced object (`AccountSync`, `AccountRelationshipSync`,
+`ContactSync`) is an instance registered once in `AddInboxSync`, as itself and as an `IAggregateProjection`, in that order.
+`AccountAggregate.TrySplit` runs all the projections and returns their events (tests, benchmarks):
 
 | In the aggregate | Stored |
 |---|---|

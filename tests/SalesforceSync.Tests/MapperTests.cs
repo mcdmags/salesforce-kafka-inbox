@@ -11,7 +11,7 @@ public sealed class MapperTests
     [Theory, TypedAutoData]
     public void Account_payload_maps_field_by_field(AccountPayload payload)
     {
-        AccountSync.ToAccount(payload).Should().BeEquivalentTo(new AccountSObject
+        Syncs.Account.ToAccount(payload).Should().BeEquivalentTo(new AccountSObject
         {
             ExternalId = payload.ExternalId,
             Name = payload.Name,
@@ -32,11 +32,11 @@ public sealed class MapperTests
     [Theory, TypedAutoData]
     public void Profile_payload_maps_field_by_field(ProfilePayload payload)
     {
-        AccountSync.ToProfile(payload).Should().BeEquivalentTo(new ProfileSObject
+        Syncs.Account.ToProfile(payload).Should().BeEquivalentTo(new ProfileSObject
         {
             ExternalId = payload.ExternalId,
             Name = payload.Name,
-            AccountId = null, // the account's: filled in by AccountSync.Map
+            AccountId = null, // the account's: filled in by Syncs.Account.Map
             Tier = payload.Tier,
             Score = payload.Score,
             Discount = payload.DiscountPercent,
@@ -49,7 +49,7 @@ public sealed class MapperTests
     [Theory, TypedAutoData]
     public void Relationship_payload_maps_field_by_field(AccountRelationshipPayload payload)
     {
-        AccountRelationshipSync.ToRelationship(payload).Should().BeEquivalentTo(new AccountRelationshipSObject
+        Syncs.Relationship.ToRelationship(payload).Should().BeEquivalentTo(new AccountRelationshipSObject
         {
             ExternalId = payload.ExternalId,
             Name = payload.Name,
@@ -64,7 +64,7 @@ public sealed class MapperTests
     [Theory, TypedAutoData]
     public void Contact_payload_maps_field_by_field(ContactPayload payload)
     {
-        ContactSync.ToContact(payload).Should().BeEquivalentTo(new ContactSObject
+        Syncs.Contact.ToContact(payload).Should().BeEquivalentTo(new ContactSObject
         {
             ExternalId = payload.ExternalId,
             AccountId = payload.AccountExternalId,
@@ -79,18 +79,18 @@ public sealed class MapperTests
     public void Empty_payloads_map_to_empty_sObjects()
     {
         // null = empty in the source; a mapper passes it on and never invents a value
-        AccountSync.ToAccount(new AccountPayload()).Should().BeEquivalentTo(new AccountSObject());
-        AccountSync.ToProfile(new ProfilePayload()).Should().BeEquivalentTo(new ProfileSObject());
-        AccountRelationshipSync.ToRelationship(new AccountRelationshipPayload()).Should().BeEquivalentTo(new AccountRelationshipSObject());
-        ContactSync.ToContact(new ContactPayload()).Should().BeEquivalentTo(new ContactSObject());
+        Syncs.Account.ToAccount(new AccountPayload()).Should().BeEquivalentTo(new AccountSObject());
+        Syncs.Account.ToProfile(new ProfilePayload()).Should().BeEquivalentTo(new ProfileSObject());
+        Syncs.Relationship.ToRelationship(new AccountRelationshipPayload()).Should().BeEquivalentTo(new AccountRelationshipSObject());
+        Syncs.Contact.ToContact(new ContactPayload()).Should().BeEquivalentTo(new ContactSObject());
     }
 
     [Fact]
     public void Tags_list_becomes_a_multi_select_value()
     {
-        AccountSync.ToAccount(new AccountPayload { Tags = ["B2B", "Retail"] }).Tags.Should().Be("B2B;Retail");
-        AccountSync.ToAccount(new AccountPayload { Tags = [] }).Tags.Should().BeEmpty("Salesforce stores an empty value as null");
-        AccountSync.ToAccount(new AccountPayload { Tags = null }).Tags.Should().BeNull();
+        Syncs.Account.ToAccount(new AccountPayload { Tags = ["B2B", "Retail"] }).Tags.Should().Be("B2B;Retail");
+        Syncs.Account.ToAccount(new AccountPayload { Tags = [] }).Tags.Should().BeEmpty("Salesforce stores an empty value as null");
+        Syncs.Account.ToAccount(new AccountPayload { Tags = null }).Tags.Should().BeNull();
     }
 
     [Theory, TypedAutoData]
@@ -98,10 +98,10 @@ public sealed class MapperTests
         ContactPayload contact)
     {
         // Guards the tests above too: with every payload property filled, nothing mapped may be left empty
-        NullProperties(AccountSync.ToAccount(account)).Should().BeEmpty();
-        NullProperties(AccountSync.ToProfile(profile)).Should().Equal(nameof(ProfileSObject.AccountId));
-        NullProperties(AccountRelationshipSync.ToRelationship(relationship)).Should().BeEmpty();
-        NullProperties(ContactSync.ToContact(contact)).Should().BeEmpty();
+        NullProperties(Syncs.Account.ToAccount(account)).Should().BeEmpty();
+        NullProperties(Syncs.Account.ToProfile(profile)).Should().Equal(nameof(ProfileSObject.AccountId));
+        NullProperties(Syncs.Relationship.ToRelationship(relationship)).Should().BeEmpty();
+        NullProperties(Syncs.Contact.ToContact(contact)).Should().BeEmpty();
     }
 
     private static IEnumerable<string> NullProperties(object sobject)

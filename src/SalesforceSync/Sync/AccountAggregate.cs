@@ -15,19 +15,18 @@ namespace SalesforceSync.Sync;
 /// (<see cref="IAggregateProjection"/>) and stores them in its inbox. Only what changed is stored: an unchanged child costs
 /// no inbox row, no claim, no Salesforce read. No I/O.
 /// </summary>
-public static class AccountAggregate
+public sealed class AccountAggregate(IEnumerable<IAggregateProjection> projections)
 {
     public const string DefaultTopic = "account-changes";
 
-    /// <summary>The types that take events from an aggregate, parents first.</summary>
-    private static readonly IAggregateProjection[] Projections =
-        [AccountSync.Strategy, AccountRelationshipSync.Strategy, ContactSync.Strategy];
+    /// <summary>The types that take events from an aggregate, in the order they were registered (parents first).</summary>
+    private readonly IAggregateProjection[] _projections = [.. projections];
 
     /// <summary>
     /// Reads an aggregate message: valid JSON, a meta with a time (with an offset) and a type, before or after, one account.
     /// </summary>
     /// <returns>False with <paramref name="problem"/> when the message is no aggregate the sync can read.</returns>
-    public static bool TryRead(string json, [NotNullWhen(true)] out AggregateChange? change, [NotNullWhen(false)] out string? problem)
+    public bool TryRead(string json, [NotNullWhen(true)] out AggregateChange? change, [NotNullWhen(false)] out string? problem)
     {
         change = null;
         AccountAggregateEvent? aggregate;
@@ -62,7 +61,7 @@ public static class AccountAggregate
     /// as every type's projection makes them. Each is <c>{ "meta": { "time", "type" }, "&lt;entityType&gt;": { ... } }</c>.
     /// </summary>
     /// <returns>False with <paramref name="problem"/> when the message is no aggregate the sync can read.</returns>
-    public static bool TrySplit(string json, [NotNullWhen(true)] out List<EntityEvent>? events, [NotNullWhen(false)] out string? problem)
+    public bool TrySplit(string json, [NotNullWhen(true)] out List<EntityEvent>? events, [NotNullWhen(false)] out string? problem)
     {
         events = null;
         if (!TryRead(json, out var change, out problem))
@@ -70,7 +69,7 @@ public static class AccountAggregate
             return false;
         }
 
-        events = [.. Projections.SelectMany(p => p.ProjectJson(change).Select(j => new EntityEvent(p.EntityType, j)))];
+        events = [.. _projections.SelectMany(p => p.ProjectJson(change).Select(j => new EntityEvent(p.EntityType, j)))];
         return true;
     }
 

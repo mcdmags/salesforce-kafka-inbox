@@ -18,11 +18,11 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class SalesforceBatchSyncServiceTests
 {
-    private static readonly SyncStrategy<AccountEvent> AccountStrategy = AccountSync.Strategy;
+    private static readonly SyncStrategy<AccountEvent> AccountStrategy = Syncs.Account.Strategy;
 
-    private static readonly SyncStrategy<AccountRelationshipEvent> RelationshipStrategy = AccountRelationshipSync.Strategy;
+    private static readonly SyncStrategy<AccountRelationshipEvent> RelationshipStrategy = Syncs.Relationship.Strategy;
 
-    private static readonly SyncStrategy<ContactEvent> ContactStrategy = ContactSync.Strategy;
+    private static readonly SyncStrategy<ContactEvent> ContactStrategy = Syncs.Contact.Strategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly Fixture _any = new();
@@ -180,7 +180,7 @@ public sealed class SalesforceBatchSyncServiceTests
             ("GOOD", RawAccount("GOOD", new() { ["Name"] = "Good" }))
         };
         var results = await _engine.WriteToSalesforceAsync(units,
-            [.. AccountSync.Queries([.. units.Select(u => u.Unit)])],
+            [.. Syncs.Account.Queries([.. units.Select(u => u.Unit)])],
             AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
 
         var bad = results.Should().ContainSingle(r => r.Key == "BAD").Subject;
@@ -208,7 +208,7 @@ public sealed class SalesforceBatchSyncServiceTests
         };
 
         var stopped = await FluentActions.Awaiting(() => _engine.WriteToSalesforceAsync(units,
-                [.. AccountSync.Queries([.. units.Select(u => u.Unit)])],
+                [.. Syncs.Account.Queries([.. units.Select(u => u.Unit)])],
                 AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None))
             .Should().ThrowAsync<MappingErrorException>();
 
