@@ -1,24 +1,20 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// What varies per synced object: how to read an event's entity id and meta (time and type), what an event asks of
-/// Salesforce (the records to upsert, or to delete), and what to read from Salesforce to diff them and find
-/// their parents.
+/// What varies per synced object on the Salesforce side: what an event asks of Salesforce (the records to upsert, or to
+/// delete), and what to read from Salesforce to diff them and find their parents. It knows nothing of aggregates or
+/// of how events get into the inbox.
 /// <see cref="SalesforceBatchSyncService"/> does everything else (claiming, ordering, coalescing, rate limits,
-/// batching, the read, the writes and deletes, retries, dead-lettering). The engine, the Kafka consumer and the SQL
-/// never name an event field: they go through <paramref name="EntityId"/> and <paramref name="Meta"/>.
+/// batching, the read, the writes and deletes, retries, dead-lettering). The engine and the SQL never name an event
+/// field: they go through the <paramref name="Reader"/>.
 /// </summary>
 /// <typeparam name="TEvent">The inbox payload (the whole event envelope).</typeparam>
-/// <param name="EntityType">The strategy's name, e.g. "account": the object name of its events, and how logs name it.</param>
-/// <param name="EntityId">The id of the entity an event is about (e.g. account.externalId), or null if it has none.</param>
-/// <param name="Meta">The event's meta, or null if it has none: when the event happened (meta.time, which must have an
-/// explicit offset) and what happened (meta.type: inserted, updated or deleted).</param>
+/// <param name="Reader">How to read an inbox event: its entity id and meta (shared with ingest).</param>
 /// <param name="Map">
 /// The action delegate: inbox event (with its entity id) -> what to do with the entity's records. An inserted or
 /// updated event upserts them (whether a record is created or updated is decided by what Salesforce has), a deleted
@@ -26,69 +22,20 @@ namespace SalesforceSync.Sync;
 /// only what it is given.
 /// </param>
 /// <param name="Queries">The batch's units -> the reads (at most 5 after chunking) the diff and the foreign keys need.</param>
-/// <param name="Project">An Account aggregate -> the events of this type it calls for (see <see cref="IAggregateProjection"/>).</param>
 public sealed record SyncStrategy<TEvent>(
-    string EntityType,
-    Func<TEvent, string?> EntityId,
-    Func<TEvent, EventMeta?> Meta,
+    EventReader<TEvent> Reader,
     Func<string, TEvent, SyncUnit> Map,
-    Func<IReadOnlyCollection<SyncUnit>, IEnumerable<SoqlQuery>> Queries,
-    Func<AggregateChange, IEnumerable<TEvent>> Project)
+    Func<IReadOnlyCollection<SyncUnit>, IEnumerable<SoqlQuery>> Queries)
 {
-    /// <summary>The events of this type that an aggregate calls for, as stored (JSON).</summary>
-    public IEnumerable<string> ProjectJson(AggregateChange change)
-    {
-        return Project(change).Select(AggregateProjection.Serialize);
-    }
+    /// <summary>The strategy's name, e.g. "account": how logs name it.</summary>
+    public string EntityType => Reader.EntityType;
 
-    /// <summary>
-    /// Reads and validates a raw event: valid JSON for <typeparamref name="TEvent"/>, an entity with a non-empty id,
-    /// a time with an explicit offset, and a type of inserted, updated or deleted. The Kafka consumer stores only events
-    /// that pass (anything else can never be synced). The engine reads claimed rows the same way.
-    /// </summary>
-    /// <returns>False with <paramref name="problem"/> saying why the event can never be synced.</returns>
+    /// <inheritdoc cref="EventReader{TEvent}.TryRead"/>
     public bool TryRead(string json, [NotNullWhen(true)] out ReadEvent<TEvent>? read, [NotNullWhen(false)] out string? problem)
     {
-        read = null;
-        TEvent? e;
-        try
-        {
-            e = JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchSyncService.EventJson);
-        }
-        catch (JsonException ex)
-        {
-            problem = $"Not a valid {EntityType} event: {ex.Message}";
-            return false;
-        }
-
-        if (e is null)
-        {
-            problem = "Event is null";
-        }
-        else if (EntityId(e) is not { } id || string.IsNullOrWhiteSpace(id))
-        {
-            problem = $"A {EntityType} event needs its entity object with a non-empty id";
-        }
-        else if (Meta(e)?.Timestamp() is not { } time)
-        {
-            problem = "The event time must be an ISO-8601 time with an offset or Z, e.g. 2026-10-14T01:02:03.456Z";
-        }
-        else if (Meta(e) is { } meta && !meta.IsInsertOrUpdate() && !meta.IsDelete())
-        {
-            problem = "The event type must be \"inserted\", \"updated\" or \"deleted\"";
-        }
-        else
-        {
-            read = new ReadEvent<TEvent>(e, id, time);
-            problem = null;
-            return true;
-        }
-        return false;
+        return Reader.TryRead(json, out read, out problem);
     }
 }
-
-/// <summary>An inbox event that passed <see cref="SyncStrategy{TEvent}.TryRead"/>: the typed event, whose it is and when.</summary>
-public sealed record ReadEvent<TEvent>(TEvent Event, string EntityId, DateTimeOffset Time);
 
 /// <summary>Records of one sObject to read from Salesforce, by a field (normally a unique external id).</summary>
 public sealed record SoqlQuery(string SObject, string WhereField, IReadOnlyCollection<string> Values)

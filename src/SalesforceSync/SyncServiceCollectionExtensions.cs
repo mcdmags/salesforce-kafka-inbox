@@ -208,23 +208,30 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton(typeof(IRepository<>), typeof(InboxRepository<>)); // one per inbox row type
         services.AddTransient<SalesforceBatchSyncService>();
 
-        // The synced objects, parents first: each is a singleton, takes its events from the aggregates
-        // (IAggregateProjection, in this order) and has the sync the engine runs for it
-        AddEntitySync<AccountSync, AccountEvent, AccountInboxRow>(services, s => s.Strategy);
-        AddEntitySync<AccountRelationshipSync, AccountRelationshipEvent, AccountRelationshipInboxRow>(services, s => s.Strategy);
-        AddEntitySync<ContactSync, ContactEvent, ContactInboxRow>(services, s => s.Strategy);
+        // The synced objects, parents first. Each has two halves: its projection (singleton, registered as an
+        // IAggregateProjection in this order), which the ingest stores in the inbox, and its sync, which the engine
+        // sends to Salesforce
+        AddEntitySync<AccountProjection, AccountSync, AccountEvent, AccountInboxRow>(services, AccountEvent.Reader, s => s.Strategy);
+        AddEntitySync<AccountRelationshipProjection, AccountRelationshipSync, AccountRelationshipEvent, AccountRelationshipInboxRow>(
+            services, AccountRelationshipEvent.Reader, s => s.Strategy);
+        AddEntitySync<ContactProjection, ContactSync, ContactEvent, ContactInboxRow>(services, ContactEvent.Reader, s => s.Strategy);
         services.AddSingleton<AccountAggregate>();
         return services;
     }
 
-    private static void AddEntitySync<TSync, TEvent, TRow>(IServiceCollection services, Func<TSync, SyncStrategy<TEvent>> strategyOf)
-        where TSync : class, IAggregateProjection
+    private static void AddEntitySync<TProjection, TSync, TEvent, TRow>(IServiceCollection services, EventReader<TEvent> reader,
+        Func<TSync, SyncStrategy<TEvent>> strategyOf)
+        where TProjection : class, IAggregateProjection
+        where TSync : class
         where TRow : InboxRow, IInboxRow, new()
     {
         ValidateLimits<TRow>();
+        services.AddSingleton<TProjection>();
+        services.AddSingleton<IAggregateProjection>(sp => sp.GetRequiredService<TProjection>());
+        services.AddTransient<IAggregateIngest>(sp => new EntityIngestService<TEvent, TRow>(
+            sp.GetRequiredService<TProjection>(), reader, sp.GetRequiredService<IRepository<TRow>>()));
         services.AddSingleton<TSync>();
-        services.AddSingleton<IAggregateProjection>(sp => sp.GetRequiredService<TSync>());
-        services.AddTransient<ISalesforceEntitySync>(sp => new EntitySyncService<TEvent, TRow>(
+        services.AddTransient<IEntitySync>(sp => new EntitySyncService<TEvent, TRow>(
             sp.GetRequiredService<SalesforceBatchSyncService>(), sp.GetRequiredService<IRepository<TRow>>(),
             strategyOf(sp.GetRequiredService<TSync>())));
     }

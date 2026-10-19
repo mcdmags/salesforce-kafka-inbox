@@ -8,31 +8,16 @@ namespace SalesforceSync.Sync;
 /// yet, nothing is sent and the contact is retried until the account sync creates it. Like
 /// <see cref="AccountSync"/>, everything particular to contacts is in this file.
 /// </summary>
-public sealed class ContactSync : IAggregateProjection
+public sealed class ContactSync
 {
-    public const string Type = "contact";
+    public const string Type = ContactEvent.Type;
 
     /// <summary>The strategy the engine runs.</summary>
     public SyncStrategy<ContactEvent> Strategy { get; }
 
     public ContactSync()
     {
-        Strategy = new(Type, e => e.Contact?.ExternalId, e => e.Meta, Map, Queries, Project);
-    }
-
-    string IAggregateProjection.EntityType => Type;
-
-    public IEnumerable<string> ProjectJson(AggregateChange change)
-    {
-        return Strategy.ProjectJson(change);
-    }
-
-    /// <summary>The contacts of the aggregate that are new or changed, and a delete for each that went.</summary>
-    public IEnumerable<ContactEvent> Project(AggregateChange change)
-    {
-        return AggregateProjection.ChildEvents(change, s => s.Contacts, c => c.ExternalId,
-            (c, accountKey) => c.AccountExternalId = accountKey, id => new ContactPayload { ExternalId = id },
-            (meta, c) => new ContactEvent(meta, c));
+        Strategy = new(ContactEvent.Reader, Map, Queries);
     }
 
     /// <summary>
@@ -81,7 +66,13 @@ public sealed class ContactSync : IAggregateProjection
 ///                "email": "ada@example.com", "phone": "+1 555 0101" } }
 /// { "meta": { "time": "2026-10-15T01:02:03.456Z", "type": "deleted" }, "contact": { "externalId": "CON-1" } }</code>
 /// </summary>
-public sealed record ContactEvent(EventMeta? Meta, ContactPayload? Contact);
+public sealed record ContactEvent(EventMeta? Meta, ContactPayload? Contact)
+{
+    public const string Type = "contact";
+
+    /// <summary>How an inbox event of this type is read: the entity's id and the meta.</summary>
+    public static readonly EventReader<ContactEvent> Reader = new(Type, e => e.Contact?.ExternalId, e => e.Meta);
+}
 
 /// <summary>The <c>contact</c> object of a <see cref="ContactEvent"/>.</summary>
 public sealed class ContactPayload

@@ -7,6 +7,13 @@ using SalesforceSync.Benchmarks;
 // The drain benchmarks need Postgres: set ConnectionStrings__benchdb (Aspire does this for you).
 // The optimizations validator is disabled so the project can also be launched from the Aspire
 // dashboard (Debug host); BenchmarkDotNet still builds and runs the measured code in Release.
+// Run: dotnet run -c Release -- --load [...]: the sustained-load simulation (see SustainedLoad), not a BenchmarkDotNet run
+if (args.Contains("--load"))
+{
+    await new SustainedLoad(SustainedLoad.Options.Parse(args)).RunAsync();
+    return;
+}
+
 var config = DefaultConfig.Instance.WithOptions(ConfigOptions.DisableOptimizationsValidator);
 var run = BenchmarkRun.Choose(ref args);
 // typeof(Program) would be ambiguous with the worker's top-level Program (CS0436), so name a benchmark type

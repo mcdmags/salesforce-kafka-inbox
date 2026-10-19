@@ -2,6 +2,9 @@
 -- same entity (e.g. the same account) can be detected after the fact. Not part of the migrations; do not install in production.
 -- Run it after the migrations: it attaches to every inbox table, where every entity is leased on its row.
 --
+-- tg_table_name is a name, whose collation is "C", not the column's: compared as it is, no index can serve the update (a scan
+-- of the whole audit table for every released row, more with every claim). Hence the cast to text with the default collation.
+--
 -- A claim starts when a worker moves a due row's next_attempt_at to the end of its lease (ClaimAsync) and ends when
 -- the row's next_attempt_at changes while it is leased (an outcome or the end of the lease). Ordering uses a sequence, not
 -- the clock: wall-clock time can step backwards (NTP / VM time sync), while a claim that can only happen after another
@@ -28,11 +31,11 @@ begin
   -- is still open, the first claim stays open, so the takeover shows up in sf_claim_overlaps.
   if old.next_attempt_at > now() and new.next_attempt_at is distinct from old.next_attempt_at then
     update sf_claim_audit set release_seq = nextval('sf_claim_audit_seq'), released_at = clock_timestamp()
-    where inbox = tg_table_name and entity_id = new.entity_id and release_seq is null;
+    where inbox = (tg_table_name::text collate "default") and entity_id = new.entity_id and release_seq is null;
   end if;
   if old.next_attempt_at <= now() and new.next_attempt_at > now() then
     insert into sf_claim_audit (inbox, entity_id, claim_seq, claim_txid, claimed_at)
-    values (tg_table_name, new.entity_id, nextval('sf_claim_audit_seq'), txid_current(), clock_timestamp());
+    values (tg_table_name::text collate "default", new.entity_id, nextval('sf_claim_audit_seq'), txid_current(), clock_timestamp());
   end if;
   return new;
 end $$;

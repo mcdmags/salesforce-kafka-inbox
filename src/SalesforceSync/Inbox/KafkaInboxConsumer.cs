@@ -8,7 +8,7 @@ namespace SalesforceSync.Inbox;
 /// Kafka -> Postgres inboxes. One topic (<c>Kafka:Topic</c>, <see cref="AccountAggregate.DefaultTopic"/>) carries
 /// account aggregates: an Account with its children, before and after a change. Each message is read once
 /// (<see cref="AccountAggregate.TryRead"/>); then every entity type takes the events it needs from it (Account,
-/// relationships, contacts; deletes included, <see cref="ISalesforceEntitySync.IngestAsync"/>) and stores them in its
+/// relationships, contacts; deletes included, <see cref="IAggregateIngest.IngestAsync"/>) and stores them in its
 /// inbox table with the entity's id, in the entity's one row unless that holds a newer event. The Kafka message key and arrival
 /// order are not used: an entity's events are ordered by their own time (the aggregate's), so they may come over
 /// any partition, in any order. The offset is stored for commit only after every event of the message is in its
@@ -34,14 +34,14 @@ public sealed class KafkaInboxConsumer(
 
     private async Task RunAsync(CancellationToken ct)
     {
-        // The syncs are only asked to read and store events here; the scope lives as long as the consumer uses them
+        // The ingests are only asked to store events here; the scope lives as long as the consumer uses them
         using var scope = scopes.CreateScope();
-        var syncs = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().ToList();
+        var ingests = scope.ServiceProvider.GetServices<IAggregateIngest>().ToList();
         var topic = config["Kafka:Topic"] is { Length: > 0 } configured ? configured : AccountAggregate.DefaultTopic;
 
         await EnsureTopicAsync(topic);
         consumer.Subscribe(topic);
-        log.LogInformation("Consuming {Topic} -> {Types}", topic, string.Join(", ", syncs.Select(s => s.EntityType)));
+        log.LogInformation("Consuming {Topic} -> {Types}", topic, string.Join(", ", ingests.Select(s => s.EntityType)));
 
         try
         {
@@ -57,7 +57,7 @@ public sealed class KafkaInboxConsumer(
                     continue;
                 }
 
-                await IngestAsync(message, syncs, ct);
+                await IngestAsync(message, ingests, ct);
             }
         }
         finally
@@ -90,7 +90,7 @@ public sealed class KafkaInboxConsumer(
     /// Stores the valid entity events of an aggregate in their types' inboxes, then its offset. Skips what can never
     /// be synced.
     /// </summary>
-    private async Task IngestAsync(ConsumeResult<string, string> message, IReadOnlyList<ISalesforceEntitySync> syncs,
+    private async Task IngestAsync(ConsumeResult<string, string> message, IReadOnlyList<IAggregateIngest> ingests,
         CancellationToken ct)
     {
         // Retrying can't fix an invalid event and would block every later event on the partition. Log where it is
@@ -104,11 +104,11 @@ public sealed class KafkaInboxConsumer(
 
         try
         {
-            foreach (var sync in syncs)
+            foreach (var ingest in ingests)
             {
-                foreach (var invalid in await sync.IngestAsync(change, ct))
+                foreach (var invalid in await ingest.IngestAsync(change, ct))
                 {
-                    log.LogError("Skipping malformed {Type} event of the aggregate at {Offset}: {Problem}", sync.EntityType,
+                    log.LogError("Skipping malformed {Type} event of the aggregate at {Offset}: {Problem}", ingest.EntityType,
                         message.TopicPartitionOffset, invalid);
                 }
             }

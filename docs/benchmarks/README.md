@@ -47,8 +47,7 @@ processing or race-condition handling, measured on `main` at 01b53b3.
 
 Since the deletes (PR #65) the drain and streaming benchmarks generate what the upstream publishes, **account
 aggregates** (`AggregateWorkload`: `{ meta, before, after }`, the Account with its Profile, relationships and
-contacts), and store what `AccountAggregate.TrySplit` makes of each, read and stored through each type's
-`ISalesforceEntitySync` exactly as the Kafka consumer does (streaming) or as storing them in order would leave the
+contacts), and store each through every type's `IAggregateIngest` exactly as the Kafka consumer does (streaming) or as storing them in order would leave the
 inboxes (preloaded). `Events` (5,000) counts aggregates. Each one changes its Account (Description and Profile score
 `vN`); 15% also touch one of the account's relationships and 15% one of its 3 contacts, a touched child it already
 has being removed (a delete) 30% of the time and changed otherwise, so removed children come back later as new
@@ -358,6 +357,55 @@ A claim of 75 entities locks them (LockHeads) in about 2 ms (median over the 108
 median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest single run 21.5 ms, under load. Leasing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
+
+## Sustained load: a production-like stream
+
+The drain benchmarks store everything as fast as they can. `--load` keeps a steady stream instead, with bursts, over many
+accounts (`SustainedLoad`): `dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --load [--rate 500]
+[--seconds 90] [--accounts 20000] [--pods 3] [--workers 4] [--latency 100] [--burst 4] [--burst-seconds 10] [--burst-every 40]`.
+Account aggregates arrive at `--rate` messages a second in publish order, each split and stored as the consumer does; the
+pods run the worker's own pass at the worker's own defaults (batches of up to 180); the mock org takes `--latency` ms per
+call. Once a second the due entities are counted and the oldest one's wait is read from the inbox. After the last message
+the pods drain what is left, and the run is checked like every drain benchmark.
+
+One run, 2026-10-19, on the code at 1f2e3bb (with the claim audit fixed, see below): 500 messages a second, x4 for 10 s
+every 40 s (bursts at 0-10 s, 40-50 s and 80-90 s; 90 s, 78,750 aggregates, 97,776 entity events, about 1,150 events a
+second on average and about 2,400 in a burst), 20,000 accounts, 3 pods x 4 workers, 100 ms per Salesforce call. All checks
+passed (no overlapping claims, every entity at its newest version).
+
+| | |
+|---|---|
+| Entity events stored | 97,776 in 84.7 s |
+| Finished | 88.8 s: 4.1 s after the last event |
+| Entities waiting | at most 7,147 (2,300 to 7,100 in the bursts, below 120 between them) |
+| Oldest wait | median 0.3 s, p95 8.5 s, max 9.1 s |
+| Salesforce calls | 5,937 (0.06 per event); 2,510 write requests; 133,137 records written |
+| Claim batches | 1,694 of about 52 rows each (87,641 rows claimed) |
+| Retries | 10,806 (relationships and contacts claimed before their Account was in the org) |
+
+- **Bursts queue, then clear.** The pods process about 1,900 rows a second in the first burst and about 1,400 in the
+  second (rows stored minus the growth of the queue, over the time). The queue after the second burst was empty by second 66,
+  16 s after the burst ended. The 12 workers are all busy during a burst (about 6 worker-seconds a second reading,
+  5 writing); between bursts they keep up with 600 to 1,000 events a second with the queue near zero.
+- **The second burst is slower than the first for the workload, not for the code**: by then most of the 20,000 accounts
+  exist, so the events update records (read, diff, write) where in the first burst they mostly created them. Dead rows also
+  build up in the inbox tables during a burst (up to 150,000) until autovacuum clears them.
+- **Batches are full under load**, unlike the small streaming benchmark: about 52 rows a batch against 1.2 there.
+- **12 workers at 100 ms a call** carry about 1,400 to 1,900 events a second, so a 4x burst of 500 messages a second sits
+  at their limit. That is the figure to compare with a real org's latency, which is not 100 ms flat; more pods or workers
+  raise it.
+- Local mock org and one run: use the shape (queue size, wait, recovery after a burst), not the absolute numbers.
+
+**A bug in the benchmark's claim audit made the first version of this run look worse, and the drain benchmarks too.**
+`sql/claim-audit.sql` (test and benchmark only, never installed in production) updates one row of `sf_claim_audit` for
+every inbox row an outcome releases. It compared the audit's `inbox` text column with `tg_table_name`, whose type `name`
+has the collation "C" and not the column's, so the primary key could not serve the update and every released row scanned
+the whole audit table, which grows with every claim: 87,904 sequential scans and 3.97 billion tuples read in one run, no
+index scan. The outcome statements of a batch took 250 ms and more (250,000 buffer hits for 180 rows) and the second burst
+built a queue of 8 s and more (oldest wait p95 8.6 to 11.9 s, tail 1.6 to 2.0 s, queue empty by second 83). The audit is
+now read by its index (87,641 index scans, 8 sequential), and the queue was empty by second 66. The drain benchmarks
+truncate the audit for every iteration, so there it grew only to a few thousand rows, but it still cost them a few percent:
+the numbers of earlier runs in this file are somewhat pessimistic.
 
 ## Latest run: plain-crud with bigger batches and no lock token, at e7cb88d
 

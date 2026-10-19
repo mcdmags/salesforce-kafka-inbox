@@ -10,45 +10,16 @@ namespace SalesforceSync.Sync;
 /// Everything particular to accounts is in this file: the event as the source sends it, the sObjects as the org
 /// has them, the mapping between the two, and the inbox row type.
 /// </summary>
-public sealed class AccountSync : IAggregateProjection
+public sealed class AccountSync
 {
-    public const string Type = "account";
+    public const string Type = AccountEvent.Type;
 
     /// <summary>The strategy the engine runs.</summary>
     public SyncStrategy<AccountEvent> Strategy { get; }
 
     public AccountSync()
     {
-        Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries, Project);
-    }
-
-    string IAggregateProjection.EntityType => Type;
-
-    public IEnumerable<string> ProjectJson(AggregateChange change)
-    {
-        return Strategy.ProjectJson(change);
-    }
-
-    /// <summary>
-    /// The Account's event: the Account (with its Profile) when it changed or Before is missing; its delete, with its
-    /// Profile if that has a key of its own, when it is gone.
-    /// </summary>
-    public IEnumerable<AccountEvent> Project(AggregateChange change)
-    {
-        if (change.IsDelete)
-        {
-            var account = new AccountPayload { ExternalId = change.AccountKey };
-            if (change.DeletedFrom.Profile?.ExternalId is { } profileKey)
-            {
-                account.Profile = new ProfilePayload { ExternalId = profileKey };
-            }
-
-            yield return new AccountEvent(change.MetaOf("deleted"), account);
-        }
-        else if (change.Before is null || AggregateProjection.Serialize<AccountPayload>(change.Before) != AggregateProjection.Serialize<AccountPayload>(change.After!))
-        {
-            yield return new AccountEvent(change.MetaOf(change.Before is null ? "inserted" : "updated"), change.After);
-        }
+        Strategy = new(AccountEvent.Reader, Map, Queries);
     }
 
     /// <summary>
@@ -141,7 +112,13 @@ public sealed class AccountSync : IAggregateProjection
 /// An event always carries the full record: a null or absent property means "empty in the source", and the
 /// field is cleared in Salesforce. The one exception is <see cref="AccountPayload.Profile"/> as a whole.
 /// </summary>
-public sealed record AccountEvent(EventMeta? Meta, AccountPayload? Account);
+public sealed record AccountEvent(EventMeta? Meta, AccountPayload? Account)
+{
+    public const string Type = "account";
+
+    /// <summary>How an inbox event of this type is read: the entity's id and the meta.</summary>
+    public static readonly EventReader<AccountEvent> Reader = new(Type, e => e.Account?.ExternalId, e => e.Meta);
+}
 
 /// <summary>The <c>account</c> object of an <see cref="AccountEvent"/>.</summary>
 public class AccountPayload

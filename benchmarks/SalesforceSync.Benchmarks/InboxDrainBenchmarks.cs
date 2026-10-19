@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Engines;
@@ -68,15 +69,23 @@ public abstract class DrainBenchmarkBase
     /// <summary>Simulated Salesforce round trip.</summary>
     public abstract int LatencyMs { get; set; }
 
+    /// <summary>Entities per batch while streaming; null leaves the worker's default.</summary>
+    protected virtual int? BatchSize => 10;
+
     /// <summary>False: the whole inbox is loaded before draining. True: events keep arriving while pods drain.</summary>
     protected abstract bool StreamIngest { get; }
 
     private NpgsqlDataSource _db = default!;
-    private IDbContextFactory<SyncDbContext> _contexts = default!;
-    private FakeSalesforceStore _store = default!;
+    protected IDbContextFactory<SyncDbContext> Contexts { get; private set; } = default!;
+    protected FakeSalesforceStore Org { get; private set; } = default!;
     private List<ServiceProvider> _pods = [];
-    private Dictionary<string, ISalesforceEntitySync> _syncs = [];
+    private List<IAggregateIngest> _ingests = [];
+    private List<(AggregateChange Change, int Events)> _aggregates = [];
+
+    /// <summary>The workload's aggregates as the consumer reads them, and how many entity events each makes.</summary>
+    protected IReadOnlyList<(AggregateChange Change, int Events)> Aggregates => _aggregates;
     private List<IngestRow> _events = [];
+    protected IReadOnlyList<IngestRow> EntityEvents => _events;
     private AggregateWorkload _workload = default!;
     private Dictionary<string, DateTimeOffset> _newest = [];
 
@@ -88,7 +97,7 @@ public abstract class DrainBenchmarkBase
         [ContactSync.Type] = model.TableOf<ContactInboxRow>()
     });
     // Every inbox of the model: AddInboxSync runs a worker per synced object, and each one claims from its own table
-    private static readonly string[] InboxTables = FromModel(model => model.InboxTables.ToArray());
+    protected static readonly string[] InboxTables = FromModel(model => model.InboxTables.ToArray());
 
     private static T FromModel<T>(Func<SyncDbContext, T> read)
     {
@@ -100,21 +109,21 @@ public abstract class DrainBenchmarkBase
     /// An entity event as the consumer stores it: entity type and its inbox table, entity id, event time (the
     /// aggregate's meta.time) and payload.
     /// </summary>
-    private sealed record IngestRow(string EntityType, string Table, string EntityId, DateTimeOffset EventTime, string Payload);
+    protected sealed record IngestRow(string EntityType, string Table, string EntityId, DateTimeOffset EventTime, string Payload);
 
     [GlobalSetup]
     public void GlobalSetup()
     {
         _db = NpgsqlDataSource.Create(BenchmarkDb.ConnectionString);
-        _contexts = SyncDbContext.CreateFactory(_db);
-        SyncSchema.MigrateAsync(_contexts).GetAwaiter().GetResult();
+        Contexts = SyncDbContext.CreateFactory(_db);
+        SyncSchema.MigrateAsync(Contexts).GetAwaiter().GetResult();
         // A plain command: EF's raw SQL formats {...} as parameter placeholders, and the script has JSON literals
         using (var audit = _db.CreateCommand(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "claim-audit.sql"))))
         {
             audit.ExecuteNonQuery();
         }
 
-        _store = new FakeSalesforceStore(new FakeSalesforceOptions
+        Org = new FakeSalesforceStore(new FakeSalesforceOptions
         {
             Latency = TimeSpan.FromMilliseconds(LatencyMs),
             EnforceDailyLimit = false,
@@ -123,8 +132,8 @@ public abstract class DrainBenchmarkBase
         });
 
         _pods = [.. Enumerable.Range(0, Pods).Select(_ => BuildPod())];
-        // What the consumer reads and stores an entity event with, by entity type
-        _syncs = _pods[0].GetServices<ISalesforceEntitySync>().ToDictionary(s => s.EntityType);
+        // What the consumer stores an aggregate's events with, one per entity type
+        _ingests = [.. _pods[0].GetServices<IAggregateIngest>()];
     }
 
     [GlobalCleanup]
@@ -150,9 +159,11 @@ public abstract class DrainBenchmarkBase
         VerifyAsync().GetAwaiter().GetResult();
     }
 
+    protected virtual TimeSpan DrainTimeout => TimeSpan.FromMinutes(5);
+
     protected async Task DrainAsync()
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        using var cts = new CancellationTokenSource(DrainTimeout);
         var ingest = StreamIngest ? Task.Run(() => IngestAsync(cts.Token)) : Task.CompletedTask;
         var loops = _pods.SelectMany(pod => Enumerable.Range(0, Workers)
             .Select(loop => Task.Run(() => WorkerLoopAsync(pod, loop, ingest, cts.Token))));
@@ -160,14 +171,26 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// Stores the entity events one at a time, aggregate after aggregate, as fast as possible, like the Kafka
-    /// consumer (<see cref="ISalesforceEntitySync.StoreEventAsync"/>).
+    /// Stores the aggregates one at a time, as fast as possible, like the Kafka consumer
+    /// (<see cref="IAggregateIngest.IngestAsync"/>).
     /// </summary>
-    private async Task IngestAsync(CancellationToken ct)
+    protected virtual async Task IngestAsync(CancellationToken ct)
     {
-        foreach (var e in _events)
+        foreach (var (change, _) in _aggregates)
         {
-            await _syncs[e.EntityType].StoreEventAsync(e.EntityId, e.EventTime, e.Payload, ct);
+            await IngestAsync(change, ct);
+        }
+    }
+
+    /// <summary>One aggregate: every entity type stores its events of it.</summary>
+    protected async Task IngestAsync(AggregateChange change, CancellationToken ct)
+    {
+        foreach (var ingest in _ingests)
+        {
+            if (await ingest.IngestAsync(change, ct) is { Count: > 0 } problems)
+            {
+                throw new InvalidOperationException($"The {ingest.EntityType} ingest skipped an event: {problems[0]}");
+            }
         }
     }
 
@@ -212,7 +235,7 @@ public abstract class DrainBenchmarkBase
 
     private async Task<bool> HasPendingAsync(CancellationToken ct)
     {
-        await using var db = await _contexts.CreateDbContextAsync(ct);
+        await using var db = await Contexts.CreateDbContextAsync(ct);
         return await db.Database.QuerySingleAsync<bool>(
             "SELECT " + string.Join(" OR ", InboxTables.Select(t => $"EXISTS (SELECT 1 FROM {t} WHERE next_attempt_at IS NOT NULL)")), ct);
     }
@@ -228,7 +251,7 @@ public abstract class DrainBenchmarkBase
         var services = new ServiceCollection();
         services.AddLogging(); // no providers: silent
         services.AddSingleton(_ => NpgsqlDataSource.Create(BenchmarkDb.ConnectionString));
-        services.AddSingleton(_store);
+        services.AddSingleton(Org);
 
         services.Configure<SalesforceOptions>(o =>
         {
@@ -239,9 +262,9 @@ public abstract class DrainBenchmarkBase
         services.Configure<SyncOptions>(o =>
         {
             o.Workers = Workers;
-            if (StreamIngest)
+            if (StreamIngest && BatchSize is { } size)
             {
-                o.BatchSize = 10;     // streaming: small batches, so entities are claimed again and again
+                o.BatchSize = size;     // streaming: small batches, so entities are claimed again and again
             }
 
             o.Lease = TimeSpan.FromMinutes(5);
@@ -260,9 +283,9 @@ public abstract class DrainBenchmarkBase
 
     private async Task SetupAsync()
     {
-        _store.Reset();
+        Org.Reset();
 
-        await using var db = await _contexts.CreateDbContextAsync();
+        await using var db = await Contexts.CreateDbContextAsync();
         await db.Database.OpenConnectionAsync();
         foreach (var table in InboxTables)
         {
@@ -270,7 +293,7 @@ public abstract class DrainBenchmarkBase
         }
         await db.Database.ExecuteAsync("TRUNCATE sf_claim_audit", default);
 
-        (_workload, _events) = Generate(Events, Accounts, _syncs, _pods[0].GetRequiredService<AccountAggregate>());
+        (_workload, _events, _aggregates) = Generate(Events, Accounts, _pods[0].GetRequiredService<AccountAggregate>());
         // Per entity, its newest event: what its one inbox row must end with
         _newest = _events.GroupBy(e => e.EntityId).ToDictionary(g => g.Key, g => g.Max(e => e.EventTime), StringComparer.Ordinal);
         if (!StreamIngest)
@@ -280,34 +303,60 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// The workload's aggregates as the entity events the consumer stores, in publish order: split by
-    /// <see cref="AccountAggregate.TrySplit"/>, read by their type's sync (entity id, time) as the consumer does. A
+    /// The workload's aggregates, as the consumer reads them, and as the entity events they make, in publish order:
+    /// split by <see cref="AccountAggregate.TrySplit"/>, each read by its type's reader (entity id, time). A
     /// relationship or contact may be claimed before its Account is in the org (DEPENDENCY_NOT_SYNCED, retried).
     /// </summary>
-    private static (AggregateWorkload Workload, List<IngestRow> Events) Generate(int aggregates, int accounts,
-        Dictionary<string, ISalesforceEntitySync> syncs, AccountAggregate accountAggregate)
+    private static (AggregateWorkload Workload, List<IngestRow> Events, List<(AggregateChange, int)> Aggregates) Generate(
+        int aggregates, int accounts, AccountAggregate accountAggregate)
     {
         var workload = AggregateWorkload.Generate(aggregates, accounts);
         var events = new List<IngestRow>();
+        var changes = new List<(AggregateChange, int)>();
         foreach (var aggregate in workload.Aggregates)
         {
-            if (!accountAggregate.TrySplit(aggregate, out var split, out var problem))
+            if (!accountAggregate.TryRead(aggregate, out var change, out var problem)
+                || !accountAggregate.TrySplit(aggregate, out var split, out problem))
             {
                 throw new InvalidOperationException($"The workload made an invalid aggregate: {problem}");
             }
 
+            changes.Add((change, split.Count));
             foreach (var e in split)
             {
-                if (!syncs[e.EntityType].TryReadEvent(e.Json, out var entityId, out var time, out problem))
+                if (!TryReadEntity(e, out var entityId, out var time, out problem))
                 {
                     throw new InvalidOperationException($"The split made an invalid {e.EntityType} event: {problem}");
                 }
 
-                events.Add(new IngestRow(e.EntityType, InboxOf[e.EntityType], entityId!, time, e.Json));
+                events.Add(new IngestRow(e.EntityType, InboxOf[e.EntityType], entityId, time, e.Json));
             }
         }
 
-        return (workload, events);
+        return (workload, events, changes);
+    }
+
+    private static bool TryReadEntity(EntityEvent e, [NotNullWhen(true)] out string? entityId, out DateTimeOffset time,
+        [NotNullWhen(false)] out string? problem)
+    {
+        (entityId, time, problem) = (null, default, null);
+        var ok = e.EntityType switch
+        {
+            AccountSync.Type => ReadOf(AccountEvent.Reader, e.Json, out entityId, out time, out problem),
+            AccountRelationshipSync.Type => ReadOf(AccountRelationshipEvent.Reader, e.Json, out entityId, out time, out problem),
+            ContactSync.Type => ReadOf(ContactEvent.Reader, e.Json, out entityId, out time, out problem),
+            _ => false
+        };
+        problem ??= ok ? null : $"unknown entity type {e.EntityType}";
+        return ok;
+    }
+
+    private static bool ReadOf<TEvent>(EventReader<TEvent> reader, string json, out string? entityId, out DateTimeOffset time,
+        out string? problem)
+    {
+        var ok = reader.TryRead(json, out var read, out problem);
+        (entityId, time) = (read?.EntityId, read?.Time ?? default);
+        return ok;
     }
 
     /// <summary>
@@ -349,9 +398,9 @@ public abstract class DrainBenchmarkBase
 
     private async Task VerifyAsync()
     {
-        var (wrong, regressions) = _workload.Check(_store);
+        var (wrong, regressions) = _workload.Check(Org);
 
-        await using var db = await _contexts.CreateDbContextAsync();
+        await using var db = await Contexts.CreateDbContextAsync();
         async Task<long> Count(string sql)
         {
             return await db.Database.QuerySingleAsync<long>(sql, default);
@@ -379,7 +428,7 @@ public abstract class DrainBenchmarkBase
         var deleteEvents = _events.Count(e => e.Payload.Contains("\"type\":\"deleted\"", StringComparison.Ordinal));
         var deleted = _workload.Final.Values.Count(e => !e.Present);
 
-        var stats = _store.GetStats();
+        var stats = Org.GetStats();
         Console.WriteLine(
             $"// [{(StreamIngest ? "streaming" : "preloaded")} pods={Pods} workers={Workers} accounts={Accounts} latency={LatencyMs}ms] " +
             $"events={Events} entityEvents={_events.Count} relationshipEvents={relationshipEvents} contactEvents={contactEvents} " +

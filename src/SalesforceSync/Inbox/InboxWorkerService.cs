@@ -62,7 +62,7 @@ public sealed class InboxWorkerService(
     internal static async Task<int> SyncOnceAsync(IServiceScopeFactory scopes, int rotation, CancellationToken ct)
     {
         await using var scope = scopes.CreateAsyncScope();
-        var syncs = scope.ServiceProvider.GetServices<ISalesforceEntitySync>().ToList();
+        var syncs = scope.ServiceProvider.GetServices<IEntitySync>().ToList();
         var processed = 0;
         for (var i = 0; i < syncs.Count; i++)
         {

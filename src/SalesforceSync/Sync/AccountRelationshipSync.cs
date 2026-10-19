@@ -8,31 +8,16 @@ namespace SalesforceSync.Sync;
 /// isn't in Salesforce yet, nothing is sent and the relationship is retried until the account sync creates it.
 /// Like <see cref="AccountSync"/>, everything particular to relationships is in this file.
 /// </summary>
-public sealed class AccountRelationshipSync : IAggregateProjection
+public sealed class AccountRelationshipSync
 {
-    public const string Type = "accountRelationship";
+    public const string Type = AccountRelationshipEvent.Type;
 
     /// <summary>The strategy the engine runs.</summary>
     public SyncStrategy<AccountRelationshipEvent> Strategy { get; }
 
     public AccountRelationshipSync()
     {
-        Strategy = new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta, Map, Queries, Project);
-    }
-
-    string IAggregateProjection.EntityType => Type;
-
-    public IEnumerable<string> ProjectJson(AggregateChange change)
-    {
-        return Strategy.ProjectJson(change);
-    }
-
-    /// <summary>The relationships of the aggregate that are new or changed, and a delete for each that went.</summary>
-    public IEnumerable<AccountRelationshipEvent> Project(AggregateChange change)
-    {
-        return AggregateProjection.ChildEvents(change, s => s.AccountRelationships, r => r.ExternalId,
-            (r, accountKey) => r.AccountExternalId = accountKey, id => new AccountRelationshipPayload { ExternalId = id },
-            (meta, r) => new AccountRelationshipEvent(meta, r));
+        Strategy = new(AccountRelationshipEvent.Reader, Map, Queries);
     }
 
     /// <summary>
@@ -82,7 +67,13 @@ public sealed class AccountRelationshipSync : IAggregateProjection
 ///                            "type": "Parent", "isActive": true } }
 /// { "meta": { "time": "2026-10-15T01:02:03.456Z", "type": "deleted" }, "accountRelationship": { "externalId": "REL-1" } }</code>
 /// </summary>
-public sealed record AccountRelationshipEvent(EventMeta? Meta, AccountRelationshipPayload? AccountRelationship);
+public sealed record AccountRelationshipEvent(EventMeta? Meta, AccountRelationshipPayload? AccountRelationship)
+{
+    public const string Type = "accountRelationship";
+
+    /// <summary>How an inbox event of this type is read: the entity's id and the meta.</summary>
+    public static readonly EventReader<AccountRelationshipEvent> Reader = new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta);
+}
 
 /// <summary>The <c>accountRelationship</c> object of an <see cref="AccountRelationshipEvent"/>.</summary>
 public sealed class AccountRelationshipPayload

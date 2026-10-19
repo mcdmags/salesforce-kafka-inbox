@@ -24,11 +24,12 @@ public sealed class EngineFlowTests
     [Fact]
     public async Task The_consumer_stores_an_event_with_the_time_it_read_from_meta_time()
     {
-        var sync = new EntitySyncService<AccountEvent, AccountInboxRow>(Engine(), _inbox, Accounts);
-        var json = Row("ACC-1", "2026-10-14T03:02:03.1234567+02:00").Payload;
+        var ingest = new EntityIngestService<AccountEvent, AccountInboxRow>(Syncs.AccountProjection, AccountEvent.Reader, _inbox);
+        Syncs.Aggregate.TryRead("""
+            { "meta": { "time": "2026-10-14T03:02:03.1234567+02:00", "type": "updated" }, "after": { "externalId": "ACC-1" } }
+            """, out var change, out var problem).Should().BeTrue(problem);
 
-        sync.TryReadEvent(json, out var entityId, out var eventTime, out var problem).Should().BeTrue("the event is valid, but: {0}", problem);
-        await sync.StoreEventAsync(entityId!, eventTime, json, CancellationToken.None);
+        (await ingest.IngestAsync(change!, CancellationToken.None)).Should().BeEmpty();
 
         _inbox.Calls.Should().Equal("add ACC-1 at 2026-10-14T03:02:03.1234567+02:00");
     }
@@ -304,8 +305,7 @@ public sealed class EngineFlowTests
     /// Account, Contact and Profile per entity, except a KIDS entity, whose Account is not written (only its Contact
     /// and Profile). A batch of them is three upserts, one per object: Accounts, then Contacts, then Profiles.
     /// </summary>
-    private static readonly SyncStrategy<AccountEvent> ThreeObjects = new("account",
-        e => e.Account?.ExternalId, e => e.Meta,
+    private static readonly SyncStrategy<AccountEvent> ThreeObjects = new(AccountEvent.Reader,
         (key, e) => new SyncUnit(
         [
             .. key == "KIDS" ? [] : new[] { new SObjectRecord("acct", "Account", "ExternalId__c", key, new Dictionary<string, object?> { ["Name"] = e.Account!.Name }) },
@@ -320,8 +320,7 @@ public sealed class EngineFlowTests
             new SoqlQuery("Account", "ExternalId__c", SoqlQuery.ParentIdsOf(units, "Account")),
             new SoqlQuery("Contact", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Contact")),
             new SoqlQuery("Profile__c", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Profile__c"))
-        ],
-        _ => []);
+        ]);
 
     /// <summary>Creates the entities OLD and KIDS (its Account first, through the account strategy), so that changing KIDS takes the second write call.</summary>
     private async Task CreateOldAsync()

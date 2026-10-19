@@ -170,11 +170,14 @@ in an event is a Salesforce name):
 ```
 
 **The consumer reads an aggregate once** (`AccountAggregate.TryRead`, pure). Then every entity type takes from it the
-events of the entities it changed (`Project` in its file: `AccountSync`, `AccountRelationshipSync`, `ContactSync`) and
-stores each in its own inbox (`ISalesforceEntitySync.IngestAsync`), all with the aggregate's `meta.time`. The snapshots
+events of the entities it changed (`Project` of `AccountProjection`, `AccountRelationshipProjection`, `ContactProjection`) and
+stores each in its own inbox (`IAggregateIngest.IngestAsync`), all with the aggregate's `meta.time`. The snapshots
 are compared as the typed payloads they are read into (property order doesn't matter, list order does), children
-matched by `externalId`. `AccountAggregate` is a singleton that gets the `IAggregateProjection`s injected: each synced object (`AccountSync`, `AccountRelationshipSync`,
-`ContactSync`) is an instance registered once in `AddInboxSync`, as itself and as an `IAggregateProjection`, in that order.
+matched by `externalId`. `AccountAggregate` is a singleton that gets the `IAggregateProjection`s injected: each synced object's projection (`AccountProjection`, `AccountRelationshipProjection`,
+`ContactProjection`) is an instance registered once in `AddInboxSync`, as itself and as an `IAggregateProjection`, in that order.
+Persisting to the inbox and sending to Salesforce are separate: a projection and its `EntityIngestService` know the aggregate
+and the inbox, nothing of Salesforce; the sync (`AccountSync`, ...) and its `EntitySyncService` know the inbox and Salesforce,
+nothing of aggregates. They share only the event and its `EventReader` (entity id, meta, validation).
 `AccountAggregate.TrySplit` runs all the projections and returns their events (tests, benchmarks):
 
 | In the aggregate | Stored |
@@ -1065,8 +1068,9 @@ limits, batching, normalization, diffing, parents first, retries and dead-letter
 the worker loops names an object. An object supplies, in one file: a payload class, an sObject class and a static class with the mapping and the strategy,
 which says how an event becomes records, upserts or deletes; and an inbox row class (which selects the object's inbox
 table) in `SalesforceSync.Data/Inbox/`. `AddInboxSync` registers it as an `EntitySyncService<TEvent, TRow>`, which does
-the rest of `ISalesforceEntitySync` through the shared `IRepository<TRow>`. Its events come from the account aggregate
-(its strategy's `Project` takes them from the aggregate: a child type reads its own list of the snapshot); an object that
+`IEntitySync` through the shared `IRepository<TRow>`, and its projection as an `EntityIngestService<TEvent, TRow>`
+(`IAggregateIngest`). Its events come from the account aggregate
+(its projection's `Project` takes them from the aggregate: a child type reads its own list of the snapshot); an object that
 isn't part of the aggregate needs its list added to `AccountSnapshot`, or a topic of its own.
 
 ```csharp
@@ -1525,7 +1529,7 @@ entity claim), claims, retries, overlaps, stale rows and regressions.
   entity's newest, through a temporary table), then drained. Params: `Pods` (1/3), `Workers` (1/4/8),
   `Accounts` (100/1000), `LatencyMs` (0/25), `Events` (5000 aggregates).
 - `StreamingIngestBenchmarks`: aggregates keep arriving, split and stored the way the consumer does
-  (`ISalesforceEntitySync.StoreEventAsync`), while the pods drain (batches of 10 entities), so the same entity is
+  (`IAggregateIngest.IngestAsync`), while the pods drain (batches of 10 entities), so the same entity is
   claimed, released and re-claimed by different workers in different pods, and its row is overwritten while a worker
   writes the event it claimed, a delete over an upsert or the other way round. Params: `Pods`
   (1/3), `Workers` (4/8), 50 accounts, 5000 aggregates, 5 ms latency.
