@@ -97,30 +97,13 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }, ct);
     }
 
-    /// <summary>One statement per outcome kind, not per entity: fixed round trips per batch.</summary>
-    public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
+    public Task MarkDoneAsync(InboxClaim claim, IReadOnlyList<string> entityIds, CancellationToken ct)
     {
-        return WithLeasesEndedAsync(claim, TimeSpan.Zero, async (db, t) =>
+        if (entityIds.Count == 0)
         {
-            var recorded = new List<string>();
-            if (outcomes.Synced.Count > 0)
-            {
-                recorded.AddRange(await DoneAsync(db, t, claim, outcomes.Synced));
-            }
-            if (outcomes.Dead.Count > 0)
-            {
-                recorded.AddRange(await FailAsync(db, t, claim, outcomes.Dead, maxRetries: 0));
-            }
-            if (outcomes.Failed.Count > 0)
-            {
-                recorded.AddRange(await FailAsync(db, t, claim, outcomes.Failed, _opt.MaxRetries));
-            }
-            return recorded;
-        }, ct);
-    }
+            return Task.CompletedTask;
+        }
 
-    private static Task<List<string>> DoneAsync(SyncDbContext db, CancellationToken ct, InboxClaim claim, IReadOnlyList<string> entityIds)
-    {
         var sql = $"""
             UPDATE {Table} i
             SET last_updated = now(), last_error = NULL, next_attempt_at = NULL
@@ -128,40 +111,47 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
             RETURNING i.entity_id
             """;
         var rows = claim.Of(entityIds);
-        return db.Database.QueryAsync<string>(sql, ct, new
+        return WithLeasesEndedAsync(rows, TimeSpan.Zero, (db, t) => db.Database.QueryAsync<string>(sql, t, new
         {
             entityIds = entityIds.ToArray(),
             times = rows.Select(r => r.EventTime).ToArray(),
             leaseEnds = rows.Select(r => r.LeaseEnd).ToArray()
-        });
+        }), ct);
     }
 
     /// <summary>
-    /// Exponential backoff, or dead letter (idle with error) at <paramref name="maxRetries"/>-th failure. @errors: one
-    /// JSON id -> error, whole batch one statement. Scalar subquery parses once; CTE re-read per row (230 ms / 5,000).
+    /// Exponential backoff, or dead letter (idle with error) at the MaxRetries-th failure, or at once if permanent
+    /// (@deadIds). @errors: one JSON id -> error, so a whole batch is one statement. Scalar subquery parses it once; as
+    /// a CTE it was re-read per row (230 ms / 5,000).
     /// </summary>
-    private Task<List<string>> FailAsync(SyncDbContext db, CancellationToken ct, InboxClaim claim, IReadOnlyList<FailedEvent> rows, int maxRetries)
+    public Task MarkFailedAsync(InboxClaim claim, IReadOnlyList<FailedEvent> failures, CancellationToken ct)
     {
+        if (failures.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
         var sql = $"""
             UPDATE {Table} i
             SET last_updated = now(), attempt_count = i.attempt_count + 1,
                 last_error = (SELECT @errors::jsonb) ->> i.entity_id,
-                next_attempt_at = CASE WHEN i.attempt_count + 1 < @maxRetries
+                next_attempt_at = CASE WHEN i.attempt_count + 1 < @maxRetries AND i.entity_id <> ALL(@deadIds)
                                        THEN now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) END
             WHERE {StillClaimed}
             RETURNING i.entity_id
             """;
-        var claimed = claim.Of(rows.Select(r => r.EntityId));
-        return db.Database.QueryAsync<string>(sql, ct, new
+        var rows = claim.Of(failures.Select(f => f.EntityId));
+        return WithLeasesEndedAsync(rows, TimeSpan.Zero, (db, t) => db.Database.QueryAsync<string>(sql, t, new
         {
-            entityIds = claimed.Select(r => r.EntityId).ToArray(),
-            times = claimed.Select(r => r.EventTime).ToArray(),
-            leaseEnds = claimed.Select(r => r.LeaseEnd).ToArray(),
-            errors = ErrorsJson(rows),
-            maxRetries,
+            entityIds = rows.Select(r => r.EntityId).ToArray(),
+            times = rows.Select(r => r.EventTime).ToArray(),
+            leaseEnds = rows.Select(r => r.LeaseEnd).ToArray(),
+            errors = ErrorsJson(failures),
+            deadIds = failures.Where(f => f.Permanent).Select(f => f.EntityId).ToArray(),
+            maxRetries = _opt.MaxRetries,
             baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
             maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
-        });
+        }), ct);
     }
 
     /// <summary>
@@ -172,7 +162,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
     /// </summary>
     public Task ReleaseAsync(InboxClaim claim, Release release, CancellationToken ct)
     {
-        return WithLeasesEndedAsync(claim, release.Delay, async (db, t) =>
+        return WithLeasesEndedAsync([.. claim.Events], release.Delay, async (db, t) =>
         {
             var releaseClaimed = $"""
                 UPDATE {Table} i
@@ -207,18 +197,18 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
     }
 
     /// <summary>
-    /// Run <paramref name="record"/>, then end lease of claimed rows it skipped (not attempted, or overwritten): due
-    /// after <paramref name="delay"/>, not at lease expiry.
+    /// Run <paramref name="record"/> on <paramref name="rows"/>, then end the lease of those it skipped (a newer event
+    /// overwrote them): due after <paramref name="delay"/>, not at lease expiry.
     /// </summary>
-    private Task WithLeasesEndedAsync(InboxClaim claim, TimeSpan delay, Func<SyncDbContext, CancellationToken, Task<List<string>>> record,
-        CancellationToken ct)
+    private Task WithLeasesEndedAsync(IReadOnlyList<InboxEvent> rows, TimeSpan delay,
+        Func<SyncDbContext, CancellationToken, Task<List<string>>> record, CancellationToken ct)
     {
         return contexts.RunAsync(async (db, t) =>
         {
             var recorded = (await record(db, t)).ToHashSet(StringComparer.Ordinal);
-            if (recorded.Count < claim.Events.Count)
+            if (recorded.Count < rows.Count)
             {
-                await EndLeasesAsync(db, t, claim.Of(claim.EntityIds.Where(id => !recorded.Contains(id))), delay);
+                await EndLeasesAsync(db, t, [.. rows.Where(r => !recorded.Contains(r.EntityId))], delay);
             }
         }, ct);
     }

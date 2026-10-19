@@ -51,7 +51,7 @@ public sealed class InboxStatements
             UPDATE {table} i
             SET last_updated = now(), attempt_count = i.attempt_count + 1,
                 last_error = (SELECT @errors::jsonb) ->> i.entity_id,
-                next_attempt_at = CASE WHEN i.attempt_count + 1 < @maxRetries
+                next_attempt_at = CASE WHEN i.attempt_count + 1 < @maxRetries AND i.entity_id <> ALL(@deadIds)
                                        THEN now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) END
             WHERE {StillClaimed}
             """;

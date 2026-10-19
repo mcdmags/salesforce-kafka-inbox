@@ -227,6 +227,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
             times = claimed.Select(e => e.EventTime).ToArray(),
             leaseEnds = claimed.Select(e => e.LeaseEnd).ToArray(),
             errors = $$"""{ "{{claimed[0].EntityId}}": "UNABLE_TO_LOCK_ROW" }""",
+            deadIds = Array.Empty<string>(),
             maxRetries = 8,
             baseDelaySecs = 60d,
             maxDelaySecs = 60d

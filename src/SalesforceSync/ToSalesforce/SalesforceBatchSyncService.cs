@@ -104,11 +104,13 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
             // Request provably not applied by Salesforce (read or write) → retry every entity. Records saved by earlier
             // calls are safe: retry reads them, writes only diffs
             log.LogError(ex, "{Type} batch failed", reader.EntityType);
-            await inbox.RecordAsync(claim, new BatchOutcomes([], [], [.. claim.Events.Select(e => new FailedEvent(e.EntityId, ex.Message))]), ct);
+            await inbox.MarkFailedAsync(claim, [.. claim.Events.Select(e => new FailedEvent(e.EntityId, ex.Message))], ct);
             return claim.Events.Count;
         }
 
-        await inbox.RecordAsync(claim, Outcomes(reader.EntityType, events, dead, failures), ct);
+        var (done, failed) = Outcomes(reader.EntityType, events, dead, failures);
+        await inbox.MarkDoneAsync(claim, done, ct);
+        await inbox.MarkFailedAsync(claim, failed, ct);
         return claim.Events.Count;
     }
 
@@ -141,11 +143,11 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
 
     private static FailedEvent Invalid<TEvent>(EventReader<TEvent> reader, InboxEvent row, string why)
     {
-        return new FailedEvent(row.EntityId, $"{SalesforceErrors.InvalidEvent}: {reader.EntityType} {row.EntityId}: {why}");
+        return new FailedEvent(row.EntityId, $"{SalesforceErrors.InvalidEvent}: {reader.EntityType} {row.EntityId}: {why}", Permanent: true);
     }
 
-    /// <summary>Done: no failure. Dead: unfixable-by-retry failures + unreadable rows. Failed: rest, retried with backoff.</summary>
-    private BatchOutcomes Outcomes<TEvent>(string entityType, List<ReadEvent<TEvent>> events, List<FailedEvent> dead,
+    /// <summary>Done: no failure. Failed: the rest; permanent (dead now) if any failure is, or the row was unreadable.</summary>
+    private (List<string> Done, List<FailedEvent> Failed) Outcomes<TEvent>(string entityType, List<ReadEvent<TEvent>> events, List<FailedEvent> dead,
         Dictionary<string, List<Failure>> failures)
     {
         foreach (var invalid in dead)
@@ -154,8 +156,7 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
         }
 
         var done = new List<string>();
-        var failed = new List<FailedEvent>();
-        var allDead = new List<FailedEvent>(dead);
+        var failed = new List<FailedEvent>(dead);
         foreach (var key in events.Select(e => e.EntityId))
         {
             if (!failures.TryGetValue(key, out var list))
@@ -164,11 +165,12 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
                 continue;
             }
 
-            var failure = new FailedEvent(key, string.Join("; ", list.OrderByDescending(f => f.Permanent).Select(f => f.Error)));
+            var failure = new FailedEvent(key, string.Join("; ", list.OrderByDescending(f => f.Permanent).Select(f => f.Error)),
+                Permanent: list.Any(f => f.Permanent));
             log.LogWarning("{Type} {Key}: {Error}", entityType, key, failure.Error);
-            (list.Any(f => f.Permanent) ? allDead : failed).Add(failure);
+            failed.Add(failure);
         }
 
-        return new BatchOutcomes(done, allDead, failed);
+        return (done, failed);
     }
 }

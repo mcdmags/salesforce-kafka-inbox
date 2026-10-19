@@ -31,12 +31,23 @@ internal sealed class InMemoryInbox<TRow> : IRepository<TRow> where TRow : Inbox
         return Task.FromResult(new InboxClaim([.. _pending]));
     }
 
-    public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
+    public Task MarkDoneAsync(InboxClaim claim, IReadOnlyList<string> entityIds, CancellationToken ct)
     {
-        Synced.AddRange(outcomes.Synced);
-        Dead.AddRange(outcomes.Dead);
-        Failed.AddRange(outcomes.Failed);
-        _pending.Clear();
+        Synced.AddRange(entityIds);
+        return Recorded(entityIds);
+    }
+
+    public Task MarkFailedAsync(InboxClaim claim, IReadOnlyList<FailedEvent> failures, CancellationToken ct)
+    {
+        Dead.AddRange(failures.Where(f => f.Permanent));
+        Failed.AddRange(failures.Where(f => !f.Permanent));
+        return Recorded(failures.Select(f => f.EntityId));
+    }
+
+    private Task Recorded(IEnumerable<string> entityIds)
+    {
+        var ids = entityIds.ToHashSet(StringComparer.Ordinal);
+        _pending.RemoveAll(e => ids.Contains(e.EntityId));
         return Task.CompletedTask;
     }
 

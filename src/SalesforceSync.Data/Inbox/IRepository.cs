@@ -13,8 +13,14 @@ public interface IRepository<TRow> where TRow : InboxRow
     /// <summary>Leases up to <see cref="SyncOptions.BatchSize"/> due entities.</summary>
     Task<InboxClaim> ClaimAsync(CancellationToken ct);
 
-    /// <summary>Records every entity's outcome, one statement per kind of outcome.</summary>
-    Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct);
+    /// <summary>In Salesforce: done. One statement for all of them.</summary>
+    Task MarkDoneAsync(InboxClaim claim, IReadOnlyList<string> entityIds, CancellationToken ct);
+
+    /// <summary>
+    /// Retried with backoff, dead-lettered at <see cref="SyncOptions.MaxRetries"/>; a
+    /// <see cref="FailedEvent.Permanent"/> failure is dead-lettered now. One statement for all of them.
+    /// </summary>
+    Task MarkFailedAsync(InboxClaim claim, IReadOnlyList<FailedEvent> failures, CancellationToken ct);
 
     /// <summary>Hands the claim back without spending an attempt: rate limited, unknown write outcome, or mapping error.</summary>
     Task ReleaseAsync(InboxClaim claim, Release release, CancellationToken ct);
@@ -56,12 +62,7 @@ public sealed record InboxClaim(IReadOnlyList<InboxEvent> Events)
 /// </param>
 public sealed record InboxEvent(string EntityId, string Payload, DateTimeOffset EventTime, DateTimeOffset LeaseEnd);
 
-public sealed record FailedEvent(string EntityId, string Error);
-
-/// <param name="Synced">In Salesforce: done.</param>
-/// <param name="Dead">Dead-lettered at once (retry can't fix).</param>
-/// <param name="Failed">Retried with backoff, dead after <see cref="SyncOptions.MaxRetries"/>.</param>
-public sealed record BatchOutcomes(
-    IReadOnlyList<string> Synced,
-    IReadOnlyList<FailedEvent> Dead,
-    IReadOnlyList<FailedEvent> Failed);
+/// <param name="EntityId">Row key.</param>
+/// <param name="Error">Stored as the row's last_error.</param>
+/// <param name="Permanent">Retry can't fix it: dead-lettered at once (<see cref="IRepository{TRow}.MarkFailedAsync"/>).</param>
+public sealed record FailedEvent(string EntityId, string Error, bool Permanent = false);

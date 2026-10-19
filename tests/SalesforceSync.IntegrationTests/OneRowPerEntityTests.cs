@@ -95,7 +95,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var entity = SyncFixture.NewAccountId();
         await StoreAsync(inbox, entity, 1);
         var first = await inbox.ClaimAsync(CancellationToken.None);
-        await inbox.RecordAsync(first, Synced(first), CancellationToken.None);
+        await inbox.MarkDoneAsync(first, first.EntityIds, CancellationToken.None);
         var before = await RowAsync(db, entity);
 
         await StoreAsync(inbox, entity, 1);
@@ -148,13 +148,8 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var next = await Eventually.ValueAsync(() => inbox.ClaimAsync(CancellationToken.None), c => c.Events.Count > 0,
             "the entity to be claimed again", TimeSpan.FromSeconds(10));
         next.Events.Should().ContainSingle().Which.EventTime.Should().Be(SyncFixture.TimeOf(Event(entity, 2)), "the next claim writes v2");
-        await inbox.RecordAsync(next, Synced(next), CancellationToken.None);
+        await inbox.MarkDoneAsync(next, next.EntityIds, CancellationToken.None);
         (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 2 && r.Status == "done");
-    }
-
-    private static BatchOutcomes Synced(InboxClaim claim)
-    {
-        return new BatchOutcomes(claim.EntityIds, [], []);
     }
 
     private static JsonObject Event(string entity, long version)

@@ -35,7 +35,7 @@ public sealed class LeaseTests(SyncFixture app)
         (await app.GetRecordAsync("Account", acct)).Should().BeNull("nobody has written the account yet");
 
         // The first worker finishes without having written (as if its records were not attempted) and releases
-        await app.AccountInbox.RecordAsync(claim, new BatchOutcomes([], [], []), CancellationToken.None);
+        await app.AccountInbox.ReleaseAsync(claim, new Release(TimeSpan.Zero), CancellationToken.None);
 
         (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
         ((string?)(await app.GetRecordAsync("Account", acct))!["Name"]).Should().Be("v2");
@@ -64,12 +64,12 @@ public sealed class LeaseTests(SyncFixture app)
         }
         (await app.GetInboxRowAsync(acct)).Should().Match<InboxRowState>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0);
         var failure = new FailedEvent(row, "failed");
-        await app.AccountInbox.RecordAsync(claim, outcome switch
+        await (outcome switch
         {
-            "done" => Synced(row),
-            "failed" => new BatchOutcomes([], [], [failure]),
-            _ => new BatchOutcomes([], [failure], [])
-        }, CancellationToken.None);
+            "done" => app.AccountInbox.MarkDoneAsync(claim, [row], CancellationToken.None),
+            "failed" => app.AccountInbox.MarkFailedAsync(claim, [failure], CancellationToken.None),
+            _ => app.AccountInbox.MarkFailedAsync(claim, [failure with { Permanent = true }], CancellationToken.None)
+        });
 
         (await app.WaitForInboxSettledAsync(acct, version: 2)).Should().Be((2L, "done"));
         ((string?)(await app.GetRecordAsync("Account", acct))?["Name"]).Should().Be("v2", "the pods wrote v2 once the lease ended");
@@ -98,6 +98,7 @@ public sealed class LeaseTests(SyncFixture app)
             times,
             leaseEnds,
             errors,
+            deadIds = Array.Empty<string>(),
             maxRetries = 8,
             baseDelaySecs = 1d,
             maxDelaySecs = 1d
@@ -106,7 +107,9 @@ public sealed class LeaseTests(SyncFixture app)
         // Every outcome the repository records is conditional on the row being pending as well: none of them touches it
         var inbox = app.AccountInbox;
         var failed = new FailedEvent(claimed[0], "x");
-        await inbox.RecordAsync(claim, new BatchOutcomes(claimed, [failed], [failed]), CancellationToken.None);
+        await inbox.MarkDoneAsync(claim, claimed, CancellationToken.None);
+        await inbox.MarkFailedAsync(claim, [failed with { Permanent = true }], CancellationToken.None);
+        await inbox.MarkFailedAsync(claim, [failed], CancellationToken.None);
         await inbox.ReleaseAsync(claim, new Release(TimeSpan.FromMinutes(10), "x"), CancellationToken.None);
         await inbox.ReleaseAsync(claim, new Release(TimeSpan.FromHours(1)), CancellationToken.None);
 
@@ -126,8 +129,8 @@ public sealed class LeaseTests(SyncFixture app)
             .Should().Be(0, "an event that is not the claimed one completes nothing");
         (await app.GetInboxAsync(acct)).Should().Be((1L, "pending"));
 
-        await app.AccountInbox.RecordAsync(claim, Synced(claimed[0]), CancellationToken.None);
-        await app.AccountInbox.RecordAsync(claim, Synced(claimed[0]), CancellationToken.None);
+        await app.AccountInbox.MarkDoneAsync(claim, [claimed[0]], CancellationToken.None);
+        await app.AccountInbox.MarkDoneAsync(claim, [claimed[0]], CancellationToken.None);
 
         (await app.GetInboxRowAsync(acct)).Should().Match<InboxRowState>(r => r.Status == "done" && r.NextAttemptAt == null,
             "recorded again (after a commit whose outcome was unknown), it finds the row idle and nothing is left to do");
@@ -150,11 +153,6 @@ public sealed class LeaseTests(SyncFixture app)
             """, new { lease, acct }, tx);
         await tx.CommitAsync();
         return new InboxClaim(rows);
-    }
-
-    private static BatchOutcomes Synced(string id)
-    {
-        return new BatchOutcomes([id], [], []);
     }
 
     private async Task<int> ExecuteAsync(string sql, object args)

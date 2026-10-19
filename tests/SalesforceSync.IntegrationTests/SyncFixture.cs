@@ -567,7 +567,7 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>Every kind of outcome a worker records for a claim (see <see cref="RecordOutcomeAsync"/>).</summary>
-    public static TheoryData<string> Outcomes => ["done", "failed", "dead", "released", "deferred", "held"];
+    public static TheoryData<string> Outcomes => ["done", "failed", "dead", "deferred", "held"];
 
     /// <summary>Records one of <see cref="Outcomes"/> for a claim of one row, through the worker's repository.</summary>
     public static Task RecordOutcomeAsync(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
@@ -577,10 +577,9 @@ public class SyncFixture : IAsyncLifetime
         var none = CancellationToken.None;
         return outcome switch
         {
-            "done" => inbox.RecordAsync(claim, new BatchOutcomes([row], [], []), none),
-            "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
-            "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
-            "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
+            "done" => inbox.MarkDoneAsync(claim, [row], none),
+            "failed" => inbox.MarkFailedAsync(claim, [failure], none),
+            "dead" => inbox.MarkFailedAsync(claim, [failure with { Permanent = true }], none),
             "deferred" => inbox.ReleaseAsync(claim, new Release(TimeSpan.Zero), none),
             "held" => inbox.ReleaseAsync(claim, new Release(UnknownOutcomeHold, "lost"), none),
             _ => throw new ArgumentOutOfRangeException(nameof(outcome))
