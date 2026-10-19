@@ -15,6 +15,7 @@ create table sf_claim_audit (
   inbox          text        not null,   -- the inbox table
   entity_id      text        not null,
   claim_seq      bigint      not null,
+  claim_txid     bigint      not null,   -- the claiming transaction: its rows are one batch
   release_seq    bigint,
   claimed_at     timestamptz not null,   -- for humans only
   released_at    timestamptz,
@@ -30,8 +31,8 @@ begin
     where inbox = tg_table_name and entity_id = new.entity_id and release_seq is null;
   end if;
   if old.next_attempt_at <= now() and new.next_attempt_at > now() then
-    insert into sf_claim_audit (inbox, entity_id, claim_seq, claimed_at)
-    values (tg_table_name, new.entity_id, nextval('sf_claim_audit_seq'), clock_timestamp());
+    insert into sf_claim_audit (inbox, entity_id, claim_seq, claim_txid, claimed_at)
+    values (tg_table_name, new.entity_id, nextval('sf_claim_audit_seq'), txid_current(), clock_timestamp());
   end if;
   return new;
 end $$;

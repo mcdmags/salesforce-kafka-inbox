@@ -405,7 +405,20 @@ Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` 
 - **Streaming with 8 workers on 3 pods is still the outlier** (5.9 s, 15,729 API calls, coalescing 1.20). It is not the
   rate limiter, as guessed in the run before: the token bucket is gone and nothing changed. With 24 workers on 50 hot
   accounts almost every event becomes a batch of its own (about 1.2 rows per claim), and each batch pays its fixed read and
-  upsert calls. This is the effect of many workers on few entities, not a defect; not tested further.
+  upsert calls. Measured afterwards (the claim audit now records the claiming transaction, so the benchmark prints
+  `claimBatches`; medians of 6 iterations):
+
+  | W | P | Rows claimed | Claim batches | Rows per batch | API calls | Calls per batch |
+  |--:|--:|--:|--:|--:|--:|--:|
+  | 4 | 1 | 2,571 | 325 | 7.9 | 1,189 | 3.7 |
+  | 4 | 3 | 4,337 | 1,334 | 3.3 | 4,618 | 3.5 |
+  | 8 | 1 | 3,828 | 756 | 5.1 | 2,668 | 3.5 |
+  | 8 | 3 | 5,378 | 4,374 | 1.2 | 15,871 | 3.6 |
+
+  A batch costs about 3.6 calls whatever it holds, and the number of batches is what grows: 24 workers claim whatever is
+  due the moment it is, and the ingest stores one event at a time, so a batch holds 1.2 rows. It is the workers
+  outnumbering the work (50 accounts), not a defect: nothing is lost or held, only efficiency. Fewer workers per pod
+  (or a short wait before an under-full claim) would batch more.
 - **This run found a bug, fixed at e7cb88d.** With `lock_token` gone, ending the lease of the rows an outcome did not
   record skipped any row whose `last_updated` equalled the transaction's `now()`, and a store of a newer event can start
   in the same microsecond. That row kept its lease until it expired (5 minutes in the benchmark) and the drain timed out

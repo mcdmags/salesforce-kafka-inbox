@@ -367,6 +367,7 @@ public abstract class DrainBenchmarkBase
         // is the coalescing (claims also count retries and deferrals). Counting records written instead would mix in
         // that an account event writes two records (Account, Profile).
         var claims = await Count("SELECT count(*) FROM sf_claim_audit");
+        var batches = await Count("SELECT count(*) FROM (SELECT DISTINCT inbox, claim_txid FROM sf_claim_audit) b");
         var overlaps = await Count("SELECT count(*) FROM sf_claim_overlaps");
         // attempt_count counts the failures of the row's event, so retries = attempt_count (of the last event
         // only: a newer event starts again at 0). Mostly relationships claimed before their Accounts were in the org
@@ -384,7 +385,7 @@ public abstract class DrainBenchmarkBase
             $"events={Events} entityEvents={_events.Count} relationshipEvents={relationshipEvents} contactEvents={contactEvents} " +
             $"deleteEvents={deleteEvents} deletedEntities={deleted} {stats} entities={rows} " +
             $"coalescing={(double)_events.Count / Math.Max(1, claims):F2} events/entity claim " +
-            $"claims={claims} retries={retries} overlappingClaims={overlaps} notDone={notDone} stale={stale} " +
+            $"claims={claims} claimBatches={batches} retries={retries} overlappingClaims={overlaps} notDone={notDone} stale={stale} " +
             $"wrong={wrong.Count} regressions={regressions}");
 
         if (wrong.Count > 0 || rows != _newest.Count || stale > 0 || notDone > 0 || overlaps > 0 || regressions > 0)
