@@ -432,6 +432,47 @@ now read by its index (87,641 index scans, 8 sequential), and the queue was empt
 truncate the audit for every iteration, so there it grew only to a few thousand rows, but it still cost them a few percent:
 the numbers of earlier runs in this file are somewhat pessimistic.
 
+## Latest run: plain-crud with the simpler inbox repository, at 295d018
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at 295d018, on 2026-10-19, against the
+[run before it](#latest-run-plain-crud-with-the-simple-send-steps-at-edafa75). Since then the inbox repository lost what
+nothing used (the row types' query and write limits, `IInboxRow`, and `FailAllAsync`, now `RecordAsync` with every row
+failed) and takes its table name from the model once; a read halves a query whose URL is too long; comments were cut to
+the reasons. The SQL text is unchanged; the database was recreated.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures, and no iteration timed out.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency), and streaming
+(50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 105.96 ms | 835.97 ms | 19.37 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 1 | 1,000 | 2,113 | 413.17 ms | 2,666.14 ms | 59.18 MB | 69 | 23 | 1.91 | 3,254 | 1141 |
+| 1 | 3 | 100 | 990 | 64.94 ms | 368.64 ms | 19.89 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 294.67 ms | 857.36 ms | 60.96 MB | 68 | 21 | 1.93 | 3,230 | 1117 |
+| 4 | 1 | 100 | 990 | 66.24 ms | 275.62 ms | 21.13 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 4 | 1 | 1,000 | 2,113 | 236.30 ms | 696.55 ms | 62.51 MB | 78 | 26 | 1.88 | 3,309 | 1196 |
+| 4 | 3 | 100 | 990 | 98.61 ms | 256.30 ms | 32.27 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 4 | 3 | 1,000 | 2,113 | 295.25 ms | 444.83 ms | 71.76 MB | 66 | 20 | 1.99 | 3,123 | 1010 |
+| 8 | 1 | 100 | 990 | 76.94 ms | 213.51 ms | 24.08 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 8 | 1 | 1,000 | 2,113 | 184.67 ms | 487.44 ms | 66.36 MB | 77 | 24 | 1.87 | 3,331 | 1218 |
+| 8 | 3 | 100 | 990 | 135.63 ms | 253.46 ms | 44.71 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 8 | 3 | 1,000 | 2,113 | 470.96 ms | 434.16 ms | 126.57 MB | 74 | 22 | 1.92 | 3,251 | 1138 |
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.841 s | 211.42 MB | 1,220 | 555 | 2.49 | 2,591 | 5 |
+| 4 | 3 | 2.504 s | 393.49 MB | 4,653 | 2,021 | 1.48 | 4,345 | 3 |
+| 8 | 1 | 2.170 s | 300.98 MB | 2,779 | 1,222 | 1.68 | 3,834 | 4 |
+| 8 | 3 | 6.360 s | 1450.97 MB | 16,433 | 7,586 | 1.19 | 5,439 | 3 |
+
+- **The same calls to Salesforce and the same allocation** (one worker on one pod: 22 calls and 8 write requests with
+  100 accounts, 69 and 23 with 1,000; 19.4 MB against 19.1 MB).
+- **The timings are the same within the noise of the runs**: rows moved both ways (8 workers on 1 pod with 1,000
+  accounts 185 ms against 313 ms at 0 ms latency; 4 workers on 3 pods 445 ms against 328 ms at 25 ms), and streaming 8
+  workers on 3 pods is still the outlier at 6.4 s.
+
 ## Latest run: plain-crud with the simple send steps, at edafa75
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at edafa75, on 2026-10-19, against the
