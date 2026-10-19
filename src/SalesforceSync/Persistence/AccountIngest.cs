@@ -4,17 +4,22 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Persistence;
 
 /// <summary>
-/// The account events an Account aggregate calls for Knows the aggregate and the event, nothing of Salesforce (that is <see cref="ToSalesforce.AccountSync"/>).
+/// The account events an Account aggregate calls for. Knows the aggregate and the event, nothing of Salesforce (that is <see cref="ToSalesforce.AccountSync"/>).
 /// </summary>
-public sealed class AccountIngest(IRepository<AccountInboxRow> inbox) : AggregateIngest<AccountEvent, AccountInboxRow>(inbox)
+public sealed class AccountIngest(IRepository<AccountInboxRow> inbox) : IAggregateIngest
 {
-    protected override EventReader<AccountEvent> Reader => AccountEvent.Reader;
+    public string EntityType => AccountEvent.Type;
+
+    public Task<IReadOnlyList<string>> IngestAsync(AggregateChange change, CancellationToken ct)
+    {
+        return InboxIngest.StoreAsync(Project(change), AccountEvent.Reader, inbox, ct);
+    }
 
     /// <summary>
     /// The Account's event: the Account (with its Profile) when it changed or Before is missing; its delete, with its
     /// Profile if that has a key of its own, when it is gone.
     /// </summary>
-    internal override IEnumerable<AccountEvent> Project(AggregateChange change)
+    internal IEnumerable<AccountEvent> Project(AggregateChange change)
     {
         if (change.IsDelete)
         {

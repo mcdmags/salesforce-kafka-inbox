@@ -174,9 +174,8 @@ events of the entities it changed (`Project` of `AccountIngest`, `AccountRelatio
 stores each in its own inbox (`IAggregateIngest.IngestAsync`), all with the aggregate's `meta.time`. The snapshots
 are compared as the typed payloads they are read into (property order doesn't matter, list order does), children
 matched by `externalId`. Persisting to the inbox and sending to Salesforce are separate, each in its own folder and namespace: `Persistence/`
-(`AccountIngest`, `AccountRelationshipIngest`, `ContactIngest`, each an `IAggregateIngest` over `AggregateIngest<TEvent, TRow>`)
-knows the aggregate and the inbox, nothing of Salesforce; `ToSalesforce/` (`AccountSync`, ... each an `IEntitySync` over
-`EntitySync<TEvent, TRow>`, and the engine) knows the inbox and Salesforce, nothing of aggregates. They share only
+(`AccountIngest`, `AccountRelationshipIngest`, `ContactIngest`, each an `IAggregateIngest`)
+knows the aggregate and the inbox, nothing of Salesforce; `ToSalesforce/` (`AccountSync`, ... each an `IEntitySync`, and the engine) knows the inbox and Salesforce, nothing of aggregates. They share only
 `Sync/`: the events, `EventMeta` and `EventReader` (entity id, meta, validation). `AddInboxSync` registers each ingest as an
 `IAggregateIngest` and each sync as an `IEntitySync`, parents first.
 `AccountAggregate.TrySplit` runs all the projections and returns their events (tests, benchmarks):

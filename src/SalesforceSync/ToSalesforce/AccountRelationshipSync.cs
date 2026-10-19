@@ -8,17 +8,32 @@ namespace SalesforceSync.ToSalesforce;
 /// isn't in Salesforce yet, nothing is sent and the relationship is retried until the account sync creates it.
 /// Like <see cref="AccountSync"/>, the mapping is here and the sObject next to it.
 /// </summary>
-public sealed class AccountRelationshipSync(SalesforceBatchSyncService engine, IRepository<AccountRelationshipInboxRow> inbox)
-    : EntitySync<AccountRelationshipEvent, AccountRelationshipInboxRow>(engine, inbox)
+public sealed class AccountRelationshipSync : IEntitySync
 {
     public const string Type = AccountRelationshipEvent.Type;
 
-    protected override EventReader<AccountRelationshipEvent> Reader => AccountRelationshipEvent.Reader;
+    private readonly SalesforceBatchSyncService _engine;
+    private readonly IRepository<AccountRelationshipInboxRow> _inbox;
+    private readonly SyncStrategy<AccountRelationshipEvent> _strategy;
+
+    public AccountRelationshipSync(SalesforceBatchSyncService engine, IRepository<AccountRelationshipInboxRow> inbox)
+    {
+        _engine = engine;
+        _inbox = inbox;
+        _strategy = new(AccountRelationshipEvent.Reader, Map, Queries);
+    }
+
+    public string EntityType => Type;
+
+    public Task<int> SyncBatchAsync(CancellationToken ct)
+    {
+        return _engine.SyncBatchAsync(_strategy, _inbox, ct);
+    }
 
     /// <summary>
     /// A deleted event deletes the relationship by its key alone. Any other event upserts it, which needs both Accounts' keys.
     /// </summary>
-    public override SyncUnit Map(string relationshipKey, AccountRelationshipEvent e)
+    public SyncUnit Map(string relationshipKey, AccountRelationshipEvent e)
     {
         if (e.Meta?.IsDelete() == true)
         {
@@ -32,7 +47,7 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService engine, I
     }
 
     // Read the relationships (to diff) and the Accounts they point at (to know they exist)
-    public override IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
+    public IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<AccountRelationshipSObject>(units), SoqlQuery.ParentsOf<AccountSObject>(units)];
     }

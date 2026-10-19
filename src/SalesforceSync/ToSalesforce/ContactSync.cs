@@ -8,17 +8,32 @@ namespace SalesforceSync.ToSalesforce;
 /// yet, nothing is sent and the contact is retried until the account sync creates it. Like
 /// <see cref="AccountSync"/>, the mapping is here and the sObject next to it.
 /// </summary>
-public sealed class ContactSync(SalesforceBatchSyncService engine, IRepository<ContactInboxRow> inbox)
-    : EntitySync<ContactEvent, ContactInboxRow>(engine, inbox)
+public sealed class ContactSync : IEntitySync
 {
     public const string Type = ContactEvent.Type;
 
-    protected override EventReader<ContactEvent> Reader => ContactEvent.Reader;
+    private readonly SalesforceBatchSyncService _engine;
+    private readonly IRepository<ContactInboxRow> _inbox;
+    private readonly SyncStrategy<ContactEvent> _strategy;
+
+    public ContactSync(SalesforceBatchSyncService engine, IRepository<ContactInboxRow> inbox)
+    {
+        _engine = engine;
+        _inbox = inbox;
+        _strategy = new(ContactEvent.Reader, Map, Queries);
+    }
+
+    public string EntityType => Type;
+
+    public Task<int> SyncBatchAsync(CancellationToken ct)
+    {
+        return _engine.SyncBatchAsync(_strategy, _inbox, ct);
+    }
 
     /// <summary>
     /// A deleted event deletes the contact by its key alone. Any other event upserts it, which needs its Account's key.
     /// </summary>
-    public override SyncUnit Map(string contactKey, ContactEvent e)
+    public SyncUnit Map(string contactKey, ContactEvent e)
     {
         if (e.Meta?.IsDelete() == true)
         {
@@ -32,7 +47,7 @@ public sealed class ContactSync(SalesforceBatchSyncService engine, IRepository<C
     }
 
     // Read the contacts (to diff) and the Accounts they point at (to know they exist)
-    public override IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
+    public IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<ContactSObject>(units), SoqlQuery.ParentsOf<AccountSObject>(units)];
     }

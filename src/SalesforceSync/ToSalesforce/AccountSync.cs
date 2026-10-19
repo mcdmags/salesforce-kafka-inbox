@@ -9,12 +9,27 @@ namespace SalesforceSync.ToSalesforce;
 /// Typed event -> mapping -> sObjects -> records. An event without a <c>profile</c> writes only the Account.
 /// The mapping from the event (<see cref="AccountEvent"/>) to the sObjects (<c>AccountSObjects.cs</c>) is here.
 /// </summary>
-public sealed class AccountSync(SalesforceBatchSyncService engine, IRepository<AccountInboxRow> inbox)
-    : EntitySync<AccountEvent, AccountInboxRow>(engine, inbox)
+public sealed class AccountSync : IEntitySync
 {
     public const string Type = AccountEvent.Type;
 
-    protected override EventReader<AccountEvent> Reader => AccountEvent.Reader;
+    private readonly SalesforceBatchSyncService _engine;
+    private readonly IRepository<AccountInboxRow> _inbox;
+    private readonly SyncStrategy<AccountEvent> _strategy;
+
+    public AccountSync(SalesforceBatchSyncService engine, IRepository<AccountInboxRow> inbox)
+    {
+        _engine = engine;
+        _inbox = inbox;
+        _strategy = new(AccountEvent.Reader, Map, Queries);
+    }
+
+    public string EntityType => Type;
+
+    public Task<int> SyncBatchAsync(CancellationToken ct)
+    {
+        return _engine.SyncBatchAsync(_strategy, _inbox, ct);
+    }
 
     /// <summary>
     /// A deleted event deletes the Profile, then the Account (children first): an org whose automation refuses to
@@ -22,7 +37,7 @@ public sealed class AccountSync(SalesforceBatchSyncService engine, IRepository<A
     /// keys; the contacts' and relationships' own deletes come through their inboxes.
     /// Any other event upserts the Account and, if the event has one, its Profile.
     /// </summary>
-    public override SyncUnit Map(string accountKey, AccountEvent e)
+    public SyncUnit Map(string accountKey, AccountEvent e)
     {
         if (e.Meta?.IsDelete() == true)
         {
@@ -44,7 +59,7 @@ public sealed class AccountSync(SalesforceBatchSyncService engine, IRepository<A
         return new SyncUnit(records);
     }
 
-    public override IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
+    public IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<AccountSObject>(units), SoqlQuery.RecordsOf<ProfileSObject>(units)];
     }

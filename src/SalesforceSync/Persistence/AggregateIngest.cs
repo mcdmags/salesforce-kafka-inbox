@@ -3,28 +3,21 @@ using SalesforceSync.Sync;
 
 namespace SalesforceSync.Persistence;
 
-/// <summary>
-/// The ingest of one entity type: what it takes from an aggregate (<see cref="Project"/>), checked with the type's
-/// reader and stored in its inbox. A type supplies only those two (e.g. <see cref="AccountIngest"/>) and its inbox row
-/// type, which selects the inbox table. Registered in <c>AddInboxSync</c>.
-/// </summary>
-public abstract class AggregateIngest<TEvent, TRow>(IRepository<TRow> inbox) : IAggregateIngest
-    where TRow : InboxRow, IInboxRow, new()
+/// <summary>What the types' ingests share: checking the events of an aggregate and storing them in the type's inbox.</summary>
+internal static class InboxIngest
 {
-    public string EntityType => Reader.EntityType;
-
-    /// <summary>How an event of this type is read: whose it is and when.</summary>
-    protected abstract EventReader<TEvent> Reader { get; }
-
-    /// <summary>The events of this type that the change calls for; none if it changes nothing for the type.</summary>
-    internal abstract IEnumerable<TEvent> Project(AggregateChange change);
-
-    public async Task<IReadOnlyList<string>> IngestAsync(AggregateChange change, CancellationToken ct)
+    /// <summary>
+    /// Stores each event the type's reader accepts in its entity's row of the inbox, unless the row holds a newer event.
+    /// </summary>
+    /// <returns>One problem per event that can never be synced (and was skipped); empty if all were stored.</returns>
+    public static async Task<IReadOnlyList<string>> StoreAsync<TEvent, TRow>(IEnumerable<TEvent> events, EventReader<TEvent> reader,
+        IRepository<TRow> inbox, CancellationToken ct)
+        where TRow : InboxRow, IInboxRow, new()
     {
         List<string> problems = [];
-        foreach (var json in Project(change).Select(AggregateProjection.Serialize))
+        foreach (var json in events.Select(AggregateProjection.Serialize))
         {
-            if (Reader.TryRead(json, out var read, out var problem))
+            if (reader.TryRead(json, out var read, out var problem))
             {
                 await inbox.AddAsync(read.EntityId, read.Time, json, ct);
             }
