@@ -1,6 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace SalesforceSync.Sync;
 
@@ -12,38 +11,25 @@ namespace SalesforceSync.Sync;
 ///               "accountRelationships": [ { "externalId": "REL-1", "relatedAccountExternalId": "ACC-2", ... } ],
 ///               "contacts": [ { "externalId": "CON-1", "lastName": "Lovelace", ... } ] },
 ///   "after": { ... } }</code>
-/// <see cref="TrySplit"/> compares the snapshots and turns them into the per-entity events the inboxes store and the
-/// strategies read. Only what changed is stored: an unchanged child costs no inbox row, no claim, no Salesforce read.
-/// No I/O.
+/// <see cref="TryRead"/> checks it into an <see cref="AggregateChange"/>; each entity type then projects the events it needs
+/// (<see cref="IAggregateProjection"/>) and stores them in its inbox. Only what changed is stored: an unchanged child costs
+/// no inbox row, no claim, no Salesforce read. No I/O.
 /// </summary>
 public static class AccountAggregate
 {
     public const string DefaultTopic = "account-changes";
 
-    /// <summary>Compact, unset properties left out: what an entity's event looks like in its inbox.</summary>
-    private static readonly JsonSerializerOptions StoredJson = new(SalesforceBatchSyncService.EventJson)
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-    };
+    /// <summary>The types that take events from an aggregate, parents first.</summary>
+    private static readonly IAggregateProjection[] Projections =
+        [AccountSync.Strategy, AccountRelationshipSync.Strategy, ContactSync.Strategy];
 
     /// <summary>
-    /// The per-entity events of an aggregate, for its entity type's inbox. Each is
-    /// <c>{ "meta": { "time", "type" }, "&lt;entityType&gt;": { ... } }</c> with the aggregate's meta.time:
-    /// <list type="bullet">
-    /// <item>After present (and meta.type not deleted): the Account, when it (or its Profile) changed or Before is
-    /// missing; each child of After that is new or changed (as in After, with <c>accountExternalId</c> = the
-    /// Account's key); a delete (<c>"type": "deleted"</c>, the child's <c>externalId</c> only) for each child of Before
-    /// that After lacks. An unchanged child or Account is not stored.</item>
-    /// <item>After missing or null, or meta.type deleted: the Account is deleted, with its Profile, and so is every
-    /// child Before has, each by its own delete event (not left to Salesforce: these Text foreign keys
-    /// cascade nothing).</item>
-    /// </list>
-    /// Snapshots are compared as the typed payloads they are read into; a property the payload classes lack is ignored.
+    /// Reads an aggregate message: valid JSON, a meta with a time (with an offset) and a type, before or after, one account.
     /// </summary>
     /// <returns>False with <paramref name="problem"/> when the message is no aggregate the sync can read.</returns>
-    public static bool TrySplit(string json, [NotNullWhen(true)] out List<EntityEvent>? events, [NotNullWhen(false)] out string? problem)
+    public static bool TryRead(string json, [NotNullWhen(true)] out AggregateChange? change, [NotNullWhen(false)] out string? problem)
     {
-        events = null;
+        change = null;
         AccountAggregateEvent? aggregate;
         try
         {
@@ -61,15 +47,30 @@ public static class AccountAggregate
             return false;
         }
 
-        var (meta, before, after) = (aggregate.Meta, aggregate.Before, aggregate.After);
-        problem = ProblemWith(meta, before, after);
+        problem = ProblemWith(aggregate.Meta, aggregate.Before, aggregate.After);
         if (problem is not null)
         {
             return false;
         }
 
-        var key = (after ?? before)!.ExternalId!;
-        events = after is null || meta!.IsDelete() ? Deleted(key, before ?? after!, meta!) : Changed(key, before, after, meta!);
+        change = new AggregateChange(aggregate.Meta!, aggregate.Before, aggregate.After);
+        return true;
+    }
+
+    /// <summary>
+    /// The per-entity events of an aggregate, in the order of the types (the Account, its relationships, its contacts),
+    /// as every type's projection makes them. Each is <c>{ "meta": { "time", "type" }, "&lt;entityType&gt;": { ... } }</c>.
+    /// </summary>
+    /// <returns>False with <paramref name="problem"/> when the message is no aggregate the sync can read.</returns>
+    public static bool TrySplit(string json, [NotNullWhen(true)] out List<EntityEvent>? events, [NotNullWhen(false)] out string? problem)
+    {
+        events = null;
+        if (!TryRead(json, out var change, out problem))
+        {
+            return false;
+        }
+
+        events = [.. Projections.SelectMany(p => p.ProjectJson(change).Select(j => new EntityEvent(p.EntityType, j)))];
         return true;
     }
 
@@ -96,99 +97,6 @@ public static class AccountAggregate
             : other is not null && other.ExternalId != account.ExternalId
                 ? $"before and after are different accounts ('{other.ExternalId}', '{account.ExternalId}')"
                 : null;
-    }
-
-    /// <summary>The Account (if it or its Profile changed) and every child that changed or went.</summary>
-    private static List<EntityEvent> Changed(string key, AccountSnapshot? before, AccountSnapshot after, EventMeta meta)
-    {
-        var events = new List<EntityEvent>();
-        if (before is null || Serialize<AccountPayload>(before) != Serialize<AccountPayload>(after))
-        {
-            events.Add(Event(AccountSync.Type, meta, before is null ? "inserted" : "updated", m => new AccountEvent(m, after)));
-        }
-
-        AddChanges(events, key, meta, before?.AccountRelationships, after.AccountRelationships, AccountRelationshipSync.Type,
-            c => c.ExternalId, (c, accountKey) => c.AccountExternalId = accountKey,
-            (m, c) => new AccountRelationshipEvent(m, c));
-        AddChanges(events, key, meta, before?.Contacts, after.Contacts, ContactSync.Type,
-            c => c.ExternalId, (c, accountKey) => c.AccountExternalId = accountKey,
-            (m, c) => new ContactEvent(m, c));
-        return events;
-    }
-
-    /// <summary>The Account, with its Profile, and every child of the last snapshot, each deleted on its own.</summary>
-    private static List<EntityEvent> Deleted(string key, AccountSnapshot last, EventMeta meta)
-    {
-        // What the account's delete needs: its key, and its Profile's if the Profile has a key of its own
-        var account = new AccountPayload { ExternalId = key };
-        if (last.Profile?.ExternalId is { } profileKey)
-        {
-            account.Profile = new ProfilePayload { ExternalId = profileKey };
-        }
-
-        List<EntityEvent> events = [Event(AccountSync.Type, meta, "deleted", m => new AccountEvent(m, account))];
-        events.AddRange(KeyedByExternalId(last.AccountRelationships, c => c.ExternalId).Keys
-            .Select(id => Deleting(AccountRelationshipSync.Type, id, meta)));
-        events.AddRange(KeyedByExternalId(last.Contacts, c => c.ExternalId).Keys.Select(id => Deleting(ContactSync.Type, id, meta)));
-        return events;
-    }
-
-    /// <summary>One list of children: those of After that are new or changed, then a delete for those that went.</summary>
-    private static void AddChanges<TChild>(List<EntityEvent> events, string key, EventMeta meta, List<TChild?>? before, List<TChild?>? after,
-        string entityType, Func<TChild, string?> idOf, Action<TChild, string> setAccountKey, Func<EventMeta, TChild, object> toEvent)
-        where TChild : class
-    {
-        var was = KeyedByExternalId(before, idOf);
-        var now = (after ?? []).OfType<TChild>().ToList();
-        foreach (var child in now)
-        {
-            // A child without an external id can't be matched: stored as a change, and rejected by its type's read
-            var old = idOf(child) is { } id ? was.GetValueOrDefault(id) : null;
-            if (old is null || Serialize(old) != Serialize(child))
-            {
-                setAccountKey(child, key);
-                events.Add(Event(entityType, meta, old is null ? "inserted" : "updated", m => toEvent(m, child)));
-            }
-        }
-
-        var kept = now.Select(idOf).ToHashSet(StringComparer.Ordinal);
-        events.AddRange(was.Keys.Where(id => !kept.Contains(id)).Select(id => Deleting(entityType, id, meta)));
-    }
-
-    /// <summary>
-    /// A snapshot's children of one list, by external id (the last one if two share an id). A child without an id
-    /// can't be told apart from another, so it is never taken for a delete.
-    /// </summary>
-    private static Dictionary<string, TChild> KeyedByExternalId<TChild>(List<TChild?>? children, Func<TChild, string?> idOf)
-        where TChild : class
-    {
-        var keyed = new Dictionary<string, TChild>(StringComparer.Ordinal);
-        foreach (var child in (children ?? []).OfType<TChild>())
-        {
-            if (idOf(child) is { Length: > 0 } id)
-            {
-                keyed[id] = child;
-            }
-        }
-        return keyed;
-    }
-
-    private static EntityEvent Deleting(string entityType, string id, EventMeta meta)
-    {
-        return entityType == ContactSync.Type
-            ? Event(entityType, meta, "deleted", m => new ContactEvent(m, new ContactPayload { ExternalId = id }))
-            : Event(entityType, meta, "deleted", m => new AccountRelationshipEvent(m, new AccountRelationshipPayload { ExternalId = id }));
-    }
-
-    private static EntityEvent Event(string entityType, EventMeta aggregateMeta, string type, Func<EventMeta, object> toEvent)
-    {
-        var meta = new EventMeta { Time = aggregateMeta.Time, Type = type };
-        return new EntityEvent(entityType, Serialize(toEvent(meta)));
-    }
-
-    private static string Serialize<T>(T value)
-    {
-        return JsonSerializer.Serialize(value, typeof(T), StoredJson);
     }
 }
 

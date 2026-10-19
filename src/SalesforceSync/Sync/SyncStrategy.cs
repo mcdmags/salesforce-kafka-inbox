@@ -26,13 +26,20 @@ namespace SalesforceSync.Sync;
 /// only what it is given.
 /// </param>
 /// <param name="Queries">The batch's units -> the reads (at most 5 after chunking) the diff and the foreign keys need.</param>
+/// <param name="Project">An Account aggregate -> the events of this type it calls for (see <see cref="IAggregateProjection"/>).</param>
 public sealed record SyncStrategy<TEvent>(
     string EntityType,
     Func<TEvent, string?> EntityId,
     Func<TEvent, EventMeta?> Meta,
     Func<string, TEvent, SyncUnit> Map,
-    Func<IReadOnlyCollection<SyncUnit>, IEnumerable<SoqlQuery>> Queries)
+    Func<IReadOnlyCollection<SyncUnit>, IEnumerable<SoqlQuery>> Queries,
+    Func<AggregateChange, IEnumerable<TEvent>> Project) : IAggregateProjection
 {
+    public IEnumerable<string> ProjectJson(AggregateChange change)
+    {
+        return Project(change).Select(AggregateProjection.Serialize);
+    }
+
     /// <summary>
     /// Reads and validates a raw event: valid JSON for <typeparamref name="TEvent"/>, an entity with a non-empty id,
     /// a time with an explicit offset, and a type of inserted, updated or deleted. The Kafka consumer stores only events

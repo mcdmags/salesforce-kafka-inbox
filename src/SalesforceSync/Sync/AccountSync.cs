@@ -15,7 +15,29 @@ public static class AccountSync
     public const string Type = "account";
 
     /// <summary>The strategy the engine runs.</summary>
-    public static readonly SyncStrategy<AccountEvent> Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries);
+    public static readonly SyncStrategy<AccountEvent> Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries, Project);
+
+    /// <summary>
+    /// The Account's event: the Account (with its Profile) when it changed or Before is missing; its delete, with its
+    /// Profile if that has a key of its own, when it is gone.
+    /// </summary>
+    public static IEnumerable<AccountEvent> Project(AggregateChange change)
+    {
+        if (change.IsDelete)
+        {
+            var account = new AccountPayload { ExternalId = change.AccountKey };
+            if (change.DeletedFrom.Profile?.ExternalId is { } profileKey)
+            {
+                account.Profile = new ProfilePayload { ExternalId = profileKey };
+            }
+
+            yield return new AccountEvent(change.MetaOf("deleted"), account);
+        }
+        else if (change.Before is null || AggregateProjection.Serialize<AccountPayload>(change.Before) != AggregateProjection.Serialize<AccountPayload>(change.After!))
+        {
+            yield return new AccountEvent(change.MetaOf(change.Before is null ? "inserted" : "updated"), change.After);
+        }
+    }
 
     /// <summary>
     /// A deleted event deletes the Profile, then the Account (children first): an org whose automation refuses to

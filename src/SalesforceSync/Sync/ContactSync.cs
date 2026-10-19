@@ -13,7 +13,15 @@ public static class ContactSync
     public const string Type = "contact";
 
     /// <summary>The strategy the engine runs.</summary>
-    public static readonly SyncStrategy<ContactEvent> Strategy = new(Type, e => e.Contact?.ExternalId, e => e.Meta, Map, Queries);
+    public static readonly SyncStrategy<ContactEvent> Strategy = new(Type, e => e.Contact?.ExternalId, e => e.Meta, Map, Queries, Project);
+
+    /// <summary>The contacts of the aggregate that are new or changed, and a delete for each that went.</summary>
+    public static IEnumerable<ContactEvent> Project(AggregateChange change)
+    {
+        return AggregateProjection.ChildEvents(change, s => s.Contacts, c => c.ExternalId,
+            (c, accountKey) => c.AccountExternalId = accountKey, id => new ContactPayload { ExternalId = id },
+            (meta, c) => new ContactEvent(meta, c));
+    }
 
     /// <summary>
     /// A deleted event deletes the contact by its key alone. Any other event upserts it, which needs its Account's key.

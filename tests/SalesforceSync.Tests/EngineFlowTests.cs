@@ -320,7 +320,8 @@ public sealed class EngineFlowTests
             new SoqlQuery("Account", "ExternalId__c", SoqlQuery.ParentIdsOf(units, "Account")),
             new SoqlQuery("Contact", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Contact")),
             new SoqlQuery("Profile__c", "ExternalId__c", SoqlQuery.ExternalIdsOf(units, "Profile__c"))
-        ]);
+        ],
+        _ => []);
 
     /// <summary>Creates the entities OLD and KIDS (its Account first, through the account strategy), so that changing KIDS takes the second write call.</summary>
     private async Task CreateOldAsync()

@@ -4,8 +4,8 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// Syncs one entity type from its inbox table to Salesforce; the worker loops run every registered one in turn.
-/// Also lets the Kafka consumer store that type's events (split out of the account aggregates) without knowing
-/// their shape.
+/// Also takes from each Account aggregate the events of its type and stores them in its inbox: the Kafka consumer
+/// needs to know no type.
 /// </summary>
 public interface ISalesforceEntitySync
 {
@@ -17,6 +17,13 @@ public interface ISalesforceEntitySync
     /// </summary>
     /// <returns>False with <paramref name="problem"/> if the message can never be synced (to skip it rather than store it).</returns>
     bool TryReadEvent(string json, out string? entityId, out DateTimeOffset eventTime, out string? problem);
+
+    /// <summary>
+    /// Takes the events of this type from an aggregate (<see cref="IAggregateProjection"/>) and stores each valid one in
+    /// its entity's row of this type's inbox, unless the row holds a newer event.
+    /// </summary>
+    /// <returns>One problem per event that can never be synced (and was skipped); empty if all were stored.</returns>
+    Task<IReadOnlyList<string>> IngestAsync(AggregateChange change, CancellationToken ct);
 
     /// <summary>
     /// Stores an event that passed <see cref="TryReadEvent"/> in its entity's row of this type's inbox, unchanged, with
@@ -47,6 +54,24 @@ public sealed class EntitySyncService<TEvent, TRow>(
         entityId = read?.EntityId;
         eventTime = read?.Time ?? default;
         return ok;
+    }
+
+    public async Task<IReadOnlyList<string>> IngestAsync(AggregateChange change, CancellationToken ct)
+    {
+        List<string> problems = [];
+        foreach (var json in strategy.ProjectJson(change))
+        {
+            if (strategy.TryRead(json, out var read, out var problem))
+            {
+                await inbox.AddAsync(read.EntityId, read.Time, json, ct);
+            }
+            else
+            {
+                problems.Add(problem);
+            }
+        }
+
+        return problems;
     }
 
     public Task StoreEventAsync(string entityId, DateTimeOffset eventTime, string json, CancellationToken ct)

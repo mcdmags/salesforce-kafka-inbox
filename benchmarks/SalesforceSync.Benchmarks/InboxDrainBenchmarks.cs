@@ -179,7 +179,17 @@ public abstract class DrainBenchmarkBase
             ct.ThrowIfCancellationRequested();
 
             // The worker's own pass: one batch of every registered entity type (accounts, relationships, contacts)
-            var processed = await InboxWorkerService.SyncOnceAsync(scopes, loop + iteration, ct);
+            int processed;
+            try
+            {
+                processed = await InboxWorkerService.SyncOnceAsync(scopes, loop + iteration, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // A worker that dies leaves its lease held until it expires, and the drain would only time out
+                Console.Error.WriteLine($"// WORKER DIED {ex}");
+                throw;
+            }
 
             if (processed > 0)
             {

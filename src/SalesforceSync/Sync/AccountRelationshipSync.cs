@@ -14,7 +14,15 @@ public static class AccountRelationshipSync
 
     /// <summary>The strategy the engine runs.</summary>
     public static readonly SyncStrategy<AccountRelationshipEvent> Strategy =
-        new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta, Map, Queries);
+        new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta, Map, Queries, Project);
+
+    /// <summary>The relationships of the aggregate that are new or changed, and a delete for each that went.</summary>
+    public static IEnumerable<AccountRelationshipEvent> Project(AggregateChange change)
+    {
+        return AggregateProjection.ChildEvents(change, s => s.AccountRelationships, r => r.ExternalId,
+            (r, accountKey) => r.AccountExternalId = accountKey, id => new AccountRelationshipPayload { ExternalId = id },
+            (meta, r) => new AccountRelationshipEvent(meta, r));
+    }
 
     /// <summary>
     /// A deleted event deletes the relationship by its key alone. Any other event upserts it, which needs both Accounts' keys.

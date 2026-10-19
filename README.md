@@ -35,7 +35,7 @@ account, is deleted in Salesforce. Several things make this harder than "consume
 
 | Problem | Solution |
 |---|---|
-| Durable, replayable intake | One topic (`account-changes`) of **account aggregates** (the Account with its Profile, relationships and contacts, `before` and `after`). The Kafka consumer splits each one (`AccountAggregate.TrySplit`) into the events of the entities that changed, deletes included (an unchanged child or Account is not stored: no row, no claim, no Salesforce read), and writes each event's **JSON** to its object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, marking the entity due on that row in the same statement, before storing the message's offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. An inbox keeps **one row per entity**, holding its newest event: a newer event overwrites it, an older one changes nothing, and neither does a redelivery of an event that is synced already, so a crash halfway through a message is safe (the redelivery stores its events again). A message that isn't a valid aggregate (see below) is logged with its offset and skipped, rather than blocking its partition. |
+| Durable, replayable intake | One topic (`account-changes`) of **account aggregates** (the Account with its Profile, relationships and contacts, `before` and `after`). The Kafka consumer reads each one once (`AccountAggregate.TryRead`) and hands it to every entity type, which projects the events of its own entities that changed (`IAggregateProjection`), deletes included (an unchanged child or Account is not stored: no row, no claim, no Salesforce read), and writes each event's **JSON** to its object type's Postgres **inbox table** (`sf_account_inbox`, `sf_account_relationship_inbox`, `sf_contact_inbox`) with the entity's id in a plain `entity_id` column, marking the entity due on that row in the same statement, before storing the message's offset (committed in the background, so there is no broker round trip per message). The id is read from the typed event in C#; **no SQL reads inside an event**. An inbox keeps **one row per entity**, holding its newest event: a newer event overwrites it, an older one changes nothing, and neither does a redelivery of an event that is synced already, so a crash halfway through a message is safe (the redelivery stores its events again). A message that isn't a valid aggregate (see below) is logged with its offset and skipped, rather than blocking its partition. |
 | Ordering across parallel batches | Workers claim **entities, not events**: every entity has one inbox row, which holds its sync state too (due time, which is also the lease's end), and a claim is `SELECT … FOR UPDATE SKIP LOCKED` on the due rows, which it then leases (`next_attempt_at` moved to the lease's end, so a leased row is not due until then) and reads, in one statement. Two workers can never hold the same entity: they would lock the same row. Which event is the newest is decided by **`meta.time`**, not by arrival: the Kafka key and partition order are not used. |
 | Bursts of updates to one entity | Pending events for an entity are **coalesced** in the inbox: every event carries the full record, so an event with a newer `meta.time` (or the same, stored later) overwrites the entity's row, and what a claim writes is the newest event stored before it. Five updates in five seconds become one Salesforce write with the newest data. An event that overwrites a row while a worker writes the event it claimed is not lost: that worker's outcome is recorded only on rows that still hold the event time it claimed, and the newer event is claimed next. |
 | Late or replayed older events | **Never stored**: the entity's row is overwritten only by an event newer than the one it holds, or as new while that one is not `done` yet (`InboxRepository.AddAsync`, by `event_time`). An older event, or a redelivery of an event already in Salesforce, changes nothing and is never claimed, so it can't be written. Nothing is stored in Salesforce for this. |
@@ -169,9 +169,11 @@ in an event is a Salesforce name):
               "contacts": [ { "externalId": "CON-1", "lastName": "Lovelace" } ] } }
 ```
 
-**The consumer splits an aggregate** (`AccountAggregate.TrySplit`, pure) into the events of the entities it changed,
-and stores each in its type's inbox, all with the aggregate's `meta.time`. The snapshots are compared structurally
-(as JSON: property order doesn't matter, list order does), children matched by `externalId`:
+**The consumer reads an aggregate once** (`AccountAggregate.TryRead`, pure). Then every entity type takes from it the
+events of the entities it changed (`Project` in its file: `AccountSync`, `AccountRelationshipSync`, `ContactSync`) and
+stores each in its own inbox (`ISalesforceEntitySync.IngestAsync`), all with the aggregate's `meta.time`. The snapshots
+are compared as the typed payloads they are read into (property order doesn't matter, list order does), children
+matched by `externalId`. `AccountAggregate.TrySplit` runs all the projections and returns their events (tests, benchmarks):
 
 | In the aggregate | Stored |
 |---|---|
@@ -1061,8 +1063,8 @@ the worker loops names an object. An object supplies, in one file: a payload cla
 which says how an event becomes records, upserts or deletes; and an inbox row class (which selects the object's inbox
 table) in `SalesforceSync.Data/Inbox/`. `AddInboxSync` registers it as an `EntitySyncService<TEvent, TRow>`, which does
 the rest of `ISalesforceEntitySync` through the shared `IRepository<TRow>`. Its events come from the account aggregate
-(`AccountAggregate` names each child list's entity type); an object that isn't part of the aggregate needs its list
-added there, or a topic of its own.
+(its strategy's `Project` takes them from the aggregate: a child type reads its own list of the snapshot); an object that
+isn't part of the aggregate needs its list added to `AccountSnapshot`, or a topic of its own.
 
 ```csharp
 // 1. Payload: the event as the source sends it  { "meta": {...}, "accountRelationship": { "externalId": ..., ... } }
@@ -1225,7 +1227,7 @@ src/
                                   Sforce-Limit-Info and limit errors); it serves Infrastructure's port
     Sync/                         The engine (SalesforceBatchSyncService.cs: the flow), PreparedBatch and one file per step of the write path (Normalizer, Reader, Differ, Sender, Interpreter), EntitySyncService, the
                                   strategy and event meta, the engine's model types, AccountAggregate (a Kafka
-                                  aggregate → the changed entities' events), and one file per synced object
+                                  aggregate → AggregateChange; each type projects its events), AggregateChange, and one file per synced object
                                   (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy)
   SalesforceSync.Infrastructure/  The Salesforce API calls (references no other project of ours):
     Salesforce/                   The REST client and its request/result types, RecordTypeCache, FieldValues, errors,
