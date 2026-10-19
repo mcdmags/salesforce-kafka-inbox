@@ -364,8 +364,8 @@ entity a deep backlog no longer exists: whatever the number of events, a claim o
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at 69f53f7, on 2026-10-19, against the
 [run before it](#latest-run-plain-crud-without-describe-at-54c47ac). Since then: the record type cache is a `HybridCache`
 (in memory over the shared `IDistributedCache`, the memory one in the benchmarks), the `RecordType` rows are read into a
-typed row, `last_error_code` and `status` are gone from the inbox, and the inbox statements are in the methods that run
-them (`ReleaseAsync` replaces hold, defer and halt). Same workload and environment; the database was recreated.
+typed row, and the inbox statements are in the methods that run them (`ReleaseAsync` replaces hold, defer and halt).
+Same workload and environment; the database was recreated.
 
 **Correctness**: 196 iterations (warm-up included), 0 failures.
 
@@ -394,7 +394,7 @@ Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` 
 | 8 | 1 | 2.064 s | 276.83 MB | 2,626 | 1,153 | 1.69 | 3,801 | 4 |
 | 8 | 3 | 5.369 s | 1250.13 MB | 15,041 | 6,891 | 1.21 | 5,327 | 3 |
 
-- **No change from the cache or the inbox columns.** The API calls and write requests are the same as in the run before
+- **No change from the cache or the inbox code.** The API calls and write requests are the same as in the run before
   (47 and 17 with one worker and one pod, 100 accounts), and the means are within the noise of three iterations each
   (152 ms against 159 ms, 1.58 s against 1.64 s at 25 ms). Allocations are about 1 MB higher in the smaller drains, which
   is `HybridCache`'s bookkeeping.
