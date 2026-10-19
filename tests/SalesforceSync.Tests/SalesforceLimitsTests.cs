@@ -156,12 +156,12 @@ public sealed class SalesforceLimitsTests
     }
 
     [Fact]
-    public void Org_usage_slows_down_and_then_pauses()
+    public void Org_usage_pauses_near_the_daily_limit()
     {
         var limiter = Limiter(new RateLimitOptions());
 
         limiter.Decide(new SalesforceLimitInfo(new LimitCounter(10_000, 100_000), null, null, null)).Should().Be(SalesforceRateLimiter.ThrottleDecision.Normal);
-        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(85_000, 100_000), null, null, null)).Speed.Should().Be(0.25, "the org is past DailySoftRatio");
+        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(85_000, 100_000), null, null, null)).Should().Be(SalesforceRateLimiter.ThrottleDecision.Normal);
         limiter.Decide(new SalesforceLimitInfo(new LimitCounter(96_000, 100_000), null, null, null)).Pause.Should().Be(TimeSpan.FromMinutes(15), "the org is past DailyHardRatio");
     }
 

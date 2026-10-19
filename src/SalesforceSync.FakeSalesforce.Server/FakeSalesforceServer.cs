@@ -4,9 +4,9 @@ using Microsoft.Extensions.Options;
 namespace SalesforceSync.FakeSalesforce.Server;
 
 /// <summary>
-/// The in-memory org as an HTTP service, so the worker talks to it over the network (real OAuth + REST client path)
-/// and tests can inspect what reached "Salesforce". Program.cs runs it standalone (Aspire); the integration tests host
-/// the same app in-process on a random Kestrel port.
+/// The in-memory org as an HTTP service: the worker talks to it over the network (real OAuth + REST client path) and
+/// tests can inspect what reached "Salesforce". Program.cs runs it standalone (Aspire); integration tests host the same
+/// app in-process on a random Kestrel port.
 /// </summary>
 public static class FakeSalesforceServer
 {

@@ -6,12 +6,13 @@ using static SalesforceSync.FakeSalesforce.FakeJson;
 namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
-/// In-memory Salesforce org: OAuth tokens, SOQL "WHERE field IN (...)" queries (in pages of 2,000),
-/// and sObject Collections upserts by external id and deletes by Id (per-record results, allOrNone false or true),
-/// modelled on the REST API Developer Guide (and, for per-record codes, the SOAP API Developer Guide). Fields follow <see cref="FakeSchema"/>: unknown and read-only fields are rejected and
-/// values are stored the way Salesforce stores them. Every committed create/update is kept in a per-record write
-/// history (stored values), so tests can check what reached the org and in which order. Errors can be injected per
-/// record. Thread-safe (single lock), which also mimics Salesforce serializing writes to the same rows.
+/// In-memory Salesforce org: OAuth tokens, SOQL "WHERE field IN (...)" queries (in pages of 2,000), and sObject
+/// Collections upserts by external id and deletes by Id (per-record results, allOrNone false or true), modelled on the
+/// REST API Developer Guide (and, for per-record codes, the SOAP API Developer Guide). Fields follow
+/// <see cref="FakeSchema"/>: unknown and read-only fields are rejected and values are stored as Salesforce stores them.
+/// Every committed create/update is kept in a per-record write history (stored values), so tests can check what
+/// reached the org and in which order. Errors can be injected per record. Thread-safe (single lock), which also
+/// mimics Salesforce serializing writes to the same rows.
 /// <para>
 /// This class is the org's surface and its lock. The parts are their own classes: <see cref="FakeRecords"/> (data and
 /// write history), <see cref="FakeSoql"/> (queries), <see cref="FakeCollectionWriter"/> (upserts),
@@ -223,10 +224,9 @@ public sealed partial class FakeSalesforceStore
 
     /// <summary>
     /// A query (<c>GET .../query?q=</c>) or its next page (<c>GET .../query/{locator}</c>, its <c>nextRecordsUrl</c>):
-    /// up to <see cref="QueryPageSize"/> rows, <c>totalSize</c> (the whole query's), <c>done</c>, and
-    /// <c>nextRecordsUrl</c> while rows are left. Each row has <c>attributes</c> (<c>type</c>, <c>url</c>) and the
-    /// fields asked for. Deleted records (in the Recycle Bin) are not returned, as Query filters them (queryAll would
-    /// return them; it isn't modelled).
+    /// up to <see cref="QueryPageSize"/> rows, <c>totalSize</c> (whole query's), <c>done</c>, and <c>nextRecordsUrl</c>
+    /// while rows are left. Each row has <c>attributes</c> (<c>type</c>, <c>url</c>) and the requested fields. Deleted
+    /// records (Recycle Bin) are not returned, as Query filters them (queryAll would return them; not modelled).
     /// </summary>
     public JsonObject Query(Uri url)
     {

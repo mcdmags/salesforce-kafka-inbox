@@ -7,22 +7,22 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
 /// Salesforce REST transport, and the only class that talks to Salesforce. Every method is exactly one API call: it
-/// takes many records and returns the raw result of each. It decides nothing (what to write, what a result means); that
-/// is <c>SalesforceBatchSyncService</c>'s.
+/// takes many records and returns each one's raw result. It decides nothing (what to write, what a result means);
+/// that is <c>SalesforceBatchSyncService</c>'s.
 /// <para>
-/// There is deliberately no call for one record (get, update, delete or upsert by id): each costs one API call per record,
-/// and the org's daily API allocation is shared by every integration. A read takes up to
-/// 2,000 external ids, an upsert or a delete up to 200 records. Writing 200 records one by one would spend 200 calls
-/// where <see cref="UpsertAsync"/> spends one.
+/// There is deliberately no call for one record (get, update, delete or upsert by id): each costs one API call per
+/// record, and every integration shares the org's daily API allocation. A read takes up to 2,000 external ids, an
+/// upsert or delete up to 200 records. Writing 200 records one by one would spend 200 calls where
+/// <see cref="UpsertAsync"/> spends one.
 /// </para>
 /// </summary>
 public sealed class SalesforceRestClient : ISalesforceRestClient
 {
     private readonly HttpClient http;
 
-    // The API path and version come from configuration (Salesforce:BaseApiPath, Salesforce:ApiVersion) rather than a
-    // constant, so moving to another API version is a settings change. One constructor, so the typed HttpClient's
-    // dependency injection has nothing to choose between (two made it throw when the pods started).
+    // API path and version come from configuration (Salesforce:BaseApiPath, Salesforce:ApiVersion), not a constant, so
+    // moving to another API version is a settings change. One constructor, so the typed HttpClient's dependency
+    // injection has nothing to choose between (two made it throw when the pods started).
     public SalesforceRestClient(HttpClient http, IOptions<SalesforceOptions> options)
     {
         this.http = http;
@@ -32,7 +32,7 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     /// <summary>The path every call starts with (<see cref="SalesforceOptions.DataPath"/>).</summary>
     public string DataPath { get; }
 
-    // The limits below are Salesforce's. They are the call-saving ceilings: the engine packs each call up to them, and the
+    // The limits below are Salesforce's. They are call-saving ceilings: the engine packs each call up to them, and the
     // client refuses anything over them before sending (a rejected call is still a call).
 
     /// <summary>
@@ -61,8 +61,8 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     /// <summary>
     /// The part of <see cref="MaxUriAndHeadersBytes"/> left to the headers this client sends: Authorization (a Bearer
     /// access token, about 100 bytes opaque, a JWT-based one a few times that), Host (the instance), User-Agent,
-    /// Accept-Encoding, Content-Type, Content-Length, Content-Encoding, and their framing. They come
-    /// to well under 1 KB; 4 KB leaves room for a long token or a proxy's additions.
+    /// Accept-Encoding, Content-Type, Content-Length, Content-Encoding, and their framing. They come to well under
+    /// 1 KB; 4 KB leaves room for a long token or a proxy's additions.
     /// </summary>
     public const int HeaderAllowanceBytes = 4_096;
 
@@ -82,8 +82,8 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     /// <exception cref="ArgumentException">The query's URL is longer than <see cref="MaxUrlBytes"/>.</exception>
     public async Task<List<TRow>> SelectAsync<TRow>(string soql, CancellationToken ct)
     {
-        // Checked before anything is sent: an over-long URL is rejected by Salesforce (414/431), but the rejected call is
-        // still counted against the allocation
+        // Checked before anything is sent: Salesforce rejects an over-long URL (414/431), but the rejected call still
+        // counts against the allocation
         var page = await GetPageAsync<TRow>(EnsureFits(QueryUrl(soql)), ct);
         var rows = page.Records;
 
@@ -107,9 +107,10 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     }
 
     /// <summary>
-    /// <c>PATCH /composite/sobjects/{object}/{externalIdFieldName}</c>: up to 200 records created or updated by their external
-    /// id. The field NAME is in the URL, once for the call; each record carries its own VALUE of that field. <c>allOrNone: false</c>: every record succeeds or fails on its own, so one bad record doesn't cost the other
-    /// 199 (and the call that carried them) a retry.
+    /// <c>PATCH /composite/sobjects/{object}/{externalIdFieldName}</c>: up to 200 records created or updated by external
+    /// id. The field NAME is in the URL, once for the call; each record carries its own VALUE of that field.
+    /// <c>allOrNone: false</c>: every record succeeds or fails on its own, so one bad record doesn't cost the other 199
+    /// (and the call that carried them) a retry.
     /// </summary>
     /// <returns>One result per record (HTTP 200 does not mean any record was saved), each with <c>created</c> set.</returns>
     /// <exception cref="ArgumentException">No records or more than <see cref="MaxCollectionRecords"/>, or a URL longer than <see cref="MaxUrlBytes"/>.</exception>
@@ -125,9 +126,9 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     }
 
     /// <summary>
-    /// <c>DELETE /composite/sobjects?ids=...&amp;allOrNone=false</c>: up to 200 records, of any objects, by their Ids (it
-    /// takes no external ids). Deleted records go to the Recycle Bin. The Ids are in the URL (a DELETE has no body); 200
-    /// Ids of 18 characters make a URL of under 4 KB, within <see cref="MaxUrlBytes"/>.
+    /// <c>DELETE /composite/sobjects?ids=...&amp;allOrNone=false</c>: up to 200 records, of any objects, by Id (no
+    /// external ids). Deleted records go to the Recycle Bin. Ids are in the URL (a DELETE has no body); 200 Ids of 18
+    /// characters make a URL under 4 KB, within <see cref="MaxUrlBytes"/>.
     /// </summary>
     /// <exception cref="ArgumentException">No Ids or more than <see cref="MaxCollectionRecords"/>, or a URL longer than <see cref="MaxUrlBytes"/>.</exception>
     public Task<IReadOnlyList<RecordResult>> DeleteAsync(IReadOnlyList<string> ids, CancellationToken ct)

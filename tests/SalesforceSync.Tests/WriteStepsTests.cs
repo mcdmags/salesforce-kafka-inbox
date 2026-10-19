@@ -7,8 +7,8 @@ using static SalesforceSync.Sync.Reader;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The pure steps of <see cref="SalesforceBatchSyncService"/>'s Salesforce step on their own: normalizing, building the
-/// read and the limits of a call. No HTTP except to the in-memory org for record types.
+/// The pure steps of <see cref="SalesforceBatchSyncService"/>'s Salesforce step alone: normalizing, building the
+/// read, the limits of a call. No HTTP except to the in-memory org for record types.
 /// </summary>
 public sealed class WriteStepsTests
 {

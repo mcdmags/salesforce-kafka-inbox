@@ -10,8 +10,8 @@ using SalesforceSync.Data.Inbox;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// The claim's retry after a commit whose outcome is unknown. Runs in a schema of its own, so the pods (which work the
-/// public schema) never see its rows.
+/// The claim's retry after a commit with unknown outcome. Runs in a schema of its own; pods (which work the public
+/// schema) never see its rows.
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class ClaimRetryTests(SyncFixture app)
@@ -29,7 +29,7 @@ public sealed class ClaimRetryTests(SyncFixture app)
             await conn.StoreAsync(SyncFixture.InboxTable(), entity, SyncFixture.BaseTime, "{}");
         }
 
-        // The claim commits, and then the commit "fails": the entity is leased, but the worker can't know it
+        // The claim commits, and then the commit "fails": the entity is leased, but the worker can't know
         var lostCommit = new LoseFirstCommit();
         var options = new DbContextOptionsBuilder<SyncDbContext>();
         SyncDbContext.Configure(options, db, new PostgresRetryOptions { BaseDelay = TimeSpan.FromMilliseconds(1) });

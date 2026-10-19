@@ -42,16 +42,6 @@ public sealed class SalesforceLimitsValidator(IOptions<SyncOptions> sync, IOptio
                        $"{RateLimitOptions.Section}:MaxWait ({rate.Value.MaxWait}), which it includes.");
         }
 
-        if (rate.Value.MaxRequestsPerSecond <= 0)
-        {
-            errors.Add($"{RateLimitOptions.Section}:MaxRequestsPerSecond must be positive.");
-        }
-
-        if (rate.Value.BurstCapacity < 1)
-        {
-            errors.Add($"{RateLimitOptions.Section}:BurstCapacity must be at least 1.");
-        }
-
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);
     }
 }

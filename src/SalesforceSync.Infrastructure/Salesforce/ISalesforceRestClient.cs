@@ -4,14 +4,13 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
 /// What the sync needs from Salesforce, one method per API call, each taking many records. The engine depends on this
-/// rather than on <see cref="SalesforceRestClient"/> so it can be exercised without HTTP, and another transport could
-/// replace the REST one.
+/// rather than on <see cref="SalesforceRestClient"/> so it can run without HTTP, and another transport could replace
+/// the REST one.
 /// <para>
-/// There is no call for one record: it would cost one API call per record against the org's daily API
-/// allocation, where a read takes up to 2,000 external ids and an upsert or a delete up
-/// to 200 records. The limits and URL helpers (<see cref="SalesforceRestClient.MaxUrlBytes"/>,
-/// <see cref="SalesforceRestClient.Soql"/>) are static on the REST client: they are Salesforce's rules, not behaviour a
-/// substitute would change.
+/// No call for one record: it would cost one API call per record against the org's daily API allocation, where a read
+/// takes up to 2,000 external ids and an upsert or delete up to 200 records. The limits and URL helpers
+/// (<see cref="SalesforceRestClient.MaxUrlBytes"/>, <see cref="SalesforceRestClient.Soql"/>) are static on the REST
+/// client: they are Salesforce's rules, not behaviour a substitute would change.
 /// </para>
 /// </summary>
 public interface ISalesforceRestClient
@@ -23,16 +22,16 @@ public interface ISalesforceRestClient
     Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct);
 
     /// <summary>
-    /// <see cref="SelectAsync(string, CancellationToken)"/> with each row read into a <typeparamref name="TRow"/> (names matched
-    /// without regard to case): the shape of the rows is declared once, and a row that doesn't fit fails with a
-    /// <see cref="JsonException"/> naming the property, not with a lookup that throws further on.
+    /// <see cref="SelectAsync(string, CancellationToken)"/> with each row read into a <typeparamref name="TRow"/> (names
+    /// matched case-insensitively): the row shape is declared once, and a row that doesn't fit fails with a
+    /// <see cref="JsonException"/> naming the property, not a lookup that throws further on.
     /// </summary>
     Task<List<TRow>> SelectAsync<TRow>(string soql, CancellationToken ct);
 
     /// <summary>
-    /// Creates or updates up to 200 records of one object. <paramref name="externalIdFieldName"/> is the NAME of the field
-    /// the records are matched by (e.g. <c>ExternalId__c</c>), the same for the whole call; each record carries its own
-    /// VALUE of that field (<c>"ExternalId__c": "A1"</c>), and is updated if a record has that value, else created.
+    /// Creates or updates up to 200 records of one object. <paramref name="externalIdFieldName"/> is the NAME of the
+    /// field the records are matched by (e.g. <c>ExternalId__c</c>), the same for the whole call; each record carries its
+    /// own VALUE of that field (<c>"ExternalId__c": "A1"</c>) and is updated if a record has it, else created.
     /// One result per record, in order. Every record succeeds or fails on its own.
     /// </summary>
     Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdFieldName, IReadOnlyList<SObjectBody> records,

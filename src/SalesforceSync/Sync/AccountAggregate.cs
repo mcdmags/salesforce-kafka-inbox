@@ -5,15 +5,15 @@ using System.Text.Json.Serialization;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// The Kafka event: an Account aggregate, its state before and after the change, each snapshot the Account (with its
-/// Profile, as an account event has it) and its children, the account relationships and the contacts:
+/// The Kafka event: an Account aggregate, its state before and after the change. Each snapshot holds the Account (with
+/// its Profile, as an account event has it) and its children, the account relationships and the contacts:
 /// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" },
 ///   "before": { "externalId": "ACC-1", "name": "Acme", "profile": { ... },
 ///               "accountRelationships": [ { "externalId": "REL-1", "relatedAccountExternalId": "ACC-2", ... } ],
 ///               "contacts": [ { "externalId": "CON-1", "lastName": "Lovelace", ... } ] },
 ///   "after": { ... } }</code>
-/// <see cref="TrySplit"/> turns it into the per-entity events the inboxes store and the strategies read, by comparing
-/// the snapshots: only what changed is stored, so an unchanged child costs no inbox row, no claim and no Salesforce read.
+/// <see cref="TrySplit"/> compares the snapshots and turns them into the per-entity events the inboxes store and the
+/// strategies read. Only what changed is stored: an unchanged child costs no inbox row, no claim, no Salesforce read.
 /// No I/O.
 /// </summary>
 public static class AccountAggregate
@@ -27,18 +27,18 @@ public static class AccountAggregate
     };
 
     /// <summary>
-    /// The per-entity events of an aggregate, each <c>{ "meta": { "time", "type" }, "&lt;entityType&gt;": { ... } }</c>
-    /// with the aggregate's meta.time, for its entity type's inbox:
+    /// The per-entity events of an aggregate, for its entity type's inbox. Each is
+    /// <c>{ "meta": { "time", "type" }, "&lt;entityType&gt;": { ... } }</c> with the aggregate's meta.time:
     /// <list type="bullet">
     /// <item>After present (and meta.type not deleted): the Account, when it (or its Profile) changed or Before is
-    /// missing; each child of After that is new or changed (as it is in After, with <c>accountExternalId</c> = the
+    /// missing; each child of After that is new or changed (as in After, with <c>accountExternalId</c> = the
     /// Account's key); a delete (<c>"type": "deleted"</c>, the child's <c>externalId</c> only) for each child of Before
-    /// that After doesn't have. An unchanged child, or an unchanged Account, is not stored.</item>
+    /// that After lacks. An unchanged child or Account is not stored.</item>
     /// <item>After missing or null, or meta.type deleted: the Account is deleted, with its Profile, and so is every
-    /// child Before has, each by a delete event of its own (not left to Salesforce: these Text foreign keys
+    /// child Before has, each by its own delete event (not left to Salesforce: these Text foreign keys
     /// cascade nothing).</item>
     /// </list>
-    /// Snapshots are compared as the typed payloads they are read into (a property the payload classes don't have is ignored).
+    /// Snapshots are compared as the typed payloads they are read into; a property the payload classes lack is ignored.
     /// </summary>
     /// <returns>False with <paramref name="problem"/> when the message is no aggregate the sync can read.</returns>
     public static bool TrySplit(string json, [NotNullWhen(true)] out List<EntityEvent>? events, [NotNullWhen(false)] out string? problem)
@@ -156,7 +156,7 @@ public static class AccountAggregate
     }
 
     /// <summary>
-    /// A snapshot's children of one list, by external id (the last one, should two share one). A child without one
+    /// A snapshot's children of one list, by external id (the last one if two share an id). A child without an id
     /// can't be told apart from another, so it is never taken for a delete.
     /// </summary>
     private static Dictionary<string, TChild> KeyedByExternalId<TChild>(List<TChild?>? children, Func<TChild, string?> idOf)

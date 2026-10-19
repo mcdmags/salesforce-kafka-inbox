@@ -6,9 +6,9 @@ public sealed class SalesforceOptions
 
     public string InstanceUrl { get; set; } = "";
 
-    // BaseApiPath and ApiVersion have no default here on purpose: appsettings.json is their only source, so the path
-    // the sync calls is visible and changed in one place, and a deployment missing them fails at startup instead of
-    // silently calling a version nobody chose.
+    // BaseApiPath and ApiVersion have no default on purpose: appsettings.json is their only source, so the called path
+    // is visible and changed in one place, and a deployment missing them fails at startup instead of silently calling
+    // a version nobody chose.
 
     /// <summary>The REST API's base path on the instance, before the version, e.g. <c>/services/data</c>. Required.</summary>
     public string BaseApiPath { get; set; } = "";
@@ -24,7 +24,7 @@ public sealed class SalesforceOptions
 
     /// <summary>
     /// The OAuth token endpoint. Unset = <c>{InstanceUrl}/services/oauth2/token</c> (the org's My Domain, and the mock
-    /// org's); set it only when the org issues tokens elsewhere, e.g. another My Domain host or
+    /// org's). Set it only when the org issues tokens elsewhere, e.g. another My Domain host or
     /// <c>https://login.salesforce.com/services/oauth2/token</c> (<c>test.salesforce.com</c> for a sandbox).
     /// </summary>
     public string TokenUrl { get; set; } = "";
@@ -57,12 +57,12 @@ public sealed class SalesforceOptions
     public string[]? PermanentErrorCodes { get; set; }
 
     /// <summary>
-    /// How the org says a record's parent is missing when the parent is named by a Text foreign key
+    /// How the org says a record's parent is missing when a Text foreign key names the parent
     /// (<see cref="SObjectForeignKeyAttribute"/>): the org's own automation rejects such a child (a validation rule,
     /// a trigger's addError or a flow's Custom Error: FIELD_CUSTOM_VALIDATION_EXCEPTION with the org's message; an
     /// unhandled trigger exception: CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY). A record error whose message contains one of
     /// these (case-insensitive) is <see cref="SalesforceErrors.DependencyNotSynced"/>, whatever its code: retried like
-    /// a parent the read didn't find, not dead-lettered. Empty (the default) = no message means that.
+    /// a parent the read didn't find, not dead-lettered. Empty (default) = no message means that.
     /// </summary>
     public string[] ParentMissingMessages { get; set; } = [];
 }

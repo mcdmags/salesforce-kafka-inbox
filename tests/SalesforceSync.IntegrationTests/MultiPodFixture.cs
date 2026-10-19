@@ -1,12 +1,11 @@
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// The same sync, scaled out like a Kubernetes deployment: several worker pods, each running several worker loops,
+/// The same sync scaled out like a Kubernetes deployment: several worker pods, each with several worker loops,
 /// all sharing one Postgres inbox, one Kafka consumer group, one Redis record type cache and one Salesforce org.
 /// <para>
-/// Salesforce itself does nothing to stop an out-of-order write, so any race lands in the mock org's write
-/// history. The rate limiter is opened up and batches are kept small so workers contend for the same accounts
-/// as much as possible.
+/// Salesforce doesn't stop an out-of-order write, so any race lands in the mock org's write history. The rate
+/// limiter is opened up and batches are kept small so workers contend for the same accounts as much as possible.
 /// </para>
 /// </summary>
 public sealed class MultiPodFixture : SyncFixture
@@ -31,9 +30,6 @@ public sealed class MultiPodFixture : SyncFixture
         // and the takeover after expiry shows up in the claim audit as an overlap.
         WorkerSettings["Postgres:Retry:MaxRetryCount"] = "15";
         WorkerSettings["Postgres:Retry:MaxRetryDelay"] = "00:00:01";
-        // Measure ordering, not the throttle
-        WorkerSettings["RateLimit:MaxRequestsPerSecond"] = "1000000";
-        WorkerSettings["RateLimit:BurstCapacity"] = "1000000";
 
         FakeOrgSettings["FakeSalesforce:Latency"] = "00:00:00.010";
     }

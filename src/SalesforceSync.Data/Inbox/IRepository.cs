@@ -1,34 +1,33 @@
 namespace SalesforceSync.Data.Inbox;
 
 /// <summary>
-/// An inbox table as the sync engine uses it: store an event, claim a batch of entities, then record what became of
-/// them. The row type selects the table (see <see cref="Data.SyncDbContext"/>), so one implementation serves every object.
-/// Every recording is conditional on the entity's row still being pending with the event the claim read, so a worker
-/// whose entity was finished by another records nothing.
+/// An inbox table as the engine uses it: store an event, claim a batch of entities, record what became of them. The row
+/// type picks the table (see <see cref="Data.SyncDbContext"/>); one implementation serves every object. Every recording
+/// needs the entity's row still pending with the event the claim read, so a worker whose entity another finished records
+/// nothing.
 /// </summary>
 public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
 {
     /// <summary>
-    /// Stores one event, with its time (meta.time), in its entity's row, unless the row holds a newer one, and makes its
-    /// entity due: see <see cref="InboxRepository{TEntity}.AddAsync"/>.
+    /// Stores one event with its time (meta.time) in its entity's row unless the row holds a newer one, and makes the entity
+    /// due: see <see cref="InboxRepository{TEntity}.AddAsync"/>.
     /// </summary>
     Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct);
 
-    /// <summary>Leases up to <see cref="SyncOptions.BatchSize"/> entities of the table; no events = nothing to do.</summary>
+    /// <summary>Leases up to <see cref="SyncOptions.BatchSize"/> entities; no events = nothing to do.</summary>
     Task<InboxClaim> ClaimAsync(CancellationToken ct);
 
     /// <summary>Records every entity's outcome in one transaction.</summary>
     Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct);
 
     /// <summary>
-    /// Hands every claimed entity back without spending an attempt, due again after <see cref="Release.Delay"/>: rate
-    /// limited (no error), the write's outcome unknown (held, with the error), or a mapping error (the inbox stopped).
+    /// Hands every claimed entity back, no attempt spent, due after <see cref="Release.Delay"/>: rate limited (no error),
+    /// write outcome unknown (held, with error), or mapping error (inbox stopped).
     /// </summary>
     Task ReleaseAsync(InboxClaim claim, Release release, CancellationToken ct);
 
     /// <summary>
-    /// The batch failed as a whole (a Salesforce call failed that provably wasn't applied): every claimed row is
-    /// retried with backoff.
+    /// Whole batch failed (a Salesforce call failed and provably wasn't applied): every claimed row retried with backoff.
     /// </summary>
     Task FailAllAsync(InboxClaim claim, string error, CancellationToken ct);
 }

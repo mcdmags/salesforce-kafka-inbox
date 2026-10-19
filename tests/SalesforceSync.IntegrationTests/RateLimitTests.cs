@@ -5,8 +5,8 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// The mock org allows only 2 concurrent long-running requests (calls of 200 ms+ count as long-running here,
-/// 20 s in Salesforce) while 3 pods x 4 workers send 250 ms calls: nothing caps them across pods, so the org
-/// rejects some, each rejected pod pauses itself briefly, and its batch is handed back.
+/// 20 s in Salesforce) while 3 pods x 4 workers send 250 ms calls. Nothing caps them across pods, so the org
+/// rejects some, each rejected pod pauses briefly, and its batch is handed back.
 /// </summary>
 public sealed class ConcurrentLimitFixture : SyncFixture
 {
@@ -15,8 +15,6 @@ public sealed class ConcurrentLimitFixture : SyncFixture
         WorkerSettings["Sync:Workers"] = "4";
         WorkerSettings["Sync:BatchSize"] = "2";
         WorkerSettings["Sync:IdleDelay"] = "00:00:00.050";
-        WorkerSettings["RateLimit:MaxRequestsPerSecond"] = "1000";
-        WorkerSettings["RateLimit:BurstCapacity"] = "1000";
         WorkerSettings["RateLimit:ConcurrentLimitPause"] = "00:00:00.500";
         WorkerSettings["RateLimit:DailyHardPause"] = "00:30:00"; // would stall the test if misclassified
 

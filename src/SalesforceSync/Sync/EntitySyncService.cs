@@ -4,8 +4,8 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// Syncs one entity type from its inbox table to Salesforce; the worker loops run every registered one in turn.
-/// Also what the Kafka consumer needs to store that type's events (split out of the account aggregates), without
-/// knowing their shape.
+/// Also lets the Kafka consumer store that type's events (split out of the account aggregates) without knowing
+/// their shape.
 /// </summary>
 public interface ISalesforceEntitySync
 {
@@ -31,7 +31,7 @@ public interface ISalesforceEntitySync
 /// <summary>
 /// One entity type's sync: its strategy and its inbox, run by the engine. A synced object supplies only its
 /// strategy (names, how to read an event, the mapping and the queries; e.g. <see cref="AccountSync"/>) and its inbox row
-/// type, which selects the inbox table; it is registered in <c>AddInboxSync</c>.
+/// type, which selects the inbox table. Registered in <c>AddInboxSync</c>.
 /// </summary>
 public sealed class EntitySyncService<TEvent, TRow>(
     SalesforceBatchSyncService engine,

@@ -43,9 +43,9 @@ var sync = builder.AddProject<Projects.SalesforceSync>("salesforce-sync")
     .WithReference(redis).WaitFor(redis)
     .WithEnvironment("Sync__Workers", "4");
 
-// A real org (a sandbox) when the AppHost's user secrets hold Salesforce:InstanceUrl, ClientId and ClientSecret
-// (README: Using a real Salesforce org); otherwise the mock org, which accepts any credentials. Either way the worker
-// gets the same settings; only Salesforce:InstanceUrl differs.
+// Real org (sandbox) when the AppHost's user secrets hold Salesforce:InstanceUrl, ClientId and ClientSecret
+// (README: Using a real Salesforce org); else the mock org, which accepts any credentials. The worker gets the same
+// settings either way; only Salesforce:InstanceUrl differs.
 var realOrg = builder.Configuration.GetSection("Salesforce");
 // The daily API limit the mock org reports in Sforce-Limit-Info (a real org reports its own)
 const string MockDailyApiLimit = "115000";
@@ -82,8 +82,8 @@ if (!testMode)
             .WithEnvironment("LoadGenerator__EventsPerSecond", "5");
     }
 
-    // Benchmarks against the same Postgres (separate DB so they never touch the live inbox). Start them from the
-    // dashboard with "Run benchmarks...", which asks which run (quick, drain or full); ▶ repeats the last one chosen.
+    // Benchmarks on the same Postgres (separate DB, never touches the live inbox). Start from the dashboard with
+    // "Run benchmarks...", which asks which run (quick, drain or full); ▶ repeats the last one.
     var benchDb = postgres.AddDatabase("benchdb");
     var benchmarkRun = "quick";
     builder.AddProject<Projects.SalesforceSync_Benchmarks>("benchmarks")

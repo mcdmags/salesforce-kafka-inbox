@@ -21,7 +21,7 @@ public sealed class SalesforceLimitsOptions
     public TimeSpan LongRunningThreshold { get; set; } = TimeSpan.FromSeconds(20);
 
     /// <summary>
-    /// Client timeout per Salesforce call, including the wait for a rate-limit token. Salesforce stops REST calls
+    /// Client timeout per Salesforce call, including the wait for a pause. Salesforce stops REST calls
     /// after 10 minutes, so this must not exceed that.
     /// </summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(90);

@@ -3,9 +3,9 @@ using System.Text.Json.Nodes;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// What is sent to Salesforce and what per-record results do to an entity: the records go as Collections upserts by
-/// external id, one call per object, parents first (the example objects name their parents by Text foreign keys); each
-/// record saved or rejected on its own (allOrNone false).
+/// What is sent to Salesforce and what per-record results do to an entity. Records go as Collections upserts by
+/// external id, one call per object, parents first (the example objects name parents by Text foreign keys). Each
+/// record is saved or rejected on its own (allOrNone false).
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class CollectionsWriteTests(SyncFixture app)
@@ -34,7 +34,7 @@ public sealed class CollectionsWriteTests(SyncFixture app)
     public async Task Account_saved_but_Profile_failed_is_retried_and_the_entity_is_done_only_with_both()
     {
         var acct = SyncFixture.NewAccountId();
-        // Retried after about 1 s, 2 s and 4 s: long enough to look at the state in between
+        // Retried after about 1 s, 2 s and 4 s: long enough to inspect the state in between
         await app.InjectFaultAsync("Profile__c", SyncFixture.ProfileIdFor(acct), "UNABLE_TO_LOCK_ROW", times: 3);
 
         await app.PublishAsync(acct, 1, new JsonObject { ["name"] = Any.String("Acme ") }, new JsonObject { ["tier"] = "Gold" });

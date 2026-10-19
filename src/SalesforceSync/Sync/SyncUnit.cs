@@ -4,7 +4,7 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// The records of one entity, upserted or deleted in the same request. Each record is saved or rejected on its own
-/// (they are not atomic); the entity counts as synced only when all of them are. The writer sends a record after the
+/// (not atomic). The entity counts as synced only when all of them are. The writer sends a record after the
 /// records its foreign keys point at.
 /// </summary>
 public sealed record SyncUnit(IReadOnlyList<SObjectRecord> Records);
@@ -17,14 +17,14 @@ public sealed record SyncUnit(IReadOnlyList<SObjectRecord> Records);
 /// Records of sObject classes always have one; null leaves RecordTypeId alone.
 /// </param>
 /// <param name="ForeignKeys">
-/// Text fields of <paramref name="Fields"/> that hold a parent's external id: written as they are, but the parent goes
+/// Text fields of <paramref name="Fields"/> that hold a parent's external id. Written as they are, but the parent goes
 /// first and must exist (<see cref="SObjectForeignKeyAttribute"/>).
 /// </param>
 /// <param name="SObject">The object's API name, e.g. Account.</param>
 /// <param name="ExternalIdField">The external id field the record is matched by.</param>
 /// <param name="ExternalId">Its value: the record's identity in this sync.</param>
 /// <param name="Delete">
-/// Delete the record rather than upsert it (<see cref="Deleting{TSObject}"/>): only its object and external id count.
+/// Delete the record instead of upserting it (<see cref="Deleting{TSObject}"/>). Only its object and external id count.
 /// </param>
 public sealed record SObjectRecord(
     string ReferenceId,
@@ -66,7 +66,7 @@ public sealed record SObjectRecord(
 
     /// <summary>
     /// A delete of the <typeparamref name="TSObject"/> record with this external id. The id is all a delete needs: the
-    /// read finds the record's Salesforce Id by it, and a record the read doesn't find is deleted already.
+    /// read finds the record's Salesforce Id by it, and a record the read doesn't find is already deleted.
     /// </summary>
     /// <exception cref="ArgumentException">The external id is missing.</exception>
     public static SObjectRecord Deleting<TSObject>(string referenceId, string externalId) where TSObject : class
@@ -85,9 +85,9 @@ public sealed record SObjectRecord(
 /// <summary>
 /// A text field of a record that holds the external id of its parent: the record of <paramref name="SObject"/> whose
 /// <paramref name="ExternalIdField"/> is <paramref name="ExternalId"/>. The parent is an earlier record of the same unit
-/// (written before this one) or one already in Salesforce (read by the strategy's queries); if neither exists, the
+/// (written before this one) or one already in Salesforce (read by the strategy's queries). If neither exists, the
 /// unit is retried later (<see cref="SalesforceErrors.DependencyNotSynced"/>). The field holds
-/// <paramref name="ExternalId"/> itself: it is never resolved to a Salesforce Id.
+/// <paramref name="ExternalId"/> itself, never resolved to a Salesforce Id.
 /// </summary>
 /// <param name="Field">The field of the child that holds the parent's external id.</param>
 /// <param name="SObject">The parent's object.</param>
@@ -104,7 +104,7 @@ public sealed record SyncResult(string Key, SyncOutcome Outcome, IReadOnlyList<S
 
 public enum SyncOutcome
 {
-    /// <summary>Salesforce already matches the inbox state (a record to delete isn't there); nothing was written.</summary>
+    /// <summary>Salesforce already matches the inbox state (a record to delete isn't there). Nothing was written.</summary>
     Unchanged,
 
     /// <summary>The differing fields were written, and the records to delete deleted.</summary>

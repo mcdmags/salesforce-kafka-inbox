@@ -5,16 +5,16 @@ using static SalesforceSync.Sync.Reader;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Step 4. Decides what each record needs by comparing it with what Salesforce has: a create, an update of the fields that
-/// differ, a delete or nothing. No I/O.
+/// Step 4. Compares each record with what Salesforce has and decides what it needs: a create, an update of the fields
+/// that differ, a delete or nothing. No I/O.
 /// </summary>
 internal static class Differ
 {
-    /// <summary>One record to send, as decided by the diff: a create, an update (only the fields that differ) or a delete.</summary>
+    /// <summary>One record to send, decided by the diff: a create, an update (only the fields that differ) or a delete.</summary>
     /// <param name="UnitKey">The entity the record belongs to.</param>
     /// <param name="Record">The record, normalized.</param>
     /// <param name="Id">Its Salesforce Id when it exists there (a delete needs it), null when it is new.</param>
-    /// <param name="Fields">What to send, by API name: all of a new record's non-empty fields, only the changed ones of an existing one.</param>
+    /// <param name="Fields">What to send, by API name: a new record's non-empty fields, only the changed fields of an existing one.</param>
     internal sealed record Change(string UnitKey, NormalizedRecord Record, string? Id, IReadOnlyDictionary<string, object?> Fields)
     {
         public bool IsDelete => Record.Record.Delete;
@@ -46,7 +46,7 @@ internal static class Differ
     /// <item>in Salesforce, nothing differs: nothing to send;</item>
     /// <item>to delete and in Salesforce: a delete by the Id the read found; to delete and not there: nothing to send.</item>
     /// </list>
-    /// Then each entity (unit) is one of: waiting (a record it points at is neither in Salesforce nor in the unit:
+    /// Each entity (unit) is then one of: waiting (a record it points at is in neither Salesforce nor the unit:
     /// transient), unchanged (nothing to send) or planned. No I/O.
     /// </summary>
     /// <returns>The entities with something to send, and the results of those that need no call.</returns>
@@ -85,7 +85,7 @@ internal static class Differ
 
             if (record.Record.Delete)
             {
-                // By the Id the read found. A record the read didn't find is deleted already (or never was): nothing to send.
+                // By the Id the read found. A record the read didn't find is already deleted (or never existed): nothing to send.
                 if (existing is not null)
                 {
                     changes.Add(new Change(unit.Key, record, existing.Id, new Dictionary<string, object?>()));
@@ -93,7 +93,7 @@ internal static class Differ
                 continue;
             }
 
-            // A record that points at a parent needs it to exist: in Salesforce already, or created by this same unit
+            // A record that points at a parent needs it to exist: already in Salesforce, or created by this unit
             foreach (var parent in record.Record.Parents)
             {
                 if (!inUnit.Contains((parent.SObject.ToLowerInvariant(), parent.ExternalId)) && current.Find(parent.SObject, parent.ExternalIdField, parent.ExternalId) is null)
@@ -116,7 +116,7 @@ internal static class Differ
 
     /// <summary>
     /// The fields to send: every non-empty one for a new record, otherwise only those whose normalized value differs from
-    /// Salesforce's. A field Salesforce won't let us set is not known here: it is that record's own error when written.
+    /// Salesforce's. A field Salesforce won't let us set is unknown here: it becomes that record's own error when written.
     /// </summary>
     /// <param name="record">The desired record, normalized.</param>
     /// <param name="existing">The record in Salesforce, or null if it is new.</param>

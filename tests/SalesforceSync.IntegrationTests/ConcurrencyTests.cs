@@ -34,8 +34,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
             await Task.Delay(150);
         }
 
-        // Wait for the drain, but check the race invariants even if it never finishes: a race typically shows up
-        // as stuck or mis-ordered rows, and the claim audit says why.
+        // Wait for the drain, but check the race invariants even if it never finishes: a race shows up as
+        // stuck or mis-ordered rows, and the claim audit says why.
         Dictionary<string, long> statuses;
         try
         {
@@ -71,8 +71,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         output.WriteLine($"claims={claims} unreleased={unreleased} accountsClaimedMoreThanOnce={reclaimedAccounts} overlaps={overlaps.Count}");
         overlaps.Should().BeEmpty("no two claims on the same account may overlap, e.g. {0}", string.Join(" | ", overlaps.Take(3)));
 
-        // 2. Nothing in Salesforce prevents an out-of-order write, so it would show up in the write history:
-        //    every account's Description and every profile's Score__c must only ever move forward
+        // 2. Salesforce doesn't prevent an out-of-order write, so it would show in the write history:
+        //    every account's Description and every profile's Score__c must only move forward
         var stats = await app.GetStatsAsync();
         output.WriteLine($"fake org: {stats}");
         stats.GetProperty("recordsFailed").GetInt64().Should().Be(0);
@@ -128,8 +128,8 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         var ids = Enumerable.Range(0, accounts).Select(_ => SyncFixture.NewAccountId()).ToArray();
         var random = new Random(7);
 
-        // Every account's versions in a shuffled order, each under a random Kafka key or none: the events of one
-        // account are spread over the 6 partitions, consumed by 3 pods, and arrive in no particular order
+        // Every account's versions shuffled, each under a random Kafka key or none: one account's events spread
+        // over the 6 partitions, consumed by 3 pods, in no particular order
         var events = ids.SelectMany(id => Enumerable.Range(1, versions).Select(v => (Id: id, Version: v)))
             .OrderBy(_ => random.Next()).ToList();
         foreach (var wave in events.Chunk(accounts))

@@ -8,8 +8,8 @@ using SalesforceSync.Data.Inbox;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Claims, stores and outcomes interleaved by hand on separate connections, in a schema of its own, so the pods (which
-/// work the public schema) never see its rows and every step happens exactly when the test says. Storing an event,
+/// Claims, stores and outcomes interleaved by hand on separate connections, in a schema of its own. Pods (which work
+/// the public schema) never see its rows, and every step happens exactly when the test says. Storing an event,
 /// claiming an entity and recording its outcome all update the entity's one inbox row, so Postgres's row lock orders
 /// them. The schema is created once and emptied before each test (<see cref="SyncFixture.MigratedSchemaAsync"/>).
 /// </summary>
@@ -27,7 +27,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await using var race = await StartAsync();
         await race.StoreAsync(race.Consumer1, 1);
 
-        // Consumer 1 stores an event and hasn't committed; consumer 2's event of the same entity has to wait for it
+        // Consumer 1 stores an event, uncommitted; consumer 2's event for the same entity waits for it
         var slowStore = await race.Consumer1.BeginTransactionAsync();
         await race.StoreAsync(race.Consumer1, 2, slowStore);
         var secondStore = race.StoreAsync(race.Consumer2, 3);
@@ -58,7 +58,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await using var txA = await race.WorkerA.BeginTransactionAsync();
         (await race.ClaimAsync(race.WorkerA, txA)).Should().ContainSingle();
 
-        // B claims while A's claim is still open: A's lease isn't visible to B yet, but A's row lock is, and B skips it
+        // B claims while A's claim is open: B can't see A's lease yet, but sees A's row lock and skips it
         await using (var txB = await race.WorkerB.BeginTransactionAsync())
         {
             (await race.ClaimAsync(race.WorkerB, txB)).Should().BeEmpty();
@@ -93,9 +93,9 @@ public sealed class ClaimRaceTests(SyncFixture app)
     }
 
     /// <summary>
-    /// The consumer has the row locked, storing v2, when the worker records v1's outcome: the outcome statement waits
-    /// for the store and then checks its WHERE again on the row the store left, whose event_time is v2's. Nothing of
-    /// v1's outcome lands on v2, the lease ends and v2 is due. (<see cref="OneRowPerEntityTests"/> covers a store that
+    /// The consumer holds the row lock, storing v2, when the worker records v1's outcome. The outcome statement waits
+    /// for the store, then re-checks its WHERE on the row the store left, whose event_time is v2's. Nothing of v1's
+    /// outcome lands on v2, the lease ends and v2 is due. (<see cref="OneRowPerEntityTests"/> covers a store that
     /// committed before the outcome.)
     /// </summary>
     [Theory]
@@ -124,10 +124,10 @@ public sealed class ClaimRaceTests(SyncFixture app)
     }
 
     /// <summary>
-    /// The worker's outcome transaction has the row locked when the consumer stores a newer event: the store waits for
-    /// it, then overwrites the row as the transaction left it, pending again and due. Either way round: the claimed
-    /// event recorded done (the row finished and idle), or the row already overwritten during the lease and only its
-    /// lease ended.
+    /// The worker's outcome transaction holds the row lock when the consumer stores a newer event. The store waits,
+    /// then overwrites the row as the transaction left it, pending again and due. Either way round: the claimed event
+    /// recorded done (row finished and idle), or the row already overwritten during the lease and only its lease
+    /// ended.
     /// </summary>
     [Theory]
     [InlineData(false)]

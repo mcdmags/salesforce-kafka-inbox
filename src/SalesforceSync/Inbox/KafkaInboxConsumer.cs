@@ -7,15 +7,15 @@ namespace SalesforceSync.Inbox;
 /// <summary>
 /// Kafka -> Postgres inboxes. One topic (<c>Kafka:Topic</c>, <see cref="AccountAggregate.DefaultTopic"/>) carries
 /// account aggregates: an Account with its children, before and after a change. Each message is split
-/// (<see cref="AccountAggregate.TrySplit"/>) into the events of the entities that changed (the Account, relationships,
-/// contacts; deletes included), and each is read with its type's typed event and stored in that type's inbox table
-/// together with the entity's id, in the entity's one row unless that holds a newer event. The Kafka message key and
-/// the order of arrival are not used: an entity's events are ordered by their own time (the aggregate's), so they may
-/// come over any partition, in any order. The offset is stored for commit only after every event of the message is in
-/// its inbox. A store is idempotent, so a crash halfway through a message is safe: the redelivery stores the events
-/// already stored over themselves (or changes nothing once they are synced) and the rest for the first time. A message
-/// that can never be synced (no valid aggregate) is logged with its offset and skipped, and so is an entity event in
-/// it that is invalid on its own, the others being stored.
+/// (<see cref="AccountAggregate.TrySplit"/>) into events of the entities that changed (Account, relationships,
+/// contacts; deletes included). Each event is read with its type's typed event and stored in that type's inbox table
+/// with the entity's id, in the entity's one row unless that holds a newer event. The Kafka message key and arrival
+/// order are not used: an entity's events are ordered by their own time (the aggregate's), so they may come over
+/// any partition, in any order. The offset is stored for commit only after every event of the message is in its
+/// inbox. A store is idempotent, so a crash halfway through a message is safe: redelivery overwrites the stored
+/// events with themselves (or changes nothing once synced) and stores the rest for the first time. A message with
+/// no valid aggregate can never be synced: it is logged with its offset and skipped. So is an entity event that is
+/// invalid on its own; the others are stored.
 /// </summary>
 public sealed class KafkaInboxConsumer(
     IConsumer<string, string> consumer,
@@ -86,14 +86,14 @@ public sealed class KafkaInboxConsumer(
     }
 
     /// <summary>
-    /// Stores the valid entity events of an aggregate in their types' inboxes, then its offset; skips what can never be
-    /// synced.
+    /// Stores the valid entity events of an aggregate in their types' inboxes, then its offset. Skips what can never
+    /// be synced.
     /// </summary>
     private async Task IngestAsync(ConsumeResult<string, string> message, IReadOnlyDictionary<string, ISalesforceEntitySync> byType,
         CancellationToken ct)
     {
-        // Retrying can't fix an invalid event, and retrying would block every later event on the partition: log where
-        // it is (to fix or replay at the source) and move on
+        // Retrying can't fix an invalid event and would block every later event on the partition. Log where it is
+        // (to fix or replay at the source) and move on
         if (!AccountAggregate.TrySplit(message.Message.Value, out var events, out var problem))
         {
             log.LogError("Skipping malformed account aggregate at {Offset}: {Problem}", message.TopicPartitionOffset, problem);
@@ -130,7 +130,7 @@ public sealed class KafkaInboxConsumer(
     /// <summary>
     /// Marks the message as handled; the client commits stored offsets in the background (EnableAutoOffsetStore=false
     /// with auto commit, set in AddKafkaIngest). If a rebalance revoked the partition since the message was consumed,
-    /// the store fails: harmless, its new owner re-reads from the last commit, and the event stored again changes
+    /// the store fails. Harmless: the new owner re-reads from the last commit, and a re-stored event changes
     /// nothing once synced.
     /// </summary>
     private void StoreOffset(ConsumeResult<string, string> result)
@@ -146,7 +146,7 @@ public sealed class KafkaInboxConsumer(
         }
     }
 
-    /// <summary>Consumes the message again next. Not possible if the partition was reassigned, and not needed then.</summary>
+    /// <summary>Consumes the message again next. Impossible, and not needed, if the partition was reassigned.</summary>
     private void Rewind(ConsumeResult<string, string> result)
     {
         try

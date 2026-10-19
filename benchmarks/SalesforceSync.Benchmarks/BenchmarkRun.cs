@@ -1,8 +1,8 @@
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// The named runs, from a few minutes to the whole suite. The chosen run is passed to the benchmark processes in
-/// <see cref="Variable"/>, which <see cref="IsQuick"/> reads to pick the shorter parameter lists.
+/// The named runs, from a few minutes to the whole suite. The chosen run goes to the benchmark processes in
+/// <see cref="Variable"/>; <see cref="IsQuick"/> reads it to pick the shorter parameter lists.
 /// </summary>
 public sealed record BenchmarkRun(string Name, string Description, string[] Filter)
 {
@@ -19,8 +19,8 @@ public sealed record BenchmarkRun(string Name, string Description, string[] Filt
     public static bool IsQuick => Environment.GetEnvironmentVariable(Variable) == "quick";
 
     /// <summary>
-    /// The run named by <c>--run</c> (removed from <paramref name="args"/>); with no arguments at all and a console to
-    /// ask in, the one chosen there. Null: no run, the arguments go to BenchmarkDotNet as they are.
+    /// The run named by <c>--run</c> (removed from <paramref name="args"/>); with no arguments and a console, the one
+    /// chosen there. Null: no run, the arguments go to BenchmarkDotNet unchanged.
     /// </summary>
     public static BenchmarkRun? Choose(ref string[] args)
     {

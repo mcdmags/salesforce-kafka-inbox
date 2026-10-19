@@ -4,7 +4,7 @@ using static SalesforceSync.Sync.Differ;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Step 5. Sends the planned changes, one call per object and one for the deletes, and reads the answers into one outcome
+/// Step 5. Sends the planned changes (one call per object, one for the deletes) and reads the answers into one outcome
 /// per entity.
 /// </summary>
 internal sealed class Sender(ISalesforceRestClient salesforce, Interpreter interpreter)
@@ -18,8 +18,8 @@ internal sealed class Sender(ISalesforceRestClient salesforce, Interpreter inter
     /// <item>Then the deletes, in one call (<see cref="ISalesforceRestClient.DeleteAsync"/>), after every upsert: a child
     /// an upsert moved to another parent must not be taken down by the delete of its old parent.</item>
     /// </list>
-    /// An entity that failed in one call is not sent in the next ones: its outcome is already decided, and what it still has
-    /// to send would only fail for the same reason. Records it saved stay saved, and the retry reads and diffs them.
+    /// An entity that failed in one call is not sent in later calls: its outcome is decided, and what it still has
+    /// to send would fail for the same reason. Records it saved stay saved; the retry reads and diffs them.
     /// </summary>
     internal async Task<List<SyncResult>> WriteAsync(IReadOnlyList<PlannedUnit> units, int maxRecordsPerWrite, CancellationToken ct)
     {
@@ -34,7 +34,7 @@ internal sealed class Sender(ISalesforceRestClient salesforce, Interpreter inter
                 var answers = await call(chunk);
                 for (var i = 0; i < chunk.Length; i++)
                 {
-                    // An answer is expected for every record, in order; a missing one is a failure that says nothing about the data
+                    // An answer is expected for every record, in order. A missing one is a failure that says nothing about the data
                     var (outcome, recordErrors) = interpreter.Interpret(chunk[i], answers.Count == chunk.Length ? answers[i] : null);
                     failures[chunk[i].UnitKey].AddRange(recordErrors.Select(e => (outcome, e)));
                     worst[chunk[i].UnitKey] = (SyncOutcome)Math.Max((int)worst[chunk[i].UnitKey], (int)outcome);
@@ -56,7 +56,7 @@ internal sealed class Sender(ISalesforceRestClient salesforce, Interpreter inter
 
     /// <summary>
     /// The objects with changes, each after the objects its records point at (a foreign key). An object whose parent has
-    /// no changes of its own goes first: that parent is in Salesforce already.
+    /// no changes of its own goes first: that parent is already in Salesforce.
     /// </summary>
     private static List<string> ParentsFirst(IEnumerable<Change> upserts)
     {

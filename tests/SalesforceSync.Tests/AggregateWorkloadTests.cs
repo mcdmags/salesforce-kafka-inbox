@@ -9,10 +9,10 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The drain benchmarks' workload (<see cref="AggregateWorkload"/>, compiled in from benchmarks/): the end state it
-/// expects is the one its aggregates lead to when split as the consumer splits them and applied in order, the newest
-/// event of each entity winning; so a correct sync passes the benchmark's check. And it holds what the benchmark is
-/// for: children removed and re-added, accounts deleted, every relationship naming two Accounts that stay.
+/// The drain benchmarks' workload (<see cref="AggregateWorkload"/>, compiled in from benchmarks/). Its expected end
+/// state is what its aggregates lead to when split as the consumer splits them and applied in order, newest event of
+/// each entity winning, so a correct sync passes the benchmark's check. It also holds what the benchmark is for:
+/// children removed and re-added, accounts deleted, every relationship naming two Accounts that stay.
 /// </summary>
 public sealed class AggregateWorkloadTests
 {

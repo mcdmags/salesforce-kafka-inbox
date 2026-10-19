@@ -34,8 +34,8 @@ public sealed class FakeSalesforceOptions
     /// <summary>
     /// The org's automation, simulated: refuse (<c>DELETE_FAILED</c> "... is associated with the following records")
     /// to delete a record while others' foreign keys (Text fields) name it, as the org refuses a child whose parent
-    /// is missing. False (the default) is what Salesforce itself does with Text fields: it knows no relationship, so it
-    /// neither refuses nor cascades.
+    /// is missing. False (default) matches Salesforce itself: Text fields have no relationship, so it neither refuses
+    /// nor cascades.
     /// </summary>
     public bool RefuseDeletingReferencedRecords { get; set; }
 }

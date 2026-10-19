@@ -4,10 +4,10 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Account + its Profile__c, written in the same batch (Accounts first); the Profile names its Account by the Account's
+/// Account + its Profile__c, written in the same batch (Accounts first). The Profile names its Account by the Account's
 /// external id (a Text foreign key).
 /// Typed event -> mapping -> sObjects -> records. An event without a <c>profile</c> writes only the Account.
-/// Everything that is particular to accounts is in this file: the event as the source sends it, the sObjects as the org
+/// Everything particular to accounts is in this file: the event as the source sends it, the sObjects as the org
 /// has them, the mapping between the two, and the inbox row type.
 /// </summary>
 public static class AccountSync
@@ -18,9 +18,9 @@ public static class AccountSync
     public static readonly SyncStrategy<AccountEvent> Strategy = new(Type, e => e.Account?.ExternalId, e => e.Meta, Map, Queries);
 
     /// <summary>
-    /// A deleted event deletes the Profile and then the Account, children first: an org whose automation refuses to
-    /// delete an Account that records still name accepts it in that order (Salesforce itself refuses nothing for Text
-    /// keys; the contacts' and relationships' own deletes come through their inboxes).
+    /// A deleted event deletes the Profile, then the Account (children first): an org whose automation refuses to
+    /// delete an Account that records still name accepts that order. Salesforce itself refuses nothing for Text
+    /// keys; the contacts' and relationships' own deletes come through their inboxes.
     /// Any other event upserts the Account and, if the event has one, its Profile.
     /// </summary>
     public static SyncUnit Map(string accountKey, AccountEvent e)
@@ -37,7 +37,7 @@ public static class AccountSync
         if (payload.Profile is not null)
         {
             var profile = ToProfile(payload.Profile);
-            // What the profile takes from its account: its id unless it has its own, and the Account it belongs to
+            // What the profile takes from its account: its id (unless it has its own) and the Account it belongs to
             profile.ExternalId ??= accountKey;
             profile.AccountId = accountKey;
             records.Add(SObjectRecord.From("prof", profile));
@@ -52,8 +52,8 @@ public static class AccountSync
 
     /// <summary>
     /// Inbox payload (the source system's shape and names) -> Salesforce sObject (the org's shape and names). Written by
-    /// hand, one line per field, so a renamed or retyped field is a compile error rather than a silent mismatch. Values
-    /// pass through as they are, nulls included (null = empty); the mapping converts only where the two sides differ in type.
+    /// hand, one line per field, so a renamed or retyped field is a compile error, not a silent mismatch. Values
+    /// pass through as they are, nulls included (null = empty). The mapping converts only where the two sides differ in type.
     /// </summary>
     public static AccountSObject ToAccount(AccountPayload payload)
     {
@@ -77,8 +77,8 @@ public static class AccountSync
     }
 
     /// <summary>
-    /// The profile on its own. What it takes from its account (the default external id and the Account's key) is filled
-    /// in by <see cref="Map"/>, which has both.
+    /// The profile on its own. <see cref="Map"/>, which has both, fills in what it takes from its account (the default
+    /// external id and the Account's key).
     /// </summary>
     public static ProfileSObject ToProfile(ProfilePayload payload)
     {
@@ -99,12 +99,12 @@ public static class AccountSync
 /// <summary>
 /// Inbox event for an account and its profile (entity type "account", key = account.externalId): the account part of
 /// its aggregate (<see cref="AccountAggregate"/>) as the source system sends it, or a delete of the Account (its key,
-/// and its Profile's if that has its own). The JSON is camelCase; nothing here is a Salesforce name.
+/// and its Profile's if that has its own). The JSON is camelCase. Nothing here is a Salesforce name.
 /// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" },
 ///   "account": { "externalId": "ACC-1", "name": "Acme", "rating": "Hot", "isActive": true,
 ///                "profile": { "tier": "Gold", "score": 87.5 } } }
 /// { "meta": { "time": "2026-10-15T01:02:03.456Z", "type": "deleted" }, "account": { "externalId": "ACC-1" } }</code>
-/// An event always carries the full record: a property that is null or absent means "empty in the source", and the
+/// An event always carries the full record: a null or absent property means "empty in the source", and the
 /// field is cleared in Salesforce. The one exception is <see cref="AccountPayload.Profile"/> as a whole.
 /// </summary>
 public sealed record AccountEvent(EventMeta? Meta, AccountPayload? Account);
@@ -178,8 +178,8 @@ public sealed class ProfileSObject
     [JsonPropertyName("Name")] public string? Name { get; set; }
 
     /// <summary>
-    /// The Account this Profile belongs to: a Text field holding the Account's external id. Its Account is in the same
-    /// unit, so the Account's write goes first and no query checks it.
+    /// The Account this Profile belongs to: a Text field holding the Account's external id. The Account is in the same
+    /// unit, so its write goes first and no query checks it.
     /// </summary>
     [JsonPropertyName("AccountId__c"), SObjectForeignKey(typeof(AccountSObject))]
     public string? AccountId { get; set; }

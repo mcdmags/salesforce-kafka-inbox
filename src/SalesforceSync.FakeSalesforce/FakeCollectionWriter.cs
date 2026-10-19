@@ -5,8 +5,8 @@ namespace SalesforceSync.FakeSalesforce;
 
 /// <summary>
 /// sObject Collections upsert by external id (PATCH .../composite/sobjects/{SObject}/{field}): each record is checked
-/// the way Salesforce checks it (type, fields, lookups, foreign keys, uniqueness, injected faults) and gets a result of
-/// its own; and delete by Id (<see cref="Delete"/>). With allOrNone true, one failed record rolls back the others.
+/// as Salesforce checks it (type, fields, lookups, foreign keys, uniqueness, injected faults) and gets its own result;
+/// and delete by Id (<see cref="Delete"/>). With allOrNone true, one failed record rolls back the others.
 /// Not thread-safe; <see cref="FakeSalesforceStore"/> holds its lock.
 /// </summary>
 internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults faults, FakeCounters counters, FakeSalesforceOptions options)
@@ -16,9 +16,9 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     private const string ExternalIdField = FakeSalesforceStore.ExternalIdField;
 
     /// <summary>
-    /// Upsert: each record is matched by <paramref name="externalIdField"/>, updated if it exists and created if not.
+    /// Upsert: each record is matched by <paramref name="externalIdField"/>, updated if it exists, else created.
     /// One result per record, in request order, with <c>created</c>. Records of one request that share an external id
-    /// all fail and none of them is written (SOAP API Developer Guide, upsert(): "those records are marked as errors").
+    /// all fail and none is written (SOAP API Developer Guide, upsert(): "those records are marked as errors").
     /// </summary>
     public JsonArray Upsert(string sobject, string externalIdField, JsonObject body)
     {
@@ -37,8 +37,8 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     }
 
     /// <summary>
-    /// Delete by Id (DELETE .../composite/sobjects?ids=...): the records may be of any objects, and each gets a result of
-    /// its own, in request order; a malformed Id is one of them, without an <c>id</c> (REST API Developer Guide,
+    /// Delete by Id (DELETE .../composite/sobjects?ids=...): records may be of any objects, each gets its own result in
+    /// request order; a malformed Id is one of them, without an <c>id</c> (REST API Developer Guide,
     /// "Delete Records Using sObject Collections"). A deleted record goes to the Recycle Bin; deleting it again is
     /// <c>ENTITY_IS_DELETED</c>, an Id no record ever had <c>INVALID_CROSS_REFERENCE_KEY</c>. Injected faults apply
     /// (e.g. <c>DELETE_FAILED</c>, a Contact with cases), and so do lost responses.
@@ -177,8 +177,8 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     }
 
     /// <summary>
-    /// The records whose foreign keys (Text fields holding a parent's external id) name this one. With
-    /// <see cref="FakeSalesforceOptions.RefuseDeletingReferencedRecords"/> the org's automation, simulated, refuses to
+    /// Records whose foreign keys (Text fields holding a parent's external id) name this one. With
+    /// <see cref="FakeSalesforceOptions.RefuseDeletingReferencedRecords"/> the simulated org automation refuses to
     /// delete a parent while they exist, as it refuses a child whose parent is missing (<see cref="MissingParent"/>).
     /// A Text field is no relationship to Salesforce, so nothing cascades either way.
     /// </summary>
@@ -194,8 +194,8 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     }
 
     /// <summary>
-    /// A record's result: <c>{ "id", "success", "errors" }</c>, errors as Collections lists them. Without an Id (a failed
-    /// upsert, a malformed Id) it has no <c>id</c>, as in the guide's examples; a failed delete keeps the Id it was for.
+    /// A record's result: <c>{ "id", "success", "errors" }</c>, errors as Collections lists them. Without an Id (failed
+    /// upsert, malformed Id) it has no <c>id</c>, as in the guide's examples; a failed delete keeps its Id.
     /// </summary>
     private static JsonObject Result((int Status, JsonNode? Body) outcome, string? id)
     {
@@ -292,9 +292,9 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     }
 
     /// <summary>
-    /// A lookup must point at a record that exists (and is of the right object); a record type must be one of the
-    /// object's that is active and available to the user; a foreign key must hold the external id of a record that
-    /// exists (the org's automation, simulated).
+    /// A lookup must point at an existing record of the right object; a record type must be one of the object's that
+    /// is active and available to the user; a foreign key must hold the external id of an existing record (the org's
+    /// automation, simulated).
     /// </summary>
     private JsonNode? MissingParent(string sobject, JsonObject stored)
     {

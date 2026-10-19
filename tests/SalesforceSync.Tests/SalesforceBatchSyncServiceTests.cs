@@ -11,10 +11,10 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The generic Salesforce half of the engine (normalize, read, diff, foreign keys, collections
-/// write, classification) driven by the real Account, AccountRelationship and Contact strategies and mappings (Text
-/// foreign keys), against the in-memory org.
-/// Events are written as the source sends them (camelCase payload names, full records); assertions read Salesforce names.
+/// The generic Salesforce half of the engine (normalize, read, diff, foreign keys, collections write,
+/// classification), driven by the real Account, AccountRelationship and Contact strategies and mappings (Text foreign
+/// keys) against the in-memory org. Events are written as the source sends them (camelCase payload names, full
+/// records); assertions read Salesforce names.
 /// </summary>
 public sealed class SalesforceBatchSyncServiceTests
 {
@@ -163,8 +163,8 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     /// <summary>
-    /// Records built directly, not through a mapper: the typed layers can't even express an unknown or read-only
-    /// field, but the generic engine must still reject one for whatever builds its records.
+    /// Records built directly, not through a mapper: the typed layers can't express an unknown or read-only field,
+    /// but the generic engine must still reject one, whatever builds its records.
     /// </summary>
     [Theory]
     [InlineData("Phone", "0123456789012345678901234567890123456789+", "STRING_TOO_LONG")]
@@ -192,9 +192,9 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     /// <summary>
-    /// A field the code sends that the org doesn't have (or won't take) is the mapping's fault for every event of that
-    /// kind: the batch stops with the error and the entity it was found on. A missing field shows in the read, before
-    /// any write; a field that can't be set shows in the write's answer, when the other entities are saved already.
+    /// A field the code sends that the org lacks (or won't take) is the mapping's fault for every event of that kind:
+    /// the batch stops with the error and the entity it was found on. A missing field shows in the read, before any
+    /// write. A field that can't be set shows in the write's answer, after the other entities are saved.
     /// </summary>
     [Theory]
     [InlineData("No_Such_Field__c", "x", "INVALID_FIELD", false)]
@@ -689,8 +689,8 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     /// <summary>
-    /// The read found both Accounts, but one is gone by the time Salesforce applies the write, and the org's automation
-    /// rejects the relationship: with its message configured, that waits like a missing parent; without, it is the
+    /// The read found both Accounts, but one is gone when Salesforce applies the write, and the org's automation
+    /// rejects the relationship. With its message configured, that waits like a missing parent. Without, it is the
     /// validation error it looks like.
     /// </summary>
     [Theory]

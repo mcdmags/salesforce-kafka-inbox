@@ -7,22 +7,22 @@ using Npgsql;
 namespace SalesforceSync.Data;
 
 /// <summary>
-/// A unit of work on a context of its own (its own connection), run through EF's execution strategy
-/// (<see cref="PostgresRetryStrategy"/>): when it fails with a transient error, the lambda runs again from the start.
+/// Unit of work on its own context (own connection), run through EF's execution strategy
+/// (<see cref="PostgresRetryStrategy"/>): on a transient error the lambda reruns from the start.
 /// </summary>
 public static class DbContextFactoryExtensions
 {
     /// <summary>
-    /// Runs <paramref name="unit"/> in a transaction and commits. On a retry, the context's change tracker is cleared and a
-    /// new transaction begun, so a unit that tracks entities never re-sends the state of a failed attempt. Anything the
-    /// unit keeps outside the lambda (see <c>InboxRepository.ClaimAsync</c>) survives the attempts.
+    /// Runs <paramref name="unit"/> in a transaction and commits. On retry, clears the change tracker and begins a
+    /// new transaction, so a unit that tracks entities never re-sends a failed attempt's state. State kept outside the
+    /// lambda (see <c>InboxRepository.ClaimAsync</c>) survives attempts.
     /// </summary>
     public static async Task<T> RunInTransactionAsync<T>(this IDbContextFactory<SyncDbContext> contexts,
         Func<SyncDbContext, CancellationToken, Task<T>> unit, CancellationToken ct)
     {
         await using var db = await contexts.CreateDbContextAsync(ct);
-        // A SaveChanges that fails fails the unit, which is retried from the start: a savepoint to roll back to would
-        // only add two round trips (SAVEPOINT, RELEASE) to every SaveChanges. Reset when the context returns to the pool.
+        // A failed SaveChanges fails the unit, which retries from the start. A savepoint would add two round trips
+        // (SAVEPOINT, RELEASE) to every SaveChanges. Reset when the context returns to the pool.
         db.Database.AutoSavepointsEnabled = false;
         var strategy = db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async t =>
@@ -85,9 +85,9 @@ public static class SqlCommands
     }
 
     /// <summary>
-    /// The rows of a statement, including UPDATE ... RETURNING. A scalar <typeparamref name="T"/> is the first column; any
-    /// other type is matched by column name (case-insensitively) or <c>[Column]</c>. Read as is, never composed with
-    /// further LINQ: EF would then wrap the statement in a subquery.
+    /// Rows of a statement, including UPDATE ... RETURNING. Scalar <typeparamref name="T"/> is the first column; any
+    /// other type matches by column name (case-insensitive) or <c>[Column]</c>. Read as is, never compose with
+    /// further LINQ: EF would wrap the statement in a subquery.
     /// </summary>
     public static Task<List<T>> QueryAsync<T>(this DatabaseFacade db, string sql, CancellationToken ct, object? args = null)
     {

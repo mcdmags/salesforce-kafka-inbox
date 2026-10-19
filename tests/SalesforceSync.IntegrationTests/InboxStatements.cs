@@ -1,9 +1,9 @@
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// The statements of <c>InboxRepository</c> for one inbox table, copied here so a test can play a worker by hand on
-/// connections of its own (claim without committing, record on a finished entity, ...). The tests that run the repository
-/// itself are what keep the copies true.
+/// The statements of <c>InboxRepository</c> for one inbox table, copied so a test can play a worker by hand on
+/// its own connections (claim without committing, record on a finished entity, ...). Tests that run the repository
+/// itself keep the copies true.
 /// </summary>
 public sealed class InboxStatements
 {

@@ -4,8 +4,9 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The Kafka aggregate split into per-entity events (<see cref="AccountAggregate.TrySplit"/>): only what changed between
-/// before and after is stored, a child that went is a delete, and every event is one its type's strategy reads and maps.
+/// The Kafka aggregate split into per-entity events (<see cref="AccountAggregate.TrySplit"/>): only what changed
+/// between before and after is stored, a removed child is a delete, and every event is one its type's strategy reads
+/// and maps.
 /// No database, no Kafka.
 /// </summary>
 public sealed class AccountAggregateTests

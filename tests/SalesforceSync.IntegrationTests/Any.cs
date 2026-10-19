@@ -3,9 +3,8 @@ using AutoFixture;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Anonymous test data from AutoFixture: values a test needs to be unique or present, but whose content doesn't
-/// matter to it (record keys, names, numbers that are only written and read back). Collections run in parallel, so
-/// the shared fixture is locked.
+/// Anonymous AutoFixture test data: values a test needs unique or present, whose content doesn't matter (record keys,
+/// names, numbers only written and read back). Collections run in parallel, so the shared fixture is locked.
 /// </summary>
 public static class Any
 {

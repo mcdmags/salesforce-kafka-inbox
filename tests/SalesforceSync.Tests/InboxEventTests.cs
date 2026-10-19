@@ -10,7 +10,7 @@ namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The raw event format: how an envelope (camelCase JSON, full record) maps to Salesforce records, how a claimed
-/// row is written or found invalid, and what the Kafka consumer admits into the inbox.
+/// row is written or found invalid, what the Kafka consumer admits into the inbox.
 /// </summary>
 public sealed class InboxEventTests
 {

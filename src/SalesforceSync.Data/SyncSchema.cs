@@ -12,9 +12,9 @@ public static class SyncSchema
     private const long MigrationLockKey = 0x5346_5348;
 
     /// <summary>
-    /// Applies the pending migrations, one process at a time: pods starting together wait for each other on an advisory
+    /// Applies pending migrations, one process at a time: pods starting together wait for each other on an advisory
     /// lock (session-level, on the context's connection, held for the whole run), and each finds the work done by the
-    /// one before. Retried as a whole on transient errors; every step is safe to run again.
+    /// one before. Retried as a whole on transient errors; every step is safe to rerun.
     /// </summary>
     public static async Task MigrateAsync(IDbContextFactory<SyncDbContext> contexts, CancellationToken ct = default)
     {

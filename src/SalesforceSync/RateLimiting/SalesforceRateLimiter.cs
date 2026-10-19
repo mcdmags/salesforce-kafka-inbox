@@ -4,13 +4,12 @@ using SalesforceSync.Infrastructure.RateLimiting;
 namespace SalesforceSync.RateLimiting;
 
 /// <summary>
-/// The rate limiter of this process: a token bucket, a pause, and the throttle that follows the Sforce-Limit-Info header
-/// Salesforce returns on each call. The header carries the org's (and the connected app's) daily usage, so it slows the
-/// bucket down at <see cref="RateLimitOptions.DailySoftRatio"/> of the daily allocation and pauses at
-/// <see cref="RateLimitOptions.DailyHardRatio"/>; Salesforce counts the allocation over a rolling 24 hours and treats it
-/// as a soft limit, so there is no count of our own to keep. Salesforce has no per-second limit and caps only the
-/// concurrent requests of 20 seconds or longer, so the pods share nothing: each learns the same ratio from its own
-/// responses, and a pod that meets a limit error pauses itself.
+/// The rate limiter of this process: a pause, set from the Sforce-Limit-Info header Salesforce returns on each call.
+/// The header carries the org's (and the connected app's) daily usage, so the process pauses at
+/// <see cref="RateLimitOptions.DailyHardRatio"/> of the daily allocation. Salesforce counts the allocation over a
+/// rolling 24 hours and treats it as a soft limit, so we keep no count of our own. Salesforce has no per-second limit
+/// and caps only concurrent requests of 20 seconds or longer (bounded by <c>Sync:Workers</c> x pods). So pods share
+/// nothing: each learns the same ratio from its own responses, and a pod that meets a limit error pauses itself.
 /// </summary>
 public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
 {
@@ -21,7 +20,6 @@ public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
     private readonly RateLimitOptions _opt;
     private readonly ILogger<SalesforceRateLimiter> _log;
     private readonly object _lock = new();
-    private readonly TokenBucket _bucket;
     private DateTimeOffset? _pausedUntil;
     private ThrottleDecision _lastDecision = ThrottleDecision.Normal;
     private long _loggedAllocation;
@@ -31,7 +29,6 @@ public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
         _clock = clock;
         _opt = options.Value;
         _log = log;
-        _bucket = new TokenBucket(_opt.BurstCapacity, _opt.MaxRequestsPerSecond, clock.GetUtcNow());
     }
 
     public bool IsPaused
@@ -46,21 +43,21 @@ public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
     }
 
     /// <summary>
-    /// Takes a token for one call, waiting up to <see cref="RateLimitOptions.MaxWait"/> for it (and for a pause to end),
-    /// else throws <see cref="RateLimitedException"/>.
+    /// Lets one call through. Waits up to <see cref="RateLimitOptions.MaxWait"/> for a pause to end, else throws
+    /// <see cref="RateLimitedException"/>.
     /// </summary>
     public async Task AcquireAsync(CancellationToken ct)
     {
         var deadline = _clock.GetUtcNow() + _opt.MaxWait;
         while (true)
         {
-            var decision = TryAcquire();
-            if (decision.IsGranted)
+            var remaining = PauseRemaining();
+            if (remaining <= TimeSpan.Zero)
             {
                 return;
             }
 
-            var wait = (decision.Wait > MinWait ? decision.Wait : MinWait)
+            var wait = (remaining > MinWait ? remaining : MinWait)
                        + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100)); // jitter
             if (_clock.GetUtcNow() + wait > deadline)
             {
@@ -79,7 +76,7 @@ public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
         }
     }
 
-    /// <summary>Slows the bucket down near the daily or per-app allocation, pauses near exhaustion. api-bursts is not acted on (see <see cref="SalesforceLimitInfo"/>).</summary>
+    /// <summary>Pauses near exhaustion of the daily or per-app allocation. api-bursts is not acted on (see <see cref="SalesforceLimitInfo"/>).</summary>
     public void ReportLimits(SalesforceLimitInfo info)
     {
         LogAllocation(info);
@@ -92,7 +89,6 @@ public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
                 _lastDecision = decision;
             }
 
-            _bucket.SetRate(_clock.GetUtcNow(), Math.Max(_opt.MaxRequestsPerSecond * decision.Speed, 0.01));
             if (decision.Pause > TimeSpan.Zero)
             {
                 PauseLocked(decision.Pause);
@@ -100,12 +96,11 @@ public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
         }
     }
 
-    private AcquireDecision TryAcquire()
+    private TimeSpan PauseRemaining()
     {
         lock (_lock)
         {
-            var now = _clock.GetUtcNow();
-            return _pausedUntil > now ? AcquireDecision.NotYet(_pausedUntil.Value - now) : _bucket.TryTake(now, 1);
+            return _pausedUntil is { } until ? until - _clock.GetUtcNow() : TimeSpan.Zero;
         }
     }
 
@@ -121,11 +116,8 @@ public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
     /// <param name="info">What Salesforce last reported in Sforce-Limit-Info.</param>
     internal ThrottleDecision Decide(SalesforceLimitInfo info)
     {
-        var daily = info.DailyRatio;
-        return daily >= _opt.DailyHardRatio
-            ? new ThrottleDecision(ThrottleLevel.DailyExhausted, _opt.DailySoftSpeed, _opt.DailyHardPause)
-            : daily >= _opt.DailySoftRatio
-            ? new ThrottleDecision(ThrottleLevel.DailyLow, _opt.DailySoftSpeed, TimeSpan.Zero)
+        return info.DailyRatio >= _opt.DailyHardRatio
+            ? new ThrottleDecision(ThrottleLevel.DailyExhausted, _opt.DailyHardPause)
             : ThrottleDecision.Normal;
     }
 
@@ -140,23 +132,23 @@ public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
         {
             return;
         }
-        _log.LogInformation("Salesforce reports a daily API allocation of {Reported} calls: slowing down at {Soft:P0}, pausing at {Hard:P0}",
-            usage.Max, _opt.DailySoftRatio, _opt.DailyHardRatio);
+        _log.LogInformation("Salesforce reports a daily API allocation of {Reported} calls: pausing at {Hard:P0}",
+            usage.Max, _opt.DailyHardRatio);
     }
 
     private void LogTransition(ThrottleDecision from, ThrottleDecision to, SalesforceLimitInfo info)
     {
         var level = to.Level == ThrottleLevel.Normal ? LogLevel.Information : LogLevel.Warning;
         _log.Log(level,
-            "Salesforce throttle {From} -> {To} (speed x{Speed}, pause {Pause}). api-usage={Api} api-bursts={Bursts} per-app={App} ({AppName})",
-            from.Level, to.Level, to.Speed, to.Pause,
+            "Salesforce throttle {From} -> {To} (pause {Pause}). api-usage={Api} api-bursts={Bursts} per-app={App} ({AppName})",
+            from.Level, to.Level, to.Pause,
             info.ApiUsage, info.ApiBursts, info.PerAppUsage, info.AppName);
     }
 
-    internal enum ThrottleLevel { Normal, DailyLow, DailyExhausted }
+    internal enum ThrottleLevel { Normal, DailyExhausted }
 
-    internal readonly record struct ThrottleDecision(ThrottleLevel Level, double Speed, TimeSpan Pause)
+    internal readonly record struct ThrottleDecision(ThrottleLevel Level, TimeSpan Pause)
     {
-        public static ThrottleDecision Normal => new(ThrottleLevel.Normal, 1.0, TimeSpan.Zero);
+        public static ThrottleDecision Normal => new(ThrottleLevel.Normal, TimeSpan.Zero);
     }
 }

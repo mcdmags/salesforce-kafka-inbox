@@ -4,12 +4,11 @@ using System.Text.Json;
 namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
-/// Handling of field values by their .NET type: no metadata of the org is read. A desired value is first put in a
-/// canonical form (numbers as decimal, date/time to the second, empty text as null, ...), the diff compares it with what
-/// Salesforce returned, and that canonical form is what gets sent. What the org stores differently from what is sent
-/// (a number rounded to the field's scale, text cut by a field's length) can't be known here: such a field looks changed
-/// until the values agree, which costs a write, never a wrong one, and a value Salesforce refuses is that record's own
-/// error.
+/// Field values handled by .NET type; no org metadata is read. A desired value is first put in canonical form (numbers
+/// as decimal, date/time to the second, empty text as null, ...); the diff compares that with what Salesforce returned,
+/// and the canonical form is what gets sent. What the org stores differently from what is sent (a number rounded to
+/// the field's scale, text cut by a field's length) can't be known here: such a field looks changed until the values
+/// agree, which costs a write, never a wrong one. A value Salesforce refuses is that record's own error.
 /// </summary>
 public static class FieldValues
 {

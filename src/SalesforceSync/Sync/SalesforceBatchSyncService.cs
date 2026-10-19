@@ -17,7 +17,7 @@ namespace SalesforceSync.Sync;
 /// SKIP LOCKED, leased and read, so no two workers in any pod ever process the same entity at once.</item>
 /// <item>Per entity, reads the claimed event: the newest one stored (events carry the full record, and a newer event
 /// overwrites the entity's row; one not newer than a synced event is never stored). Arrival order plays no
-/// part, so events may come out of order, over any partitions. An event that can't be read or mapped is
+/// part: events may come out of order, over any partitions. An event that can't be read or mapped is
 /// dead-lettered on its own.</item>
 /// <item>Writes the units to Salesforce (<see cref="WriteToSalesforceAsync"/>), giving up before the lease runs out:
 /// reads the current records (one query per object), then sends what differs, one upsert per object with parents first,
@@ -35,8 +35,8 @@ namespace SalesforceSync.Sync;
 /// (camelCase names, its own shape). Only the strategy's <c>Map</c> reads it.</item>
 /// <item><b>SObject</b> (<c>AccountSObject</c>, <c>ContactSObject</c>, ...): the same data as Salesforce names it (API
 /// field names, <c>[SObject]</c> attributes). <c>Map</c> builds one per Salesforce record and
-/// <see cref="SObjectRecord.From{TSObject}"/> turns it into a plain <see cref="SObjectRecord"/>: that is where the event stops
-/// and Salesforce's side begins, and the engine never sees an event object again.</item>
+/// <see cref="SObjectRecord.From{TSObject}"/> turns it into a plain <see cref="SObjectRecord"/>: the event stops
+/// there, Salesforce's side begins, and the engine never sees an event object again.</item>
 /// <item>The records of one entity are its <see cref="SyncUnit"/>.</item>
 /// <item><b>Diff</b> (<see cref="Differ.Plan"/>): each record is compared with what the read found in Salesforce, and
 /// becomes a create (all its fields), an update (only the fields that differ), a delete or nothing.</item>
@@ -44,7 +44,7 @@ namespace SalesforceSync.Sync;
 /// </list>
 /// This class is the flow (<see cref="SyncBatchAsync{TEvent, TRow}"/>) and, below it, the steps of
 /// <see cref="WriteToSalesforceAsync"/> in the order they run. The pure ones (normalize, build the read, diff) are static
-/// and do no I/O; Salesforce is reached only through <see cref="ISalesforceRestClient"/> and the inbox only through
+/// and do no I/O. Salesforce is reached only through <see cref="ISalesforceRestClient"/> and the inbox only through
 /// <see cref="IRepository{TEntity}"/>, whose every unit of work runs through <see cref="PostgresRetryStrategy"/>.
 /// </summary>
 public sealed class SalesforceBatchSyncService(
@@ -62,12 +62,12 @@ public sealed class SalesforceBatchSyncService(
     public static readonly JsonSerializerOptions EventJson = new(JsonSerializerDefaults.Web);
 
     /// <summary>
-    /// Share of the lease a batch may spend before its Salesforce call is cancelled; the rest is margin for recording
+    /// Share of the lease a batch may spend before its Salesforce call is cancelled. The rest is margin for recording
     /// the outcome. A write cancelled this way has an unknown outcome and puts its entities on hold.
     /// </summary>
     private const double LeaseUsableFraction = 0.8;
 
-    /// <summary>Recording a hold must not be cut short by the cancellation that caused it (shutdown), but may not hang it either.</summary>
+    /// <summary>Recording a hold must not be cut short by the cancellation that caused it (shutdown), and must not hang it.</summary>
     private static readonly TimeSpan HoldRecordingTimeout = TimeSpan.FromSeconds(10);
 
     private readonly SyncOptions _opt = options.Value;
@@ -82,7 +82,7 @@ public sealed class SalesforceBatchSyncService(
     public async Task<int> SyncBatchAsync<TEvent, TRow>(SyncStrategy<TEvent> strategy, IRepository<TRow> inbox, CancellationToken ct)
         where TRow : InboxRow, IInboxRow, new()
     {
-        // No batch starts while this process is paused (Salesforce asked for it): nothing is claimed
+        // No batch starts while this process is paused (Salesforce asked for it). Nothing is claimed
         if (limiter.IsPaused)
         {
             return 0;
@@ -93,8 +93,8 @@ public sealed class SalesforceBatchSyncService(
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
 
-        // 1. Claim entities and their rows from the inbox table (short transaction; the lease, not a transaction,
-        // protects the entities until step 4)
+        // 1. Claim entities and their rows from the inbox table (short transaction). The lease, not a transaction,
+        // protects the entities until step 4
         var claim = await inbox.ClaimAsync(ct);
         if (claim.Events.Count == 0)
         {
@@ -104,12 +104,12 @@ public sealed class SalesforceBatchSyncService(
         // 2. Per entity: map its event to records
         var batch = PreparedBatch.Prepare(strategy, claim.Events);
 
-        // 3. Salesforce (outside any transaction): read, decide, send, interpret. Not inside one on purpose: Salesforce
-        // can't take part in a Postgres transaction (a rollback can't undo a saved write), the execution strategy
+        // 3. Salesforce (outside any transaction): read, decide, send, interpret. Outside on purpose: Salesforce
+        // can't join a Postgres transaction (a rollback can't undo a saved write), the execution strategy
         // re-runs its whole delegate on a transient Postgres error (the HTTP calls would be sent again), and a
         // transaction held for up to the request timeout keeps locks, a pooled connection per worker and autovacuum's
         // horizon on a high-churn table. A crash between here and step 4 leaves the rows pending under an expiring
-        // lease; the retry reads Salesforce and writes only what still differs.
+        // lease. The retry reads Salesforce and writes only what still differs.
         Dictionary<string, SyncResult> results;
         try
         {
@@ -129,9 +129,9 @@ public sealed class SalesforceBatchSyncService(
         }
         catch (MappingErrorException ex)
         {
-            // The inbox stops (every due row waits) with the error on the rows to fix, so nothing is dead-lettered and the
-            // rows go on after the deploy with no replay. Found by the read, nothing was written; found in a write's
-            // answer, the records that were saved are read as unchanged next time.
+            // The inbox stops (every due row waits) with the error on the rows to fix. Nothing is dead-lettered and the
+            // rows go on after the deploy with no replay. If the read found it, nothing was written. If a write's
+            // answer found it, the records that were saved are read as unchanged next time.
             log.LogError(ex, "{Type} inbox stopped for {Hold} by {Count} mapping error(s), fix the mapping or add the field: {Errors}",
                 strategy.EntityType, _opt.MappingErrorHold, ex.Errors.Count,
                 string.Join("; ", ex.Errors.Select(e => $"{e.Key}: {e.Error.Code} {e.Error.Message}")));
@@ -153,7 +153,7 @@ public sealed class SalesforceBatchSyncService(
             // A request failed that Salesforce provably did not apply (the read or a write): every entity is
             // retried. Records that earlier write requests of the batch saved are safe: the retry reads them and writes
             // only what still differs. Shutdown (ct) is not caught: the failed request wrote nothing, and the lease
-            // simply expires.
+            // expires.
             log.LogError(ex, "{Type} batch failed", strategy.EntityType);
             await inbox.FailAllAsync(claim, ex.Message, ct);
             return claim.Events.Count;
@@ -229,7 +229,7 @@ public sealed class SalesforceBatchSyncService(
     // ---------- Mapping errors ----------
 
     /// <summary>
-    /// A field the code sends that Salesforce doesn't have, or won't let us set: the mapping is wrong, for every event of
+    /// A field the code sends that Salesforce lacks or won't let us set: the mapping is wrong for every event of
     /// that kind, so only a code change or a field in the org fixes it. Retrying or dead-lettering one entity at a time
     /// would only spend attempts, so the caller stops the inbox instead.
     /// </summary>

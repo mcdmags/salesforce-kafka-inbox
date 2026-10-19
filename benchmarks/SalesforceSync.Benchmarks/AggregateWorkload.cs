@@ -6,19 +6,19 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// The drain benchmarks' input: account aggregates as the upstream publishes them (<c>{ meta, before, after }</c>, see
+/// Drain benchmark input: account aggregates as the upstream publishes them (<c>{ meta, before, after }</c>, see
 /// <see cref="AccountAggregate"/>), and the state the org must end in. Every aggregate changes its Account (Description
-/// "vN" and Profile score N, N the account's version); now and then it also adds, changes or removes one of the
-/// account's relationships or contacts (a removed one may come back later, as a new record), and a few accounts are
-/// deleted, with all their children. The benchmark stores what <see cref="AccountAggregate.TrySplit"/> makes of each
-/// aggregate, as the Kafka consumer does. Seeded and without I/O, so every iteration gets the same workload.
+/// "vN" and Profile score N, N the account's version). Now and then it also adds, changes or removes a relationship or
+/// contact (a removed one may return later as a new record). A few accounts are deleted with all their children.
+/// The benchmark stores what <see cref="AccountAggregate.TrySplit"/> makes of each aggregate, as the Kafka consumer
+/// does. Seeded, no I/O, so every iteration gets the same workload.
 /// </summary>
 public sealed class AggregateWorkload
 {
     /// <summary>Share of aggregates that touch one of the account's relationships, and one of its contacts.</summary>
     private const double RelationshipShare = 0.15, ContactShare = 0.15;
 
-    /// <summary>A touched child the aggregate already has is removed (a delete) this often, else changed.</summary>
+    /// <summary>A touched child the aggregate already has is deleted this often, else changed.</summary>
     private const double RemovalShare = 0.3;
 
     /// <summary>
@@ -172,8 +172,8 @@ public sealed class AggregateWorkload
     }
 
     /// <summary>
-    /// A tenth of the accounts may be deleted; no other account's relationship names them, so a relationship never
-    /// outlives an Account it names (the source system would remove it first).
+    /// A tenth of the accounts may be deleted. No other account's relationship names them, so a relationship never
+    /// outlives an Account it names (the source system removes it first).
     /// </summary>
     private static bool IsDeletable(int account)
     {
@@ -220,10 +220,9 @@ public sealed class AggregateWorkload
     // ---------- The check ----------
 
     /// <summary>
-    /// Compares the org with <see cref="Final"/>. Nothing in the org rejects an out-of-order write, so a race lands
-    /// there: every entity present at its newest version on every record it writes (a relationship or contact naming
-    /// the right Accounts, which exist), every removed or deleted one absent, and each record's write history only
-    /// moving forward.
+    /// Compares the org with <see cref="Final"/>. The org rejects no out-of-order write, so a race lands there. Checks:
+    /// every entity at its newest version on every record it writes (a relationship or contact names the right,
+    /// existing Accounts), every removed or deleted one absent, and each record's write history only moving forward.
     /// </summary>
     /// <returns>What is wrong, per entity, and how many records received an older version after a newer one.</returns>
     public (List<string> Wrong, int Regressions) Check(FakeSalesforceStore org)
@@ -302,7 +301,7 @@ public sealed class AggregateWorkload
 
         /// <summary>
         /// The versions ("vN" in <paramref name="field"/>) in the order the org received them, of the record that has
-        /// the key now (a re-added child is a new record, with a history of its own).
+        /// the key now (a re-added child is a new record with its own history).
         /// </summary>
         private List<long> Versions(string sobject, string key, string field)
         {

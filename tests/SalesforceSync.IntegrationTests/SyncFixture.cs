@@ -18,11 +18,11 @@ using Testcontainers.Redis;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// The whole sync, started once per xUnit collection: Postgres and Kafka (and Redis, if asked) in containers (Testcontainers), the mock
-/// Salesforce org on Kestrel in this process, and <see cref="Pods"/> worker pods, each an in-process
-/// <see cref="Microsoft.Extensions.Hosting.IHost"/> wired by the worker's own registrations. Tests produce to Kafka
-/// and assert on the mock org and the Postgres inbox. Subclasses reshape the deployment (pods, per-pod settings, the
-/// org's behavior) in their constructor through <see cref="WorkerSettings"/> and <see cref="FakeOrgSettings"/>.
+/// The whole sync, started once per xUnit collection: Postgres and Kafka (and Redis, if asked) in Testcontainers
+/// containers, the mock Salesforce org on Kestrel in this process, and <see cref="Pods"/> worker pods, each an
+/// in-process <see cref="Microsoft.Extensions.Hosting.IHost"/> wired by the worker's own registrations. Tests produce
+/// to Kafka and assert on the mock org and the Postgres inbox. Subclasses reshape the deployment (pods, per-pod
+/// settings, org behavior) in their constructor through <see cref="WorkerSettings"/> and <see cref="FakeOrgSettings"/>.
 /// Requires only Docker.
 /// </summary>
 public class SyncFixture : IAsyncLifetime
@@ -34,12 +34,12 @@ public class SyncFixture : IAsyncLifetime
     public const string Contacts = "contact";
 
     /// <summary>
-    /// Tests think in versions (v1, v2, ...); an event's order is its meta.time, so version N is published as this
-    /// time + N ms, and read back from the stored payload the same way.
+    /// Tests think in versions (v1, v2, ...). Event order is meta.time, so version N is published as this
+    /// time + N ms and read back from the stored payload the same way.
     /// </summary>
     public static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-    /// <summary>Sync:UnknownOutcomeHold of every pod: seconds instead of the production 10 minutes, so a test can watch a hold end.</summary>
+    /// <summary>Sync:UnknownOutcomeHold of every pod: seconds, not the production 10 minutes, so a test can watch a hold end.</summary>
     public static readonly TimeSpan UnknownOutcomeHold = TimeSpan.FromSeconds(4);
 
     /// <summary>The tests' own Postgres sessions, so chaos tests can drop everyone else's connections.</summary>
@@ -80,14 +80,14 @@ public class SyncFixture : IAsyncLifetime
     public int Pods { get; }
 
     /// <summary>
-    /// The pods share their record type cache through Redis (a container, <c>ConnectionStrings:redis</c>), as in production;
-    /// otherwise each pod has its own in-memory one.
+    /// The pods share their record type cache through Redis (a container, <c>ConnectionStrings:redis</c>), as in
+    /// production. Otherwise each pod has its own in-memory cache.
     /// </summary>
     protected bool SharedRecordTypeCache { get; init; }
 
     /// <summary>
-    /// Configuration every pod gets on top of the worker's appsettings.json (like the environment variables of a
-    /// Kubernetes deployment). Connection strings and the org's URL are added at startup.
+    /// Configuration every pod gets on top of the worker's appsettings.json (like Kubernetes environment variables).
+    /// Connection strings and the org's URL are added at startup.
     /// </summary>
     protected Dictionary<string, string?> WorkerSettings { get; } = new()
     {
@@ -107,7 +107,7 @@ public class SyncFixture : IAsyncLifetime
         // The daily API limit the mock org reports in Sforce-Limit-Info
         ["FakeSalesforce:DailyApiLimit"] = "115000",
         // An org whose automation refuses to delete an Account that records still name (Salesforce itself wouldn't,
-        // with Text foreign keys): DeleteTests covers the Account's delete waiting for its children (DEPENDENCY_NOT_SYNCED)
+        // with Text foreign keys). DeleteTests covers the Account's delete waiting for its children (DEPENDENCY_NOT_SYNCED)
         ["FakeSalesforce:RefuseDeletingReferencedRecords"] = "true",
         ["Logging:LogLevel:Default"] = "Warning"
     };
@@ -240,7 +240,7 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// A per-entity account event (<see cref="AccountEvent"/>) as the aggregate that carries it: its meta, no before, and
+    /// A per-entity account event (<see cref="AccountEvent"/>) as the aggregate that carries it: its meta, no before,
     /// its account as after. Every part of after is stored.
     /// </summary>
     public static JsonObject AsAggregate(JsonObject accountEvent)
@@ -254,8 +254,8 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// Publishes a raw message value as it is, under any Kafka key (or none). The sync must not
-    /// depend on the key, so tests use this to scatter one entity's events over partitions.
+    /// Publishes a raw message value as is, under any Kafka key (or none). The sync must not depend on the
+    /// key, so tests use this to scatter one entity's events over partitions.
     /// </summary>
     public async Task PublishRawAsync(string? key, string value)
     {
@@ -552,8 +552,8 @@ public class SyncFixture : IAsyncLifetime
 
     /// <summary>
     /// <paramref name="schema"/>, migrated, with an empty account inbox, and contexts on it: for tests that drive the
-    /// worker's SQL by hand on rows the pods never see. Created on first use and only emptied after that: a data source
-    /// per test would cost EF a service provider each, and more than twenty fail the run.
+    /// worker's SQL by hand on rows the pods never see. Created on first use, only emptied after: a data source per test
+    /// costs EF a service provider each, and more than twenty fail the run.
     /// </summary>
     public async Task<(NpgsqlDataSource Db, IDbContextFactory<SyncDbContext> Contexts)> MigratedSchemaAsync(string schema)
     {

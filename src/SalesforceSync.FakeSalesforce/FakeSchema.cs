@@ -39,11 +39,11 @@ public sealed record FakeRecordType(
     bool Default = false);
 
 /// <summary>
-/// The mock org's metadata and how it stores values, the way Salesforce does:
-/// unknown and read-only fields are rejected, numbers are rounded to the field's scale, date/time is kept to the second, a checkbox is never null,
-/// multi-select values are kept in picklist order, text is length-checked, a record type must be one of the object's
-/// that is active and available. Deliberately independent of the client's
-/// normalization, so tests catch a client that would make fields flap.
+/// The mock org's metadata and how it stores values, as Salesforce does: unknown and read-only fields are rejected,
+/// numbers are rounded to the field's scale, date/time is kept to the second, a checkbox is never null, multi-select
+/// values are kept in picklist order, text is length-checked, a record type must be one of the object's that is active
+/// and available. Deliberately independent of the client's normalization, so tests catch a client that would make
+/// fields flap.
 /// <para>
 /// A Text field with <see cref="FakeField.KeyOf"/> is a foreign key: it holds the external id of a record of that
 /// object, stored as plain text. Like the org's automation, a create or update that sets it to an external id no such

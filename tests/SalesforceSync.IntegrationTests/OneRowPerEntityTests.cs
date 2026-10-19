@@ -8,9 +8,9 @@ using SalesforceSync.Data.Inbox;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// An inbox keeps one row per entity: storing an event overwrites the entity's row unless that holds a newer event,
-/// and an outcome is recorded on a claimed row only while it still holds the event the claim read. Through the
-/// worker's own repository, in a schema of its own, so the pods (which work the public schema) never see its rows and
+/// An inbox keeps one row per entity: storing an event overwrites the entity's row unless it holds a newer event,
+/// and an outcome is recorded on a claimed row only while it still holds the event the claim read. Runs through the
+/// worker's own repository, in a schema of its own. Pods (which work the public schema) never see its rows, and
 /// every step happens exactly when the test says (<see cref="SyncFixture.MigratedSchemaAsync"/>).
 /// </summary>
 [Collection(SyncCollection.Name)]
@@ -123,8 +123,8 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
     /// <summary>
     /// The race the one row per entity brings: a worker claims v1 and, while it writes v1 to Salesforce, the consumer
-    /// overwrites the row with v2. Whatever the worker records for v1 must not land on v2: the row stays pending with v2,
-    /// and the entity is due, so the next claim takes v2.
+    /// overwrites the row with v2. Whatever the worker records for v1 must not land on v2: the row stays pending with
+    /// v2, the entity is due, and the next claim takes v2.
     /// </summary>
     [Theory]
     [MemberData(nameof(SyncFixture.Outcomes), MemberType = typeof(SyncFixture))]

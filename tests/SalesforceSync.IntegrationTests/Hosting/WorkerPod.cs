@@ -6,9 +6,9 @@ namespace SalesforceSync.IntegrationTests.Hosting;
 
 /// <summary>
 /// One worker "pod": its own <see cref="IHost"/> in the test process, wired by the worker's own
-/// <see cref="SyncServiceCollectionExtensions.AddSalesforceSyncWorker"/> (the same call Program.cs makes), so it has
-/// its own Postgres pool, Kafka consumer (in the shared consumer group), token cache, HTTP stack and worker loops.
-/// Several pods against the same containers behave like replicas of a Kubernetes deployment.
+/// <see cref="SyncServiceCollectionExtensions.AddSalesforceSyncWorker"/> (the call Program.cs makes). It has its own
+/// Postgres pool, Kafka consumer (in the shared consumer group), token cache, HTTP stack and worker loops.
+/// Several pods on the same containers behave like replicas of a Kubernetes deployment.
 /// </summary>
 public sealed class WorkerPod : IAsyncDisposable
 {
@@ -45,8 +45,8 @@ public sealed class WorkerPod : IAsyncDisposable
 
     /// <summary>
     /// Builds and starts the pod. Configuration: the worker's appsettings.json, then <paramref name="settings"/>
-    /// (connection strings, Salesforce endpoint, per-pod Sync settings). Nothing comes from the environment, so a
-    /// developer's ConnectionStrings__* variables can't redirect the tests.
+    /// (connection strings, Salesforce endpoint, per-pod Sync settings). Nothing comes from the environment, so
+    /// ConnectionStrings__* variables on a developer machine can't redirect the tests.
     /// </summary>
     /// <remarks>Returns once the hosted services have started and the loops are running. The schema must be migrated (<see cref="MigrateAsync"/>).</remarks>
     public static async Task<WorkerPod> StartAsync(IReadOnlyDictionary<string, string?> settings, CancellationToken ct)

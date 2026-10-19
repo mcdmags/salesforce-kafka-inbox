@@ -4,7 +4,7 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
 /// Reads Salesforce's JSON answers into <see cref="RecordResult"/> and <see cref="SalesforceError"/>. Kept apart from
-/// <see cref="SalesforceRestClient"/> so the client stays about sending: parsing here is pure, with no HTTP or state.
+/// <see cref="SalesforceRestClient"/> so the client stays about sending: parsing here is pure, no HTTP or state.
 /// </summary>
 internal static class SalesforceResponseParser
 {

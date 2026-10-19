@@ -6,7 +6,7 @@ using static SalesforceSync.Sync.Normalizer;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Step 3. Reads what Salesforce has now for the records of the batch: the queries (chunked to fit a URL), one call per
+/// Step 3. Reads what Salesforce has now for the batch's records: the queries (chunked to fit a URL), one call per
 /// object, and the rows indexed for the diff.
 /// </summary>
 internal sealed partial class Reader(ISalesforceRestClient salesforce)
@@ -48,8 +48,8 @@ internal sealed partial class Reader(ISalesforceRestClient salesforce)
 
     /// <summary>
     /// The values in order as queries of at most <paramref name="maxValues"/> values: a query takes the next value while
-    /// its URL, as the client sends it, still fits. Percent-encoding works character by character, so a URL's length is the
-    /// empty query's plus each value's encoded literal and separator: counted per value, not rebuilt.
+    /// its URL, as the client sends it, still fits. Percent-encoding works character by character, so a URL's length is
+    /// the empty query's plus each value's encoded literal and separator: counted per value, not rebuilt.
     /// </summary>
     private IEnumerable<string> Chunked(string sobject, List<string> fields, string whereField, IEnumerable<string> values, int maxValues)
     {
@@ -90,8 +90,8 @@ internal sealed partial class Reader(ISalesforceRestClient salesforce)
 
     /// <summary>What Salesforce has now for the records the queries ask for.</summary>
     /// <exception cref="MappingErrorException">
-    /// Salesforce has no such field on an object (INVALID_FIELD): the diff needs the fields the code sends, so this is the
-    /// first place a wrong mapping shows, before anything is written. It names the entities that have a record of that object.
+    /// Salesforce has no such field on an object (INVALID_FIELD). The diff needs the fields the code sends, so a wrong
+    /// mapping shows here first, before anything is written. Names the entities that have a record of that object.
     /// </exception>
     internal async Task<CurrentRecords> ReadCurrentAsync(IReadOnlyList<ReadQuery> queries, IReadOnlyList<NormalizedUnit> units,
         CancellationToken ct)
@@ -131,7 +131,7 @@ internal sealed partial class Reader(ISalesforceRestClient salesforce)
     /// <summary>A record as Salesforce has it now: the fields the read selected, by API name (case-insensitive).</summary>
     internal sealed class CurrentRecord(Dictionary<string, JsonElement> fields)
     {
-        /// <summary>The Id as Salesforce returned it; a delete addresses the record by it.</summary>
+        /// <summary>The Id as Salesforce returned it. A delete addresses the record by it.</summary>
         public string Id => fields["Id"].GetString()!;
 
         public IEnumerable<KeyValuePair<string, JsonElement>> Fields => fields;

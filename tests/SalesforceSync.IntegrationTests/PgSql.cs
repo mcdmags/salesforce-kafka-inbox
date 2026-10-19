@@ -3,7 +3,7 @@ using Npgsql;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Plain SQL for the tests' own setup and checks: a statement and an object whose properties are its <c>@named</c>
+/// Plain SQL for the tests' own setup and checks: a statement plus an object whose properties are its <c>@named</c>
 /// parameters. Rows come back as a scalar (first column), a value tuple or a record (by column position).
 /// </summary>
 public static class PgSql

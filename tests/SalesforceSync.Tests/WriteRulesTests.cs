@@ -9,9 +9,9 @@ using static SalesforceSync.Sync.Reader;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The write path's rules on their own, from hand-built Salesforce state and results: the diff and the plan
-/// (<see cref="Differ.Plan"/>), the calls (<see cref="Sender.WriteAsync"/>, on a stub client) and the reading of the answers
-/// (<see cref="Interpreter.Interpret"/>). No org, no HTTP.
+/// The write path's rules alone, from hand-built Salesforce state and results: the diff and plan
+/// (<see cref="Differ.Plan"/>), the calls (<see cref="Sender.WriteAsync"/>, on a stub client) and the reading of the
+/// answers (<see cref="Interpreter.Interpret"/>). No org, no HTTP.
 /// </summary>
 public sealed class WriteRulesTests
 {

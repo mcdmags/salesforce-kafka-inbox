@@ -5,8 +5,7 @@ using System.Text.Json.Serialization;
 namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
-/// What the attributes of an sObject class say: the object, its external id field, its record type, its fields and its
-/// foreign keys.
+/// What an sObject class's attributes say: the object, its external id field, record type, fields and foreign keys.
 /// Read by reflection once per class (see <see cref="SObjectMetadata{TSObject}"/>).
 /// </summary>
 public abstract class SObjectMetadata
@@ -54,9 +53,9 @@ public abstract class SObjectMetadata
 
 /// <summary>
 /// <see cref="SObjectMetadata"/> of <typeparamref name="TSObject"/> plus compiled property getters. Built once per
-/// class (the static <see cref="Instance"/>), so turning an instance into a record costs no reflection. A class that
-/// is declared wrongly (a property without <c>[JsonPropertyName]</c>, no external id property, no record type, a foreign
-/// key that isn't a string) fails here, the first time the class is used, rather than per event.
+/// class (the static <see cref="Instance"/>), so turning an instance into a record costs no reflection. A wrongly
+/// declared class (a property without <c>[JsonPropertyName]</c>, no external id property, no record type, a foreign
+/// key that isn't a string) fails here on first use, rather than per event.
 /// </summary>
 public sealed class SObjectMetadata<TSObject> : SObjectMetadata where TSObject : class
 {
@@ -192,11 +191,10 @@ public sealed class SObjectAttribute(string name) : Attribute
 /// On a string property of a Text field: a foreign key, holding the external id of its parent record, e.g. the
 /// Account's <c>ExternalId__c</c>. To normalization, the read, the diff and the write it is an ordinary field:
 /// compared with the event's value and written as the text. (The sync doesn't use Salesforce lookup fields, which
-/// would need the parent's Id.) What the attribute adds: the parent's write is sent before the child's (parents first: the
-/// org rejects a child whose parent doesn't exist), and a parent that isn't written with the child must already be in
+/// would need the parent's Id.) What the attribute adds: the parent's write is sent before the child's (the org
+/// rejects a child whose parent doesn't exist), and a parent not written with the child must already be in
 /// Salesforce, or the child waits for it (<see cref="SalesforceErrors.DependencyNotSynced"/>, nothing sent). The
-/// strategy's queries must then read the parent (<c>SoqlQuery.ParentsOf</c>). An empty value has no parent to
-/// wait for.
+/// strategy's queries must then read the parent (<c>SoqlQuery.ParentsOf</c>). An empty value has no parent to wait for.
 /// <code>[JsonPropertyName("AccountId__c"), SObjectForeignKey(typeof(AccountSObject))]
 /// public string? AccountId { get; set; }</code>
 /// </summary>

@@ -5,7 +5,7 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// Account_Relationship__c between two Accounts, named by their external ids (Text foreign keys). If either Account
-/// isn't in Salesforce yet, nothing is sent and the relationship is retried until the account sync has created it.
+/// isn't in Salesforce yet, nothing is sent and the relationship is retried until the account sync creates it.
 /// Like <see cref="AccountSync"/>, everything particular to relationships is in this file.
 /// </summary>
 public static class AccountRelationshipSync
@@ -17,7 +17,7 @@ public static class AccountRelationshipSync
         new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta, Map, Queries);
 
     /// <summary>
-    /// A deleted event deletes the relationship, by its key alone; any other upserts it, which needs both Accounts' keys.
+    /// A deleted event deletes the relationship by its key alone. Any other event upserts it, which needs both Accounts' keys.
     /// </summary>
     public static SyncUnit Map(string relationshipKey, AccountRelationshipEvent e)
     {
@@ -32,7 +32,7 @@ public static class AccountRelationshipSync
             : new SyncUnit([SObjectRecord.From("rel", ToRelationship(payload))]);
     }
 
-    // What to read: the relationships themselves (to diff) and the Accounts they point at (to know they exist)
+    // Read the relationships (to diff) and the Accounts they point at (to know they exist)
     public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units)
     {
         return [SoqlQuery.RecordsOf<AccountRelationshipSObject>(units), SoqlQuery.ParentsOf<AccountSObject>(units)];
@@ -57,7 +57,7 @@ public static class AccountRelationshipSync
 /// <summary>
 /// Inbox event for an account-to-account relationship (entity type "accountRelationship", key =
 /// accountRelationship.externalId), as <see cref="AccountAggregate"/> splits it out of its first Account's aggregate:
-/// the relationship as the source system sends it (camelCase JSON, full record), or a delete of it (its key only).
+/// the relationship as the source system sends it (camelCase JSON, full record), or a delete (its key only).
 /// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" },
 ///   "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-1", "relatedAccountExternalId": "ACC-2",
 ///                            "type": "Parent", "isActive": true } }
@@ -70,7 +70,7 @@ public sealed class AccountRelationshipPayload
 {
     public string? ExternalId { get; set; }
 
-    /// <summary>External ids of the two accounts. Both are required; an event without them is dead-lettered (INVALID_EVENT).</summary>
+    /// <summary>External ids of the two accounts. Both required. An event without them is dead-lettered (INVALID_EVENT).</summary>
     public string? AccountExternalId { get; set; }
     public string? RelatedAccountExternalId { get; set; }
 

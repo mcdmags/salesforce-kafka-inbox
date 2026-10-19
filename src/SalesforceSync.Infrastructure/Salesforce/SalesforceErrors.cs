@@ -14,8 +14,8 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 
     /// <summary>
     /// Our own code: the record's record type (its sObject class's <c>RecordType</c>) is not among the object's active
-    /// record types, or Salesforce rejected its Id. Transient (not in <see cref="DefaultPermanentCodes"/>): an admin fixes
-    /// the org, and the record types are read again.
+    /// record types, or Salesforce rejected its Id. Transient (not in <see cref="DefaultPermanentCodes"/>): an admin
+    /// fixes the org, and the record types are read again.
     /// </summary>
     public const string InvalidRecordType = "INVALID_RECORD_TYPE";
 

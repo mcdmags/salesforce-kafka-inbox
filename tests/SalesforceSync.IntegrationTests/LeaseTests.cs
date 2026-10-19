@@ -5,8 +5,8 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// The lease, tested by playing a worker by hand: the test claims an entity with the worker's own statements
-/// (<see cref="InboxStatements"/> and the repository) while the real pods run, so "another worker is in the middle of its Salesforce call"
-/// lasts exactly as long as the test wants.
+/// (<see cref="InboxStatements"/> and the repository) while the real pods run. "Another worker is mid Salesforce
+/// call" lasts exactly as long as the test wants.
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class LeaseTests(SyncFixture app)
@@ -43,7 +43,7 @@ public sealed class LeaseTests(SyncFixture app)
     }
 
     /// <summary>
-    /// The consumer overwrites the row with v2 while the worker that claimed v1 is writing it to Salesforce. Had the
+    /// The consumer overwrites the row with v2 while the worker that claimed v1 writes it to Salesforce. If the
     /// worker's outcome for v1 landed on v2 (done or dead), v2 would never be written.
     /// </summary>
     [Theory]
@@ -134,9 +134,9 @@ public sealed class LeaseTests(SyncFixture app)
     }
 
     /// <summary>
-    /// Stores the event and leases its row in one transaction, as the claim statement would lease it, so no pod can get in
-    /// between (the new row is theirs to see only once it is committed, leased). The claim is what the worker's own claim
-    /// returns: the entity's row with the event_time it read.
+    /// Stores the event and leases its row in one transaction, as the claim statement would, so no pod can get in
+    /// between (pods see the new row only once committed, leased). The claim is what the worker's own claim returns:
+    /// the entity's row with the event_time it read.
     /// </summary>
     private async Task<InboxClaim> InsertAndClaimAsync(string acct, TimeSpan lease, JsonObject e)
     {

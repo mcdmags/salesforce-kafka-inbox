@@ -4,29 +4,14 @@ public sealed class RateLimitOptions
 {
     public const string Section = "RateLimit";
 
-    /// <summary>Max time a request waits for a token before giving up (keep well under HttpClient.Timeout).</summary>
+    /// <summary>Max time a request waits for a pause to end before giving up (keep well under HttpClient.Timeout).</summary>
     public TimeSpan MaxWait { get; set; } = TimeSpan.FromSeconds(20);
-
-    /// <summary>Sustained Salesforce calls per second across the workers of this process (token bucket refill). Salesforce has no per-second limit: this only smooths bursts.</summary>
-    public double MaxRequestsPerSecond { get; set; } = 2;
-
-    /// <summary>Calls this process may make back to back after an idle period (token bucket capacity).</summary>
-    public double BurstCapacity { get; set; } = 5;
 
     /// <summary>
     /// Pause of the process that meets REQUEST_LIMIT_EXCEEDED for too many concurrent long-running requests
     /// (clears as soon as one of them finishes).
     /// </summary>
     public TimeSpan ConcurrentLimitPause { get; set; } = TimeSpan.FromSeconds(30);
-
-    /// <summary>
-    /// Daily usage ratio at which to slow down: the higher of the org's usage and the connected app's usage
-    /// (both from Sforce-Limit-Info).
-    /// </summary>
-    public double DailySoftRatio { get; set; } = 0.80;
-
-    /// <summary>Speed multiplier applied above <see cref="DailySoftRatio"/>.</summary>
-    public double DailySoftSpeed { get; set; } = 0.25;
 
     /// <summary>Daily usage ratio at which to stop completely.</summary>
     public double DailyHardRatio { get; set; } = 0.95;

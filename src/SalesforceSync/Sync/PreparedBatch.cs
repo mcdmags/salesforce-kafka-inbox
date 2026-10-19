@@ -20,7 +20,7 @@ internal sealed record PreparedBatch(List<Work> Work, List<FailedEvent> Invalid)
     /// Decides what to do with each claimed entity's row, which holds its newest event (the inbox keeps one row per
     /// entity: a newer event overwrites it, and an event not newer than a synced one is never stored). A row that can't
     /// be read (or whose event is about another entity than the row says) is invalid. Otherwise it is mapped to the
-    /// unit to write; if it can't be mapped, it is invalid.
+    /// unit to write, and is invalid if it can't be mapped.
     /// </summary>
     /// <param name="strategy">Reads, keys and maps the object's events.</param>
     /// <param name="rows">The claimed rows, one per entity.</param>

@@ -26,7 +26,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         held.NextAttemptAt.Should().BeAfter(heldAt.AddSeconds(1)).And.BeBefore(heldAt + SyncFixture.UnknownOutcomeHold + TimeSpan.FromSeconds(1));
         ((string?)(await app.GetRecordAsync("Account", acct))?["Description"]).Should().Be("v1", "Salesforce did apply the write");
 
-        // A newer event arrives during the hold, overwrites the row and has to wait, although nobody is working on the account
+        // A newer event arrives during the hold, overwrites the row and waits, though nobody is working on the account
         await app.PublishAsync(acct, 2, new JsonObject { ["name"] = "v2", ["description"] = "v2" }, new JsonObject { ["score"] = 2 });
         await Eventually.ValueAsync(() => app.GetInboxRowAsync(acct), row => row?.Version == 2, "v2 to be stored");
         await Task.Delay(TimeSpan.FromSeconds(1.5));

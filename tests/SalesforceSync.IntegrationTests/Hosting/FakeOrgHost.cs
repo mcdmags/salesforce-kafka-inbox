@@ -7,8 +7,8 @@ using SalesforceSync.FakeSalesforce.Server;
 namespace SalesforceSync.IntegrationTests.Hosting;
 
 /// <summary>
-/// The mock Salesforce org (the FakeSalesforce.Server app, unchanged) hosted in the test process on Kestrel at a random
-/// loopback port. Workers reach it over real HTTP through their OAuth + REST client, exactly as they reach Salesforce.
+/// The mock Salesforce org (the FakeSalesforce.Server app, unchanged) hosted in the test process on Kestrel at a
+/// random loopback port. Workers reach it over real HTTP through their OAuth + REST client, as they reach Salesforce.
 /// </summary>
 public sealed class FakeOrgHost : IAsyncDisposable
 {

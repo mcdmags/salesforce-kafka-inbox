@@ -10,8 +10,8 @@ namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The mock org against what the REST API Developer Guide (and, for per-record codes, the SOAP API Developer Guide)
-/// documents, over HTTP as a client sees it: sObject Collections deletes and upserts, query pages and
-/// OAuth sessions. The engine's own use of them is covered by <see cref="SalesforceBatchSyncServiceTests"/>.
+/// documents, over HTTP as a client sees it: sObject Collections deletes and upserts, query pages, OAuth sessions.
+/// The engine's use of them is covered by <see cref="SalesforceBatchSyncServiceTests"/>.
 /// </summary>
 public sealed class FakeSalesforceTests
 {

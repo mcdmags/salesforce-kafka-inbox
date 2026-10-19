@@ -4,12 +4,12 @@ using Microsoft.Extensions.Options;
 namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
-/// The Ids of the active record types of each object, by developer name: Salesforce takes a record type as its Id, which
+/// Ids of the active record types of each object, by developer name: Salesforce takes a record type as its Id, which
 /// differs between orgs. One SOQL query on RecordType per object, cached in a <see cref="HybridCache"/> for
 /// <see cref="SalesforceOptions.RecordTypeRefreshInterval"/>: in process, and shared by all pods through the registered
-/// <see cref="Microsoft.Extensions.Caching.Distributed.IDistributedCache"/> (Redis, or memory when none is configured), so the org is
-/// asked about once per interval in total and a new pod starts warm. Concurrent callers share one query per object, and a
-/// cache backend that fails is logged and treated as empty. Nothing else of the org's metadata is read.
+/// <see cref="Microsoft.Extensions.Caching.Distributed.IDistributedCache"/> (Redis, or memory when none is configured),
+/// so the org is asked once per interval in total and a new pod starts warm. Concurrent callers share one query per
+/// object, and a failing cache backend is logged and treated as empty. Nothing else of the org's metadata is read.
 /// </summary>
 public sealed class RecordTypeCache(HybridCache cache, ISalesforceRestClient salesforce, IOptions<SalesforceOptions> options)
 {

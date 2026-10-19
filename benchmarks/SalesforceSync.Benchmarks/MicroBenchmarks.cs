@@ -9,7 +9,7 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// CPU-only hot paths: header parsing, reading events, the typed mapping (event JSON -> payload -> sObject -> record),
+/// CPU-only hot paths: header parsing, reading events, typed mapping (event JSON -> payload -> sObject -> record),
 /// type-aware normalize + compare.
 /// </summary>
 [MemoryDiagnoser]

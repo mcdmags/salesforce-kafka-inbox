@@ -6,12 +6,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL;
 namespace SalesforceSync.Data;
 
 /// <summary>
-/// EF Core's retrying execution strategy for Npgsql, tuned to what this service needs: it runs a unit of work again,
-/// from the start, when it fails with a transient error (a dropped connection, a timeout, a failover or restart, a
-/// serialization failure or deadlock). It is used through <c>Database.CreateExecutionStrategy()</c> (see
-/// <see cref="DbContextFactoryExtensions"/>), which retries the whole unit (new transaction), never a single statement,
-/// so a transaction is never half-applied. If a commit fails, it is unknown whether it went through, so every unit
-/// run through it must be safe to run twice; the callers document why theirs are.
+/// EF Core's retrying execution strategy for Npgsql. It reruns a unit of work from the start when it fails with a
+/// transient error (dropped connection, timeout, failover or restart, serialization failure or deadlock). Use it
+/// through <c>Database.CreateExecutionStrategy()</c> (see <see cref="DbContextFactoryExtensions"/>), which retries the
+/// whole unit (new transaction), never a single statement, so a transaction is never half-applied. If a commit fails,
+/// it is unknown whether it went through, so every unit run through it must be safe to run twice; callers document why.
 /// <para>
 /// Compared with Npgsql's default it also retries the connection-class SQLSTATEs (08xxx), backs off from
 /// <see cref="PostgresRetryOptions"/> (with jitter), and clears the connection pool when the session itself is gone.
@@ -41,9 +40,9 @@ public sealed class PostgresRetryStrategy(
             return null;
         }
 
-        // When the server restarts, fails over or terminates sessions, the idle connections in the pool are dead too,
-        // and Npgsql only finds out when one is used. Without clearing, every retry could draw another dead
-        // connection and the retries would run out before reaching the server.
+        // On server restart, failover or session termination, idle pooled connections are dead too, and Npgsql only
+        // finds out on use. Without clearing, each retry could draw another dead connection and the retries would run
+        // out before reaching the server.
         if (IsConnectionLost(lastException))
         {
             db.Clear();

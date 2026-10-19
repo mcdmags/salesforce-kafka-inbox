@@ -3,10 +3,10 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Step 1. Puts each unit's values in a canonical form (<see cref="FieldValues.Normalize"/>) and its record types as
-/// the Ids the org knows them by, before any call that writes. A unit whose record type the org doesn't have is
-/// rejected on its own. No other check is made here: the org's metadata is not read, so a field it doesn't have or won't
-/// let us set is found by Salesforce itself (the read, or the write's answer for the record).
+/// Step 1. Before any call that writes, puts each unit's values in canonical form (<see cref="FieldValues.Normalize"/>)
+/// and its record types as the Ids the org knows them by. A unit whose record type the org lacks is rejected on its
+/// own. No other check is made: the org's metadata is not read, so Salesforce itself finds a field the org lacks or
+/// won't let us set (in the read, or the write's answer for the record).
 /// </summary>
 internal sealed class Normalizer(RecordTypeCache recordTypes)
 {
@@ -20,9 +20,9 @@ internal sealed class Normalizer(RecordTypeCache recordTypes)
     }
 
     /// <summary>
-    /// The units with their values normalized. A record type the org doesn't have (or not active) is a problem of that
-    /// unit alone: the unit is rejected, transient (an admin may yet add or activate it: the object's record types are
-    /// read again next time), and the rest of the batch carries on. A record's record type becomes its RecordTypeId
+    /// The units with their values normalized. A record type the org lacks (or that is not active) is a problem of that
+    /// unit alone: the unit is rejected as transient (an admin may add or activate it; the object's record types are
+    /// read again next time) and the rest of the batch carries on. A record's record type becomes its RecordTypeId
     /// here, a field like any other.
     /// </summary>
     internal async Task<(List<NormalizedUnit> Normalized, List<SyncResult> Rejected)> NormalizeAsync(
@@ -52,7 +52,7 @@ internal sealed class Normalizer(RecordTypeCache recordTypes)
     }
 
     /// <summary>
-    /// A record type the org rejected or didn't have may just have been created, activated or assigned: the objects
+    /// A record type the org rejected or lacked may since have been created, activated or assigned. The objects
     /// are read again next time, in every pod.
     /// </summary>
     internal async Task InvalidateRecordTypesAsync(IReadOnlyList<(string Key, SyncUnit Unit)> units, IEnumerable<SyncResult> results,

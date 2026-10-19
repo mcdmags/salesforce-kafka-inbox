@@ -16,7 +16,7 @@ namespace SalesforceSync;
 
 /// <summary>
 /// The sync's service registrations. <see cref="AddSalesforceSyncWorker"/> is the whole worker (Program.cs and the
-/// integration tests' in-process pods use it, so both run the identical wiring); <see cref="AddSalesforceClient"/>,
+/// integration tests' in-process pods use it, so both run identical wiring). <see cref="AddSalesforceClient"/>,
 /// <see cref="AddSalesforceRateLimiting"/> and <see cref="AddInboxSync"/> are the pipeline itself, which the benchmarks
 /// also use with their own options, data source and primary HTTP handler.
 /// </summary>
@@ -39,15 +39,15 @@ public static class SyncServiceCollectionExtensions
         // Postgres (ConnectionStrings:inboxdb, injected by Aspire, appsettings or the tests)
         builder.AddNpgsqlDataSource("inboxdb");
 
-        // Record type Ids shared by all pods (ConnectionStrings:redis, injected by Aspire); without it each process
+        // Record type Ids shared by all pods (ConnectionStrings:redis, injected by Aspire). Without it each process
         // keeps its own (AddSalesforceClient falls back to an in-memory IDistributedCache)
         if (!string.IsNullOrWhiteSpace(config.GetConnectionString("redis")))
         {
             builder.AddRedisDistributedCache("redis");
         }
 
-        // Salesforce client, rate limited in memory (each process has its own bucket and pause).
-        // Handler order: rate limiter (outermost, so every attempt costs a token) -> gzip -> auth.
+        // Salesforce client, rate limited in memory (each process has its own pause).
+        // Handler order: rate limiter (outermost, so every attempt waits for a pause) -> gzip -> auth.
         var salesforce = services.AddSalesforceClient()
             .AddSalesforceRateLimiting();
         UseSalesforceOrg(salesforce);
@@ -66,8 +66,8 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// The deploy's migrate step (<c>SalesforceSync --migrate</c>), performed once before the pods roll out: applies the
-    /// migrations. Needs only Postgres.
+    /// The deploy's migrate step (<c>SalesforceSync --migrate</c>): applies the migrations once before the pods roll
+    /// out. Needs only Postgres.
     /// </summary>
     public static async Task MigrateAsync(this IHostApplicationBuilder builder)
     {
@@ -124,8 +124,8 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton<SalesforceTokenProvider>();
         services.AddTransient<SalesforceAuthHandler>();
         salesforce.AddHttpMessageHandler<SalesforceAuthHandler>()
-            // Long-lived pooled connections (recycled so DNS changes are picked up) instead of handler rotation;
-            // responses are compressed by Salesforce when we accept it
+            // Long-lived pooled connections (recycled so DNS changes are picked up) instead of handler rotation.
+            // Salesforce compresses responses when we accept it
             .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
             {
                 AutomaticDecompression = DecompressionMethods.All,
@@ -174,9 +174,9 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Rate limiting for the client from <see cref="AddSalesforceClient"/>, in memory: the process's token bucket, pause
-    /// and throttle from Sforce-Limit-Info (<see cref="SalesforceRateLimiter"/>) and <see cref="SalesforceRateLimitHandler"/>,
-    /// inserted as the outermost handler whatever else is added, so every attempt costs a token:
+    /// Rate limiting for the client from <see cref="AddSalesforceClient"/>, in memory: the process's pause, from
+    /// Sforce-Limit-Info and limit errors (<see cref="SalesforceRateLimiter"/>), and <see cref="SalesforceRateLimitHandler"/>,
+    /// inserted as the outermost handler whatever else is added, so every attempt waits for a pause:
     /// rate limiter -> gzip -> auth. Register it before the worker loops
     /// (hosted services start in registration order). <see cref="SalesforceBatchSyncService"/> needs it.
     /// </summary>
@@ -202,7 +202,7 @@ public static class SyncServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {
-        // The database: EF contexts pooled over the app's NpgsqlDataSource; every unit of work retries transient errors
+        // The database: EF contexts pooled over the app's NpgsqlDataSource. Every unit of work retries transient errors
         services.AddPooledDbContextFactory<SyncDbContext>((sp, o) => SyncDbContext.Configure(o,
             sp.GetRequiredService<NpgsqlDataSource>(), sp.GetRequiredService<IOptions<PostgresRetryOptions>>().Value));
         services.AddSingleton(typeof(IRepository<>), typeof(InboxRepository<>)); // one per inbox row type

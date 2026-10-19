@@ -19,19 +19,18 @@ namespace SalesforceSync.Benchmarks;
 /// <summary>
 /// End-to-end: put N account aggregates (<see cref="AggregateWorkload"/>: Account changes, relationships and contacts
 /// added, changed, removed and re-added, a few whole accounts deleted), split by <see cref="AccountAggregate.TrySplit"/>
-/// into the per-entity events the consumer stores, into the real Postgres inboxes and drain them with P "pods" x W
+/// into the per-entity events the consumer stores, into the real Postgres inboxes, and drain them with P "pods" x W
 /// parallel worker loops. A pod is wired exactly like the worker
-/// (<see cref="SyncServiceCollectionExtensions"/>, rate limiter included) and its loops run the worker's own pass
+/// (<see cref="SyncServiceCollectionExtensions"/>, rate limiter included); its loops run the worker's own pass
 /// (<see cref="InboxWorkerService.SyncOnceAsync"/>) over every registered entity type. Only the Salesforce HTTP
-/// endpoint is fake. A pod is an independent service provider (own connection pool, rate limiter, HTTP client), like a separate
-/// process; all pods share the Postgres inbox and one Salesforce org.
+/// endpoint is fake. A pod is an independent service provider (own connection pool, rate limiter, HTTP client), like
+/// a separate process. All pods share the Postgres inbox and one Salesforce org.
 /// <para>
-/// Each iteration also verifies correctness. Nothing in the org rejects an out-of-order write, so a race would
-/// land: every account, relationship and contact the aggregates end with must be in the org at its newest version
-/// (a relationship or contact naming the right Accounts), every one they removed or deleted must be absent, the
-/// org's write history must show each record's versions only moving forward, the claim audit
-/// (sql/claim-audit.sql) must show no two overlapping claims on the same entity, and every entity's one inbox row
-/// must hold its newest event and end done.
+/// Each iteration also verifies correctness. The org rejects no out-of-order write, so a race would land. Checks:
+/// every account, relationship and contact the aggregates end with is in the org at its newest version (a
+/// relationship or contact names the right Accounts); every one they removed or deleted is absent; the org's write
+/// history shows each record's versions only moving forward; the claim audit (sql/claim-audit.sql) shows no two
+/// overlapping claims on the same entity; every entity's one inbox row holds its newest event and ends done.
 /// </para>
 /// </summary>
 [Config(typeof(DrainConfig))]
@@ -99,8 +98,8 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// An entity event as the consumer stores it: its entity type and that type's inbox table, the entity's id, the
-    /// event's time (the aggregate's meta.time) and the payload.
+    /// An entity event as the consumer stores it: entity type and its inbox table, entity id, event time (the
+    /// aggregate's meta.time) and payload.
     /// </summary>
     private sealed record IngestRow(string EntityType, string Table, string EntityId, DateTimeOffset EventTime, string Payload);
 
@@ -162,8 +161,8 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// Stores the entity events one at a time, aggregate after aggregate, as fast as possible, the way the Kafka
-    /// consumer does (<see cref="ISalesforceEntitySync.StoreEventAsync"/>).
+    /// Stores the entity events one at a time, aggregate after aggregate, as fast as possible, like the Kafka
+    /// consumer (<see cref="ISalesforceEntitySync.StoreEventAsync"/>).
     /// </summary>
     private async Task IngestAsync(CancellationToken ct)
     {
@@ -212,8 +211,8 @@ public abstract class DrainBenchmarkBase
     // ---------- Setup ----------
 
     /// <summary>
-    /// One "pod": its own connection pool, limiter and HTTP stack; shares Postgres and the org. Wired with the worker's
-    /// registrations; only options, the data source and the primary HTTP handler (the mock org) differ.
+    /// One "pod": own connection pool, limiter and HTTP stack; shares Postgres and the org. Wired with the worker's
+    /// registrations; only options, data source and primary HTTP handler (the mock org) differ.
     /// </summary>
     private ServiceProvider BuildPod()
     {
@@ -243,8 +242,6 @@ public abstract class DrainBenchmarkBase
             o.MaxRetryDelay = TimeSpan.FromMilliseconds(500);
             o.MaxRetries = 50;
         });
-        // Effectively unlimited bucket: measure the pipeline, not the throttle
-        services.Configure<RateLimitOptions>(o => (o.MaxRequestsPerSecond, o.BurstCapacity) = (1e9, 1e9));
         services.AddSalesforceClient()
             .AddSalesforceRateLimiting()
             .ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
@@ -274,8 +271,8 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// The workload's aggregates turned into the entity events the consumer stores, in publish order: split by
-    /// <see cref="AccountAggregate.TrySplit"/> and read by their type's sync (entity id, time), exactly as it does. A
+    /// The workload's aggregates as the entity events the consumer stores, in publish order: split by
+    /// <see cref="AccountAggregate.TrySplit"/>, read by their type's sync (entity id, time) as the consumer does. A
     /// relationship or contact may be claimed before its Account is in the org (DEPENDENCY_NOT_SYNCED, retried).
     /// </summary>
     private static (AggregateWorkload Workload, List<IngestRow> Events) Generate(int aggregates, int accounts,
@@ -305,8 +302,8 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// Loads the events as storing them one after the other would leave the inbox (InboxRepository.AddAsync): per entity one row,
-    /// its newest event (of two as new, the one stored later), and the entity due. Copied into a temporary table first,
+    /// Loads the events to match storing them one by one (InboxRepository.AddAsync): per entity one row with its
+    /// newest event (of two equally new, the one stored later), entity due. Copied into a temporary table first,
     /// since one insert can't overwrite a row twice.
     /// </summary>
     private async Task PreloadAsync(NpgsqlConnection conn)
@@ -416,10 +413,10 @@ public class InboxDrainBenchmarks : DrainBenchmarkBase
 }
 
 /// <summary>
-/// Aggregates keep arriving (in publish order, like Kafka, each split and stored the way the consumer does) while the
-/// pods drain, so the same entity is claimed, released and claimed again many times by different workers in different
-/// pods, and its row is overwritten while a worker writes the event it claimed, a delete over an upsert and an upsert
-/// over a delete included: the races the lease and the outcomes' check of the claimed event time must handle.
+/// Aggregates keep arriving (in publish order, like Kafka, each split and stored as the consumer does) while the
+/// pods drain. The same entity is claimed, released and claimed again many times by different workers in different
+/// pods. Its row is overwritten while a worker writes the event it claimed, including a delete over an upsert and an
+/// upsert over a delete: the races the lease and the outcomes' check of the claimed event time must handle.
 /// </summary>
 public class StreamingIngestBenchmarks : DrainBenchmarkBase
 {

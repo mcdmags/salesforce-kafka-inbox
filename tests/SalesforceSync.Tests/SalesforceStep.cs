@@ -15,7 +15,7 @@ namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The engine wired for its Salesforce step alone (<see cref="SalesforceBatchSyncService.WriteToSalesforceAsync"/>:
-/// normalize, read, decide, send, interpret): a real client on the given HTTP stack, its own record type cache, and no database.
+/// normalize, read, decide, send, interpret): a real client on the given HTTP stack, its own record type cache, no database.
 /// </summary>
 internal static class SalesforceStep
 {
@@ -65,7 +65,7 @@ internal static class SalesforceStep
         return http;
     }
 
-    /// <summary>A limiter that is never paused and is never asked for a token: the Salesforce step calls it through the client only.</summary>
+    /// <summary>A limiter that is never paused and never asked for a token: the Salesforce step calls it through the client only.</summary>
     public sealed class NotPaused : ISalesforceRateLimiter
     {
         public bool IsPaused { get; set; }

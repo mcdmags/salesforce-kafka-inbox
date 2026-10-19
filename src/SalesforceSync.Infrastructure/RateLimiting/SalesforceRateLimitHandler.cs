@@ -6,8 +6,8 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.Infrastructure.RateLimiting;
 
 /// <summary>
-/// Every Salesforce HTTP call takes a token from the process's bucket. The Sforce-Limit-Info header on each
-/// response feeds back into the bucket's speed; limit errors pause the process's workers.
+/// Every Salesforce HTTP call waits for the process's pause to end. The Sforce-Limit-Info header on each
+/// response can start a pause near the daily limit; limit errors pause the process's workers.
 /// </summary>
 public sealed class SalesforceRateLimitHandler(
     ISalesforceRateLimiter limiter,
@@ -19,8 +19,8 @@ public sealed class SalesforceRateLimitHandler(
 
     /// <summary>
     /// Pause after a 429/503 that doesn't say how long to wait. Salesforce documents 503 (server down for maintenance
-    /// or overloaded) and REQUEST_LIMIT_EXCEEDED as a 403; 429 isn't in its REST status codes and is handled in case
-    /// something in front of it sends one.
+    /// or overloaded) and REQUEST_LIMIT_EXCEEDED as 403; 429 isn't in its REST status codes, handled in case something
+    /// in front of it sends one.
     /// </summary>
     private static readonly TimeSpan DefaultRetryAfter = TimeSpan.FromSeconds(30);
 

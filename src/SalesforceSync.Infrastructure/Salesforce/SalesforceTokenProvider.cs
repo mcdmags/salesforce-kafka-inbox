@@ -17,8 +17,8 @@ public sealed class SalesforceTokenProvider(IHttpClientFactory httpFactory, IOpt
     private volatile CachedToken? _token; // replaced as a whole, so lock-free readers never pair a token with another's expiry
 
     /// <param name="rejected">
-    /// A token Salesforce just answered 401 to. It is replaced only if it is still the cached one, so when many
-    /// requests fail at once, one of them fetches a new token and the rest reuse it.
+    /// A token Salesforce just answered 401 to. Replaced only if still the cached one, so when many requests fail at
+    /// once, one fetches a new token and the rest reuse it.
     /// </param>
     /// <param name="ct">Cancels the wait and the token request.</param>
     public async Task<string> GetTokenAsync(string? rejected, CancellationToken ct)
@@ -91,8 +91,8 @@ public sealed class SalesforceAuthHandler(SalesforceTokenProvider tokens) : Dele
     }
 
     /// <summary>
-    /// A failure to get a token is not a failed API request: either nothing has been sent yet, or what was sent came
-    /// back 401 (not applied). Marked so a write is not held as "outcome unknown" because of it.
+    /// A failure to get a token is not a failed API request: either nothing was sent yet, or what was sent came back
+    /// 401 (not applied). Marked so a write is not held as "outcome unknown" because of it.
     /// </summary>
     private async Task<string> TokenAsync(string? rejected, CancellationToken ct)
     {

@@ -10,7 +10,7 @@ namespace SalesforceSync.Tests;
 
 /// <summary>
 /// The engine's flow end to end without a database: a claim handed to it, the in-memory org behind the real client,
-/// and a recording inbox. What is asserted is which inbox operation each kind of result leads to.
+/// and a recording inbox. Asserts which inbox operation each kind of result leads to.
 /// </summary>
 public sealed class EngineFlowTests
 {
@@ -301,8 +301,8 @@ public sealed class EngineFlowTests
     // ---------- Helpers ----------
 
     /// <summary>
-    /// Account, Contact and Profile per entity, except for a KIDS entity, whose Account is not written (only its Contact
-    /// and Profile). A batch of them is three upserts, one per object: the Accounts, then the Contacts, then the Profiles.
+    /// Account, Contact and Profile per entity, except a KIDS entity, whose Account is not written (only its Contact
+    /// and Profile). A batch of them is three upserts, one per object: Accounts, then Contacts, then Profiles.
     /// </summary>
     private static readonly SyncStrategy<AccountEvent> ThreeObjects = new("account",
         e => e.Account?.ExternalId, e => e.Meta,
@@ -335,8 +335,8 @@ public sealed class EngineFlowTests
     }
 
     /// <summary>
-    /// NEW, a change of OLD and a change of KIDS's Contact and Profile: the Accounts' upsert is the first write call, the
-    /// Contacts' the second (the one the tests make fail), the Profiles' the third.
+    /// NEW, a change of OLD and a change of KIDS's Contact and Profile. The Accounts' upsert is the first write call,
+    /// the Contacts' the second (the one the tests make fail), the Profiles' the third.
     /// </summary>
     /// <param name="processed">What the engine returns: 0 when the batch is deferred (no progress).</param>
     private async Task TwoCallBatchAsync(int processed = 3)

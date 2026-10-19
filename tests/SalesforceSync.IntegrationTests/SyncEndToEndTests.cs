@@ -5,9 +5,9 @@ using SalesforceSync.FakeSalesforce;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Kafka -> KafkaInboxConsumer -> sf_account_inbox (Postgres) -> InboxWorkerService -> mock Salesforce, with Postgres
-/// and Kafka in containers and the worker and mock org in-process. Each test uses its own account ids (AutoFixture) so
-/// tests don't interfere through shared state.
+/// Kafka -> KafkaInboxConsumer -> sf_account_inbox (Postgres) -> InboxWorkerService -> mock Salesforce. Postgres
+/// and Kafka run in containers; the worker and mock org run in-process. Each test uses its own account ids
+/// (AutoFixture) so tests don't interfere through shared state.
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class SyncEndToEndTests(SyncFixture app)

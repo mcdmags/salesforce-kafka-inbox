@@ -8,12 +8,12 @@ namespace SalesforceSync.LoadGenerator;
 
 /// <summary>
 /// Publishes account aggregate events (keyed by account external id, like the real upstream, though the sync orders by
-/// meta.time and never reads the key): the Account with its Profile, its account relationships and its contacts,
-/// before and after each change, including rapid bursts to the same account to exercise the ordering and coalescing.
-/// Each event changes the Account and, now and then, adds, changes or removes one of its relationships or contacts (a
-/// removed child is a delete for the sync); a child can name an Account that isn't synced yet. Events use the real
-/// envelope: <c>{ "meta": { "time", "type" }, "before": { ... } | null, "after": { ... } }</c>, with the source system's
-/// camelCase field names. Every snapshot carries the full records.
+/// meta.time and never reads the key): the Account with its Profile, relationships and contacts, before and after each
+/// change, including rapid bursts to the same account to exercise ordering and coalescing. Each event changes the
+/// Account and, now and then, adds, changes or removes one of its relationships or contacts (a removed child is a
+/// delete for the sync); a child can name an Account that isn't synced yet. Events use the real envelope:
+/// <c>{ "meta": { "time", "type" }, "before": { ... } | null, "after": { ... } }</c>, with the source system's camelCase
+/// field names. Every snapshot carries the full records.
 /// </summary>
 public sealed class AccountEventProducer(
     IProducer<string, string> producer,

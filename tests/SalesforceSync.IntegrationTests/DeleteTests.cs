@@ -3,10 +3,10 @@ using System.Text.Json.Nodes;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// Deletes end to end: an aggregate whose after no longer has a child (or no longer has the Account) -> a delete
-/// event in the child's inbox -> the read finds the record's Id -> one sObject Collections delete. The mock org keeps
-/// deleted records in its Recycle Bin and, set up so by <see cref="SyncFixture"/> (its automation, simulated),
-/// refuses to delete an Account that records still name.
+/// Deletes end to end: an aggregate whose after no longer has a child (or the Account) -> delete event in the
+/// child's inbox -> the read finds the record's Id -> one sObject Collections delete. The mock org keeps deleted
+/// records in its Recycle Bin and, as <see cref="SyncFixture"/> sets it up (simulated automation), refuses to
+/// delete an Account that records still name.
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class DeleteTests(SyncFixture app)
@@ -31,7 +31,7 @@ public sealed class DeleteTests(SyncFixture app)
             "by the Id the read found, in one Collections delete");
         (await app.GetInboxAsync(acct)).Should().Be((1L, "done"), "the Account didn't change, so its row wasn't touched");
 
-        // A late aggregate from before the delete still has the contact: older than the delete, so it changes nothing
+        // A late aggregate from before the delete still has the contact: older than the delete, so no change
         await app.PublishAggregateAsync(acct, 2, null, withContact);
         await app.WaitUntilConsumedAsync(acct);
         (await app.GetInboxAsync(contact, SyncFixture.Contacts)).Should().Be((3L, "done"));
