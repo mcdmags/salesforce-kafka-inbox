@@ -417,7 +417,7 @@ public sealed class EngineFlowTests
         public Task<InboxClaim> ClaimAsync(CancellationToken ct)
         {
             Calls.Add("claim");
-            return Task.FromResult(new InboxClaim(Guid.NewGuid(), Rows));
+            return Task.FromResult(new InboxClaim(Rows));
         }
 
         public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)

@@ -48,10 +48,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("last_updated")
                         .HasDefaultValueSql("now()");
 
-                    b.Property<Guid?>("LockToken")
-                        .HasColumnType("uuid")
-                        .HasColumnName("lock_token");
-
                     b.Property<DateTimeOffset?>("NextAttemptAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("next_attempt_at");
@@ -101,10 +97,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnName("last_updated")
                         .HasDefaultValueSql("now()");
 
-                    b.Property<Guid?>("LockToken")
-                        .HasColumnType("uuid")
-                        .HasColumnName("lock_token");
-
                     b.Property<DateTimeOffset?>("NextAttemptAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("next_attempt_at");
@@ -153,10 +145,6 @@ namespace SalesforceSync.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_updated")
                         .HasDefaultValueSql("now()");
-
-                    b.Property<Guid?>("LockToken")
-                        .HasColumnType("uuid")
-                        .HasColumnName("lock_token");
 
                     b.Property<DateTimeOffset?>("NextAttemptAt")
                         .HasColumnType("timestamp with time zone")

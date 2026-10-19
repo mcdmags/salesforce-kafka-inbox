@@ -58,14 +58,13 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         await inbox.ReleaseAsync(claim, new Release(TimeSpan.FromMinutes(5), "stopped",
             [new FailedEvent(broken, "INVALID_FIELD: No such column 'Rating'")], StopInbox: true), CancellationToken.None);
 
-        var rows = new List<(string Entity, Row Row, DateTime? NextAttemptAt, Guid? LockToken)>();
+        var rows = new List<(string Entity, Row Row, DateTime? NextAttemptAt)>();
         foreach (var entity in entities)
         {
-            var (next, token) = await StateAsync(db, entity);
-            rows.Add((entity, await RowAsync(db, entity), next, token));
+            rows.Add((entity, await RowAsync(db, entity), await StateAsync(db, entity)));
         }
 
-        rows.Should().OnlyContain(r => r.Row.Status == "pending" && r.Row.AttemptCount == 0 && r.LockToken == null,
+        rows.Should().OnlyContain(r => r.Row.Status == "pending" && r.Row.AttemptCount == 0,
             "nothing is dead-lettered, no attempt is spent");
         rows.Single(r => r.Entity == broken).Row.Should().Match<Row>(r => r.Error == "INVALID_FIELD: No such column 'Rating'");
         rows.Where(r => r.Entity == claim.Events[1].EntityId).Should().ContainSingle().Which.Row.Error.Should().Be("stopped");
@@ -144,9 +143,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
 
         (await RowAsync(db, entity)).Should().Match<Row>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0
                                                              && r.Error == null, "nothing of v1's outcome lands on v2");
-        var (nextAttemptAt, lockToken) = await StateAsync(db, entity);
-        lockToken.Should().BeNull();
-        nextAttemptAt.Should().NotBeNull("v2 is pending, so its entity must be due");
+        (await StateAsync(db, entity)).Should().NotBeNull("v2 is pending, so its entity must be due");
 
         var next = await Eventually.ValueAsync(() => inbox.ClaimAsync(CancellationToken.None), c => c.Events.Count > 0,
             "the entity to be claimed again", TimeSpan.FromSeconds(10));
@@ -199,11 +196,11 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         return new Row(SyncFixture.VersionOf(row.Payload), row.Status, row.AttemptCount, row.Error, row.EventTime, row.LastUpdated);
     }
 
-    private static async Task<(DateTime? NextAttemptAt, Guid? LockToken)> StateAsync(NpgsqlDataSource db, string entity)
+    private static async Task<DateTime?> StateAsync(NpgsqlDataSource db, string entity)
     {
         await using var conn = await db.OpenConnectionAsync();
-        return await conn.QuerySingleAsync<(DateTime?, Guid?)>(
-            $"SELECT next_attempt_at, lock_token FROM {Table} WHERE entity_id = @entity", new { entity });
+        return await conn.QuerySingleAsync<DateTime?>(
+            $"SELECT next_attempt_at FROM {Table} WHERE entity_id = @entity", new { entity });
     }
 
     private static async Task ExecuteAsync(NpgsqlDataSource db, string sql, object? args = null)

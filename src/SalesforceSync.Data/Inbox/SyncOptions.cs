@@ -29,7 +29,7 @@ public sealed class SyncOptions
     public int MaxEntitiesPerBatch { get; set; } = 100;
 
     /// <summary>
-    /// How long a claim owns its entities (until its inbox row's next_attempt_at; lock_token says who). Between the claim
+    /// How long a claim owns its entities (until its inbox row's next_attempt_at). Between the claim
     /// transaction and the outcome transaction nothing else holds them: no transaction or row lock spans the Salesforce
     /// calls. The worker stops calling Salesforce at 80% of it, and a worker that crashes needs no cleanup: the lease
     /// expires and the entities are claimable again. Must be longer than <c>SalesforceLimits:RequestTimeout</c>.

@@ -12,19 +12,19 @@ namespace SalesforceSync.Data.Inbox;
 /// <para>
 /// An inbox has one row per entity (entity_id is unique) that holds the entity's newest event, a newer event overwriting it
 /// (<see cref="AddAsync"/>), and the entity's sync state: when it is due (next_attempt_at), the lease of the worker
-/// processing it (lock_token; the lease ends at next_attempt_at, after which the row is simply due again) and what
+/// processing it (the lease is next_attempt_at moved to its end, after which the row is simply due again) and what
 /// became of its event (attempt_count, last_error; an idle row, next_attempt_at null, is done without a last_error, else
 /// dead). No statement reads inside the payload: an event's entity is its entity_id column, its time its event_time column
 /// (both set by the consumer). An entity is claimed by locking and leasing its row, so two workers can never hold one
 /// entity: they would lock the same row.
 /// </para>
 /// <para>
-/// Every outcome statement updates only the claimed rows that its claim's token still holds and that still hold the event
+/// Every outcome statement updates only the claimed rows that are still pending and still hold the event
 /// the claim read (<see cref="StillClaimed"/>), and ends their lease. The consumer writes the same row, so
 /// Postgres's row lock orders the two (see <see cref="StillClaimed"/>). Every statement is safe to run again after an
 /// unknown commit (see PostgresRetryStrategy): storing the same event again is harmless (see <see cref="AddAsync"/>),
-/// a retried claim first releases what the lost attempt leased (<see cref="ClaimAsync"/>), and an outcome's first run
-/// ended the lease, so a second finds no row it holds. Outcome statements take arrays, so recording a batch costs a fixed
+/// a retried claim first releases what the lost attempt leased (<see cref="ClaimAsync"/>), and a done outcome run again
+/// finds its rows idle. (A failure run again counts one more attempt: an unknown commit is rare, and it costs one retry.) Outcome statements take arrays, so recording a batch costs a fixed
 /// number of round trips, not one per entity.
 /// </para>
 /// <para>
@@ -39,8 +39,8 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 {
     /// <summary>
     /// The WHERE of every outcome statement: of the claimed rows (@entityIds, with the event_time @times the claim read
-    /// for each), those that @token still holds and that still hold that event. A worker whose lease expired
-    /// records nothing; a row the consumer overwrote with a newer event after the claim gets no outcome: it stays
+    /// for each), those that are still pending (next_attempt_at set) and still hold that event. A worker
+    /// whose entity was finished by another records nothing; a row the consumer overwrote with a newer event after the claim gets no outcome: it stays
     /// pending with the newer event, <see cref="DoneAsync"/> doesn't mark it done, and <see cref="EndLeasesAsync"/> ends its
     /// lease, leaving it due. Each row is looked up by primary key; the times are compared as timestamptz, exactly: @times
     /// are the values the claim read back from the column.
@@ -54,7 +54,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// </para>
     /// </summary>
     private const string StillClaimed = """
-        i.entity_id = ANY(@entityIds) AND i.lock_token = @token
+        i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL
           AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times) AS c(entity_id, event_time) WHERE c.entity_id = i.entity_id AND c.event_time = i.event_time)
         """;
 
@@ -107,7 +107,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// <summary>
     /// Picks and leases up to @batchSize due rows, the longest-waiting first, and returns them with their payloads
     /// and event times, in a transaction of its own, so the rows are read before the commit is sent. The lease is
-    /// lock_token and next_attempt_at moved to the lease's end (now + @lease): a leased row is not due until then, and
+    /// next_attempt_at moved to the lease's end (now + @lease): a leased row is not due until then, and
     /// an expired lease (its worker died) is simply due again and taken over without anyone resetting it. FOR UPDATE SKIP
     /// LOCKED: a row another transaction is claiming, recording or storing an event in is skipped, not waited for. Under
     /// READ COMMITTED a row whose lease another worker committed after this statement's snapshot is re-checked on its new
@@ -116,29 +116,27 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     /// The picked entity ids are an array, not a CTE joined back: with statistics from a backlog, the join was planned as
     /// a hash join over a scan of the whole table.
     /// <para>
-    /// The transaction ends before Salesforce is called: from then on the lease (lock_token, and next_attempt_at as its
-    /// end) protects the entities, not a lock. Each attempt leases under a fresh token. If a commit's outcome is unknown
-    /// and the claim is retried, the attempts before may have leased rows nobody works on: the retry first ends those
-    /// leases, by the lost tokens and the rows they read, in one statement (<see cref="EndLeasesAsync"/>), so the rows
-    /// are due at once, not when the leases expire, and are not mistaken for this attempt's.
+    /// The transaction ends before Salesforce is called: from then on the lease (next_attempt_at as its end)
+    /// protects the entities, not a lock. If a commit's outcome is unknown and the claim is retried, the attempts before
+    /// may have leased rows nobody works on: the retry first ends those leases, by the rows they read, in one statement
+    /// (<see cref="EndLeasesAsync"/>), so the rows are due at once, not when the leases expire.
     /// </para>
     /// </summary>
     public Task<InboxClaim> ClaimAsync(CancellationToken ct)
     {
         // What the attempts so far leased: if this runs again, their commits were lost
-        var lostTokens = new List<Guid>();
         var lostEntityIds = new List<string>();
         return contexts.RunInTransactionAsync(async (db, t) =>
         {
             if (lostEntityIds.Count > 0)
             {
-                await EndLeasesAsync(db, t, lostEntityIds, lostTokens, TimeSpan.Zero);
+                await EndLeasesAsync(db, t, lostEntityIds, TimeSpan.Zero);
             }
 
             var table = Table(db);
             var sql = $"""
                 UPDATE {table} i
-                SET next_attempt_at = now() + @lease, lock_token = @token, last_updated = now()
+                SET next_attempt_at = now() + @lease, last_updated = now()
                 WHERE i.entity_id = ANY(ARRAY(
                   SELECT d.entity_id FROM {table} d
                   WHERE d.next_attempt_at <= now()
@@ -147,16 +145,13 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
                   FOR UPDATE SKIP LOCKED))
                 RETURNING i.entity_id AS EntityId, i.payload::text AS Payload, i.event_time AS EventTime
                 """;
-            var token = Guid.NewGuid();
             var events = await db.Database.QueryAsync<InboxEvent>(sql, t, new
             {
-                token,
                 lease = _opt.Lease,
                 batchSize = _opt.BatchSize
             });
-            lostTokens.Add(token);
             lostEntityIds.AddRange(events.Select(e => e.EntityId));
-            return new InboxClaim(token, events);
+            return new InboxClaim(events);
         }, ct);
     }
 
@@ -193,10 +188,10 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
     {
         var sql = $"""
             UPDATE {Table(db)} i
-            SET last_updated = now(), last_error = NULL, next_attempt_at = NULL, lock_token = NULL
+            SET last_updated = now(), last_error = NULL, next_attempt_at = NULL
             WHERE {StillClaimed}
             """;
-        return db.Database.ExecuteAsync(sql, ct, new { entityIds = entityIds.ToArray(), times = claim.TimesOf(entityIds), token = claim.Token });
+        return db.Database.ExecuteAsync(sql, ct, new { entityIds = entityIds.ToArray(), times = claim.TimesOf(entityIds) });
     }
 
     /// <summary>
@@ -214,8 +209,7 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             SET last_updated = now(), attempt_count = i.attempt_count + 1,
                 last_error = (SELECT @errors::jsonb) ->> i.entity_id,
                 next_attempt_at = CASE WHEN i.attempt_count + 1 < @maxRetries
-                                       THEN now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) END,
-                lock_token = NULL
+                                       THEN now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) END
             WHERE {StillClaimed}
             """;
         string[] ids = [.. rows.Select(r => r.EntityId)];
@@ -224,7 +218,6 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
             entityIds = ids,
             times = claim.TimesOf(ids),
             errors = ErrorsJson(rows),
-            token = claim.Token,
             maxRetries,
             baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
             maxDelaySecs = _opt.MaxRetryDelay.TotalSeconds
@@ -256,14 +249,13 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
                 UPDATE {table} i
                 SET last_updated = now(),
                     last_error = coalesce((SELECT @errors::jsonb) ->> i.entity_id, @error::text, i.last_error),
-                    next_attempt_at = now() + @delay, lock_token = NULL
+                    next_attempt_at = now() + @delay
                 WHERE {StillClaimed}
                 """;
             var released = await db.Database.ExecuteAsync(releaseClaimed, t, new
             {
                 entityIds = claim.EntityIds,
                 times = claim.EventTimes,
-                token = claim.Token,
                 errors = ErrorsJson(release.OwnErrors ?? []),
                 error = release.Error,
                 delay = release.Delay
@@ -291,11 +283,11 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
 
     /// <summary>
     /// Records outcomes in one transaction: <paramref name="record"/> runs the outcome statements, each of which updates
-    /// only the claimed rows this lease still holds that still hold the event the claim read
+    /// only the claimed rows that are still pending and still hold the event the claim read
     /// (<see cref="StillClaimed"/>), and returns how many rows they updated. If that is fewer than the claim's,
     /// <see cref="EndLeasesAsync"/> ends the lease on the rest (rows not attempted, and rows a newer event
     /// overwrote meanwhile), due after <paramref name="delay"/>. Safe to repeat: an attempt whose commit outcome was
-    /// unknown, or a lease lost meanwhile, leaves no row under this token, and nothing is written.
+    /// unknown, or an entity finished meanwhile, leaves no pending row, and nothing is written.
     /// </summary>
     private Task InTransactionAsync(InboxClaim claim, TimeSpan delay, Func<SyncDbContext, CancellationToken, Task<int>> record,
         CancellationToken ct)
@@ -304,30 +296,28 @@ public sealed class InboxRepository<TEntity>(IDbContextFactory<SyncDbContext> co
         {
             if (await record(db, t) < claim.Events.Count)
             {
-                await EndLeasesAsync(db, t, claim.EntityIds, [claim.Token], delay);
+                await EndLeasesAsync(db, t, claim.EntityIds, delay);
             }
         }, ct);
     }
 
     /// <summary>
-    /// Ends the lease on the rows (@entityIds) that any of @tokens still holds, due again after @delay, with no attempt spent:
-    /// what becomes of a row that gets no outcome. Last in an outcome transaction, those are the rows not attempted
-    /// (skipped because of another entity's record) and the rows a newer event overwrote during the lease (see
-    /// <see cref="StillClaimed"/>), whatever was recorded for the others; a claim rate limited as a whole is
-    /// deferred with this statement alone. They are due now (held or deferred: when the hold or deferral ends) instead
-    /// of at the lease's end, which the store kept as an overwritten row's next_attempt_at. Ending a lease needs no check
-    /// of the claimed event: the row is due again either way. A retried claim ends the leases of the attempts it lost
-    /// the same way, all their tokens at once. The rows are looked up by @entityIds: lock_token has no index.
+    /// Ends the lease on the pending rows (@entityIds) that the transaction has not just recorded, due again after
+    /// @delay, with no attempt spent: what becomes of a row that gets no outcome. Last in an outcome transaction, those are
+    /// the rows not attempted (skipped because of another entity's record) and the rows a newer event overwrote during the
+    /// lease (see <see cref="StillClaimed"/>), whatever was recorded for the others (a recorded row has last_updated =
+    /// now(), the transaction's time); a claim rate limited as a whole is deferred with this statement alone. They are
+    /// due now (held or deferred: when the hold or deferral ends) instead of at the lease's end, which the store kept as an
+    /// overwritten row's next_attempt_at. A retried claim ends the leases of the attempts it lost the same way.
     /// </summary>
-    private Task<int> EndLeasesAsync(SyncDbContext db, CancellationToken ct, IReadOnlyList<string> entityIds, IReadOnlyList<Guid> tokens,
-        TimeSpan delay)
+    private Task<int> EndLeasesAsync(SyncDbContext db, CancellationToken ct, IReadOnlyList<string> entityIds, TimeSpan delay)
     {
         var sql = $"""
             UPDATE {Table(db)} i
-            SET lock_token = NULL, next_attempt_at = now() + @delay, last_updated = now()
-            WHERE i.entity_id = ANY(@entityIds) AND i.lock_token = ANY(@tokens)
+            SET next_attempt_at = now() + @delay, last_updated = now()
+            WHERE i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL AND i.last_updated <> now()
             """;
-        return db.Database.ExecuteAsync(sql, ct, new { entityIds = entityIds.ToArray(), tokens = tokens.ToArray(), delay });
+        return db.Database.ExecuteAsync(sql, ct, new { entityIds = entityIds.ToArray(), delay });
     }
 
     /// <summary>{ "entity id": error }, as <see cref="FailAsync"/> and <see cref="ReleaseAsync"/> take the errors.</summary>

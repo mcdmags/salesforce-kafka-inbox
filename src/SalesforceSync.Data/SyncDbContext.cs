@@ -72,7 +72,7 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
 
     /// <summary>
     /// An inbox table: one row per entity, holding its newest Kafka event, what became of it and the entity's sync state
-    /// (due when, leased by whom); its key is the entity id. Columns with a database default are left out of
+    /// (due when, which is also the lease's end); its key is the entity id. Columns with a database default are left out of
     /// an insert while they hold the CLR default, so a new row gets the database's clock and 'pending'.
     /// </summary>
     private static void ConfigureInbox<TRow>(EntityTypeBuilder<TRow> entity, string table) where TRow : InboxRow

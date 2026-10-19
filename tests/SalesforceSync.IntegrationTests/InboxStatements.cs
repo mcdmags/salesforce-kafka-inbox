@@ -2,13 +2,13 @@ namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
 /// The statements of <c>InboxRepository</c> for one inbox table, copied here so a test can play a worker by hand on
-/// connections of its own (claim without committing, record on a stale token, ...). The tests that run the repository
+/// connections of its own (claim without committing, record on a finished entity, ...). The tests that run the repository
 /// itself are what keep the copies true.
 /// </summary>
 public sealed class InboxStatements
 {
     private const string StillClaimed = """
-        i.entity_id = ANY(@entityIds) AND i.lock_token = @token
+        i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL
           AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times) AS c(entity_id, event_time) WHERE c.entity_id = i.entity_id AND c.event_time = i.event_time)
         """;
 
@@ -27,7 +27,7 @@ public sealed class InboxStatements
             """;
         Claim = $"""
             UPDATE {table} i
-            SET next_attempt_at = now() + @lease, lock_token = @token, last_updated = now()
+            SET next_attempt_at = now() + @lease, last_updated = now()
             WHERE i.entity_id = ANY(ARRAY(
               SELECT d.entity_id FROM {table} d
               WHERE d.next_attempt_at <= now()
@@ -38,7 +38,7 @@ public sealed class InboxStatements
             """;
         Done = $"""
             UPDATE {table} i
-            SET last_updated = now(), last_error = NULL, next_attempt_at = NULL, lock_token = NULL
+            SET last_updated = now(), last_error = NULL, next_attempt_at = NULL
             WHERE {StillClaimed}
             """;
         Fail = $"""
@@ -46,14 +46,13 @@ public sealed class InboxStatements
             SET last_updated = now(), attempt_count = i.attempt_count + 1,
                 last_error = (SELECT @errors::jsonb) ->> i.entity_id,
                 next_attempt_at = CASE WHEN i.attempt_count + 1 < @maxRetries
-                                       THEN now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) END,
-                lock_token = NULL
+                                       THEN now() + make_interval(secs => least(@maxDelaySecs, @baseDelaySecs * power(2, i.attempt_count))) END
             WHERE {StillClaimed}
             """;
         EndLease = $"""
             UPDATE {table} i
-            SET lock_token = NULL, next_attempt_at = now() + @delay, last_updated = now()
-            WHERE i.entity_id = ANY(@entityIds) AND i.lock_token = ANY(@tokens)
+            SET next_attempt_at = now() + @delay, last_updated = now()
+            WHERE i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL AND i.last_updated <> now()
             """;
     }
 

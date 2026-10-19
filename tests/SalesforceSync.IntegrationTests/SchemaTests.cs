@@ -70,7 +70,7 @@ public sealed class SchemaTests(SyncFixture app)
         var account = await Columns(SyncFixture.InboxTable());
         account.Select(c => c.Split(' ')[0]).Should().Equal(
             "entity_id", "payload", "event_time", "attempt_count", "last_error", "last_updated",
-            "next_attempt_at", "lock_token");
+            "next_attempt_at");
         (await Columns(SyncFixture.InboxTable(SyncFixture.Relationships))).Should().Equal(account);
         (await Columns(SyncFixture.InboxTable(SyncFixture.Contacts))).Should().Equal(account);
         (await conn.QuerySingleAsync<long>("SELECT count(*) FROM pg_proc WHERE proname LIKE 'sf\\_event\\_%'"))

@@ -499,15 +499,14 @@ public class SyncFixture : IAsyncLifetime
     {
         await using var conn = await Db.OpenConnectionAsync();
         var rows = await conn.QueryAsync<StoredRow>(
-            $"SELECT payload::text, {StatusSql} AS status, attempt_count, last_error, next_attempt_at, lock_token FROM {InboxTable(entityType)} WHERE entity_id = @key",
+            $"SELECT payload::text, {StatusSql} AS status, attempt_count, last_error, next_attempt_at FROM {InboxTable(entityType)} WHERE entity_id = @key",
             new { key });
-        return rows.Select(r => new InboxRowState(VersionOf(r.Payload), r.Status, r.AttemptCount, r.Error, r.NextAttemptAt, r.LockToken))
+        return rows.Select(r => new InboxRowState(VersionOf(r.Payload), r.Status, r.AttemptCount, r.Error, r.NextAttemptAt))
             .SingleOrDefault();
     }
 
     /// <summary>An inbox row as read, its payload as stored.</summary>
-    private sealed record StoredRow(string Payload, string Status, int AttemptCount, string? Error, DateTime? NextAttemptAt,
-        Guid? LockToken);
+    private sealed record StoredRow(string Payload, string Status, int AttemptCount, string? Error, DateTime? NextAttemptAt);
 
     /// <summary>The version of a stored payload: its meta.time, BaseTime + N ms.</summary>
     public static long VersionOf(string payload)
@@ -625,8 +624,7 @@ public class SyncFixture : IAsyncLifetime
 }
 
 /// <summary>An inbox row as the tests see it; <paramref name="Version"/> comes from the payload's meta.time.</summary>
-public sealed record InboxRowState(long Version, string Status, int AttemptCount, string? Error, DateTime? NextAttemptAt,
-    Guid? LockToken);
+public sealed record InboxRowState(long Version, string Status, int AttemptCount, string? Error, DateTime? NextAttemptAt);
 
 [CollectionDefinition(Name)]
 public sealed class SyncCollection : ICollectionFixture<SyncFixture>

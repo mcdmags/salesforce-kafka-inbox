@@ -17,9 +17,8 @@ public sealed class LeaseTests(SyncFixture app)
     public async Task Event_arriving_while_its_entity_is_being_processed_waits_for_the_lease_then_wins_if_newer()
     {
         var acct = SyncFixture.NewAccountId();
-        var token = Guid.NewGuid();
         // "A worker" claims v1 the instant it is stored and then takes its time
-        var claim = await InsertAndClaimAsync(acct, token, TimeSpan.FromMinutes(1),
+        var claim = await InsertAndClaimAsync(acct, TimeSpan.FromMinutes(1),
             SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []));
         claim.Events.Should().ContainSingle();
 
@@ -32,7 +31,7 @@ public sealed class LeaseTests(SyncFixture app)
         var during = (await app.GetInboxRowAsync(acct))!;
         during.Should().Match<InboxRowState>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0,
             "v2 must wait while another worker holds its account");
-        during.LockToken.Should().Be(token, "the account is still leased to the first worker");
+        during.NextAttemptAt.Should().BeAfter(DateTime.UtcNow, "the account is still leased to the first worker");
         (await app.GetRecordAsync("Account", acct)).Should().BeNull("nobody has written the account yet");
 
         // The first worker finishes without having written (as if its records were not attempted) and releases
@@ -54,8 +53,7 @@ public sealed class LeaseTests(SyncFixture app)
     public async Task A_newer_event_stored_while_the_claimed_one_is_written_is_written_next_whatever_the_claimed_ones_outcome(string outcome)
     {
         var acct = SyncFixture.NewAccountId();
-        var token = Guid.NewGuid();
-        var claim = await InsertAndClaimAsync(acct, token, TimeSpan.FromMinutes(1),
+        var claim = await InsertAndClaimAsync(acct, TimeSpan.FromMinutes(1),
             SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []));
         var row = claim.EntityIds.Single();
 
@@ -78,42 +76,33 @@ public sealed class LeaseTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Worker_whose_lease_expired_can_record_nothing()
+    public async Task Worker_whose_entity_was_finished_by_another_can_record_nothing()
     {
         var acct = SyncFixture.NewAccountId();
-        var stale = Guid.NewGuid();
         // "A worker" claims v1 with a lease that runs out before it finishes
-        var claim = await InsertAndClaimAsync(acct, stale, TimeSpan.FromSeconds(1),
+        var claim = await InsertAndClaimAsync(acct, TimeSpan.FromSeconds(1),
             SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []));
 
         // A real worker takes the entity over once the lease has expired, and syncs it
         (await app.WaitForInboxSettledAsync(acct, version: 1)).Should().Be((1L, "done"));
-        // The stale worker's claim gets the row's new time, so that only the token stands in its way
-        await ExecuteAsync($"UPDATE {Sql.Table} SET event_time = event_time + interval '1000 seconds' WHERE entity_id = @id", new { id = claim.EntityIds[0] });
-        await using (var conn = await app.Db.OpenConnectionAsync())
-        {
-            var time = await conn.QuerySingleAsync<DateTime>($"SELECT event_time FROM {Sql.Table} WHERE entity_id = @acct", new { acct });
-            claim = claim with { Events = [claim.Events.Single() with { EventTime = new DateTimeOffset(time) }] };
-        }
         var (claimed, times) = (claim.EntityIds, claim.EventTimes);
         var rowBefore = await app.GetInboxRowAsync(acct);
 
-        // The first worker comes back and tries everything it could do with its old token
+        // The first worker comes back and tries everything it could do with its old claim
         var errors = $$"""{ "{{claimed[0]}}": "late failure: UNABLE_TO_LOCK_ROW" }""";
-        (await ExecuteAsync(Sql.Done, new { entityIds = claimed, times, token = stale }))
-            .Should().Be(0, "only the worker that holds the lease records anything");
+        (await ExecuteAsync(Sql.Done, new { entityIds = claimed, times }))
+            .Should().Be(0, "an entity that is finished has nothing left to record");
         (await ExecuteAsync(Sql.Fail, new
         {
             entityIds = claimed,
             times,
-            token = stale,
             errors,
             maxRetries = 8,
             baseDelaySecs = 1d,
             maxDelaySecs = 1d
         })).Should().Be(0);
 
-        // Every outcome the repository records is conditional on the token as well: none of them touches the row
+        // Every outcome the repository records is conditional on the row being pending as well: none of them touches it
         var inbox = app.AccountInbox;
         var failed = new FailedEvent(claimed[0], "x");
         await inbox.RecordAsync(claim, new BatchOutcomes(claimed, [failed], [failed]), CancellationToken.None);
@@ -126,23 +115,22 @@ public sealed class LeaseTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Done_completes_an_event_only_under_its_lease_and_only_once()
+    public async Task Done_completes_an_event_only_while_it_is_pending_and_only_once()
     {
         var acct = SyncFixture.NewAccountId();
-        var token = Guid.NewGuid();
-        var claim = await InsertAndClaimAsync(acct, token, TimeSpan.FromMinutes(1),
+        var claim = await InsertAndClaimAsync(acct, TimeSpan.FromMinutes(1),
             SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "v1" }, []));
         var claimed = claim.EntityIds;
 
-        (await ExecuteAsync(Sql.Done, new { entityIds = claimed, times = claim.EventTimes, token = Guid.NewGuid() }))
-            .Should().Be(0, "a lost lease completes nothing");
+        (await ExecuteAsync(Sql.Done, new { entityIds = claimed, times = new[] { claim.EventTimes[0].AddSeconds(1) } }))
+            .Should().Be(0, "an event that is not the claimed one completes nothing");
         (await app.GetInboxAsync(acct)).Should().Be((1L, "pending"));
 
         await app.AccountInbox.RecordAsync(claim, Synced(claimed[0]), CancellationToken.None);
         await app.AccountInbox.RecordAsync(claim, Synced(claimed[0]), CancellationToken.None);
 
-        (await app.GetInboxRowAsync(acct)).Should().Match<InboxRowState>(r => r.Status == "done" && r.LockToken == null && r.NextAttemptAt == null,
-            "recorded again (after a commit whose outcome was unknown), it finds the lease already ended and nothing is left to do");
+        (await app.GetInboxRowAsync(acct)).Should().Match<InboxRowState>(r => r.Status == "done" && r.NextAttemptAt == null,
+            "recorded again (after a commit whose outcome was unknown), it finds the row idle and nothing is left to do");
     }
 
     /// <summary>
@@ -150,18 +138,18 @@ public sealed class LeaseTests(SyncFixture app)
     /// between (the new row is theirs to see only once it is committed, leased). The claim is what the worker's own claim
     /// returns: the entity's row with the event_time it read.
     /// </summary>
-    private async Task<InboxClaim> InsertAndClaimAsync(string acct, Guid token, TimeSpan lease, JsonObject e)
+    private async Task<InboxClaim> InsertAndClaimAsync(string acct, TimeSpan lease, JsonObject e)
     {
         await using var conn = await app.Db.OpenConnectionAsync();
         await using var tx = await conn.BeginTransactionAsync();
         await conn.StoreAsync(Sql.Table, acct, SyncFixture.TimeOf(e), e.ToJsonString(), tx);
         var rows = await conn.QueryAsync<InboxEvent>($"""
-            UPDATE {Sql.Table} SET lock_token = @token, next_attempt_at = now() + @lease
+            UPDATE {Sql.Table} SET next_attempt_at = now() + @lease
             WHERE entity_id = @acct
             RETURNING entity_id, payload::text, event_time
-            """, new { token, lease, acct }, tx);
+            """, new { lease, acct }, tx);
         await tx.CommitAsync();
-        return new InboxClaim(token, rows);
+        return new InboxClaim(rows);
     }
 
     private static BatchOutcomes Synced(string id)

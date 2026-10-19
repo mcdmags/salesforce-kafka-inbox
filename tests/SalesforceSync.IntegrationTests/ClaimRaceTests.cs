@@ -36,7 +36,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         // Meanwhile a worker skips the entity: its row is locked
         await using (var txA = await race.WorkerA.BeginTransactionAsync())
         {
-            (await race.ClaimAsync(race.WorkerA, txA, Guid.NewGuid())).Should().BeEmpty();
+            (await race.ClaimAsync(race.WorkerA, txA)).Should().BeEmpty();
             await txA.CommitAsync();
         }
 
@@ -44,7 +44,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await secondStore;
 
         await using var tx = await race.WorkerA.BeginTransactionAsync();
-        var events = await race.ClaimAsync(race.WorkerA, tx, Guid.NewGuid());
+        var events = await race.ClaimAsync(race.WorkerA, tx);
         await tx.CommitAsync();
         events.Should().ContainSingle("the entity has one row").Which.EventTime.Should().Be(race.TimeOf(3));
     }
@@ -55,19 +55,18 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await using var race = await StartAsync();
         await race.StoreAsync(race.Consumer1, 1);
 
-        var tokenA = Guid.NewGuid();
         await using var txA = await race.WorkerA.BeginTransactionAsync();
-        (await race.ClaimAsync(race.WorkerA, txA, tokenA)).Should().ContainSingle();
+        (await race.ClaimAsync(race.WorkerA, txA)).Should().ContainSingle();
 
         // B claims while A's claim is still open: A's lease isn't visible to B yet, but A's row lock is, and B skips it
         await using (var txB = await race.WorkerB.BeginTransactionAsync())
         {
-            (await race.ClaimAsync(race.WorkerB, txB, Guid.NewGuid())).Should().BeEmpty();
+            (await race.ClaimAsync(race.WorkerB, txB)).Should().BeEmpty();
             await txB.CommitAsync();
         }
 
         await txA.CommitAsync();
-        (await race.StateAsync()).LockToken.Should().Be(tokenA);
+        (await race.DueAsync()).Should().BeFalse("the entity is leased to A");
     }
 
     [Fact]
@@ -76,10 +75,9 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await using var race = await StartAsync();
         await race.StoreAsync(race.Consumer1, 1);
 
-        var tokenA = Guid.NewGuid();
         await using (var txA = await race.WorkerA.BeginTransactionAsync())
         {
-            (await race.ClaimAsync(race.WorkerA, txA, tokenA)).Should().ContainSingle();
+            (await race.ClaimAsync(race.WorkerA, txA)).Should().ContainSingle();
             await txA.CommitAsync();
         }
 
@@ -87,11 +85,11 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await race.StoreAsync(race.Consumer2, 2);
         await using (var txB = await race.WorkerB.BeginTransactionAsync())
         {
-            (await race.ClaimAsync(race.WorkerB, txB, Guid.NewGuid())).Should().BeEmpty();
+            (await race.ClaimAsync(race.WorkerB, txB)).Should().BeEmpty();
             await txB.CommitAsync();
         }
 
-        (await race.StateAsync()).LockToken.Should().Be(tokenA);
+        (await race.DueAsync()).Should().BeFalse("the entity is leased to A");
     }
 
     /// <summary>
@@ -120,9 +118,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         }
 
         (await race.RowAsync()).Should().Be((race.TimeOf(2), "pending", 0, null), "nothing of v1's outcome lands on v2");
-        var (nextAttemptAt, lockToken) = await race.StateAsync();
-        lockToken.Should().BeNull("the lease ended");
-        nextAttemptAt.Should().NotBeNull("v2 is pending, so it must be due, or it would never be claimed");
+        (await race.StateAsync()).Should().NotBeNull("v2 is pending, so it must be due, or it would never be claimed");
         (await race.DueAsync()).Should().Be(outcome != "held",
             "v2 is due when the outcome transaction ends (held: when the hold ends), not when v1's lease would have");
     }
@@ -140,11 +136,10 @@ public sealed class ClaimRaceTests(SyncFixture app)
     {
         await using var race = await StartAsync();
         await race.StoreAsync(race.Consumer1, 1);
-        var token = Guid.NewGuid();
         List<InboxEvent> claimed;
         await using (var tx = await race.WorkerA.BeginTransactionAsync())
         {
-            claimed = await race.ClaimAsync(race.WorkerA, tx, token);
+            claimed = await race.ClaimAsync(race.WorkerA, tx);
             await tx.CommitAsync();
         }
         if (overwrittenDuringTheLease)
@@ -155,9 +150,9 @@ public sealed class ClaimRaceTests(SyncFixture app)
         // The worker records v1 done and ends the lease, as the repository does; consumer 2 stores v3 meanwhile
         await using (var record = await race.WorkerA.BeginTransactionAsync())
         {
-            var args = new { entityIds = claimed.Select(e => e.EntityId).ToArray(), times = claimed.Select(e => e.EventTime).ToArray(), token };
+            var args = new { entityIds = claimed.Select(e => e.EntityId).ToArray(), times = claimed.Select(e => e.EventTime).ToArray() };
             (await race.WorkerA.ExecuteAsync(Sql.Done, args, record)).Should().Be(overwrittenDuringTheLease ? 0 : 1);
-            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.entityIds, tokens = new[] { token }, delay = TimeSpan.Zero }, record))
+            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.entityIds, delay = TimeSpan.Zero }, record))
                 .Should().Be(overwrittenDuringTheLease ? 1 : 0, "only an overwritten row is left under the lease");
             var lateStore = race.StoreAsync(race.Consumer2, 3);
             await race.WaitUntilBlockedByAsync(race.WorkerA, lateStore);
@@ -166,9 +161,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
         }
 
         (await race.RowAsync()).Should().Be((race.TimeOf(3), "pending", 0, null));
-        var (nextAttemptAt, lockToken) = await race.StateAsync();
-        lockToken.Should().BeNull();
-        nextAttemptAt.Should().NotBeNull("v3 is pending, so it must be due, or it would never be claimed");
+        (await race.StateAsync()).Should().NotBeNull("v3 is pending, so it must be due, or it would never be claimed");
         (await race.DueAsync()).Should().BeTrue("v3 is due now, not when v1's lease would have ended");
     }
 
@@ -212,15 +205,14 @@ public sealed class ClaimRaceTests(SyncFixture app)
             return (new DateTimeOffset(time), status, attempts, error);
         }
 
-        public Task<List<InboxEvent>> ClaimAsync(NpgsqlConnection worker, NpgsqlTransaction tx, Guid token)
+        public Task<List<InboxEvent>> ClaimAsync(NpgsqlConnection worker, NpgsqlTransaction tx)
         {
-            return worker.QueryAsync<InboxEvent>(Sql.Claim, new { token, lease = TimeSpan.FromMinutes(1), batchSize = 75 }, tx);
+            return worker.QueryAsync<InboxEvent>(Sql.Claim, new { lease = TimeSpan.FromMinutes(1), batchSize = 75 }, tx);
         }
 
-        public Task<(DateTime? NextAttemptAt, Guid? LockToken)> StateAsync()
+        public Task<DateTime?> StateAsync()
         {
-            return observer.QuerySingleAsync<(DateTime?, Guid?)>(
-                $"SELECT next_attempt_at, lock_token FROM {Table} WHERE entity_id = @Entity", new { Entity });
+            return observer.QuerySingleAsync<DateTime?>($"SELECT next_attempt_at FROM {Table} WHERE entity_id = @Entity", new { Entity });
         }
 
         /// <summary>Whether the entity is due now (null: idle).</summary>

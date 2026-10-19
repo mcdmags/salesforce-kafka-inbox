@@ -55,9 +55,9 @@ public sealed class ConcurrencyTests(MultiPodFixture app, ITestOutputHelper outp
         await using var conn = await app.Db.OpenConnectionAsync();
         var overlaps = (await conn.QueryAsync<string>(
             """
-            SELECT format('%s: claim %s (seq %s) while claim %s (seq %s..%s) was open',
-                          entity_id, second_token, second_claim_seq,
-                          first_token, first_claim_seq, coalesce(first_release_seq::text, 'never'))
+            SELECT format('%s: claim (seq %s) while claim (seq %s..%s) was open',
+                          entity_id, second_claim_seq,
+                          first_claim_seq, coalesce(first_release_seq::text, 'never'))
             FROM sf_claim_overlaps WHERE entity_id = ANY(@ids)
             """,
             new { ids })).ToList();

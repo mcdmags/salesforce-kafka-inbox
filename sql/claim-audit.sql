@@ -2,10 +2,10 @@
 -- same entity (e.g. the same account) can be detected after the fact. Not part of the migrations; do not install in production.
 -- Run it after the migrations: it attaches to every inbox table, where every entity is leased on its row.
 --
--- A claim starts when a worker sets lock_token (InboxSql.Claim) and ends when that worker clears
--- the token (an outcome or EndLease). Ordering uses a sequence, not the clock: wall-clock
--- time can step backwards (NTP / VM time sync), while a claim that can only happen after another worker's
--- release commits always draws a higher sequence number than that release.
+-- A claim starts when a worker moves a due row's next_attempt_at to the end of its lease (ClaimAsync) and ends when
+-- the row's next_attempt_at changes while it is leased (an outcome or the end of the lease). Ordering uses a sequence, not
+-- the clock: wall-clock time can step backwards (NTP / VM time sync), while a claim that can only happen after another
+-- worker's release commits always draws a higher sequence number than that release.
 
 create sequence if not exists sf_claim_audit_seq;
 
@@ -14,48 +14,45 @@ drop table if exists sf_claim_audit;  -- recreated: its shape follows the inbox 
 create table sf_claim_audit (
   inbox          text        not null,   -- the inbox table
   entity_id      text        not null,
-  lock_token     uuid        not null,
   claim_seq      bigint      not null,
   release_seq    bigint,
   claimed_at     timestamptz not null,   -- for humans only
   released_at    timestamptz,
-  primary key (inbox, entity_id, lock_token)
+  primary key (inbox, entity_id, claim_seq)
 );
 
 create or replace function sf_claim_audit_fn() returns trigger language plpgsql as $$
 begin
-  -- Released only when the holder clears its token. If another worker overwrites a token that is still
-  -- set, the first claim stays open, so the takeover shows up in sf_claim_overlaps.
-  if old.lock_token is not null and new.lock_token is null then
+  -- A leased row (not due) whose next_attempt_at changes is released. If another worker takes the row over while a claim
+  -- is still open, the first claim stays open, so the takeover shows up in sf_claim_overlaps.
+  if old.next_attempt_at > now() and new.next_attempt_at is distinct from old.next_attempt_at then
     update sf_claim_audit set release_seq = nextval('sf_claim_audit_seq'), released_at = clock_timestamp()
-    where inbox = tg_table_name and entity_id = new.entity_id and lock_token = old.lock_token and release_seq is null;
+    where inbox = tg_table_name and entity_id = new.entity_id and release_seq is null;
   end if;
-  if new.lock_token is not null and new.lock_token is distinct from old.lock_token then
-    insert into sf_claim_audit (inbox, entity_id, lock_token, claim_seq, claimed_at)
-    values (tg_table_name, new.entity_id, new.lock_token, nextval('sf_claim_audit_seq'), clock_timestamp())
-    on conflict (inbox, entity_id, lock_token) do nothing;
+  if old.next_attempt_at <= now() and new.next_attempt_at > now() then
+    insert into sf_claim_audit (inbox, entity_id, claim_seq, claimed_at)
+    values (tg_table_name, new.entity_id, nextval('sf_claim_audit_seq'), clock_timestamp());
   end if;
   return new;
 end $$;
 
 drop trigger if exists sf_claim_audit_trg on sf_account_inbox;
-create trigger sf_claim_audit_trg before update of lock_token on sf_account_inbox
+create trigger sf_claim_audit_trg before update of next_attempt_at on sf_account_inbox
   for each row execute function sf_claim_audit_fn();
 drop trigger if exists sf_claim_audit_trg on sf_account_relationship_inbox;
-create trigger sf_claim_audit_trg before update of lock_token on sf_account_relationship_inbox
+create trigger sf_claim_audit_trg before update of next_attempt_at on sf_account_relationship_inbox
   for each row execute function sf_claim_audit_fn();
 drop trigger if exists sf_claim_audit_trg on sf_contact_inbox;
-create trigger sf_claim_audit_trg before update of lock_token on sf_contact_inbox
+create trigger sf_claim_audit_trg before update of next_attempt_at on sf_contact_inbox
   for each row execute function sf_claim_audit_fn();
 
 -- Overlapping claims on the same entity (must be empty):
 create view sf_claim_overlaps as
 select a.inbox, a.entity_id,
-       a.lock_token as first_token,  a.claim_seq as first_claim_seq,  a.release_seq as first_release_seq,
-       b.lock_token as second_token, b.claim_seq as second_claim_seq
+       a.claim_seq as first_claim_seq, a.release_seq as first_release_seq,
+       b.claim_seq as second_claim_seq
 from sf_claim_audit a
 join sf_claim_audit b
   on b.inbox = a.inbox and b.entity_id = a.entity_id
- and b.lock_token <> a.lock_token
  and b.claim_seq > a.claim_seq
  and b.claim_seq < coalesce(a.release_seq, 9223372036854775807);

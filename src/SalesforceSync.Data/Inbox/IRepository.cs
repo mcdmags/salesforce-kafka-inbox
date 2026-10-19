@@ -3,8 +3,8 @@ namespace SalesforceSync.Data.Inbox;
 /// <summary>
 /// An inbox table as the sync engine uses it: store an event, claim a batch of entities, then record what became of
 /// them. The row type selects the table (see <see cref="Data.SyncDbContext"/>), so one implementation serves every object.
-/// Every recording is conditional on the claim's lease token (on the entities' rows), so a worker whose lease expired
-/// records nothing.
+/// Every recording is conditional on the entity's row still being pending with the event the claim read, so a worker
+/// whose entity was finished by another records nothing.
 /// </summary>
 public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
 {
@@ -41,9 +41,8 @@ public interface IRepository<TEntity> where TEntity : InboxRow, IInboxRow, new()
 public sealed record Release(TimeSpan Delay, string? Error = null, IReadOnlyList<FailedEvent>? OwnErrors = null, bool StopInbox = false);
 
 /// <summary>A batch of entities leased to this worker: their claimed rows.</summary>
-/// <param name="Token">Identifies the lease; every outcome statement is conditional on it.</param>
 /// <param name="Events">The claimed row of every leased entity: one per entity.</param>
-public sealed record InboxClaim(Guid Token, IReadOnlyList<InboxEvent> Events)
+public sealed record InboxClaim(IReadOnlyList<InboxEvent> Events)
 {
     /// <summary>The entity ids of the claimed rows: a row's key (one row per entity).</summary>
     public string[] EntityIds => [.. Events.Select(e => e.EntityId)];

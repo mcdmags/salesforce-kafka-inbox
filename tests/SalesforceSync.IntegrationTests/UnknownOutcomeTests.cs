@@ -23,7 +23,6 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         var heldAt = DateTime.UtcNow;
         held.Status.Should().Be("pending");
         held.AttemptCount.Should().Be(0, "an unknown outcome doesn't spend an attempt");
-        held.LockToken.Should().BeNull("the old worker can't record anything on it any more");
         held.NextAttemptAt.Should().BeAfter(heldAt.AddSeconds(1)).And.BeBefore(heldAt + SyncFixture.UnknownOutcomeHold + TimeSpan.FromSeconds(1));
         ((string?)(await app.GetRecordAsync("Account", acct))?["Description"]).Should().Be("v1", "Salesforce did apply the write");
 
@@ -35,7 +34,6 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         DateTime.UtcNow.Should().BeBefore(held.NextAttemptAt!.Value, "the check must fall inside the hold");
         during.Should().Match<InboxRowState>(r => r.Version == 2 && r.Status == "pending" && r.AttemptCount == 0,
             "nothing of a held entity may be claimed");
-        during.LockToken.Should().BeNull();
         ((string?)(await app.GetRecordAsync("Account", acct))!["Description"]).Should().Be("v1");
 
         // After the hold, normal processing converges: read, diff, write the newest

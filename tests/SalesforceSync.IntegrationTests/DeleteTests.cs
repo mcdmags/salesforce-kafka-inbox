@@ -114,7 +114,7 @@ public sealed class DeleteTests(SyncFixture app)
 
         var held = (await Eventually.ValueAsync(() => app.GetInboxRowAsync(contact, SyncFixture.Contacts),
             row => row?.Error?.Contains("UNKNOWN_OUTCOME") == true, "the delete's outcome to be recorded as unknown"))!;
-        (held.Status, held.AttemptCount, held.LockToken).Should().Be(("pending", 0, null),
+        (held.Status, held.AttemptCount).Should().Be(("pending", 0),
             "held like an unknown upsert: a late delete must not remove a record a newer event recreated");
         (await app.GetRecordAsync("Contact", contact)).Should().BeNull("the org did delete it");
 

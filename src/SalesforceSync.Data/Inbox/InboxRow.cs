@@ -2,7 +2,7 @@ namespace SalesforceSync.Data.Inbox;
 
 /// <summary>
 /// One row of an inbox table: an entity's newest Kafka event, what became of it, and the entity's sync state (when it is
-/// due, the lease of the worker processing it). One row per entity: a newer event overwrites it. Every inbox table has
+/// due, which is also the end of the lease of the worker processing it). One row per entity: a newer event overwrites it. Every inbox table has
 /// exactly these columns (the inbox configuration in SyncDbContext), so they all live here; a synced object only adds
 /// a subclass with its limits (<see cref="IInboxRow"/>) and gets its own table (<see cref="Data.SyncDbContext"/> maps
 /// each subclass to one; the base is not an entity, there is no shared table).
@@ -41,9 +41,6 @@ public abstract class InboxRow
     /// A claim moves it to the end of its lease, so a leased row is not due until the lease ends or expires.
     /// </summary>
     public DateTimeOffset? NextAttemptAt { get; set; }
-
-    /// <summary>Which claim holds the lease (until <see cref="NextAttemptAt"/>).</summary>
-    public Guid? LockToken { get; set; }
 
     /// <summary>
     /// An event time as <see cref="EventTime"/> stores it: cut to whole microseconds, in UTC. Postgres keeps microseconds,
