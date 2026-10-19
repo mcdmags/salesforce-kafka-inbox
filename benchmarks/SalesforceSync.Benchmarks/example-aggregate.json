@@ -1,0 +1,47 @@
+{
+  "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" },
+  "before": null,
+  "after": {
+    "externalId": "ACC-000001",
+    "name": "Account {key}",
+    "rating": "Hot",
+    "industry": "Technology",
+    "description": "set by the workload",
+    "annualRevenue": 1250000.5,
+    "numberOfEmployees": 250,
+    "phone": "+1 555 0100",
+    "website": "https://example.com",
+    "isActive": true,
+    "tags": ["B2B", "Retail"],
+    "customerSince": "2020-01-15",
+    "lastContactedAt": null,
+    "profile": {
+      "name": "Profile {key}",
+      "tier": "Gold",
+      "score": 0,
+      "discountPercent": 12.5,
+      "notes": null,
+      "optIn": true,
+      "startDate": "2020-02-01"
+    },
+    "accountRelationships": [
+      {
+        "externalId": "REL-000001-000002",
+        "relatedAccountExternalId": "ACC-000002",
+        "name": "set by the workload",
+        "type": "Partner",
+        "startDate": "2020-03-01",
+        "isActive": true
+      }
+    ],
+    "contacts": [
+      {
+        "externalId": "CON-000001-0",
+        "firstName": "Ada",
+        "lastName": "set by the workload",
+        "email": "{key}@example.com",
+        "phone": "+1 555 0101"
+      }
+    ]
+  }
+}

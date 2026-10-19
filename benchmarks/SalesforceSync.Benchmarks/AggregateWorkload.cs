@@ -11,6 +11,7 @@ namespace SalesforceSync.Benchmarks;
 /// <see cref="AccountAggregate"/>), and the state the org must end in. Every aggregate changes its Account (Description
 /// "vN" and Profile score N, N the account's version). Now and then it also adds, changes or removes a relationship or
 /// contact (a removed one may return later as a new record). A few accounts are deleted with all their children.
+/// The aggregates are copies of an example (<see cref="AggregateTemplate"/>), so they have the fields of your event.
 /// The benchmark stores what the types' ingests makes of each aggregate, as the Kafka consumer
 /// does. Seeded, no I/O, so every iteration gets the same workload.
 /// </summary>
@@ -47,8 +48,11 @@ public sealed class AggregateWorkload
     private readonly Dictionary<string, long> _childVersions = new(StringComparer.Ordinal);
     private readonly HashSet<(string Type, string Key)> _children = [];
 
-    private AggregateWorkload(int accounts, int seed)
+    private readonly AggregateTemplate _template;
+
+    private AggregateWorkload(int accounts, int seed, AggregateTemplate template)
     {
+        _template = template;
         _random = new Random(seed);
         _versions = new long[accounts];
         _snapshots = new JsonObject?[accounts];
@@ -65,9 +69,13 @@ public sealed class AggregateWorkload
     /// <paramref name="aggregates"/> aggregates over <paramref name="accounts"/> accounts: a random account each, now
     /// and then in a burst of 2-5 in a row (coalescing and ordering pressure).
     /// </summary>
-    public static AggregateWorkload Generate(int aggregates, int accounts, int seed = 42)
+    /// <param name="aggregates">How many aggregates (Kafka messages).</param>
+    /// <param name="accounts">How many distinct accounts.</param>
+    /// <param name="seed">The random seed: the same seed and template make the same workload.</param>
+    /// <param name="template">The shape of the aggregates; the run's (<see cref="AggregateTemplate.Current"/>) when null.</param>
+    public static AggregateWorkload Generate(int aggregates, int accounts, int seed = 42, AggregateTemplate? template = null)
     {
-        var workload = new AggregateWorkload(accounts, seed);
+        var workload = new AggregateWorkload(accounts, seed, template ?? AggregateTemplate.Current);
         workload.Run(aggregates);
         return workload;
     }
@@ -123,36 +131,15 @@ public sealed class AggregateWorkload
         var other = _random.Next(_versions.Length);
         if (_random.NextDouble() < RelationshipShare && other != account && _versions[other] > 0 && !IsDeletable(other))
         {
-            Touch(relationships, AccountRelationshipSync.Type, $"REL-{account:D6}-{other:D6}", (id, v) => new JsonObject
-            {
-                ["externalId"] = id,
-                ["relatedAccountExternalId"] = Key(other),
-                ["name"] = $"v{v}",
-                ["type"] = "Partner",
-                ["isActive"] = true
-            });
+            Touch(relationships, AccountRelationshipSync.Type, $"REL-{account:D6}-{other:D6}", (id, v) => _template.Relationship(id, Key(other), v));
         }
 
         if (_random.NextDouble() < ContactShare)
         {
-            Touch(contacts, ContactSync.Type, $"CON-{account:D6}-{_random.Next(ContactsPerAccount)}", (id, v) => new JsonObject
-            {
-                ["externalId"] = id,
-                ["firstName"] = "Contact",
-                ["lastName"] = $"v{v}"
-            });
+            Touch(contacts, ContactSync.Type, $"CON-{account:D6}-{_random.Next(ContactsPerAccount)}", _template.Contact);
         }
 
-        // No profile.externalId: the Profile__c takes the account's
-        return new JsonObject
-        {
-            ["externalId"] = Key(account),
-            ["name"] = $"Account {Key(account)}",
-            ["description"] = $"v{version}",
-            ["profile"] = new JsonObject { ["score"] = version },
-            ["accountRelationships"] = relationships,
-            ["contacts"] = contacts
-        };
+        return _template.Account(Key(account), version, relationships, contacts);
     }
 
     /// <summary>Removes the child if the list has it (<see cref="RemovalShare"/>), else adds it at its next version.</summary>

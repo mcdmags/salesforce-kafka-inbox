@@ -20,6 +20,7 @@
   <ItemGroup>
     <!-- Test/benchmark-only claim audit used by the correctness check -->
     <None Include="..\..\sql\claim-audit.sql" Link="claim-audit.sql" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="example-aggregate.json" />
   </ItemGroup>
 
   <ItemGroup>

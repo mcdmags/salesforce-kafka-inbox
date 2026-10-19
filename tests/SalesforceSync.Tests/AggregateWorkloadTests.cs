@@ -52,6 +52,25 @@ public sealed class AggregateWorkloadTests
     }
 
     [Fact]
+    public async Task The_check_passes_an_org_that_got_the_events_of_the_example_template_with_all_its_fields()
+    {
+        var workload = AggregateWorkload.Generate(300, 20, template: AggregateTemplate.Load(Path.Combine(AppContext.BaseDirectory, "example-aggregate.json")));
+        var org = new FakeSalesforceStore(new FakeSalesforceOptions { EnforceDailyLimit = false });
+        var syncs = new SyncHarness(org);
+        foreach (var (key, e) in Split(workload))
+        {
+            await Apply(syncs, key, e);
+        }
+
+        var (wrong, regressions) = workload.Check(org);
+
+        wrong.Should().BeEmpty();
+        regressions.Should().Be(0);
+        org.FindByExternalId("Account", "ACC-000001")!["Industry"]!.GetValue<string>().Should().Be("Technology");
+        org.All("Contact").Should().OnlyContain(c => c["FirstName"]!.GetValue<string>() == "Ada" && c["Email"]!.GetValue<string>().EndsWith("@example.com"));
+    }
+
+    [Fact]
     public async Task The_check_passes_an_org_the_events_reached_in_order_and_finds_a_stale_record_and_one_not_deleted()
     {
         var workload = AggregateWorkload.Generate(1_000, 20);
