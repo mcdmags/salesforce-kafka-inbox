@@ -407,6 +407,48 @@ now read by its index (87,641 index scans, 8 sequential), and the queue was empt
 truncate the audit for every iteration, so there it grew only to a few thousand rows, but it still cost them a few percent:
 the numbers of earlier runs in this file are somewhat pessimistic.
 
+## Latest run: plain-crud with the claim audit fixed, at aa3d6fd
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at aa3d6fd, on 2026-10-19, against the
+[run before it](#latest-run-plain-crud-with-bigger-batches-and-no-lock-token-at-e7cb88d). Since then: the claim-audit
+trigger (test and benchmark only) no longer scans its table for every claim (a collation mismatch made `tg_table_name`
+miss the index), so the earlier numbers carried that overhead; persisting to the inbox (`IAggregateIngest`) and sending
+to Salesforce (`IEntitySync`) are separate classes. The engine and the SQL are the same. Same workload and environment;
+the database was recreated.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures, and no iteration timed out.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency), and streaming
+(50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 114.57 ms | 818.83 ms | 24.25 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 1 | 1,000 | 2,113 | 357.12 ms | 2,668.99 ms | 78.23 MB | 69 | 23 | 1.91 | 3,254 | 1141 |
+| 1 | 3 | 100 | 990 | 65.30 ms | 366.88 ms | 24.59 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 327.99 ms | 832.58 ms | 81.61 MB | 68 | 21 | 1.93 | 3,230 | 1117 |
+| 4 | 1 | 100 | 990 | 67.60 ms | 283.07 ms | 26.6 MB | 24 | 8 | 5.72 | 1,128 | 138 |
+| 4 | 1 | 1,000 | 2,113 | 329.31 ms | 684.73 ms | 83.71 MB | 78 | 26 | 1.85 | 3,358 | 1245 |
+| 4 | 3 | 100 | 990 | 99.27 ms | 239.01 ms | 37.79 MB | 24 | 8 | 6.13 | 1,051 | 61 |
+| 4 | 3 | 1,000 | 2,113 | 375.30 ms | 441.51 ms | 92.26 MB | 65 | 20 | 1.98 | 3,138 | 1025 |
+| 8 | 1 | 100 | 990 | 79.18 ms | 212.28 ms | 29.88 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 8 | 1 | 1,000 | 2,113 | 311.00 ms | 508.95 ms | 87.22 MB | 75 | 23 | 1.84 | 3,383 | 1270 |
+| 8 | 3 | 100 | 990 | 158.52 ms | 256.56 ms | 50.18 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 8 | 3 | 1,000 | 2,113 | 462.08 ms | 512.84 ms | 141.13 MB | 76 | 23 | 1.91 | 3,261 | 1148 |
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.851 s | 245.08 MB | 1,238 | 560 | 2.46 | 2,614 | 5 |
+| 4 | 3 | 2.663 s | 450.27 MB | 4,976 | 2,164 | 1.46 | 4,428 | 4 |
+| 8 | 1 | 2.203 s | 354.95 MB | 2,846 | 1,248 | 1.65 | 3,902 | 4 |
+| 8 | 3 | 6.203 s | 1612.59 MB | 16,285 | 7,508 | 1.19 | 5,423 | 2 |
+
+- **The calls, writes and claims are the same as the run before** (one worker on one pod with 100 accounts: 22 calls,
+  8 write requests, 990 claims). Only timings moved, and by little: at 0 ms most scenarios are within noise, the
+  one-worker ones are faster (115 ms against 137 ms; 357 ms against 608 ms), which is where the trigger cost most.
+- **Streaming is also unchanged in shape**, 8 workers on 3 pods still the outlier (6.2 s, 16,285 calls, coalescing 1.19)
+  for the reason given in the run before: 24 workers on 50 hot accounts claim about 1.2 rows per batch.
+
 ## Latest run: plain-crud with bigger batches and no lock token, at e7cb88d
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at e7cb88d, on 2026-10-19, against the
