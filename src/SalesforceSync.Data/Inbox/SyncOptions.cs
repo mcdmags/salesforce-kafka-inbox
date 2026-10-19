@@ -15,18 +15,18 @@ public sealed class SyncOptions
     public int Workers { get; set; } = 4;
 
     /// <summary>
-    /// Entities per batch, 1 to <see cref="MaxEntitiesPerBatch"/>: a batch is read with one query per object (up to 100
-    /// external ids each; very long ids split the read over more) and written with one upsert per object and one delete.
+    /// Entities per batch, 1 to <see cref="MaxEntitiesPerBatch"/>: a batch is read with one query per object (up to 200
+    /// external ids each; more ids, or very long ones, split the read over more queries) and written with one upsert per object and one delete.
     /// </summary>
-    public int BatchSize { get; set; } = 75;
+    public int BatchSize { get; set; } = 180;
 
     /// <summary>
     /// The most entities one batch may hold, the ceiling of <see cref="BatchSize"/>. Not a Salesforce limit of its own:
-    /// with the row types' 100 external ids per query, 100 entities are read with one query per object while an entity
+    /// with the row types' 200 external ids per query, 200 entities are read with one query per object while an entity
     /// needs one id of an object (a relationship needs up to 3: itself and two Accounts). Raise it to batch more entities
     /// per claim: ids then split the read over more queries, not a failure, and a write call takes the row types' 180 records.
     /// </summary>
-    public int MaxEntitiesPerBatch { get; set; } = 100;
+    public int MaxEntitiesPerBatch { get; set; } = 200;
 
     /// <summary>
     /// How long a claim owns its entities (until its inbox row's next_attempt_at). Between the claim

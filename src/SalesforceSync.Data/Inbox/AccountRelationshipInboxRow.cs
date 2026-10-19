@@ -4,7 +4,7 @@ namespace SalesforceSync.Data.Inbox;
 public sealed class AccountRelationshipInboxRow : InboxRow, IInboxRow
 {
     // External ids per query of a batch's read: up to 3 per relationship (itself, two Accounts)
-    public static int MaxValuesPerQuery => 100;
+    public static int MaxValuesPerQuery => 200;
     // A margin under Salesforce's 200
     public static int MaxRecordsPerWrite => 180;
 }

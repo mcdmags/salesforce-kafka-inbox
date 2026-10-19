@@ -231,7 +231,11 @@ public abstract class DrainBenchmarkBase
         services.Configure<SyncOptions>(o =>
         {
             o.Workers = Workers;
-            o.BatchSize = StreamIngest ? 10 : 75;     // streaming: small batches, so entities are claimed again and again
+            if (StreamIngest)
+            {
+                o.BatchSize = 10;     // streaming: small batches, so entities are claimed again and again
+            }
+
             o.Lease = TimeSpan.FromMinutes(5);
             // A relationship can be claimed before its Accounts are in the org (DEPENDENCY_NOT_SYNCED): retry it
             // within milliseconds rather than the production 30 s, so the benchmark measures the pipeline
