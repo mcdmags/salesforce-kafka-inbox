@@ -10,7 +10,6 @@ using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
-using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
