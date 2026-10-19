@@ -255,7 +255,6 @@ public sealed class FakeSalesforceTests
         return (string?)result!["errors"]![0]!["statusCode"];
     }
 
-    /// <summary>Creates (or updates) an Account and returns its Id.</summary>
     private async Task<string> UpsertAccountsAsync(string key)
     {
         return (string)(await UpsertAsync("Account", Account(key))).Single()!["id"]!;

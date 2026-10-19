@@ -9,7 +9,6 @@ var builder = DistributedApplication.CreateBuilder(args);
 // (The integration tests don't use Aspire; they run on Testcontainers.)
 var testMode = bool.TryParse(builder.Configuration["AppHost:TestMode"], out var t) && t;
 
-// Infrastructure
 var postgres = builder.AddPostgres("postgres");
 if (!testMode)
 {
@@ -24,7 +23,7 @@ if (!testMode)
     kafka.WithKafkaUI();
 }
 
-// Describe results shared by every salesforce-sync replica (ConnectionStrings:redis)
+// Record type cache shared by every salesforce-sync replica (ConnectionStrings:redis)
 var redis = builder.AddRedis("redis");
 if (!testMode)
 {

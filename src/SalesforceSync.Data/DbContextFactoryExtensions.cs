@@ -78,7 +78,6 @@ public static class SqlCommands
 {
     private static readonly ConcurrentDictionary<Type, PropertyInfo[]> Properties = new();
 
-    /// <returns>Rows affected.</returns>
     public static Task<int> ExecuteAsync(this DatabaseFacade db, string sql, CancellationToken ct, object? args = null)
     {
         return db.ExecuteSqlRawAsync(sql, Params(args), ct);

@@ -100,11 +100,9 @@ public class SyncFixture : IAsyncLifetime
         ["Logging:LogLevel:Default"] = "Warning"
     };
 
-    /// <summary>The mock org's configuration (<c>FakeSalesforce:*</c>).</summary>
     protected Dictionary<string, string?> FakeOrgSettings { get; } = new()
     {
         ["FakeSalesforce:Latency"] = "00:00:00",
-        // The daily API limit the mock org reports in Sforce-Limit-Info
         ["FakeSalesforce:DailyApiLimit"] = "115000",
         // An org whose automation refuses to delete an Account that records still name (Salesforce itself wouldn't,
         // with Text foreign keys). DeleteTests covers the Account's delete waiting for its children (DEPENDENCY_NOT_SYNCED)
@@ -233,7 +231,6 @@ public class SyncFixture : IAsyncLifetime
         return snapshot;
     }
 
-    /// <summary>A child of a snapshot: its external id and fields.</summary>
     public static JsonObject Child(string externalId, JsonObject fields)
     {
         return Body(externalId, fields);
@@ -505,7 +502,6 @@ public class SyncFixture : IAsyncLifetime
             .SingleOrDefault();
     }
 
-    /// <summary>An inbox row as read, its payload as stored.</summary>
     private sealed record StoredRow(string Payload, string Status, int AttemptCount, string? Error, DateTime? NextAttemptAt);
 
     /// <summary>The version of a stored payload: its meta.time, BaseTime + N ms.</summary>
@@ -571,7 +567,7 @@ public class SyncFixture : IAsyncLifetime
     }
 
     /// <summary>Every kind of outcome a worker records for a claim (see <see cref="RecordOutcomeAsync"/>).</summary>
-    public static TheoryData<string> Outcomes => ["done", "failed", "dead", "released", "failed all", "deferred", "held"];
+    public static TheoryData<string> Outcomes => ["done", "failed", "dead", "released", "deferred", "held"];
 
     /// <summary>Records one of <see cref="Outcomes"/> for a claim of one row, through the worker's repository.</summary>
     public static Task RecordOutcomeAsync(IRepository<AccountInboxRow> inbox, InboxClaim claim, string outcome)
@@ -585,7 +581,6 @@ public class SyncFixture : IAsyncLifetime
             "failed" => inbox.RecordAsync(claim, new BatchOutcomes([], [], [failure]), none),
             "dead" => inbox.RecordAsync(claim, new BatchOutcomes([], [failure], []), none),
             "released" => inbox.RecordAsync(claim, new BatchOutcomes([], [], []), none),
-            "failed all" => inbox.FailAllAsync(claim, "failed", none),
             "deferred" => inbox.ReleaseAsync(claim, new Release(TimeSpan.Zero), none),
             "held" => inbox.ReleaseAsync(claim, new Release(UnknownOutcomeHold, "lost"), none),
             _ => throw new ArgumentOutOfRangeException(nameof(outcome))

@@ -10,8 +10,7 @@ if (args.Contains("--migrate"))
     return;
 }
 
-// Everything the worker runs (shared with the integration tests' in-process pods): options, Postgres, rate-limited
-// Salesforce client, Kafka -> inbox, inbox -> Salesforce.
+// Shared with the integration tests' in-process pods.
 builder.AddSalesforceSyncWorker();
 
 builder.Build().Run();

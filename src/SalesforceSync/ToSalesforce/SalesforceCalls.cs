@@ -19,8 +19,8 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     }
 
     /// <summary>
-    /// Current Salesforce records for these external ids (queries of ≤ 200 ids): fields, Id (deletes need it), external
-    /// id. Missing record = absent from result.
+    /// Current Salesforce records for these external ids: fields, Id (deletes need it), external id. Missing record =
+    /// absent from result.
     /// </summary>
     /// <exception cref="MappingErrorException">Org lacks such a field on the object.</exception>
     public async Task<Dictionary<string, JsonElement>> ReadAsync(string sobject, IEnumerable<string> fields, IEnumerable<string> externalIds,
@@ -28,11 +28,11 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     {
         var columns = fields.Append(ExternalIdField).Append("Id").Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var found = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-        foreach (var ids in externalIds.Distinct(StringComparer.Ordinal).Chunk(SalesforceRestClient.MaxCollectionRecords))
+        foreach (var (soql, ids) in Queries(sobject, columns, externalIds))
         {
             try
             {
-                foreach (var row in await salesforce.SelectAsync(SalesforceRestClient.Soql(sobject, columns, ExternalIdField, ids), ct))
+                foreach (var row in await salesforce.SelectAsync(soql, ct))
                 {
                     found[row.GetProperty(ExternalIdField).GetString()!] = row;
                 }
@@ -45,6 +45,27 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
         }
 
         return found;
+    }
+
+    /// <summary>
+    /// 200 ids per query, halved while the query's URL is over Salesforce's limit: the query is a GET, so long external
+    /// ids can overflow its URL long before 200 of them.
+    /// </summary>
+    private IEnumerable<(string Soql, string[] Ids)> Queries(string sobject, List<string> columns, IEnumerable<string> externalIds)
+    {
+        var pending = new Stack<string[]>(externalIds.Distinct(StringComparer.Ordinal).Chunk(SalesforceRestClient.MaxCollectionRecords).Reverse());
+        while (pending.TryPop(out var ids))
+        {
+            var soql = SalesforceRestClient.Soql(sobject, columns, ExternalIdField, ids);
+            if (ids.Length > 1 && !SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(salesforce.DataPath, soql)))
+            {
+                pending.Push(ids[(ids.Length / 2)..]);
+                pending.Push(ids[..(ids.Length / 2)]);
+                continue;
+            }
+
+            yield return (soql, ids);
+        }
     }
 
     /// <summary>
@@ -125,7 +146,6 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
         }
     }
 
-    /// <summary>Adds a failure to the entity.</summary>
     public static void Fail(Dictionary<string, List<Failure>> failures, string key, string code, string message, bool permanent = false)
     {
         if (!failures.TryGetValue(key, out var list))
@@ -193,7 +213,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     }
 }
 
-/// <summary>Entities whose mapping Salesforce rejects, with fix hint.</summary>
+/// <summary>Entities whose fields Salesforce rejects. Stops the type's inbox until the mapping or org is fixed.</summary>
 public sealed class MappingErrorException(IReadOnlyList<(string Key, SalesforceError Error)> errors)
     : Exception($"{errors.Count} mapping error(s), e.g. {errors[0].Error.Code}: {errors[0].Error.Message}")
 {

@@ -5,8 +5,8 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// How to read one type's event: whose (entity id), when + what (meta). Shared by both sync halves so they agree on
-/// validity: ingest (<see cref="Persistence.IAggregateIngest"/>) stores only events that read; engine reads claimed
-/// rows same way. Knows no Salesforce or aggregates.
+/// validity: ingest (<see cref="Persistence.IAggregateIngest"/>) stores only events that read, and
+/// <see cref="ToSalesforce.SalesforceBatchSyncService"/> reads claimed rows the same way. Knows no Salesforce or aggregates.
 /// </summary>
 /// <typeparam name="TEvent">Inbox payload (whole event envelope).</typeparam>
 /// <param name="EntityType">Type name, e.g. "account": object name of its events; used in logs.</param>
@@ -18,11 +18,6 @@ public sealed record EventReader<TEvent>(
     Func<TEvent, string?> EntityId,
     Func<TEvent, EventMeta?> Meta)
 {
-    /// <summary>
-    /// Reads, validates raw event: valid JSON for <typeparamref name="TEvent"/>, entity with non-empty id, time with
-    /// explicit offset, type inserted/updated/deleted. Kafka consumer stores only passing events (rest can never
-    /// sync). Engine reads claimed rows same way.
-    /// </summary>
     /// <returns>False with <paramref name="problem"/> = why event can never sync.</returns>
     public bool TryRead(string json, [NotNullWhen(true)] out ReadEvent<TEvent>? read, [NotNullWhen(false)] out string? problem)
     {

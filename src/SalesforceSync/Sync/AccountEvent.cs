@@ -15,7 +15,6 @@ public sealed record AccountEvent(EventMeta? Meta, AccountPayload? Account)
 {
     public const string Type = "account";
 
-    /// <summary>How inbox events of this type are read: entity id + meta.</summary>
     public static readonly EventReader<AccountEvent> Reader = new(Type, e => e.Account?.ExternalId, e => e.Meta);
 }
 

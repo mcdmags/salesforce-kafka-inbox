@@ -46,7 +46,7 @@ account, is deleted in Salesforce. Several things make this harder than "consume
 | Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. `inserted` and `updated` are the same to the sync. |
 | Deletes | A child gone from an aggregate's `after` (or the whole Account, when `after` is missing) is a `deleted` event in its inbox, ordered by `meta.time` like any other: an older insert can't bring it back, a newer one recreates it. The batch's read finds the record's Id by its external id, and every record to delete goes into one **sObject Collections delete** by Id (`DELETE /composite/sobjects?ids=...&allOrNone=false`), after the batch's upserts. A record the read doesn't find (never synced, or deleted already) costs nothing and is done. Already deleted is success, a refusal is permanent or transient by its code, a lost answer is held (`UNKNOWN_OUTCOME`). See [Deletes](#deletes). |
 | Change-only updates | **Diff against Salesforce by the value's .NET type**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are put in a canonical form by their type (`""` = `null`, numbers as decimals, date/time to the second, time to the millisecond; a checkbox `null` equals Salesforce's `false`) and only fields that differ are sent. The org's field metadata is not read, so a value Salesforce stores differently (a number with more decimals than the field's scale, multi-select values in another order than the picklist's) looks changed and is written again: the mapping should send values as Salesforce stores them. A new record's `null` checkbox is not sent (Salesforce defaults it to `false`). The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
-| Batching and API calls | Every call is one operation on many records (`SelectAsync`, `UpsertAsync`, `DeleteAsync`); there is no Composite request. **One read call per object** per batch of up to `Sync:BatchSize` entities (180, max 200): a query of up to 200 external ids (the row type's `MaxValuesPerQuery`), whose URL fits Salesforce's 16,384-byte limit on a call's URI and headers (long ids split a query further). Then, after the diff, the writes: **one `UpsertAsync` per object** (≤180 records, the row type's `MaxRecordsPerWrite`, under Salesforce's 200), parents first, with exactly the planned fields, matched by external id; then **one `DeleteAsync`** of the Ids to delete (≤180). So a batch of new Accounts with their Profiles costs 4 calls (two reads, two upserts), an Account-only change 3 (two reads, one upsert: the Profile is read too), and relationships and contacts 3 (their own object and the Account they point at, read; one upsert). A batch of deletes only is its reads plus one delete, and a delete Salesforce has nothing for costs the reads only. See [One call per object](#one-call-per-object) for the cost against Composite requests. The first batch of a pod, and then every 15 minutes (`Salesforce:RecordTypeRefreshInterval`), adds one query on `RecordType` per object that has a record type. Request bodies are gzipped, responses accepted compressed. |
+| Batching and API calls | Every call is one operation on many records (`SelectAsync`, `UpsertAsync`, `DeleteAsync`); there is no Composite request. **One read call per object** per batch of up to `Sync:BatchSize` entities (180, max 200): a query of up to 200 external ids, whose URL fits Salesforce's 16,384-byte limit on a call's URI and headers (long ids split a query further). Then, after the diff, the writes: **one `UpsertAsync` per object** (≤200 records, Salesforce's limit; a batch is at most 200 entities), parents first, with exactly the planned fields, matched by external id; then **one `DeleteAsync`** of the Ids to delete (≤180). So a batch of new Accounts with their Profiles costs 4 calls (two reads, two upserts), an Account-only change 3 (two reads, one upsert: the Profile is read too), and relationships and contacts 3 (their own object and the Account they point at, read; one upsert). A batch of deletes only is its reads plus one delete, and a delete Salesforce has nothing for costs the reads only. See [One call per object](#one-call-per-object) for the cost against Composite requests. The first batch of a pod, and then every 15 minutes (`Salesforce:RecordTypeRefreshInterval`), adds one query on `RecordType` per object that has a record type. Request bodies are gzipped, responses accepted compressed. |
 | Record types | Every synced object has a record type, named by developer name in its sync (`Business` for Account, `Standard` for the others). Its Id comes from one SOQL query on `RecordType` per object, cached in the process for `Salesforce:RecordTypeRefreshInterval` (15 minutes), and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't have (or not active) fails that entity alone before any write (`INVALID_RECORD_TYPE`, retried) and makes the next batch read the record types again. See [Record types](#record-types). |
 | Bad records | A value Salesforce rejects (too long, wrong type, required field emptied, a validation rule) fails only its own unit, by Salesforce's answer for that record (permanent or transient by its code; a required field emptied on an *update* is retried until `MaxRetries`, since the code can also mean the record was deleted meanwhile); an unknown or read-only field is a mapping error and stops the inbox; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a parent not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
@@ -94,10 +94,9 @@ model defines every table in `OnModelCreating` (partial indexes with `HasFilter`
 [Schema and migrations](#schema-and-migrations)); `SchemaTests` checks the model against the real tables column by
 column, and a unit test fails when the model has changed without a migration. Every inbox table has the same columns, so
 they all live on the abstract `InboxRow`; `AccountInboxRow`, `AccountRelationshipInboxRow` and `ContactInboxRow` only
-name their tables (independent entity types, no shared table) and their batch's query and write sizes, and the one
+name their tables (independent entity types, no shared table), and the one
 `InboxRepository<TRow>` (`IRepository<TRow>`, registered as an open generic) serves them all. The table name comes
-from the EF model, the batch's query and write sizes from the row type (`IInboxRow`'s static `MaxValuesPerQuery` and
-`MaxRecordsPerWrite`). What EF can express is LINQ (the rate limiter's usage count and writes); storing an event, the
+from the EF model. What EF can express is LINQ (the rate limiter's usage count and writes); storing an event, the
 claim, every outcome (done, fail, dead-letter, hold) and the end of a lease (of rows released or deferred, and of a
 lost claim attempt's leases) are the SQL texts of `InboxRepository` run unchanged through
 `Database.SqlQueryRaw` / `ExecuteSqlRaw`, their `@name` parameters bound from an anonymous object's properties
@@ -749,17 +748,16 @@ batch); relationships: `Account_Relationship__c` and `Account` (the parents' exi
 call's URI and headers together (414 / 431 over it). The client keeps 4,096 of them for the headers
 (`SalesforceRestClient.HeaderAllowanceBytes`: the bearer token, Host, User-Agent and the rest) and holds every URL it
 sends to the remaining 12,288 bytes (`MaxUrlBytes`), counted as sent, after percent-encoding (`'`, `,` and spaces take 3
-bytes, a non-ASCII character up to 12). `Reader` fills a query with up to the row type's `MaxValuesPerQuery`
-external ids (100 for the built-in objects; at most 2,000, a query's result page, `SalesforceRestClient.MaxQueryValues`)
-while its URL still fits, then starts the next. Short ids give one query per object; 100 ids of 250 characters take 3
+bytes, a non-ASCII character up to 12). `SalesforceCalls.ReadAsync` puts up to 200 external ids in a
+query and halves a query while its URL doesn't fit. Short ids give one query per object; 100 ids of 250 characters take 3
 queries per object. A query that doesn't fit even with one id (an absurd field list) fails the batch with a message
 naming the object and field.
 
 ### One call per object
 
 Every batch is read and diffed first; only then is anything written. Every write is an **sObject Collections upsert**
-by external id with exactly the planned fields, one call per object (≤ the row type's `MaxRecordsPerWrite`, 180 for the
-built-in objects, under Salesforce's 200; more records of one object take further calls), parents first. Records to
+by external id with exactly the planned fields, one call per object (≤ 200 records, Salesforce's limit; more records of one object
+take further calls), parents first. Records to
 delete go last in one Collections delete by Id ([Deletes](#deletes)).
 
 The calls are `SalesforceCalls` and `SalesforceRestClient`, which know no object by name: a new sync writing, say,
@@ -814,10 +812,8 @@ answer lost: the whole batch is held), deferred if it was rate limited. What ear
 That is safe even though they may have saved their records: every write is matched by external id, so the retry reads
 Salesforce again and writes only what still differs, and those entities end `done` without being written twice.
 
-**`Sync:BatchSize`** is 1 to `Sync:MaxEntitiesPerBatch` entities (default 180; the cap defaults to 200). 180 fills a write call
-(`MaxRecordsPerWrite`, under Salesforce's 200 records), since an entity is one record of an object. The bound comes
-from the read: the built-in row types query 200 external ids at a time (`MaxValuesPerQuery`), and a relationship needs up
-to three ids per entity (itself and two Accounts).
+**`Sync:BatchSize`** is 1 to `Sync:MaxEntitiesPerBatch` entities (default 180; the cap defaults to 200). An entity is one record of
+an object, so a batch's upsert of one object fits one call (Salesforce's 200 records).
 
 ### Record types
 
@@ -980,7 +976,7 @@ same chapters is linked where it is cited):
 |---|---|---|
 | Which call | One **Collections delete by Id** (`DeleteAsync`) per batch, after the batch's upserts | 1–200 records in one call. The batch's read already finds each record's Id by its external id, so no call is spent on looking it up. Last, so children's upserts and deletes both come after their parents' upserts. |
 | `allOrNone` | `false`, in the URL, as on every upsert | One record that can't be deleted fails alone. |
-| Size | ≤ the row type's `MaxRecordsPerWrite` (180) Ids, and the URL checked against the 16,384-byte limit like a query's (200 Ids of 18 characters are about 3,900 bytes) | Same margin as the upserts. |
+| Size | ≤ 200 Ids, and the URL checked against the 16,384-byte limit like a query's (200 Ids of 18 characters are about 3,900 bytes) | Same margin as the upserts. |
 | A record Salesforce doesn't have | No call, `done` | The read decides, as for create or update: never synced, or deleted (in the Recycle Bin, which SOQL doesn't return). |
 | Already deleted at the write | Success | Deleted between the read and the write: what was asked for. |
 | A refusal | The existing interpreter: `Salesforce:PermanentErrorCodes` (now with `DELETE_FAILED`) dead-letter, the rest retry; a lost answer holds the batch (`UNKNOWN_OUTCOME`), and the next read finds the record or not | No error handling of its own. |
@@ -1739,8 +1735,7 @@ passes the connection string.
   a missing parent (below) and add it here, e.g. in `appsettings.json`:
   `"Salesforce": { "ParentMissingMessages": [ "Account not found" ] }` (or `Salesforce__ParentMissingMessages__0`).
   Empty, such a rejection is what its code says (`FIELD_CUSTOM_VALIDATION_EXCEPTION`: permanent, dead-lettered).
-- Startup fails on `Sync` values that can't work (no workers, `BatchSize` outside 1 to `MaxEntitiesPerBatch`, ...), on a row
-  type's limits outside Salesforce's (`MaxValuesPerQuery` 1-2,000, `MaxRecordsPerWrite` 1-200) and on a missing
+- Startup fails on `Sync` values that can't work (no workers, `BatchSize` outside 1 to `MaxEntitiesPerBatch`, ...), and on a missing
   `Salesforce:InstanceUrl`.
 - The mock org was built from Salesforce's documentation. These behaviours are worth confirming in the sandbox:
   - an empty checkbox (`null`) is stored as `false`, and an empty text (`""`) as empty;

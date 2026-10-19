@@ -60,7 +60,10 @@ public sealed class SustainedLoad : DrainBenchmarkBase
         }
     }
 
-    /// <summary>Due entities: count, and how long oldest has been due.</summary>
+    /// <summary>
+    /// Due entities: count, and how long oldest has been due. Also reused as the row shape for the one-number
+    /// diagnostic queries (second column 0), so no extra record is needed.
+    /// </summary>
     private sealed record Queue(long Waiting, double OldestSeconds);
 
     private sealed record Sample(double Second, long Waiting, double OldestWaitSeconds, long Stored);

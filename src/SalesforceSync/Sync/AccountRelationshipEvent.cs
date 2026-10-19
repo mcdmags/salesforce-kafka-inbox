@@ -13,7 +13,6 @@ public sealed record AccountRelationshipEvent(EventMeta? Meta, AccountRelationsh
 {
     public const string Type = "accountRelationship";
 
-    /// <summary>How inbox events of this type are read: entity id + meta.</summary>
     public static readonly EventReader<AccountRelationshipEvent> Reader = new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta);
 }
 

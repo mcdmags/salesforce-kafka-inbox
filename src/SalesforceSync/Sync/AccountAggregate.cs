@@ -53,7 +53,6 @@ public sealed class AccountAggregate
         return true;
     }
 
-    /// <summary>What's wrong with meta (time with offset, type) or snapshots (not both missing, one account), if anything.</summary>
     private static string? ProblemWith(EventMeta? meta, AccountSnapshot? before, AccountSnapshot? after)
     {
         if (meta?.Timestamp() is null)
@@ -79,7 +78,6 @@ public sealed class AccountAggregate
     }
 }
 
-/// <summary>Kafka message: meta + aggregate snapshots before/after change.</summary>
 public sealed record AccountAggregateEvent(EventMeta? Meta, AccountSnapshot? Before, AccountSnapshot? After);
 
 /// <summary>Account in a snapshot: account event's Account + Profile, plus children.</summary>

@@ -59,7 +59,6 @@ public static class SyncServiceCollectionExtensions
             AddKafkaIngest(builder);
         }
 
-        // Inbox -> Salesforce: one engine, one strategy per synced object
         services.AddInboxSync();
         services.AddHostedService<InboxWorkerService>();
 
@@ -148,7 +147,7 @@ public static class SyncServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Salesforce REST client + what engine's Salesforce step needs (record type cache, error classification). Cache's
+    /// Salesforce REST client + what the send steps need (record type cache, error classification). Cache's
     /// shared layer = registered <see cref="Microsoft.Extensions.Caching.Distributed.IDistributedCache"/>, else
     /// in-memory (this process only).
     /// Handler order: gzip -> (auth + primary handler, added by caller); <see cref="AddSalesforceRateLimiting"/>
@@ -159,7 +158,7 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton(TimeProvider.System);
         services.AddDistributedMemoryCache(); // only if no IDistributedCache (Redis) registered
         services.AddHybridCache(); // in process + in IDistributedCache (Redis) shared by pods
-        services.AddSingleton<RecordTypeCache>(); // record type Ids
+        services.AddSingleton<RecordTypeCache>();
         services.AddSingleton<SalesforceErrors>();
         services.AddTransient<GzipRequestHandler>();
 
@@ -177,9 +176,8 @@ public static class SyncServiceCollectionExtensions
     /// <summary>
     /// In-memory rate limiting for the <see cref="AddSalesforceClient"/> client: process pause from Sforce-Limit-Info
     /// and limit errors (<see cref="SalesforceRateLimiter"/>), and <see cref="SalesforceRateLimitHandler"/>, inserted
-    /// outermost whatever else is added, so every attempt waits for a pause: rate limiter -> gzip -> auth. Register
-    /// before worker loops (hosted services start in registration order). <see cref="SalesforceBatchSyncService"/>
-    /// needs it.
+    /// outermost whatever else is added, so every attempt waits for a pause: rate limiter -> gzip -> auth.
+    /// <see cref="SalesforceBatchSyncService"/> needs it.
     /// </summary>
     public static IHttpClientBuilder AddSalesforceRateLimiting(this IHttpClientBuilder salesforce)
     {
@@ -189,14 +187,14 @@ public static class SyncServiceCollectionExtensions
         services.AddTransient<SalesforceRateLimitHandler>();
 
         return salesforce
-            // Call may first wait for a token (RateLimit:MaxWait): timeout covers both
+            // Call may first wait for a pause to end (RateLimit:MaxWait): timeout covers both
             .ConfigureHttpClient((sp, c) => c.Timeout = sp.GetRequiredService<IOptions<SalesforceLimitsOptions>>().Value.RequestTimeout)
             .ConfigureAdditionalHttpMessageHandlers((handlers, sp) =>
                 handlers.Insert(0, sp.GetRequiredService<SalesforceRateLimitHandler>()));
     }
 
     /// <summary>
-    /// Inbox -> Salesforce: DB context, one engine, per synced object its sync (strategy + inbox). Register a new
+    /// Inbox -> Salesforce: DB context, the shared batch flow, per synced object its ingest + sync. Register a new
     /// object's sync here (its <see cref="InboxRow"/> type mapped in <see cref="SyncDbContext"/>, migration creates
     /// its table): consumer stores events its ingest takes from aggregates; worker loops pick it up.
     /// </summary>
@@ -209,40 +207,19 @@ public static class SyncServiceCollectionExtensions
         services.AddTransient<SalesforceCalls>();
         services.AddTransient<SalesforceBatchSyncService>();
 
-        // Synced objects, parents first. Two halves each: ingest (stores aggregate's events in inbox) and sync
-        // (engine sends to Salesforce)
-        AddEntitySync<AccountIngest, AccountSync, AccountInboxRow>(services);
-        AddEntitySync<AccountRelationshipIngest, AccountRelationshipSync, AccountRelationshipInboxRow>(services);
-        AddEntitySync<ContactIngest, ContactSync, ContactInboxRow>(services);
+        // Synced objects, parents first (a pass runs them in this order from its start type)
+        AddEntitySync<AccountIngest, AccountSync>(services);
+        AddEntitySync<AccountRelationshipIngest, AccountRelationshipSync>(services);
+        AddEntitySync<ContactIngest, ContactSync>(services);
         services.AddSingleton<AccountAggregate>();
         return services;
     }
 
-    private static void AddEntitySync<TIngest, TSync, TRow>(IServiceCollection services)
+    private static void AddEntitySync<TIngest, TSync>(IServiceCollection services)
         where TIngest : class, IAggregateIngest
         where TSync : class, IEntitySync
-        where TRow : InboxRow, IInboxRow, new()
     {
-        ValidateLimits<TRow>();
         services.AddSingleton<IAggregateIngest, TIngest>();
         services.AddTransient<IEntitySync, TSync>();
-    }
-
-    /// <summary>Row type's query + write limits are within Salesforce's (<see cref="IInboxRow"/>).</summary>
-    /// <exception cref="InvalidOperationException">One isn't; message names row type + member.</exception>
-    internal static void ValidateLimits<TRow>() where TRow : IInboxRow
-    {
-        if (TRow.MaxValuesPerQuery is < 1 or > SalesforceRestClient.MaxQueryValues)
-        {
-            throw new InvalidOperationException($"{typeof(TRow).Name}.{nameof(IInboxRow.MaxValuesPerQuery)} ({TRow.MaxValuesPerQuery}) " +
-                                                $"must be 1 to {SalesforceRestClient.MaxQueryValues} (a query's result page).");
-        }
-
-        if (TRow.MaxRecordsPerWrite is < 1 or > SalesforceRestClient.MaxCollectionRecords)
-        {
-            throw new InvalidOperationException(
-                $"{typeof(TRow).Name}.{nameof(IInboxRow.MaxRecordsPerWrite)} ({TRow.MaxRecordsPerWrite}) " +
-                $"must be 1 to {SalesforceRestClient.MaxCollectionRecords} (records per sObject Collections upsert or delete).");
-        }
     }
 }

@@ -54,7 +54,7 @@ public sealed class AggregateTemplate
         }
         """;
 
-    /// <summary>Example benchmark always used.</summary>
+    /// <summary>Built-in example, used when no template file is given.</summary>
     public static AggregateTemplate Default { get; } = Parse(DefaultJson, BuiltInSource);
 
     private static readonly Lazy<AggregateTemplate> FromEnvironment = new(() =>

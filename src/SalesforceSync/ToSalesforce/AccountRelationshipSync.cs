@@ -28,7 +28,6 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = events.Except(deletes).ToList();
 
-        // Upsert needs both Account keys + record type
         foreach (var e in upserts.Where(e => string.IsNullOrWhiteSpace(e.Event.AccountRelationship?.AccountExternalId)
                                              || string.IsNullOrWhiteSpace(e.Event.AccountRelationship.RelatedAccountExternalId)))
         {
@@ -47,7 +46,6 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
             upserts = [];
         }
 
-        // Wanted record per upsert, Salesforce field names
         var wanted = upserts.Select(e =>
         {
             var r = e.Event.AccountRelationship!;

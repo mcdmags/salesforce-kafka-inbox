@@ -1,5 +1,4 @@
 using System.Text.Json.Nodes;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data.Inbox;
@@ -56,59 +55,6 @@ public sealed class SalesforceLimitsTests
 
         result.Failed.Should().BeTrue();
         result.FailureMessage.Should().Contain("API timeout");
-    }
-
-    // ---------- Row type limits ----------
-
-    [Fact]
-    public void Every_registered_row_type_queries_and_writes_within_Salesforces_limits()
-    {
-        // Registering a sync validates its row type's limits
-        var register = () => new ServiceCollection().AddInboxSync();
-
-        register.Should().NotThrow();
-    }
-
-    [Fact]
-    public void A_row_type_may_query_and_write_up_to_Salesforces_limits()
-    {
-        var validate = SyncServiceCollectionExtensions.ValidateLimits<AtTheLimitsRow>;
-
-        validate.Should().NotThrow();
-    }
-
-    [Fact]
-    public void A_row_type_querying_more_values_than_a_result_page_fails_startup()
-    {
-        var validate = SyncServiceCollectionExtensions.ValidateLimits<TooManyValuesRow>;
-
-        validate.Should().Throw<InvalidOperationException>().WithMessage("TooManyValuesRow.MaxValuesPerQuery (2001) must be 1 to 2000*");
-    }
-
-    [Fact]
-    public void A_row_type_writing_no_records_per_upsert_fails_startup()
-    {
-        var validate = SyncServiceCollectionExtensions.ValidateLimits<NoRecordsRow>;
-
-        validate.Should().Throw<InvalidOperationException>().WithMessage("NoRecordsRow.MaxRecordsPerWrite (0) must be 1 to 200*");
-    }
-
-    private sealed class AtTheLimitsRow : IInboxRow
-    {
-        public static int MaxValuesPerQuery => 2_000;
-        public static int MaxRecordsPerWrite => 200;
-    }
-
-    private sealed class TooManyValuesRow : IInboxRow
-    {
-        public static int MaxValuesPerQuery => 2_001;
-        public static int MaxRecordsPerWrite => 200;
-    }
-
-    private sealed class NoRecordsRow : IInboxRow
-    {
-        public static int MaxValuesPerQuery => 100;
-        public static int MaxRecordsPerWrite => 0;
     }
 
     // ---------- REQUEST_LIMIT_EXCEEDED ----------

@@ -13,13 +13,11 @@ public sealed class AggregateChange(EventMeta meta, AccountSnapshot? before, Acc
     /// <summary>Account's external id (same in Before and After).</summary>
     public string AccountKey => (After ?? Before)!.ExternalId!;
 
-    /// <summary>Account gone: After missing, or meta.type deleted.</summary>
     public bool IsDelete => After is null || Meta.IsDelete();
 
     /// <summary>Delete's source: last state the sync saw.</summary>
     public AccountSnapshot DeletedFrom => (Before ?? After)!;
 
-    /// <summary>Entity event's meta: aggregate's time + entity event's type.</summary>
     public EventMeta MetaOf(string type)
     {
         return new EventMeta { Time = Meta.Time, Type = type };

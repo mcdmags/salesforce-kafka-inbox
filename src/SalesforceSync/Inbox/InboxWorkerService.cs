@@ -40,6 +40,7 @@ public sealed class InboxWorkerService(
 
             if (processed == 0)
             {
+                // Jitter so idle loops (and pods) don't poll the inbox in lockstep
                 var jitter = TimeSpan.FromMilliseconds(Random.Shared.Next(0, 500));
                 try
                 {
@@ -53,10 +54,7 @@ public sealed class InboxWorkerService(
         }
     }
 
-    /// <summary>
-    /// One pass: a batch of every registered type, fresh scope. Starts at type <paramref name="rotation"/> mod N so
-    /// loops don't queue behind one type. Benchmarks call it too: same as worker.
-    /// </summary>
+    /// <summary>One pass over every type. Benchmarks call it too, so they measure what the worker does.</summary>
     /// <returns>Inbox rows processed across types (0 = nothing to do).</returns>
     internal static async Task<int> SyncOnceAsync(IServiceScopeFactory scopes, int rotation, CancellationToken ct)
     {

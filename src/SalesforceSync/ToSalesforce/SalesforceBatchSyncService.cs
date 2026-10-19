@@ -43,14 +43,10 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
 
     private readonly SyncOptions _opt = options.Value;
 
-    /// <param name="reader">Reads, validates events.</param>
-    /// <param name="inbox">Type's inbox table.</param>
-    /// <param name="send">Type's handling of valid events.</param>
-    /// <param name="ct">Shutdown.</param>
     /// <returns>Inbox rows processed (0 = nothing to do or no capacity).</returns>
     public async Task<int> SyncBatchAsync<TEvent, TRow>(EventReader<TEvent> reader, IRepository<TRow> inbox, SendStep<TEvent> send,
         CancellationToken ct)
-        where TRow : InboxRow, IInboxRow, new()
+        where TRow : InboxRow
     {
         if (limiter.IsPaused)
         {
@@ -108,7 +104,7 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
             // Request provably not applied by Salesforce (read or write) → retry every entity. Records saved by earlier
             // calls are safe: retry reads them, writes only diffs
             log.LogError(ex, "{Type} batch failed", reader.EntityType);
-            await inbox.FailAllAsync(claim, ex.Message, ct);
+            await inbox.RecordAsync(claim, new BatchOutcomes([], [], [.. claim.Events.Select(e => new FailedEvent(e.EntityId, ex.Message))]), ct);
             return claim.Events.Count;
         }
 

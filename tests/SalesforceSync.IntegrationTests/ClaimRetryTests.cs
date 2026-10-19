@@ -47,6 +47,10 @@ public sealed class ClaimRetryTests(SyncFixture app)
         await check.ExecuteAsync($"DROP SCHEMA {Schema} CASCADE");
     }
 
+    /// <summary>
+    /// Throws after the first commit has already landed, like a connection dropped before the commit's reply, so the
+    /// retry runs on a database where the lost attempt's lease is real.
+    /// </summary>
     private sealed class LoseFirstCommit : DbTransactionInterceptor
     {
         public int Commits { get; private set; }

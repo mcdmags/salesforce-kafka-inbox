@@ -116,7 +116,6 @@ public sealed class AggregateWorkloadTests
         return (string?)e["meta"]!["type"] == "deleted";
     }
 
-    /// <summary>Every entity event of the aggregates, in order, by entity type and key.</summary>
     private static IEnumerable<((string Type, string Key) Key, JsonObject Event)> Split(AggregateWorkload workload)
     {
         foreach (var aggregate in workload.Aggregates)

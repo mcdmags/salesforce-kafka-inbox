@@ -108,7 +108,6 @@ public sealed class LeaseTests(SyncFixture app)
         await inbox.RecordAsync(claim, new BatchOutcomes(claimed, [failed], [failed]), CancellationToken.None);
         await inbox.ReleaseAsync(claim, new Release(TimeSpan.FromMinutes(10), "x"), CancellationToken.None);
         await inbox.ReleaseAsync(claim, new Release(TimeSpan.FromHours(1)), CancellationToken.None);
-        await inbox.FailAllAsync(claim, "x", CancellationToken.None);
 
         (await app.GetInboxAsync(acct)).Should().Be((1L, "done"));
         (await app.GetInboxRowAsync(acct)).Should().Be(rowBefore, "the row is exactly as the worker that took over left it");

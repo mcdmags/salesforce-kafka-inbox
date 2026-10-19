@@ -58,7 +58,7 @@ public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
             }
 
             var wait = (remaining > MinWait ? remaining : MinWait)
-                       + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100)); // jitter
+                       + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100)); // jitter: waiting workers don't all call at once when the pause ends
             if (_clock.GetUtcNow() + wait > deadline)
             {
                 throw new RateLimitedException(wait);
@@ -113,7 +113,6 @@ public sealed class SalesforceRateLimiter : ISalesforceRateLimiter
         }
     }
 
-    /// <param name="info">What Salesforce last reported in Sforce-Limit-Info.</param>
     internal ThrottleDecision Decide(SalesforceLimitInfo info)
     {
         return info.DailyRatio >= _opt.DailyHardRatio

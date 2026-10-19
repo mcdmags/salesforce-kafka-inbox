@@ -27,23 +27,13 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
         DataPath = options.Value.DataPath;
     }
 
-    /// <summary>Path prefix of every call (<see cref="SalesforceOptions.DataPath"/>).</summary>
     public string DataPath { get; }
 
-    // Limits below are Salesforce's call-saving ceilings: engine packs calls up to them; client refuses anything over
+    // Limits below are Salesforce's call-saving ceilings: callers pack calls up to them; client refuses anything over
     // before sending (rejected call still counts).
 
-    /// <summary>
-    /// sObject Collections: max records per create/update/upsert; ceiling of a row type's
-    /// <c>IInboxRow.MaxRecordsPerWrite</c>.
-    /// </summary>
+    /// <summary>sObject Collections: max records per create/update/upsert/delete.</summary>
     public const int MaxCollectionRecords = 200;
-
-    /// <summary>
-    /// Max external ids per query for records to fit one page: page ≤ 2,000 records, each external id matches ≤ 1
-    /// record. Ceiling of a row type's <c>IInboxRow.MaxValuesPerQuery</c>.
-    /// </summary>
-    public const int MaxQueryValues = 2_000;
 
     /// <summary>
     /// REST call URI + headers ≤ 16,384 bytes: over → 414 URI Too Long (URI alone) or 431 Request Header Fields Too
@@ -66,14 +56,12 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
-    /// <summary>Runs one SOQL query: all rows.</summary>
     /// <exception cref="ArgumentException">Query URL longer than <see cref="MaxUrlBytes"/>.</exception>
     public Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct)
     {
         return SelectAsync<JsonElement>(soql, ct);
     }
 
-    /// <summary>Runs one SOQL query: all rows, each read into a <typeparamref name="TRow"/>.</summary>
     /// <exception cref="ArgumentException">Query URL longer than <see cref="MaxUrlBytes"/>.</exception>
     public async Task<List<TRow>> SelectAsync<TRow>(string soql, CancellationToken ct)
     {
@@ -82,8 +70,8 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
         var rows = page.Records;
 
         // Unique external id lookups → ≤ 1 row per id, far below page size (2,000): loop normally never makes a second
-        // call. Follows nextRecordsUrl anyway: silently dropped rows are worse than an extra call (engine would treat an
-        // existing record as missing → duplicate)
+        // call. Follows nextRecordsUrl anyway: silently dropped rows are worse than an extra call (an existing record
+        // would look missing → duplicate)
         for (var next = page.NextRecordsUrl; next is not null;)
         {
             var more = await GetPageAsync<TRow>(EnsureFits(next), ct);
@@ -132,7 +120,6 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
         return SendAsync(new HttpRequestMessage(HttpMethod.Delete, EnsureFits(url)), ct);
     }
 
-    // Call answering with a result per record (both Collections calls)
     private async Task<IReadOnlyList<RecordResult>> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
         using (request)
@@ -156,13 +143,11 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
         }
     }
 
-    /// <summary>URL a query is sent with.</summary>
     internal string QueryUrl(string soql)
     {
         return QueryUrl(DataPath, soql);
     }
 
-    /// <summary>Query URL under <paramref name="dataPath"/> (<see cref="SalesforceOptions.DataPath"/>).</summary>
     internal static string QueryUrl(string dataPath, string soql)
     {
         return $"{dataPath}/query?q={Uri.EscapeDataString(soql)}";
@@ -205,8 +190,6 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
 
         throw new SalesforceResponseException(res.StatusCode, await res.Content.ReadAsStringAsync(ct));
     }
-
-    // ---------- DTOs ----------
 
     private sealed record QueryPage<TRow>(List<TRow> Records, string? NextRecordsUrl);
 }

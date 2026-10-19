@@ -2,7 +2,6 @@ using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
 
-/// <summary>Relationships between two Accounts, from an inbox event to the mock org.</summary>
 public sealed class AccountRelationshipSyncTests
 {
     private readonly SyncHarness _sync = new();

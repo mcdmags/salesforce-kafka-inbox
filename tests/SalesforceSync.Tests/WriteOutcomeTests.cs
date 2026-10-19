@@ -135,7 +135,6 @@ public sealed class WriteOutcomeTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            // Write = collections call (upsert or delete); read = query
             var path = request.RequestUri!.AbsolutePath;
             var isWrite = path.Contains("/composite/sobjects", StringComparison.Ordinal);
             return (isWrite ? !FailWrites : !FailReads) || (!isWrite && !path.EndsWith("/query", StringComparison.Ordinal))

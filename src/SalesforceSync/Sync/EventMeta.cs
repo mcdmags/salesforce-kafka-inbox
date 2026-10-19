@@ -35,7 +35,6 @@ public sealed partial class EventMeta
                || "updated".Equals(Type, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary><see cref="Type"/> is deleted: entity to be deleted.</summary>
     public bool IsDelete()
     {
         return "deleted".Equals(Type, StringComparison.OrdinalIgnoreCase);

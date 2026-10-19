@@ -138,8 +138,8 @@ public static class FakeSchema
         };
 
     /// <summary>
-    /// Every object's record types: one per synced object, with the developer name its sObject class declares, plus
-    /// Master (which every object has).
+    /// Every object's record types: one per synced object, with the developer name the sync asks for, plus Master
+    /// (which every object has).
     /// </summary>
     public static readonly IReadOnlyDictionary<string, IReadOnlyList<FakeRecordType>> RecordTypes =
         new Dictionary<string, IReadOnlyList<FakeRecordType>>(StringComparer.OrdinalIgnoreCase)

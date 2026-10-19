@@ -13,7 +13,6 @@ public sealed record ContactEvent(EventMeta? Meta, ContactPayload? Contact)
 {
     public const string Type = "contact";
 
-    /// <summary>How inbox events of this type are read: entity id + meta.</summary>
     public static readonly EventReader<ContactEvent> Reader = new(Type, e => e.Contact?.ExternalId, e => e.Meta);
 }
 

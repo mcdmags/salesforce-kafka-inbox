@@ -168,14 +168,12 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         return inbox.AddAsync(entity, SyncFixture.TimeOf(e), e.ToJsonString(), CancellationToken.None);
     }
 
-    /// <summary>The test's schema, migrated, with no rows.</summary>
     private async Task<NpgsqlDataSource> SchemaAsync()
     {
         (var db, _contexts) = await app.MigratedSchemaAsync(Schema);
         return db;
     }
 
-    /// <summary>The worker's repository; a hold short enough to see it end.</summary>
     private InboxRepository<AccountInboxRow> Inbox()
     {
         return new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions { UnknownOutcomeHold = TimeSpan.FromMilliseconds(200) }));
@@ -209,11 +207,9 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         await conn.ExecuteAsync(sql, args);
     }
 
-    /// <summary>An inbox row as read, its payload as stored.</summary>
     private sealed record StoredRow(string Payload, string Status, int AttemptCount, string? Error,
         DateTimeOffset EventTime, DateTimeOffset LastUpdated);
 
-    /// <summary>An inbox row as these tests compare it; the version is read from its payload.</summary>
     private sealed record Row(long Version, string Status, int AttemptCount, string? Error,
         DateTimeOffset EventTime, DateTimeOffset LastUpdated);
 }

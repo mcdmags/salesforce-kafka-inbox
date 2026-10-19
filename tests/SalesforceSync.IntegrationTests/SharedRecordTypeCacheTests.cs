@@ -23,7 +23,8 @@ public sealed class SharedRecordTypeCacheTests(MultiPodFixture app)
         var redis = services.GetRequiredService<IDistributedCache>();
         redis.Should().BeAssignableTo<RedisCache>("ConnectionStrings:redis is set");
 
-        // A pod that has read nothing itself: everything it needs is in Redis, so the org is not asked
+        // A fresh HybridCache over the same Redis stands in for a new pod: its memory layer is empty, so what it finds
+        // comes from Redis, and the org is not asked
         var queriesBefore = (await app.GetStatsAsync()).GetProperty("recordTypeQueries").GetInt64();
         var newPodServices = new ServiceCollection();
         newPodServices.AddSingleton(redis);

@@ -15,7 +15,7 @@ namespace SalesforceSync.FakeSalesforce;
 /// mimics Salesforce serializing writes to the same rows.
 /// <para>
 /// This class is the org's surface and its lock. The parts are their own classes: <see cref="FakeRecords"/> (data and
-/// write history), <see cref="FakeSoql"/> (queries), <see cref="FakeCollectionWriter"/> (upserts),
+/// write history), <see cref="FakeSoql"/> (queries), <see cref="FakeCollectionWriter"/> (upserts and deletes),
 /// <see cref="FakeFaults"/> (injected failures)
 /// and <see cref="FakeCounters"/> (stats).
 /// </para>
@@ -62,8 +62,6 @@ public sealed partial class FakeSalesforceStore
             AccessToken = $"{FirstAccessToken}-{++_tokens}";
         }
     }
-
-    // ---------- Limits and stats ----------
 
     public long CountApiCall()
     {
@@ -116,8 +114,6 @@ public sealed partial class FakeSalesforceStore
             AccessToken = FirstAccessToken;
         }
     }
-
-    // ---------- Inspection and manipulation by tests ----------
 
     /// <summary>Returns a copy of the record with the given external id, or null.</summary>
     public JsonObject? FindByExternalId(string sobject, string externalId, string extField = ExternalIdField)
@@ -217,8 +213,6 @@ public sealed partial class FakeSalesforceStore
         }
     }
 
-    // ---------- Query ----------
-
     /// <summary>Records per query page, at most (REST API Developer Guide, "Query": up to 2,000 at a time).</summary>
     public const int QueryPageSize = 2_000;
 
@@ -306,8 +300,6 @@ public sealed partial class FakeSalesforceStore
 
     [GeneratedRegex(@"^(?<base>/services/data/v\d+\.\d+)/query(?:/(?<locator>[^/]+))?/?$", RegexOptions.IgnoreCase)]
     private static partial Regex QueryUrl();
-
-    // ---------- sObject Collections upsert ----------
 
     /// <summary>
     /// sObject Collections upsert (<c>PATCH /composite/sobjects/{SObject}/{ExternalIdField}</c>): one API call of its own,

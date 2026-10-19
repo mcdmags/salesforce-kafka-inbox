@@ -6,7 +6,6 @@ namespace SalesforceSync.ToSalesforce;
 /// </summary>
 public interface IEntitySync
 {
-    /// <summary>Type name, e.g. "account".</summary>
     string EntityType { get; }
 
     /// <returns>Inbox rows processed (0 = nothing to do).</returns>

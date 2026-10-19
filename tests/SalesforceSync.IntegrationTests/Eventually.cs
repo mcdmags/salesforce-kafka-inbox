@@ -1,6 +1,5 @@
 namespace SalesforceSync.IntegrationTests;
 
-/// <summary>Polling helper for asserting on an asynchronous pipeline.</summary>
 public static class Eventually
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(60);

@@ -8,14 +8,11 @@ using SalesforceSync.Data.Inbox;
 namespace SalesforceSync.Data;
 
 /// <summary>
-/// The sync's tables, defined here and created by EF migrations (Data/Migrations, applied at startup by
-/// <see cref="SyncSchema"/>): one inbox table per synced object type. The claim's statements are raw SQL
-/// (<c>InboxRepository</c>) run through <c>Database.SqlQueryRaw</c>: FOR UPDATE SKIP LOCKED and UPDATE ... RETURNING
-/// have no LINQ form.
+/// One inbox table per synced object type, created by EF migrations (<see cref="SyncSchema"/>). Statements are raw
+/// SQL (<c>InboxRepository</c>): FOR UPDATE SKIP LOCKED and UPDATE ... RETURNING have no LINQ form.
 /// <para>
-/// To sync another object: add a subclass of <see cref="InboxRow"/> with its limits (<see cref="IInboxRow"/>) and its
-/// <see cref="ConfigureInbox{TRow}"/> line in <see cref="OnModelCreating"/>, then a migration
-/// (<c>dotnet ef migrations add ...</c>) creates the table.
+/// New object: a subclass of <see cref="InboxRow"/>, its <see cref="ConfigureInbox{TRow}"/> line below, then
+/// <c>dotnet ef migrations add ...</c>.
 /// </para>
 /// </summary>
 public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbContext(options)
@@ -54,45 +51,35 @@ public partial class SyncDbContext(DbContextOptions<SyncDbContext> options) : Db
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        // The base is only shared code: without this, EF would make it an entity and map the rows as one hierarchy
+        // Else EF maps the subclasses as one hierarchy in one table
         modelBuilder.Ignore<InboxRow>();
         modelBuilder.Entity<AccountInboxRow>(entity => ConfigureInbox(entity, "sf_account_inbox"));
         modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
         modelBuilder.Entity<ContactInboxRow>(entity => ConfigureInbox(entity, "sf_contact_inbox"));
 
-        // Every column is its property's name in snake_case (EntityId -> entity_id)
+        // snake_case columns: EntityId -> entity_id
         foreach (var property in modelBuilder.Model.GetEntityTypes().SelectMany(e => e.GetProperties()))
         {
             property.SetColumnName(WordStart().Replace(property.Name, "_$1").ToLowerInvariant());
         }
     }
 
-    /// <summary>An upper-case letter that starts a word inside a name.</summary>
     [GeneratedRegex("(?<=[a-z0-9])([A-Z])", RegexOptions.CultureInvariant)]
     private static partial Regex WordStart();
 
-    /// <summary>
-    /// An inbox table: one row per entity, holding its newest Kafka event, what became of it and its sync state
-    /// (due when, which is also the lease end); key is the entity id. Columns with a database default are left out of
-    /// an insert while they hold the CLR default, so a new row gets the database's clock and 'pending'.
-    /// </summary>
     private static void ConfigureInbox<TRow>(EntityTypeBuilder<TRow> entity, string table) where TRow : InboxRow
     {
         entity.ToTable(table);
-        // Hot table: vacuumed after 2% (plus 1,000 rows) is dead instead of the default 20%. Every event rewrites its
-        // entity's row, every claim and outcome updates it again, and claims read the front of the ready index, where
-        // the dead index entries from those updates collect. The default lets that grow with the table.
+        // Vacuum at 2% dead, not the default 20%: every event, claim and outcome rewrites a row, and the claim reads the
+        // front of the ready index, where those dead entries collect and slow it down as the table grows.
         entity.HasStorageParameter("autovacuum_vacuum_scale_factor", 0.02);
         entity.HasStorageParameter("autovacuum_vacuum_threshold", 1000);
-        // Entity id is the key: one row per entity (InboxRepository.AddAsync's on conflict), so no surrogate id and no
-        // second unique index. Every claim and outcome finds its rows by it.
         entity.HasKey(r => r.EntityId).HasName($"{table}_pkey");
         entity.Property(r => r.Payload).HasColumnType("jsonb");
-        // No default: every insert sets it from the event (InboxRepository.AddAsync)
         entity.Property(r => r.EventTime).IsRequired();
         entity.Property(r => r.AttemptCount).HasDefaultValue(0);
         entity.Property(r => r.LastUpdated).HasDefaultValueSql("now()");
-        // The claim (InboxRepository.ClaimAsync): the due rows, the longest-waiting first. Idle rows (null) are not in the index.
+        // Partial: done and dead rows (null) are most of the table and never claimed.
         entity.HasIndex(r => r.NextAttemptAt).HasDatabaseName($"{table}_ready").HasFilter("next_attempt_at is not null");
     }
 }

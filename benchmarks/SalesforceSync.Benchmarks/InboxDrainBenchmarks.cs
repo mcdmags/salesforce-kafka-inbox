@@ -183,7 +183,6 @@ public abstract class DrainBenchmarkBase
         }
     }
 
-    /// <summary>One aggregate: every entity type stores its events.</summary>
     protected async Task IngestAsync(AggregateChange change, CancellationToken ct)
     {
         foreach (var ingest in _ingests)
@@ -339,7 +338,7 @@ public abstract class DrainBenchmarkBase
 
     private sealed record EntityEvent(string EntityType, string Json);
 
-    // Projections need no inbox
+    // Only Project is called, which never touches the inbox, so a null inbox is safe
     private static readonly AccountIngest AccountIngest = new(null!);
     private static readonly AccountRelationshipIngest RelationshipIngest = new(null!);
     private static readonly ContactIngest ContactIngest = new(null!);
@@ -462,7 +461,6 @@ public abstract class DrainBenchmarkBase
         }
     }
 
-    /// <summary>Inbox row's entity and event time, as verification reads them.</summary>
     private sealed record StoredEvent(string EntityId, DateTimeOffset EventTime);
 }
 

@@ -16,7 +16,6 @@ internal sealed class FakeRecords
 
     public int Count => _tables.Values.Sum(t => t.Count);
 
-    /// <summary>The object's records by Id.</summary>
     public Dictionary<string, JsonObject> Table(string sobject)
     {
         if (!_tables.TryGetValue(sobject, out var t))
@@ -118,7 +117,6 @@ internal sealed class FakeRecords
         _deleted.Add(id);
     }
 
-    /// <summary>Whether the record with this Id was deleted (is in the Recycle Bin).</summary>
     public bool IsDeleted(string id)
     {
         return _deleted.Contains(id);

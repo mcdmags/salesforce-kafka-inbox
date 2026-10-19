@@ -170,8 +170,7 @@ public sealed class SalesforceBatchSyncServiceTests
 
         (await RunAsync((_, _) => throw new HttpRequestException("refused"))).Should().Be(2);
 
-        _inbox.FailedAll.Should().Equal("refused");
-        _inbox.Failed.Select(f => f.EntityId).Should().BeEquivalentTo("ACC-1", "ACC-2");
+        _inbox.Failed.Should().BeEquivalentTo([new FailedEvent("ACC-1", "refused"), new FailedEvent("ACC-2", "refused")]);
     }
 
     [Fact]
@@ -213,6 +212,5 @@ public sealed class SalesforceBatchSyncServiceTests
 
         await run.Should().ThrowAsync<OperationCanceledException>();
         _inbox.Failed.Should().BeEmpty("the lease expires and the row is claimed again");
-        _inbox.FailedAll.Should().BeEmpty();
     }
 }

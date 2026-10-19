@@ -30,7 +30,6 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = events.Except(deletes).ToList();
 
-        // Upsert needs account in event + both record types
         foreach (var e in upserts.Where(e => e.Event.Account is null))
         {
             SalesforceCalls.Fail(failures, e.EntityId, SalesforceErrors.InvalidEvent, "account is required", permanent: true);
@@ -49,7 +48,6 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
             upserts = [];
         }
 
-        // Wanted record per upsert, Salesforce field names
         var wantedAccounts = upserts.Select(e => (e.EntityId, Fields: AccountFields(e.Event.Account!, accountType!))).ToList();
         var wantedProfiles = upserts.Where(e => e.Event.Account!.Profile is not null) // no profile in event: leave Salesforce's
             .Select(e => (e.EntityId, ExternalId: ProfileKey(e), Fields: ProfileFields(e, profileType!))).ToList();
@@ -79,9 +77,6 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         return failures;
     }
 
-    // ---- mapping: event -> Salesforce fields ----
-
-    /// <summary>Profile's own key, else Account's.</summary>
     private static string ProfileKey(ReadEvent<AccountEvent> e)
     {
         return e.Event.Account?.Profile?.ExternalId ?? e.EntityId;
@@ -119,7 +114,7 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         return new Dictionary<string, object?>
         {
             ["Name"] = p.Name,
-            ["AccountId__c"] = e.EntityId, // Profile belongs to event's Account
+            ["AccountId__c"] = e.EntityId,
             ["Tier__c"] = p.Tier,
             ["Score__c"] = p.Score,
             ["Discount__c"] = p.DiscountPercent,

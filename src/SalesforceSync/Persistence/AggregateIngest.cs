@@ -12,7 +12,7 @@ internal static class InboxIngest
     /// <returns>One problem per never-syncable (skipped) event; empty if all stored.</returns>
     public static async Task<IReadOnlyList<string>> StoreAsync<TEvent, TRow>(IEnumerable<TEvent> events, EventReader<TEvent> reader,
         IRepository<TRow> inbox, CancellationToken ct)
-        where TRow : InboxRow, IInboxRow, new()
+        where TRow : InboxRow
     {
         List<string> problems = [];
         foreach (var json in events.Select(AggregateProjection.Serialize))

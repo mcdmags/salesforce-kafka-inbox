@@ -50,7 +50,7 @@ internal sealed class SyncHarness
     }
 
     private static async Task<int> SyncAsync<TRow>(IEntitySync sync, InMemoryInbox<TRow> inbox, string key, DateTimeOffset time, string json)
-        where TRow : InboxRow, IInboxRow, new()
+        where TRow : InboxRow
     {
         await inbox.AddAsync(key, time, json, CancellationToken.None);
         return await sync.SyncBatchAsync(CancellationToken.None);

@@ -130,6 +130,19 @@ public sealed class SalesforceCallsTests
     }
 
     [Fact]
+    public async Task A_read_of_long_external_ids_splits_the_query_to_fit_the_URL_limit()
+    {
+        var ids = Enumerable.Range(0, 200).Select(i => $"ACC-{i:D4}-{new string('x', 200)}").ToList();
+        await CreateAsync(ids[0], ids[199]);
+        var before = _org.GetStats().Queries;
+
+        var found = await _calls.ReadAsync("Account", ["Name"], ids, Ct);
+
+        found.Keys.Should().BeEquivalentTo([ids[0], ids[199]]);
+        (_org.GetStats().Queries - before).Should().BeGreaterThan(1, "200 ids of 210 characters don't fit one URL");
+    }
+
+    [Fact]
     public async Task A_read_of_a_field_the_org_lacks_is_a_mapping_error()
     {
         var read = () => _calls.ReadAsync("Account", ["Bogus__c"], ["A1"], Ct);

@@ -61,7 +61,6 @@ public sealed class SalesforceRateLimiterTests
         return new SalesforceRateLimiter(clock, Options.Create(options ?? new RateLimitOptions()), NullLogger<SalesforceRateLimiter>.Instance);
     }
 
-    /// <summary>A clock that moves only when told to.</summary>
     private sealed class ManualClock(DateTimeOffset start) : TimeProvider
     {
         private DateTimeOffset _now = start;

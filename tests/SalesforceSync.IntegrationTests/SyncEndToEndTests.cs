@@ -205,7 +205,6 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         await app.WaitUntilConsumedAsync(acct);
         (await app.GetInboxAsync(acct)).Should().Be((5L, "done"), "an older event doesn't overwrite the row");
 
-        // v3 never reached Salesforce
         var account = await app.GetRecordAsync("Account", acct);
         account.Should().NotBeNull();
         ((string?)account!["Rating"]).Should().Be("Hot");
@@ -399,7 +398,6 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         ((long)transport!["acceptGzip"]!).Should().BePositive("the worker accepts compressed responses");
     }
 
-    /// <summary>A copy of the event with another meta.type (null = none).</summary>
     private static JsonObject WithType(JsonObject evt, string? type)
     {
         var copy = (JsonObject)evt.DeepClone();

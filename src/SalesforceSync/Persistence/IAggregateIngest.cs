@@ -8,7 +8,6 @@ namespace SalesforceSync.Persistence;
 /// </summary>
 public interface IAggregateIngest
 {
-    /// <summary>Type name, e.g. "account".</summary>
     string EntityType { get; }
 
     /// <summary>

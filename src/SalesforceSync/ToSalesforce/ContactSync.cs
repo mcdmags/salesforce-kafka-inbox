@@ -27,7 +27,6 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = events.Except(deletes).ToList();
 
-        // Upsert needs Account key + record type
         foreach (var e in upserts.Where(e => string.IsNullOrWhiteSpace(e.Event.Contact?.AccountExternalId)))
         {
             SalesforceCalls.Fail(failures, e.EntityId, SalesforceErrors.InvalidEvent, "accountExternalId is required", permanent: true);
@@ -45,7 +44,6 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
             upserts = [];
         }
 
-        // Wanted record per upsert, Salesforce field names
         var wanted = upserts.Select(e =>
         {
             var c = e.Event.Contact!;

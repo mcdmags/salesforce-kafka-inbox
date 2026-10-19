@@ -2,7 +2,6 @@ using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
 
-/// <summary>Contacts of an Account, from an inbox event to the mock org.</summary>
 public sealed class ContactSyncTests
 {
     private readonly SyncHarness _sync = new();

@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
-/// What the sync needs from Salesforce, one method per API call, each taking many records. The engine depends on this
+/// What the sync needs from Salesforce, one method per API call, each taking many records. The sync depends on this
 /// rather than on <see cref="SalesforceRestClient"/> so it can run without HTTP, and another transport could replace
 /// the REST one.
 /// <para>

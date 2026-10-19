@@ -220,7 +220,6 @@ public sealed class AggregateWorkload
         return (wrong, check.Regressions);
     }
 
-    /// <summary>One <see cref="Check"/> run over the org.</summary>
     private sealed class OrgCheck(FakeSalesforceStore org)
     {
         private const string RelationshipObject = "Account_Relationship__c";

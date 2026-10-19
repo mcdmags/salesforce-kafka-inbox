@@ -13,7 +13,6 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// </summary>
 public sealed class RecordTypeCache(HybridCache cache, ISalesforceRestClient salesforce, IOptions<SalesforceOptions> options)
 {
-    /// <summary>The field that holds a record's record type.</summary>
     public const string RecordTypeIdField = "RecordTypeId";
 
     /// <summary>A row of the RecordType query: a record type of an object, as the org has it.</summary>

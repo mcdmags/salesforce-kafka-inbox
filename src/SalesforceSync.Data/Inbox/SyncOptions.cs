@@ -16,16 +16,16 @@ public sealed class SyncOptions
 
     /// <summary>
     /// Entities per batch, 1 to <see cref="MaxEntitiesPerBatch"/>. A batch is read with one query per object (up to
-    /// 200 external ids each; more or very long ids split the read over more queries) and written with one upsert per
-    /// object and one delete.
+    /// 200 external ids each; more or very long ids split the read over more queries) and written with one upsert and
+    /// one delete call per object.
     /// </summary>
     public int BatchSize { get; set; } = 180;
 
     /// <summary>
-    /// Most entities one batch may hold; the ceiling of <see cref="BatchSize"/>. Not a Salesforce limit: with the row
-    /// types' 200 external ids per query, 200 entities are read with one query per object while an entity needs one id
-    /// of an object (a relationship needs up to 3: itself and two Accounts). Raise it to batch more entities per claim:
-    /// ids then split the read over more queries (not a failure), and a write call takes the row types' 180 records.
+    /// Most entities one batch may hold; the ceiling of <see cref="BatchSize"/>. Not a Salesforce limit: at 200 ids per
+    /// query and 200 records per write call, 200 entities take one call per object when each needs one record of it (a
+    /// relationship reads up to 3 ids: itself and two Accounts). Raising it is safe: reads and writes split into more
+    /// calls of 200.
     /// </summary>
     public int MaxEntitiesPerBatch { get; set; } = 200;
 

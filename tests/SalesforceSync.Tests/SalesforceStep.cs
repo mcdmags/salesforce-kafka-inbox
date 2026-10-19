@@ -23,16 +23,13 @@ internal static class SalesforceStep
     // What appsettings.json supplies in the running worker; tests spell out the URLs these make
     private static readonly SalesforceOptions Org = new() { BaseApiPath = "/services/data", ApiVersion = "v62.0" };
 
-    /// <summary>Client on <paramref name="http"/> with default API path and version.</summary>
     public static SalesforceRestClient Client(HttpClient http)
     {
         return new SalesforceRestClient(http, Options.Create(Org));
     }
 
-    /// <summary>REST call path with default options.</summary>
     public static readonly string DataPath = Org.DataPath;
 
-    /// <summary>Salesforce calls on <paramref name="http"/>: no database, own record type cache.</summary>
     public static SalesforceCalls Calls(HttpClient http, IOptions<SalesforceOptions> options)
     {
         return new(Client(http), RecordTypes(http), new SalesforceErrors(options));

@@ -34,8 +34,8 @@ public sealed class SalesforceRateLimitHandler(
         }
         catch (Exception ex)
         {
-            // Nothing has been sent yet: whatever went wrong here (Postgres, the wait being cancelled) is not a
-            // write whose outcome is unknown
+            // Nothing has been sent yet: a pause outlasting MaxWait or a cancelled wait is not a write whose outcome
+            // is unknown
             WriteOutcome.MarkNotSent(ex);
             throw;
         }

@@ -29,6 +29,7 @@ public sealed class UnknownOutcomeTests(SyncFixture app)
         // A newer event arrives during the hold, overwrites the row and waits, though nobody is working on the account
         await app.PublishAsync(acct, 2, new JsonObject { ["name"] = "v2", ["description"] = "v2" }, new JsonObject { ["score"] = 2 });
         await Eventually.ValueAsync(() => app.GetInboxRowAsync(acct), row => row?.Version == 2, "v2 to be stored");
+        // Give the workers time to claim it, which they must not do while the hold lasts
         await Task.Delay(TimeSpan.FromSeconds(1.5));
         var during = (await app.GetInboxRowAsync(acct))!;
         DateTime.UtcNow.Should().BeBefore(held.NextAttemptAt!.Value, "the check must fall inside the hold");

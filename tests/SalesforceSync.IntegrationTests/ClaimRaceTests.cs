@@ -192,7 +192,6 @@ public sealed class ClaimRaceTests(SyncFixture app)
         (await race.DueAsync()).Should().BeTrue("v2 is due now, not when v1's lease would have ended");
     }
 
-    /// <summary>Test's schema, migrated, no rows, with a race in it.</summary>
     private async Task<Race> StartAsync()
     {
         var (db, contexts) = await app.MigratedSchemaAsync(Schema);
@@ -218,13 +217,11 @@ public sealed class ClaimRaceTests(SyncFixture app)
             return consumer.StoreAsync(Table, Entity, SyncFixture.TimeOf(e), e.ToJsonString(), tx);
         }
 
-        /// <summary>event_time version N is stored with.</summary>
         public DateTimeOffset TimeOf(int version)
         {
             return SyncFixture.BaseTime.AddMilliseconds(version);
         }
 
-        /// <summary>Entity's inbox row: event_time, status, attempts, error.</summary>
         public async Task<(DateTimeOffset EventTime, string Status, int AttemptCount, string? Error)> RowAsync()
         {
             var (time, status, attempts, error) = await observer.QuerySingleAsync<(DateTime, string, int, string?)>(

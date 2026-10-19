@@ -1,12 +1,14 @@
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// <c>InboxRepository</c>'s statements for one inbox table, copied so a test can play a worker by hand on own
-/// connections (claim without committing, record on a finished entity, ...). Tests running the repository itself keep
-/// copies true.
+/// <c>InboxRepository</c>'s statements for one inbox table, copied so a test can play a worker by hand on its own
+/// connections (claim without committing, record on a finished entity, ...). Keep them in step with the repository;
+/// the tests that run the repository itself catch a copy that has drifted.
 /// </summary>
 public sealed class InboxStatements
 {
+    // An outcome lands only while the row still holds the claimed event: if a newer event overwrote it meanwhile,
+    // the outcome is for an event that is gone and must not touch the newer one
     private const string StillClaimed = """
         i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL
           AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times) AS c(entity_id, event_time) WHERE c.entity_id = i.entity_id AND c.event_time = i.event_time)
@@ -15,6 +17,8 @@ public sealed class InboxStatements
     private InboxStatements(string table)
     {
         Table = table;
+        // Same time overwrites only a row not yet done (a done row is in Salesforce already). coalesce keeps a running
+        // lease, so a second worker can't claim the entity while the first is still writing it
         Store = $"""
             INSERT INTO {table} AS i (entity_id, event_time, payload, next_attempt_at)
             VALUES (@entityId, @eventTime, @payload::jsonb, now())
@@ -25,6 +29,7 @@ public sealed class InboxStatements
             WHERE i.event_time < excluded.event_time
                OR (i.event_time = excluded.event_time AND (i.next_attempt_at IS NOT NULL OR i.last_error IS NOT NULL))
             """;
+        // SKIP LOCKED lets workers claim side by side without waiting on each other's rows
         Claim = $"""
             UPDATE {table} i
             SET next_attempt_at = now() + @lease, last_updated = now()
