@@ -407,6 +407,44 @@ now read by its index (87,641 index scans, 8 sequential), and the queue was empt
 truncate the audit for every iteration, so there it grew only to a few thousand rows, but it still cost them a few percent:
 the numbers of earlier runs in this file are somewhat pessimistic.
 
+## Latest run: plain-crud with ingest and sync as separate classes, at 36bb0e7
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at 36bb0e7, on 2026-10-19, against the
+[run before it](#latest-run-plain-crud-with-the-claim-audit-fixed-at-aa3d6fd). Since then only the code layout changed:
+each synced object has an ingest (`Persistence/`, `IAggregateIngest`) and a sync (`ToSalesforce/`, `IEntitySync`) that
+implement their interfaces directly. The engine and the SQL are the same; the database was recreated.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures, and no iteration timed out.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency), and streaming
+(50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 115.12 ms | 799.14 ms | 24.25 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 1 | 1,000 | 2,113 | 456.28 ms | 2,643.92 ms | 79.67 MB | 69 | 23 | 1.91 | 3,254 | 1141 |
+| 1 | 3 | 100 | 990 | 67.77 ms | 367.14 ms | 24.8 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 212.33 ms | 859.08 ms | 79.56 MB | 68 | 21 | 1.93 | 3,230 | 1117 |
+| 4 | 1 | 100 | 990 | 69.86 ms | 280.84 ms | 25.96 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 4 | 1 | 1,000 | 2,113 | 315.13 ms | 702.22 ms | 83.13 MB | 77 | 26 | 1.83 | 3,403 | 1290 |
+| 4 | 3 | 100 | 990 | 108.17 ms | 252.44 ms | 35.91 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 4 | 3 | 1,000 | 2,113 | 404.56 ms | 369.08 ms | 100.85 MB | 64 | 19 | 1.98 | 3,132 | 1019 |
+| 8 | 1 | 100 | 990 | 84.54 ms | 218.41 ms | 30.03 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 8 | 1 | 1,000 | 2,113 | 327.38 ms | 491.40 ms | 93.15 MB | 76 | 24 | 1.83 | 3,412 | 1299 |
+| 8 | 3 | 100 | 990 | 159.82 ms | 272.32 ms | 57.88 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 8 | 3 | 1,000 | 2,113 | 382.34 ms | 532.52 ms | 108.55 MB | 72 | 22 | 1.92 | 3,235 | 1122 |
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.871 s | 240.18 MB | 1,234 | 559 | 2.47 | 2,613 | 5 |
+| 4 | 3 | 2.561 s | 457.19 MB | 4,809 | 2,094 | 1.47 | 4,395 | 3 |
+| 8 | 1 | 2.179 s | 347 MB | 2,725 | 1,195 | 1.65 | 3,892 | 3 |
+| 8 | 3 | 6.277 s | 1602.14 MB | 16,256 | 7,492 | 1.19 | 5,426 | 2 |
+
+- **No change from the refactor, as expected**: the calls, write requests and claims match the run before to within
+  run-to-run variation (22 calls and 8 write requests for one worker on one pod with 100 accounts; streaming with 8
+  workers on 3 pods 6.3 s against 6.2 s). The means differ by noise only.
+
 ## Latest run: plain-crud with the claim audit fixed, at aa3d6fd
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at aa3d6fd, on 2026-10-19, against the
