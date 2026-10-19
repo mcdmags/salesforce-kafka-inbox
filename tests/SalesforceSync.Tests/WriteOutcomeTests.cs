@@ -2,11 +2,9 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
-using SalesforceSync.Data.Inbox;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
-using SalesforceSync.Sync;
 using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
@@ -61,7 +59,7 @@ public sealed class WriteOutcomeTests
         new SalesforceResponseException(HttpStatusCode.ServiceUnavailable, body).IsSalesforceError.Should().Be(own);
     }
 
-    // ---------- Read vs write, through the engine ----------
+    // ---------- Read vs write ----------
 
     [Fact]
     public async Task A_failed_read_is_not_an_unknown_outcome()
@@ -69,9 +67,9 @@ public sealed class WriteOutcomeTests
         var (engine, org, failing) = Engine();
         failing.FailReads = true;
 
-        var upsert = () => Upsert(engine, "A1");
+        var read = () => engine.ReadAsync("Account", ["Name"], ["A1"], CancellationToken.None);
 
-        (await upsert.Should().ThrowAsync<HttpRequestException>()).Which.Should().NotBeOfType<UnknownOutcomeException>();
+        (await read.Should().ThrowAsync<HttpRequestException>()).Which.Should().NotBeOfType<UnknownOutcomeException>();
         org.FindByExternalId("Account", "A1").Should().BeNull();
     }
 
@@ -111,20 +109,18 @@ public sealed class WriteOutcomeTests
         (await upsert.Should().ThrowAsync<UnknownOutcomeException>()).WithInnerException<OperationCanceledException>();
     }
 
-    private static Task<Dictionary<string, List<Failure>>> Upsert(RecordWriter writer, string key)
+    private static Task Upsert(SalesforceCalls calls, string key)
     {
-        List<ReadEvent<string>> events = [new("", key, DateTimeOffset.UnixEpoch)];
-        return writer.WriteAsync(events, (k, _) => [new Rec("Account", k, new Dictionary<string, object?> { ["Name"] = "Acme" })],
-            AccountInboxRow.MaxValuesPerQuery, AccountInboxRow.MaxRecordsPerWrite, CancellationToken.None);
+        return calls.UpsertAsync("Account", [(key, key, new Dictionary<string, object?> { ["Name"] = "Acme" })], [], CancellationToken.None);
     }
 
-    private static (RecordWriter, FakeSalesforceStore, FailingHandler) Engine()
+    private static (SalesforceCalls, FakeSalesforceStore, FailingHandler) Engine()
     {
         var org = new FakeSalesforceStore(new FakeSalesforceOptions { EnforceDailyLimit = false });
         var options = Options.Create(new SalesforceOptions { CompressRequestsLargerThan = 0 });
         var failing = new FailingHandler { InnerHandler = new FakeSalesforceHandler(org) };
         var http = SalesforceStep.Http(failing);
-        return (SalesforceStep.Writer(http, options), org, failing);
+        return (SalesforceStep.Calls(http, options), org, failing);
     }
 
     /// <summary>

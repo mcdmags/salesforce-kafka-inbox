@@ -33,8 +33,8 @@ internal static class SalesforceStep
     /// <summary>The path of the REST calls with the default options.</summary>
     public static readonly string DataPath = Org.DataPath;
 
-    /// <summary>The writer (read, decide, send, interpret) on <paramref name="http"/>: no database, its own record type cache.</summary>
-    public static RecordWriter Writer(HttpClient http, IOptions<SalesforceOptions> options)
+    /// <summary>The Salesforce calls on <paramref name="http"/>: no database, their own record type cache.</summary>
+    public static SalesforceCalls Calls(HttpClient http, IOptions<SalesforceOptions> options)
     {
         return new(Client(http), RecordTypes(http), new SalesforceErrors(options));
     }

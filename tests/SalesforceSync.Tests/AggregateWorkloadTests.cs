@@ -95,10 +95,10 @@ public sealed class AggregateWorkloadTests
         public Syncs3(FakeSalesforceStore org)
         {
             var flow = SalesforceStep.Flow();
-            var writer = SalesforceStep.Writer(SalesforceStep.Http(new FakeSalesforceHandler(org)), Options.Create(new SalesforceOptions()));
-            _account = new AccountSync(flow, writer, _accounts);
-            _relationship = new AccountRelationshipSync(flow, writer, _relationships);
-            _contact = new ContactSync(flow, writer, _contacts);
+            var calls = SalesforceStep.Calls(SalesforceStep.Http(new FakeSalesforceHandler(org)), Options.Create(new SalesforceOptions()));
+            _account = new AccountSync(flow, calls, _accounts);
+            _relationship = new AccountRelationshipSync(flow, calls, _relationships);
+            _contact = new ContactSync(flow, calls, _contacts);
         }
 
         /// <summary>An entity event synced as a worker syncs a claimed row.</summary>

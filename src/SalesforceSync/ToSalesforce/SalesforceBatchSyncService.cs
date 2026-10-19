@@ -7,11 +7,11 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.ToSalesforce;
 
 /// <summary>What went wrong with one record of an entity, and whether retrying the same data can help.</summary>
-public sealed record Failure(SalesforceError Error, bool Permanent);
+public sealed record Failure(string Error, bool Permanent);
 
 /// <summary>
-/// What a type does with a batch's valid events: send them to Salesforce, however it likes (see <see cref="RecordWriter"/>
-/// for the usual way).
+/// What a type does with a batch's valid events: send them to Salesforce, however it likes (<see cref="SalesforceCalls"/>
+/// has the calls it is usually made of).
 /// </summary>
 /// <returns>The entities that failed, by entity id, with why. An entity not in it is done.</returns>
 public delegate Task<Dictionary<string, List<Failure>>> SendStep<TEvent>(IReadOnlyList<ReadEvent<TEvent>> events, CancellationToken ct);

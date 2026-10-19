@@ -1,4 +1,5 @@
 using SalesforceSync.Data.Inbox;
+using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.ToSalesforce;
@@ -7,9 +8,11 @@ namespace SalesforceSync.ToSalesforce;
 /// Contact of an Account, named by the Account's external id (a Text foreign key). If the Account isn't in Salesforce
 /// yet, nothing is sent and the contact is retried until the account sync creates it.
 /// </summary>
-public sealed class ContactSync(SalesforceBatchSyncService batch, RecordWriter writer, IRepository<ContactInboxRow> inbox) : IEntitySync
+public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCalls salesforce, IRepository<ContactInboxRow> inbox) : IEntitySync
 {
     public const string Type = ContactEvent.Type;
+
+    private const string ContactObject = "Contact";
 
     public string EntityType => Type;
 
@@ -18,35 +21,68 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, RecordWriter w
         return batch.SyncBatchAsync(ContactEvent.Reader, inbox, Send, ct);
     }
 
-    /// <summary>What this type does with a batch: map its events to records and let the writer send them.</summary>
-    private Task<Dictionary<string, List<Failure>>> Send(IReadOnlyList<ReadEvent<ContactEvent>> events, CancellationToken ct)
+    private async Task<Dictionary<string, List<Failure>>> Send(IReadOnlyList<ReadEvent<ContactEvent>> events, CancellationToken ct)
     {
-        return writer.WriteAsync(events, Map, ContactInboxRow.MaxValuesPerQuery, ContactInboxRow.MaxRecordsPerWrite, ct);
-    }
+        var failures = new Dictionary<string, List<Failure>>();
+        var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
+        var upserts = events.Except(deletes).ToList();
 
-    /// <summary>
-    /// A deleted event deletes the contact by its key alone. Any other event upserts it, which needs its Account's key.
-    /// </summary>
-    private static IReadOnlyList<Rec> Map(string contactKey, ContactEvent e)
-    {
-        if (e.Meta?.IsDelete() == true)
+        // An upsert needs its Account's key, and the record type
+        foreach (var e in upserts.Where(e => string.IsNullOrWhiteSpace(e.Event.Contact?.AccountExternalId)))
         {
-            return [Rec.Deleting("Contact", contactKey)];
+            SalesforceCalls.Fail(failures, e.EntityId, SalesforceErrors.InvalidEvent, "accountExternalId is required", permanent: true);
         }
 
-        var c = e.Contact;
-        return string.IsNullOrWhiteSpace(c?.AccountExternalId)
-            ? throw new ArgumentException("accountExternalId is required")
-            :
-            [
-                new Rec("Contact", contactKey, new Dictionary<string, object?>
-                {
-                    ["AccountId__c"] = c.AccountExternalId,
-                    ["FirstName"] = c.FirstName,
-                    ["LastName"] = c.LastName,
-                    ["Email"] = c.Email,
-                    ["Phone"] = c.Phone
-                }, RecordType: "Standard", Parents: [new Parent("AccountId__c", "Account", c.AccountExternalId)])
-            ];
+        upserts = [.. upserts.Where(e => !failures.ContainsKey(e.EntityId))];
+        var recordType = await salesforce.RecordTypeIdAsync(ContactObject, "Standard", ct);
+        if (recordType is null)
+        {
+            foreach (var e in upserts)
+            {
+                SalesforceCalls.Fail(failures, e.EntityId, SalesforceErrors.InvalidRecordType, "the record type is not in the org");
+            }
+
+            upserts = [];
+        }
+
+        // The record each upsert wants: the fields as Salesforce names them
+        var wanted = upserts.Select(e =>
+        {
+            var c = e.Event.Contact!;
+            return (e.EntityId, c.AccountExternalId, Fields: new Dictionary<string, object?>
+            {
+                ["AccountId__c"] = c.AccountExternalId,
+                ["FirstName"] = c.FirstName,
+                ["LastName"] = c.LastName,
+                ["Email"] = c.Email,
+                ["Phone"] = c.Phone,
+                ["RecordTypeId"] = recordType
+            });
+        }).ToList();
+
+        // READ: the contacts (to compare, and the Ids a delete needs) and the Accounts they point at (to know they exist)
+        var now = await salesforce.ReadAsync(ContactObject, wanted.SelectMany(w => w.Fields.Keys), events.Select(e => e.EntityId), ct);
+        var accounts = await salesforce.ReadAsync("Account", [], wanted.Select(w => w.AccountExternalId!), ct);
+
+        // DECIDE: a contact whose Account isn't in Salesforce yet waits for it; otherwise create, update or leave alone
+        var sends = new List<(string Key, string ExternalId, Dictionary<string, object?> Fields)>();
+        foreach (var (key, account, fields) in wanted)
+        {
+            if (!accounts.ContainsKey(account!))
+            {
+                SalesforceCalls.Fail(failures, key, SalesforceErrors.DependencyNotSynced, $"Account {account} is not in Salesforce yet");
+            }
+            else if (SalesforceCalls.Changes(fields, now.TryGetValue(key, out var row) ? row : null) is { Count: > 0 } changes)
+            {
+                sends.Add((key, key, changes));
+            }
+        }
+
+        // WRITE. A delete of a contact Salesforce lacks has nothing to do: it is already deleted
+        await salesforce.UpsertAsync(ContactObject, sends, failures, ct);
+        await salesforce.DeleteAsync(deletes.Where(e => now.ContainsKey(e.EntityId))
+            .Select(e => (e.EntityId, now[e.EntityId].GetProperty("Id").GetString()!)), failures, ct);
+
+        return failures;
     }
 }
