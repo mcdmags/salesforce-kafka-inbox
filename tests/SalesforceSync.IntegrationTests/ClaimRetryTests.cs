@@ -10,8 +10,7 @@ using SalesforceSync.Data.Inbox;
 namespace SalesforceSync.IntegrationTests;
 
 /// <summary>
-/// The claim's retry after a statement whose commit landed but whose reply was lost. Runs in a schema of its own; pods (which work the public
-/// schema) never see its rows.
+/// Claim retry after commit landed but reply lost. Own schema: pods (public schema) never see its rows.
 /// </summary>
 [Collection(SyncCollection.Name)]
 public sealed class ClaimRetryTests(SyncFixture app)
@@ -29,7 +28,7 @@ public sealed class ClaimRetryTests(SyncFixture app)
             await conn.StoreAsync(SyncFixture.InboxTable(), entity, SyncFixture.BaseTime, "{}");
         }
 
-        // The claim commits, and then its reply "fails": the entity is leased, but the worker can't know
+        // Claim commits, reply "fails": entity leased, worker can't know
         var lostCommit = new LoseFirstReply();
         var options = new DbContextOptionsBuilder<SyncDbContext>();
         SyncDbContext.Configure(options, db, new PostgresRetryOptions { BaseDelay = TimeSpan.FromMilliseconds(1) });
@@ -48,8 +47,7 @@ public sealed class ClaimRetryTests(SyncFixture app)
     }
 
     /// <summary>
-    /// Throws after the first claim has already run (and, outside a transaction, committed), like a connection dropped
-    /// before the reply, so the retry runs on a database where the lost attempt's lease is real.
+    /// Throws after first claim ran (and committed), like connection dropped before reply: lost lease is real.
     /// </summary>
     private sealed class LoseFirstReply : DbCommandInterceptor
     {
