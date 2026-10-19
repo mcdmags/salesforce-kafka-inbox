@@ -7,8 +7,12 @@ namespace SalesforceSync.Data.Inbox;
 /// <summary>
 /// <see cref="IRepository{TRow}"/> on Postgres, raw SQL through EF. Each unit of work runs through
 /// <see cref="PostgresRetryStrategy"/>, so every statement must be safe to repeat after a commit whose outcome was lost:
-/// storing the same event again is harmless, a retried claim first frees what the lost one leased, done again finds
-/// its rows idle. Only a failure run again counts one extra attempt (rare, accepted).
+/// storing the same event again is harmless, a claim whose commit was lost leaves its rows leased until expiry, done again
+/// finds its rows idle. Only a failure run again counts one extra attempt (rare, accepted).
+/// <para>
+/// No unit runs in a transaction: each statement commits on its own. A crash between an outcome's statements
+/// leaves the rest of the claim leased until expiry.
+/// </para>
 /// <para>
 /// Lookups go by key only (primary key, front of the ready index), never a join the planner could turn into a scan:
 /// with a large backlog's statistics a join back to the table became a hash join over all of it.
@@ -74,16 +78,9 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
     /// </summary>
     public Task<InboxClaim> ClaimAsync(CancellationToken ct)
     {
-        // Retried after a lost commit: earlier attempts may have leased rows nobody works on; free them first instead
-        // of waiting for their leases to expire
-        var lostEntityIds = new List<string>();
-        return contexts.RunInTransactionAsync(async (db, t) =>
+        // One statement, so no transaction. Rows leased by an attempt whose commit was lost wait for the lease to expire
+        return contexts.RunAsync(async (db, t) =>
         {
-            if (lostEntityIds.Count > 0)
-            {
-                await EndLeasesAsync(db, t, lostEntityIds, TimeSpan.Zero);
-            }
-
             var sql = $"""
                 UPDATE {Table} i
                 SET next_attempt_at = now() + @lease, last_updated = now()
@@ -100,7 +97,6 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
                 lease = _opt.Lease,
                 batchSize = _opt.BatchSize
             });
-            lostEntityIds.AddRange(events.Select(e => e.EntityId));
             return new InboxClaim(events);
         }, ct);
     }
@@ -108,7 +104,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
     /// <summary>One statement per kind of outcome, not per entity, so a batch is a fixed number of round trips.</summary>
     public Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct)
     {
-        return InTransactionAsync(claim, TimeSpan.Zero, async (db, t) =>
+        return WithLeasesEndedAsync(claim, TimeSpan.Zero, async (db, t) =>
         {
             var recorded = new List<string>();
             if (outcomes.Synced.Count > 0)
@@ -170,12 +166,12 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
     /// Due again after <see cref="Release.Delay"/> without spending an attempt. An unknown write outcome holds the
     /// entities until Salesforce has surely applied or dropped the lost write; events arriving meanwhile wait too,
     /// because a store keeps a pending row's due time. <see cref="Release.StopInbox"/> also delays every other due row
-    /// in the same transaction: a mapping error fails them all, and waiting loses nothing, while retrying would
+    /// in the same unit: a mapping error fails them all, and waiting loses nothing, while retrying would
     /// dead-letter them.
     /// </summary>
     public Task ReleaseAsync(InboxClaim claim, Release release, CancellationToken ct)
     {
-        return InTransactionAsync(claim, release.Delay, async (db, t) =>
+        return WithLeasesEndedAsync(claim, release.Delay, async (db, t) =>
         {
             var releaseClaimed = $"""
                 UPDATE {Table} i
@@ -212,10 +208,10 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
     /// Runs <paramref name="record"/>, then ends the lease of the claim's rows it did not update (not attempted, or
     /// overwritten by a newer event), due after <paramref name="delay"/>, so they don't sit until the lease expires.
     /// </summary>
-    private Task InTransactionAsync(InboxClaim claim, TimeSpan delay, Func<SyncDbContext, CancellationToken, Task<List<string>>> record,
+    private Task WithLeasesEndedAsync(InboxClaim claim, TimeSpan delay, Func<SyncDbContext, CancellationToken, Task<List<string>>> record,
         CancellationToken ct)
     {
-        return contexts.RunInTransactionAsync(async (db, t) =>
+        return contexts.RunAsync(async (db, t) =>
         {
             var recorded = (await record(db, t)).ToHashSet(StringComparer.Ordinal);
             if (recorded.Count < claim.Events.Count)

@@ -12,39 +12,6 @@ namespace SalesforceSync.Data;
 /// </summary>
 public static class DbContextFactoryExtensions
 {
-    /// <summary>
-    /// Runs <paramref name="unit"/> in a transaction and commits. On retry, clears the change tracker and begins a
-    /// new transaction, so a unit that tracks entities never re-sends a failed attempt's state. State kept outside the
-    /// lambda (see <c>InboxRepository.ClaimAsync</c>) survives attempts.
-    /// </summary>
-    public static async Task<T> RunInTransactionAsync<T>(this IDbContextFactory<SyncDbContext> contexts,
-        Func<SyncDbContext, CancellationToken, Task<T>> unit, CancellationToken ct)
-    {
-        await using var db = await contexts.CreateDbContextAsync(ct);
-        // A failed SaveChanges fails the unit, which retries from the start. A savepoint would add two round trips
-        // (SAVEPOINT, RELEASE) to every SaveChanges. Reset when the context returns to the pool.
-        db.Database.AutoSavepointsEnabled = false;
-        var strategy = db.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync(async t =>
-        {
-            db.ChangeTracker.Clear();
-            await using var tx = await db.Database.BeginTransactionAsync(t);
-            var result = await unit(db, t);
-            await tx.CommitAsync(t);
-            return result;
-        }, ct);
-    }
-
-    public static async Task RunInTransactionAsync(this IDbContextFactory<SyncDbContext> contexts,
-        Func<SyncDbContext, CancellationToken, Task> unit, CancellationToken ct)
-    {
-        await contexts.RunInTransactionAsync(async (db, t) =>
-        {
-            await unit(db, t);
-            return true;
-        }, ct);
-    }
-
     /// <summary>Runs <paramref name="unit"/>, a single statement or a few that need no transaction, retried as a whole.</summary>
     public static async Task<T> RunAsync<T>(this IDbContextFactory<SyncDbContext> contexts,
         Func<SyncDbContext, CancellationToken, Task<T>> unit, CancellationToken ct)

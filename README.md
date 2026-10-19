@@ -50,7 +50,7 @@ account, is deleted in Salesforce. Several things make this harder than "consume
 | Record types | Every synced object has a record type, named by developer name in its sync (`Business` for Account, `Standard` for the others). Its Id comes from one SOQL query on `RecordType` per object, cached in the process for `Salesforce:RecordTypeRefreshInterval` (15 minutes), and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't have (or not active) fails that entity alone before any write (`INVALID_RECORD_TYPE`, retried) and makes the next batch read the record types again. See [Record types](#record-types). |
 | Bad records | A value Salesforce rejects (too long, wrong type, required field emptied, a validation rule) fails only its own unit, by Salesforce's answer for that record (permanent or transient by its code; a required field emptied on an *update* is retried until `MaxRetries`, since the code can also mean the record was deleted meanwhile); an unknown or read-only field is a mapping error and stops the inbox; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a parent not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
-| Postgres failures | Every unit of work (claim, outcomes, ingest, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` around a transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new transaction, change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
+| Postgres failures | Every unit of work (claim, outcomes, ingest, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)`; the inbox's statements commit one by one, with no explicit transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; rows leased by a claim whose commit was lost wait for the lease to expire. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
 | Rate limits | Salesforce publishes a daily total (a soft limit, rolling 24 hours) and a cap on concurrent long-running requests, and no per-second limit (see [Salesforce API limits](#salesforce-api-limits)). Each process keeps an in-memory **pause**: the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) pauses it at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause the process that gets them. `Sync:Workers` x pods is kept under the org's concurrent limit by configuration. Rate-limited batches are handed back without spending an attempt. |
 
 ```
@@ -337,8 +337,7 @@ is already due, backing off, deferred, held or leased keeps its time (a leased r
 of an entity that arrive before it is claimed overwrite its row one after the other, and only the last is written.
 The lock the store takes on the existing row is what orders it against a claim or an outcome of the same entity.
 
-**Claim** (`InboxRepository.ClaimAsync`, the same statement for every type), in a transaction of its own, so the rows are read
-before the commit is sent: lock up to `Sync:BatchSize` of the inbox's rows that are due (`next_attempt_at <= now()`),
+**Claim** (`InboxRepository.ClaimAsync`, the same statement for every type), one statement that commits on its own: lock up to `Sync:BatchSize` of the inbox's rows that are due (`next_attempt_at <= now()`),
 longest-waiting first, off the ready index, `FOR UPDATE SKIP LOCKED`; lease them (`next_attempt_at =
 now() + Sync:Lease`), and return them with their payloads and their `event_time`. Only pending rows are due: every
 outcome that finishes a row sets its `next_attempt_at` null. A leased row is not due until its lease ends, so "due"
@@ -372,7 +371,7 @@ claimed. So every outcome statement updates only the claimed rows that still hol
 (`InboxRepository.StillClaimed`, part of each statement's WHERE: the claim's entity ids and times, `unnest(@entityIds, @times)`, each
 row looked up by primary key and compared timestamptz to timestamptz, exactly: the times are the microseconds read
 back from the column) and records outcomes on those only: done, retried, dead, held. An overwritten row stays
-pending with the newer event, not marked done, and the transaction's last statement (`EndLeasesAsync`, run only if the
+pending with the newer event, not marked done, and the unit's last statement (`EndLeasesAsync`, run only if the
 outcomes left a claimed row under the lease) ends its lease and makes it due now (held: when the hold ends), not when
 the lease would have ended, so the next claim writes it. The consumer and the outcome update the same row, so
 Postgres's row lock orders them (see below).
@@ -448,12 +447,12 @@ A lease is one column of the entity's inbox row, `next_attempt_at` (until when),
 an entity to one worker while that worker talks to Salesforce, without holding a database lock or a transaction all
 that time.
 
-1. **Take.** In the claim transaction, `Claim` locks due rows (`FOR UPDATE SKIP LOCKED`) and leases them: a new
-   `next_attempt_at = now() + Sync:Lease`. The transaction commits; the row locks go, the lease stays.
+1. **Take.** In the claim statement, `Claim` locks due rows (`FOR UPDATE SKIP LOCKED`) and leases them: a new
+   `next_attempt_at = now() + Sync:Lease`. The statement commits; the row locks go, the lease stays.
 2. **While live.** Other workers skip the entity. This worker calls Salesforce outside any transaction and stops
    (cancels the call) at 80% of the lease, measured from the claim, so it gives up before anyone else can claim the
    entity.
-3. **Release.** The outcome transaction records done, retry, dead or hold; every statement only touches rows
+3. **Release.** The outcome statements record done, retry, dead or hold; every statement only touches rows
    `WHERE next_attempt_at IS NOT NULL`, so a worker whose entity another worker finished changes nothing, and only
    rows that still hold the event the claim read (see [Overwritten while claimed](#the-inbox)). Each statement also
    ends the lease of its rows and sets `next_attempt_at`: null for a finished row, else when it is due again (the end
@@ -498,8 +497,8 @@ versions kept a `lock_token` for that; it is gone, to keep the row to what the s
   left with older data over newer: a newer event has another `event_time`, so no outcome of the old one lands on it.
 - **A hold** (unknown outcome) can be cleared by a late `done` of a stale worker while the row is pending.
 - **An outcome run again after an unknown commit** counts a failure twice (a done or a release is repeated harmlessly).
-- **A claim retried after a lost commit** ends the leases of the rows the lost attempt read (`EndLeasesAsync`, by
-  entity id), which may end another worker's live lease on one of them.
+- **A claim retried after a lost commit** finds the rows the lost attempt leased still leased: they wait for the lease
+  to expire (`Sync:Lease`), then the next claim takes them.
 
 Tests: `LeaseTests.Worker_whose_entity_was_finished_by_another_can_record_nothing` and `ClaimRetryTests`.
 
@@ -524,9 +523,10 @@ i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL
 
 ### Why the Salesforce calls run outside a transaction
 
-A batch uses two short transactions: the claim (`InboxRepository.ClaimAsync`) and the outcomes
-(`RecordAsync`), each through `RunInTransactionAsync` (the execution strategy around `BeginTransactionAsync`). The
-Salesforce read and write happen between them, in no transaction. One transaction around everything would be worse:
+A batch runs two short units of work: the claim (`InboxRepository.ClaimAsync`, one statement) and the outcomes
+(`RecordAsync`, one statement per kind of outcome), each through `RunAsync` (the execution strategy, no explicit
+transaction: every statement commits on its own). The Salesforce read and write happen between them, in no
+transaction. One transaction around everything would be worse:
 
 | One transaction around the batch would | Because |
 |---|---|
@@ -536,7 +536,7 @@ Salesforce read and write happen between them, in no transaction. One transactio
 | pin a pooled connection per worker | Workers × pods connections busy doing nothing. |
 | block autovacuum | An open transaction holds back the horizon, and the inbox tables churn: bloat builds up. |
 
-The lease protects the entities between the two transactions. The trade-off: a crash after Salesforce saved but before
+The lease protects the entities between the two units. The trade-off: a crash after Salesforce saved but before
 the outcomes committed leaves the events pending. That is safe, because every attempt reads Salesforce first and writes
 only what differs, so the retry finds the records saved and ends `done` without writing them again. A write whose
 outcome is unknown is held rather than retried at once.
