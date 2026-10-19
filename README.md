@@ -489,9 +489,11 @@ or the worker's outcome is dropped and another worker may already have the rows.
 
 An outcome is recorded on a row only if it is still under the claim's **lease** (`next_attempt_at` is still the lease
 end the claim set and read back) and still holds the **event** the claim read (`event_time`: a newer event overwrites
-the row). The lease end does what a `lock_token` column did in earlier versions, with no extra column: while a lease
-runs only a claim changes it (a store keeps it, and finishing or failing the row replaces it), and two claims never set
-the same microsecond. So:
+the row). An alternative is a `lock_token` column: each claim writes a new random token on its rows, every outcome
+matches `lock_token = @token`, and finishing a row clears it. We chose not to: it is one more column to write, clear and
+keep consistent on every statement, and the lease end already does the same job. While a lease runs only a claim
+changes it (a store keeps it, and finishing or failing the row replaces it), and two claims never set the same
+microsecond. So:
 
 - **A worker slower than its lease** (a long pause, a network outage) that comes back after another worker took the
   entity over records nothing and ends no lease: the row has the new worker's lease end.
