@@ -7,40 +7,50 @@ namespace SalesforceSync.Data.Inbox;
 /// <summary>
 /// <see cref="IRepository{TRow}"/> on Postgres, raw SQL through EF.
 /// <para>
-/// <b>Claim = receipt.</b> <see cref="ClaimAsync"/> leases due rows (next_attempt_at = lease end), returns per row: id,
-/// event_time read, lease end set (<see cref="InboxEvent"/>). Every later statement of the batch
-/// (<see cref="MarkDoneAsync"/>, <see cref="MarkFailedAsync"/>, <see cref="ReleaseAsync"/>, <see cref="EndLeasesAsync"/>)
-/// sends receipt back for its claimed ids (<see cref="InboxClaim.Of"/>: only claimed ids, values from claim, never
-/// re-read). Postgres applies it only where row still matches (<see cref="StillClaimed"/>). Why: Salesforce calls run
-/// between claim and outcome, no transaction, nothing holds row; receipt tells "still ours" from "changed".
+/// <b>The claim is a receipt.</b> <see cref="ClaimAsync"/> leases due rows by setting next_attempt_at to the lease end.
+/// For each row it returns the entity id, the event_time it read and the lease end it set (<see cref="InboxEvent"/>).
+/// Every later statement for the batch (<see cref="MarkDoneAsync"/>, <see cref="MarkFailedAsync"/>,
+/// <see cref="ReleaseAsync"/>, <see cref="EndLeasesAsync"/>) sends that receipt back for the ids it is about. The values
+/// come from the claim (<see cref="InboxClaim.Of"/>), never from the table, and only claimed ids are accepted. Postgres
+/// applies the statement only to rows that still match the receipt (<see cref="StillClaimed"/>).
+/// Why: the Salesforce calls run between the claim and the outcome, outside any transaction, so nothing holds the row
+/// in the meantime. The receipt is how we tell a row that is still ours from one that has changed.
 /// </para>
 /// <para>
-/// <b>What changes a leased row:</b>
+/// <b>What can change a leased row, and what happens then:</b>
 /// <list type="bullet">
-/// <item>Newer event stored (new event_time, attempts reset). Store keeps next_attempt_at (lease end): now would let
-/// 2nd worker claim mid-write. Outcome skips row (event_time differs): newer event never marked done unsent, old
-/// failure not counted on it. Skipped row's lease ended (lease end still matches): newer event due now, not at expiry.
-/// After <see cref="ReleaseAsync"/>: due after release delay (hold must not race write Salesforce may still apply).</item>
-/// <item>Lease ran out, other worker claimed (new lease end). Our outcomes, lease ends match nothing: late worker can't
-/// record on or end other's lease. Rare: Salesforce call cancelled at 80% of lease.</item>
-/// <item>Same statement ran already (reply lost, unit retried). 1st run replaced lease end (done: null, failed:
-/// backoff): rerun matches nothing, failure counted once.</item>
+/// <item><b>A newer event is stored.</b> The store replaces event_time and resets the attempts, but keeps
+/// next_attempt_at (the lease end); moving it to now would let a second worker claim the entity while we are still
+/// writing it. Our outcome then skips the row because event_time differs, so the newer event is never marked done
+/// without being sent, and the old event's failure is not counted against it. The skipped row's lease is ended (its
+/// lease end still matches), so the newer event is due at once instead of at lease expiry. After a
+/// <see cref="ReleaseAsync"/> it waits for the release delay instead, so it can't race a write Salesforce may still
+/// apply.</item>
+/// <item><b>Our lease ran out and another worker claimed the row.</b> The row now has their lease end, so none of our
+/// late statements match: we can't record an outcome on their lease or end it. This is rare, because the Salesforce
+/// call is cancelled at 80% of the lease.</item>
+/// <item><b>The same statement runs twice</b> (its reply was lost and the unit was retried). The first run already
+/// replaced the lease end (done: null; failed: the backoff time), so the second run matches nothing and a failure is
+/// counted only once.</item>
 /// </list>
-/// Store + outcome same row same moment: row lock orders them; READ COMMITTED re-checks outcome WHERE on row store left.
+/// If a store and an outcome hit the same row at the same moment, the row lock orders them, and READ COMMITTED
+/// re-checks the outcome's WHERE against the row the store left.
 /// </para>
 /// <para>
-/// <b>No transactions:</b> each statement commits alone. Claim 1 round trip not 3 (BEGIN, statement, COMMIT), rows leased
-/// shorter (streaming 8 workers x 3 pods: 4.6 s vs 6.4 s). Safe: receipt makes every statement OK to run twice or late.
-/// Accepted cost: lost claim commit, or crash between outcome statements, leaves rows leased till expiry (delayed, not
-/// lost).
+/// <b>Why no transactions.</b> Each statement commits on its own. A claim is one round trip instead of three (BEGIN,
+/// statement, COMMIT), and rows stay leased for less time: streaming with 8 workers on 3 pods went from 6.4 s to 4.6 s.
+/// The receipt makes this safe, because every statement can run twice or late. The accepted cost: if a claim's commit
+/// is lost, or the process crashes between outcome statements, those rows stay leased until the lease expires. They
+/// are delayed, never lost.
 /// </para>
 /// <para>
-/// <b>Lease end, not lock_token column:</b> during lease only a claim changes next_attempt_at, 2 claims never same
-/// microsecond: already identifies lease, no extra column.
+/// <b>Why the lease end instead of a lock_token column.</b> While a lease runs, only a claim changes next_attempt_at,
+/// and two claims never set the same microsecond. So the lease end already identifies the lease, with no extra column
+/// to maintain.
 /// </para>
 /// <para>
-/// <b>Key lookups only</b>, never join back to table: big backlog stats turned that into hash join over all rows. Hence
-/// entity_id = ANY(@entityIds) beside receipt's unnest.
+/// <b>Why lookups go by key only.</b> We never join back to the table: with a large backlog's statistics such a join
+/// became a hash join over every row. That is why entity_id = ANY(@entityIds) sits next to the unnest of the receipt.
 /// </para>
 /// </summary>
 public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TRow>
