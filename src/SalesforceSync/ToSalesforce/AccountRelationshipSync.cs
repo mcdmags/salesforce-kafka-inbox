@@ -5,8 +5,8 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
-/// Account_Relationship__c between two Accounts, named by their external ids (Text foreign keys). If either Account
-/// isn't in Salesforce yet, nothing is sent and the relationship is retried until the account sync creates it.
+/// Account_Relationship__c between two Accounts, named by external ids (Text foreign keys). Either Account missing in
+/// Salesforce → nothing sent, retried until account sync creates it.
 /// </summary>
 public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, SalesforceCalls salesforce, IRepository<AccountRelationshipInboxRow> inbox)
     : IEntitySync
@@ -28,7 +28,7 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = events.Except(deletes).ToList();
 
-        // An upsert needs both Accounts' keys, and the record type
+        // Upsert needs both Account keys + record type
         foreach (var e in upserts.Where(e => string.IsNullOrWhiteSpace(e.Event.AccountRelationship?.AccountExternalId)
                                              || string.IsNullOrWhiteSpace(e.Event.AccountRelationship.RelatedAccountExternalId)))
         {
@@ -47,7 +47,7 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
             upserts = [];
         }
 
-        // The record each upsert wants: the fields as Salesforce names them
+        // Wanted record per upsert, Salesforce field names
         var wanted = upserts.Select(e =>
         {
             var r = e.Event.AccountRelationship!;
@@ -63,11 +63,11 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
             });
         }).ToList();
 
-        // READ: the relationships (to compare, and the Ids a delete needs) and the Accounts they point at (to know they exist)
+        // READ: relationships (to compare; Ids for deletes) + target Accounts (must exist)
         var now = await salesforce.ReadAsync(RelationshipObject, wanted.SelectMany(w => w.Fields.Keys), events.Select(e => e.EntityId), ct);
         var accounts = await salesforce.ReadAsync("Account", [], wanted.SelectMany(w => new[] { w.AccountExternalId!, w.RelatedAccountExternalId! }), ct);
 
-        // DECIDE: a relationship whose Account isn't in Salesforce yet waits for it; otherwise create, update or leave alone
+        // DECIDE: Account not in Salesforce yet → wait; else create, update or skip
         var sends = new List<(string Key, string ExternalId, Dictionary<string, object?> Fields)>();
         foreach (var (key, account, related, fields) in wanted)
         {
@@ -81,7 +81,7 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
             }
         }
 
-        // WRITE. A delete of a relationship Salesforce lacks has nothing to do: it is already deleted
+        // WRITE. Delete of a record Salesforce lacks = already deleted
         await salesforce.UpsertAsync(RelationshipObject, sends, failures, ct);
         await salesforce.DeleteAsync(deletes.Where(e => now.ContainsKey(e.EntityId))
             .Select(e => (e.EntityId, now[e.EntityId].GetProperty("Id").GetString()!)), failures, ct);

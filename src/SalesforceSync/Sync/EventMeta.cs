@@ -4,33 +4,30 @@ using System.Text.RegularExpressions;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// The <c>meta</c> object every event carries next to its entity:
+/// <c>meta</c> object every event carries next to its entity:
 /// <c>{ "time": "2026-10-14T01:02:03.456Z", "type": "inserted" }</c>.
-/// The time is the event's place in its entity's history: the newest time wins, whatever order events arrive in, a
-/// delete like any other. The type is inserted or updated (the same to the sync: what Salesforce has decides
-/// create or update), or deleted.
+/// Time = event's place in entity history: newest wins whatever arrival order, deletes too. Type is inserted or updated
+/// (same to the sync: Salesforce state decides create/update), or deleted.
 /// </summary>
 public sealed partial class EventMeta
 {
-    /// <summary>As sent. Kept as text so a time without an offset can be told apart and rejected.</summary>
+    /// <summary>As sent. Text, so offset-less times can be spotted and rejected.</summary>
     public string? Time { get; set; }
 
     /// <summary>
-    /// ISO-8601 date and time with an offset or Z. Nothing else: a time without an offset would be read in the
-    /// worker's zone, so another pod could order the same event differently.
+    /// ISO-8601 date-time with offset or Z, nothing else: offset-less time would be read in worker's zone, so pods
+    /// could order the same event differently.
     /// </summary>
     [GeneratedRegex(@"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$", RegexOptions.CultureInvariant)]
     private static partial Regex IsoTimeWithOffset();
 
     /// <summary>
-    /// "inserted", "updated" or "deleted", in any case. Kept as text so anything else is rejected by name, not
-    /// as bad JSON.
+    /// "inserted", "updated" or "deleted", any case. Text, so anything else is rejected by name, not as bad JSON.
     /// </summary>
     public string? Type { get; set; }
 
     /// <summary>
-    /// Whether <see cref="Type"/> is inserted or updated. Which of the two decides nothing: Salesforce's state
-    /// decides create or update.
+    /// <see cref="Type"/> is inserted or updated. Which one decides nothing: Salesforce state decides create/update.
     /// </summary>
     public bool IsInsertOrUpdate()
     {
@@ -38,13 +35,13 @@ public sealed partial class EventMeta
                || "updated".Equals(Type, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>Whether <see cref="Type"/> is deleted: the event's entity is to be deleted.</summary>
+    /// <summary><see cref="Type"/> is deleted: entity to be deleted.</summary>
     public bool IsDelete()
     {
         return "deleted".Equals(Type, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary><see cref="Time"/> as an instant, or null if it is missing or not an ISO-8601 time with an offset.</summary>
+    /// <summary><see cref="Time"/> as instant; null if missing or not ISO-8601 with offset.</summary>
     public DateTimeOffset? Timestamp()
     {
         return Time is not null && IsoTimeWithOffset().IsMatch(Time) &&

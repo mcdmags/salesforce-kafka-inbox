@@ -5,12 +5,11 @@ using SalesforceSync.Data;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// What the drain benchmarks don't show: the pods under a steady stream with bursts, as in production. Account aggregates
-/// keep arriving at a set rate (Kafka messages per second, in publish order, each split and stored as the consumer does)
-/// over many accounts, with a burst now and then, while the pods run the worker's own pass at the worker's own defaults
-/// (batches of up to 180 entities) against a Salesforce that takes real time per call. Once a second the queue is sampled:
-/// how many entities wait and how long the oldest has waited. After the last message the pods drain what is left, and the
-/// run is checked like every drain benchmark (every account, relationship and contact at its newest version, no
+/// What drain benchmarks don't show: pods under steady stream with bursts, as in production. Account aggregates arrive
+/// at set rate (Kafka msgs/s, publish order, each split and stored as consumer does) over many accounts, with
+/// occasional bursts, while pods run worker's own pass at worker defaults (batches ≤180 entities) against Salesforce
+/// taking real time per call. Queue sampled each second: entities waiting, oldest wait. After last message pods drain
+/// the rest; run checked like every drain benchmark (all accounts, relationships, contacts at newest version, no
 /// overlapping claims). Run: <c>dotnet run -c Release -- --load [--rate 300] [--seconds 120] [--accounts 20000] [--pods 3]
 /// [--workers 4] [--latency 100] [--burst 4] [--burst-seconds 10] [--burst-every 40]</c>.
 /// </summary>
@@ -38,7 +37,7 @@ public sealed class SustainedLoad : DrainBenchmarkBase
     protected override int? BatchSize => null;
     protected override TimeSpan DrainTimeout => TimeSpan.FromMinutes(30);
 
-    /// <summary>The run's settings; the burst multiplies the rate for BurstSeconds at the start of every BurstEvery seconds.</summary>
+    /// <summary>Run settings; burst multiplies rate for BurstSeconds at start of every BurstEvery seconds.</summary>
     public sealed record Options(double Rate, int Seconds, int Accounts, int Pods, int Workers, int LatencyMs, double Burst,
         double BurstSeconds, double BurstEvery, bool Diagnostics = false)
     {
@@ -61,7 +60,7 @@ public sealed class SustainedLoad : DrainBenchmarkBase
         }
     }
 
-    /// <summary>The due entities: how many, and how long the oldest has been due.</summary>
+    /// <summary>Due entities: count, and how long oldest has been due.</summary>
     private sealed record Queue(long Waiting, double OldestSeconds);
 
     private sealed record Sample(double Second, long Waiting, double OldestWaitSeconds, long Stored);
@@ -84,7 +83,7 @@ public sealed class SustainedLoad : DrainBenchmarkBase
             await sampler;
 
             Report(total);
-            IterationCleanup(); // the correctness checks and the claim summary line
+            IterationCleanup(); // correctness checks + claim summary line
         }
         finally
         {
@@ -92,7 +91,7 @@ public sealed class SustainedLoad : DrainBenchmarkBase
         }
     }
 
-    /// <summary>Stores the entity events at the run's rate: an event's turn comes as the aggregates before it have.</summary>
+    /// <summary>Stores entity events at run rate: event's turn comes once earlier aggregates have.</summary>
     protected override async Task IngestAsync(CancellationToken ct)
     {
         var clock = Stopwatch.StartNew();
@@ -117,7 +116,7 @@ public sealed class SustainedLoad : DrainBenchmarkBase
     private long _stored;
     private double _lastStoredAt;
 
-    /// <summary>Once a second: entities due and not yet done, and how long the one waiting longest has been due.</summary>
+    /// <summary>Each second: entities due and not done, and longest wait.</summary>
     private async Task SampleAsync(Stopwatch clock, CancellationToken ct)
     {
         var sql = string.Join(" UNION ALL ", InboxTables.Select(t => $"SELECT next_attempt_at FROM {t} WHERE next_attempt_at <= now()"));
@@ -132,7 +131,7 @@ public sealed class SustainedLoad : DrainBenchmarkBase
                 var sample = new Sample(clock.Elapsed.TotalSeconds, queue.Waiting, queue.OldestSeconds, Interlocked.Read(ref _stored));
                 _samples.Add(sample);
 
-                // Where the time goes: the claim's own lookup, the dead rows it walks past, and this process
+                // Where time goes: claim lookup, dead rows it walks past, this process
                 var probe = Stopwatch.StartNew();
                 await db.Database.QuerySingleAsync<Queue>(
                     $"SELECT count(*) AS Waiting, 0::float8 AS OldestSeconds FROM (SELECT entity_id FROM {InboxTables[0]} WHERE next_attempt_at <= now() ORDER BY next_attempt_at LIMIT 180) x", ct);

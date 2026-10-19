@@ -3,19 +3,18 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Persistence;
 
 /// <summary>
-/// Takes from each Account aggregate the events of one entity type and stores them in that type's inbox: the Kafka
-/// consumer needs to know no type. The persist half of the sync: it knows aggregates and the inbox, nothing of
-/// Salesforce (that is <see cref="ToSalesforce.IEntitySync"/>).
+/// Takes one entity type's events from each Account aggregate, stores in that type's inbox; Kafka consumer knows no
+/// type. Persist half: knows aggregates + inbox, not Salesforce (<see cref="ToSalesforce.IEntitySync"/>).
 /// </summary>
 public interface IAggregateIngest
 {
-    /// <summary>The type's name, e.g. "account".</summary>
+    /// <summary>Type name, e.g. "account".</summary>
     string EntityType { get; }
 
     /// <summary>
-    /// Takes the events of this type from an aggregate and stores each valid one in its entity's row of this type's
-    /// inbox, unless the row holds a newer event.
+    /// Takes this type's events from an aggregate, stores each valid one in its entity's inbox row, unless row holds
+    /// a newer event.
     /// </summary>
-    /// <returns>One problem per event that can never be synced (and was skipped); empty if all were stored.</returns>
+    /// <returns>One problem per never-syncable (skipped) event; empty if all stored.</returns>
     Task<IReadOnlyList<string>> IngestAsync(AggregateChange change, CancellationToken ct);
 }

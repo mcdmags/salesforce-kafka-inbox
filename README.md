@@ -1362,7 +1362,7 @@ diff.
 Both drain benchmarks run P **pods** (independent service providers: own connection pool, rate limiter and
 HTTP client, like separate processes) x W worker loops against one Postgres inbox and one org. The input is what
 the upstream publishes: `Events` **account aggregates** (`AggregateWorkload`, before and after) over `Accounts`
-accounts, each split by `AccountAggregate.TrySplit` into the entity events the consumer stores. Every aggregate
+accounts, each stored through the types' ingests (`IAggregateIngest`) as the consumer does. Every aggregate
 changes its Account and Profile; some also add, change or remove one of the account's relationships or contacts (a
 removed one may come back later, as a new record), and a tenth of the accounts may be deleted with all their
 children, so the drain syncs upserts and deletes of all three objects. Each iteration **fails** if any entity the
@@ -1384,8 +1384,13 @@ entity claim), claims, retries, overlaps, stale rows and regressions.
   (1/3), `Workers` (4/8), 50 accounts, 5000 aggregates, 5 ms latency.
 
 The workload's expected end state and the check are unit-tested (`AggregateWorkloadTests`) without running the
-benchmarks. Results on this workload are pending; [docs/benchmarks/README.md](docs/benchmarks/README.md#the-drain-workload)
-has the workload's counts and the results of the earlier one.
+benchmarks. [docs/benchmarks/README.md](docs/benchmarks/README.md#the-drain-workload) has the workload's counts and the results.
+
+**Your own aggregate.** The aggregates are copies of an example JSON. `--template my.json` (with `--run` or `--load`) swaps
+it for yours, so events carry the fields of your `AccountEvent`; ids and the version markers the check reads are set, the
+rest stays as written, and a file that doesn't fit the event classes is refused with what is wrong. Start from
+`benchmarks/SalesforceSync.Benchmarks/example-aggregate.json`; details in
+[docs/benchmarks/README.md](docs/benchmarks/README.md#using-your-own-aggregate).
 
 ```bash
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --filter '*StreamingIngest*'

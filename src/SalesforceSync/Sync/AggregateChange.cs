@@ -1,8 +1,8 @@
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// One Account aggregate message, read and validated: its meta and the two snapshots. Each entity type projects the
-/// events it needs from it (its <see cref="Persistence.IAggregateIngest"/>); nothing here knows a type.
+/// One validated Account aggregate message: meta + two snapshots. Each entity type projects its events from it
+/// (<see cref="Persistence.IAggregateIngest"/>); knows no type.
 /// </summary>
 public sealed class AggregateChange(EventMeta meta, AccountSnapshot? before, AccountSnapshot? after)
 {
@@ -10,16 +10,16 @@ public sealed class AggregateChange(EventMeta meta, AccountSnapshot? before, Acc
     public AccountSnapshot? Before { get; } = before;
     public AccountSnapshot? After { get; } = after;
 
-    /// <summary>The Account's external id (the same in Before and After).</summary>
+    /// <summary>Account's external id (same in Before and After).</summary>
     public string AccountKey => (After ?? Before)!.ExternalId!;
 
-    /// <summary>The Account is gone: After is missing, or meta.type says deleted.</summary>
+    /// <summary>Account gone: After missing, or meta.type deleted.</summary>
     public bool IsDelete => After is null || Meta.IsDelete();
 
-    /// <summary>What a delete works from: the last state the sync saw.</summary>
+    /// <summary>Delete's source: last state the sync saw.</summary>
     public AccountSnapshot DeletedFrom => (Before ?? After)!;
 
-    /// <summary>The meta of an entity event: the aggregate's time and the type the entity's event has.</summary>
+    /// <summary>Entity event's meta: aggregate's time + entity event's type.</summary>
     public EventMeta MetaOf(string type)
     {
         return new EventMeta { Time = Meta.Time, Type = type };

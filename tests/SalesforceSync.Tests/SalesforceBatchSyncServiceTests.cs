@@ -7,8 +7,8 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The flow of a batch (pause, claim, parse, send, record) and what it does when the type's send step fails as a whole.
-/// The send step is a stand-in here: what the types do is tested with them.
+/// Batch flow (pause, claim, parse, send, record) and what it does when the type's send step fails as a whole.
+/// Send step is a stand-in: what types do is tested with them.
 /// </summary>
 public sealed class SalesforceBatchSyncServiceTests
 {

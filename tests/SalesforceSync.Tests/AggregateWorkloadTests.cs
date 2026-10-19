@@ -6,14 +6,14 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The drain benchmarks' workload (<see cref="AggregateWorkload"/>, compiled in from benchmarks/). Its expected end
-/// state is what its aggregates lead to when split as the consumer splits them and applied in order, newest event of
-/// each entity winning, so a correct sync passes the benchmark's check. It also holds what the benchmark is for:
-/// children removed and re-added, accounts deleted, every relationship naming two Accounts that stay.
+/// Drain benchmarks' workload (<see cref="AggregateWorkload"/>, compiled in from benchmarks/). Expected end state =
+/// aggregates split as the consumer splits them, applied in order, newest event per entity wins; so a correct sync
+/// passes the benchmark's check. Also holds what the benchmark is for: children removed and re-added, accounts
+/// deleted, every relationship naming two Accounts that stay.
 /// </summary>
 public sealed class AggregateWorkloadTests
 {
-    /// <summary>The streaming benchmark's shape and the drain's (100 and 1,000 accounts).</summary>
+    /// <summary>Streaming benchmark's shape and the drain's (100 and 1,000 accounts).</summary>
     public static TheoryData<int, int> Shapes => new() { { 5_000, 50 }, { 5_000, 100 }, { 5_000, 1_000 } };
 
     [Theory]
@@ -85,7 +85,7 @@ public sealed class AggregateWorkloadTests
         var (passedWrong, passedRegressions) = workload.Check(org);
         var stale = workload.Final.First(e => e.Key.Type == AccountSync.Type && e.Value is { Present: true, Version: > 1 }).Key.Key;
         org.Edit("Account", stale, new JsonObject { ["Description"] = "v1" });
-        // A removed contact of an account that stays, written again (its Account exists, so the org takes it)
+        // Removed contact of a staying account, written again (Account exists, so org takes it)
         var removed = workload.Final.First(e => e.Key.Type == ContactSync.Type && !e.Value.Present
                                                 && workload.Final[(AccountSync.Type, OwnerOf(e.Key.Key))].Present).Key;
         await Apply(syncs, removed, events.Last(e => e.Key == removed && !IsDelete(e.Event)).Event);
@@ -97,7 +97,7 @@ public sealed class AggregateWorkloadTests
         regressions.Should().Be(1, "v1 after a newer version");
     }
 
-    /// <summary>An entity event synced as a worker syncs a claimed row; it must not fail.</summary>
+    /// <summary>Entity event synced as a worker syncs a claimed row; must not fail.</summary>
     private static async Task Apply(SyncHarness syncs, (string Type, string Key) entity, JsonObject e)
     {
         await syncs.SyncAsync(entity.Type, entity.Key, e.ToJsonString());
@@ -105,7 +105,7 @@ public sealed class AggregateWorkloadTests
             .Concat(syncs.Contacts.Dead).Concat(syncs.Contacts.Failed).Should().BeEmpty($"{entity.Key} was written");
     }
 
-    /// <summary>The account a child's key names: REL-{account}-{other}, CON-{account}-{n}.</summary>
+    /// <summary>Account a child's key names: REL-{account}-{other}, CON-{account}-{n}.</summary>
     private static string OwnerOf(string childKey)
     {
         return $"ACC-{childKey.Split('-')[1]}";
@@ -141,7 +141,7 @@ public sealed class AggregateWorkloadTests
         return newest;
     }
 
-    /// <summary>What an entity's newest event leaves in the org: nothing for a delete, else its version and Accounts.</summary>
+    /// <summary>What an entity's newest event leaves in org: nothing for delete, else its version and Accounts.</summary>
     private static AggregateWorkload.Expected Replay(string type, JsonObject e)
     {
         if (IsDelete(e))

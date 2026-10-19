@@ -9,9 +9,8 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The mock org against what the REST API Developer Guide (and, for per-record codes, the SOAP API Developer Guide)
-/// documents, over HTTP as a client sees it: sObject Collections deletes and upserts, query pages, OAuth sessions.
-/// The sync's use of them is covered by the integration tests.
+/// Mock org vs what REST API Developer Guide (per-record codes: SOAP API Developer Guide) documents, over HTTP as a
+/// client sees it: sObject Collections deletes and upserts, query pages, OAuth sessions. Sync's use of them: integration tests.
 /// </summary>
 public sealed class FakeSalesforceTests
 {

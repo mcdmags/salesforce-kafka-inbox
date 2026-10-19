@@ -6,52 +6,48 @@ using Microsoft.Extensions.Options;
 namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
-/// Salesforce REST transport, and the only class that talks to Salesforce. Every method is exactly one API call: it
-/// takes many records and returns each one's raw result. It decides nothing (what to write, what a result means);
-/// that is the type's own (<c>RecordWriter</c> for the usual way).
+/// Salesforce REST transport; only class that talks to Salesforce. Each method = exactly one API call: many records
+/// in, each one's raw result out. Decides nothing (what to write, what a result means): type's job (<c>SalesforceCalls</c>
+/// and the type's sync).
 /// <para>
-/// There is deliberately no call for one record (get, update, delete or upsert by id): each costs one API call per
-/// record, and every integration shares the org's daily API allocation. A read takes up to 2,000 external ids, an
-/// upsert or delete up to 200 records. Writing 200 records one by one would spend 200 calls where
-/// <see cref="UpsertAsync"/> spends one.
+/// No single-record call (get, update, delete, upsert by id) on purpose: one API call per record, and all
+/// integrations share org's daily API allocation. Read ≤ 2,000 external ids, upsert/delete ≤ 200 records. 200 records
+/// one by one = 200 calls vs 1 for <see cref="UpsertAsync"/>.
 /// </para>
 /// </summary>
 public sealed class SalesforceRestClient : ISalesforceRestClient
 {
     private readonly HttpClient http;
 
-    // API path and version come from configuration (Salesforce:BaseApiPath, Salesforce:ApiVersion), not a constant, so
-    // moving to another API version is a settings change. One constructor, so the typed HttpClient's dependency
-    // injection has nothing to choose between (two made it throw when the pods started).
+    // API path + version from config (Salesforce:BaseApiPath, Salesforce:ApiVersion), not constants: new API version =
+    // settings change. One constructor: typed HttpClient DI has nothing to choose (two made it throw at pod start).
     public SalesforceRestClient(HttpClient http, IOptions<SalesforceOptions> options)
     {
         this.http = http;
         DataPath = options.Value.DataPath;
     }
 
-    /// <summary>The path every call starts with (<see cref="SalesforceOptions.DataPath"/>).</summary>
+    /// <summary>Path prefix of every call (<see cref="SalesforceOptions.DataPath"/>).</summary>
     public string DataPath { get; }
 
-    // The limits below are Salesforce's. They are call-saving ceilings: the engine packs each call up to them, and the
-    // client refuses anything over them before sending (a rejected call is still a call).
+    // Limits below are Salesforce's call-saving ceilings: engine packs calls up to them; client refuses anything over
+    // before sending (rejected call still counts).
 
     /// <summary>
-    /// sObject Collections: max records in one create, update or upsert; the ceiling of a row type's
+    /// sObject Collections: max records per create/update/upsert; ceiling of a row type's
     /// <c>IInboxRow.MaxRecordsPerWrite</c>.
     /// </summary>
     public const int MaxCollectionRecords = 200;
 
     /// <summary>
-    /// External ids per query, at most, for its records to come back in one page: a query returns up to 2,000 records
-    /// per page and each external id matches at most one record. The ceiling of a row type's
-    /// <c>IInboxRow.MaxValuesPerQuery</c>.
+    /// Max external ids per query for records to fit one page: page ≤ 2,000 records, each external id matches ≤ 1
+    /// record. Ceiling of a row type's <c>IInboxRow.MaxValuesPerQuery</c>.
     /// </summary>
     public const int MaxQueryValues = 2_000;
 
     /// <summary>
-    /// A REST call's URI and headers together may be at most 16,384 bytes: over it Salesforce answers 414 URI Too Long
-    /// (the URI alone) or 431 Request Header Fields Too Large (URI and headers). Salesforce Developer Limits and
-    /// Allocations Quick Reference, "API Request Limits and Allocations"
+    /// REST call URI + headers ≤ 16,384 bytes: over → 414 URI Too Long (URI alone) or 431 Request Header Fields Too
+    /// Large (URI + headers). Salesforce Developer Limits and Allocations Quick Reference, "API Request Limits and Allocations"
     /// (https://developer.salesforce.com/docs/platform/salesforce-app-limits-cheatsheet/guide/salesforce-app-limits-platform-api.html);
     /// REST API Developer Guide, "Status Codes and Error Responses"
     /// (https://developer.salesforce.com/docs/platform/api-rest/guide/errorcodes.html).
@@ -59,37 +55,35 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     public const int MaxUriAndHeadersBytes = 16_384;
 
     /// <summary>
-    /// The part of <see cref="MaxUriAndHeadersBytes"/> left to the headers this client sends: Authorization (a Bearer
-    /// access token, about 100 bytes opaque, a JWT-based one a few times that), Host (the instance), User-Agent,
-    /// Accept-Encoding, Content-Type, Content-Length, Content-Encoding, and their framing. They come to well under
-    /// 1 KB; 4 KB leaves room for a long token or a proxy's additions.
+    /// Part of <see cref="MaxUriAndHeadersBytes"/> reserved for this client's headers: Authorization (Bearer token, ~100
+    /// bytes opaque, JWT-based a few times that), Host, User-Agent, Accept-Encoding, Content-Type, Content-Length,
+    /// Content-Encoding, framing. Well under 1 KB; 4 KB leaves room for a long token or proxy additions.
     /// </summary>
     public const int HeaderAllowanceBytes = 4_096;
 
-    /// <summary>The longest URL (path and query) a call is sent with.</summary>
+    /// <summary>Longest URL (path + query) a call is sent with.</summary>
     public const int MaxUrlBytes = MaxUriAndHeadersBytes - HeaderAllowanceBytes;
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
-    /// <summary>Runs one SOQL query: all its rows.</summary>
-    /// <exception cref="ArgumentException">The query's URL is longer than <see cref="MaxUrlBytes"/>.</exception>
+    /// <summary>Runs one SOQL query: all rows.</summary>
+    /// <exception cref="ArgumentException">Query URL longer than <see cref="MaxUrlBytes"/>.</exception>
     public Task<List<JsonElement>> SelectAsync(string soql, CancellationToken ct)
     {
         return SelectAsync<JsonElement>(soql, ct);
     }
 
-    /// <summary>Runs one SOQL query: all its rows, each read into a <typeparamref name="TRow"/>.</summary>
-    /// <exception cref="ArgumentException">The query's URL is longer than <see cref="MaxUrlBytes"/>.</exception>
+    /// <summary>Runs one SOQL query: all rows, each read into a <typeparamref name="TRow"/>.</summary>
+    /// <exception cref="ArgumentException">Query URL longer than <see cref="MaxUrlBytes"/>.</exception>
     public async Task<List<TRow>> SelectAsync<TRow>(string soql, CancellationToken ct)
     {
-        // Checked before anything is sent: Salesforce rejects an over-long URL (414/431), but the rejected call still
-        // counts against the allocation
+        // Checked before sending: Salesforce rejects over-long URL (414/431) but the call still counts against allocation
         var page = await GetPageAsync<TRow>(EnsureFits(QueryUrl(soql)), ct);
         var rows = page.Records;
 
-        // Lookups by unique external id return at most one row per id, far below a query page (2,000), so this loop
-        // normally never runs a second call. It follows nextRecordsUrl anyway: dropping rows silently would be worse than
-        // one extra call, and the engine would then treat a record that exists as missing and create a duplicate
+        // Unique external id lookups → ≤ 1 row per id, far below page size (2,000): loop normally never makes a second
+        // call. Follows nextRecordsUrl anyway: silently dropped rows are worse than an extra call (engine would treat an
+        // existing record as missing → duplicate)
         for (var next = page.NextRecordsUrl; next is not null;)
         {
             var more = await GetPageAsync<TRow>(EnsureFits(next), ct);
@@ -107,13 +101,13 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     }
 
     /// <summary>
-    /// <c>PATCH /composite/sobjects/{object}/{externalIdFieldName}</c>: up to 200 records created or updated by external
-    /// id. The field NAME is in the URL, once for the call; each record carries its own VALUE of that field.
-    /// <c>allOrNone: false</c>: every record succeeds or fails on its own, so one bad record doesn't cost the other 199
-    /// (and the call that carried them) a retry.
+    /// <c>PATCH /composite/sobjects/{object}/{externalIdFieldName}</c>: ≤ 200 records created/updated by external id.
+    /// Field NAME in URL once per call; each record carries its own VALUE.
+    /// <c>allOrNone: false</c>: each record succeeds/fails alone, so one bad record doesn't force a retry of the other
+    /// 199 (and their call).
     /// </summary>
-    /// <returns>One result per record (HTTP 200 does not mean any record was saved), each with <c>created</c> set.</returns>
-    /// <exception cref="ArgumentException">No records or more than <see cref="MaxCollectionRecords"/>, or a URL longer than <see cref="MaxUrlBytes"/>.</exception>
+    /// <returns>One result per record (HTTP 200 ≠ any record saved), each with <c>created</c> set.</returns>
+    /// <exception cref="ArgumentException">No records, > <see cref="MaxCollectionRecords"/>, or URL longer than <see cref="MaxUrlBytes"/>.</exception>
     public Task<IReadOnlyList<RecordResult>> UpsertAsync(string sobject, string externalIdFieldName, IReadOnlyList<SObjectBody> records,
         CancellationToken ct)
     {
@@ -126,11 +120,11 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
     }
 
     /// <summary>
-    /// <c>DELETE /composite/sobjects?ids=...&amp;allOrNone=false</c>: up to 200 records, of any objects, by Id (no
-    /// external ids). Deleted records go to the Recycle Bin. Ids are in the URL (a DELETE has no body); 200 Ids of 18
-    /// characters make a URL under 4 KB, within <see cref="MaxUrlBytes"/>.
+    /// <c>DELETE /composite/sobjects?ids=...&amp;allOrNone=false</c>: ≤ 200 records, any objects, by Id (no external
+    /// ids). Deleted → Recycle Bin. Ids in URL (DELETE has no body); 200 18-char Ids = URL under 4 KB, within
+    /// <see cref="MaxUrlBytes"/>.
     /// </summary>
-    /// <exception cref="ArgumentException">No Ids or more than <see cref="MaxCollectionRecords"/>, or a URL longer than <see cref="MaxUrlBytes"/>.</exception>
+    /// <exception cref="ArgumentException">No Ids, > <see cref="MaxCollectionRecords"/>, or URL longer than <see cref="MaxUrlBytes"/>.</exception>
     public Task<IReadOnlyList<RecordResult>> DeleteAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
         EnsureRecordCount(ids.Count);
@@ -138,7 +132,7 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
         return SendAsync(new HttpRequestMessage(HttpMethod.Delete, EnsureFits(url)), ct);
     }
 
-    // A call that answers with a result per record, as both Collections calls do
+    // Call answering with a result per record (both Collections calls)
     private async Task<IReadOnlyList<RecordResult>> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
         using (request)
@@ -153,7 +147,7 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
         }
     }
 
-    // A call takes 1 to 200 records: checked before sending, as a rejected call is still a call
+    // Call takes 1-200 records: checked before sending (rejected call still counts)
     private static void EnsureRecordCount(int count)
     {
         if (count is 0 or > MaxCollectionRecords)
@@ -162,21 +156,20 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
         }
     }
 
-    /// <summary>The URL a query is sent with.</summary>
+    /// <summary>URL a query is sent with.</summary>
     internal string QueryUrl(string soql)
     {
         return QueryUrl(DataPath, soql);
     }
 
-    /// <summary>The URL of a query under <paramref name="dataPath"/> (<see cref="SalesforceOptions.DataPath"/>).</summary>
+    /// <summary>Query URL under <paramref name="dataPath"/> (<see cref="SalesforceOptions.DataPath"/>).</summary>
     internal static string QueryUrl(string dataPath, string soql)
     {
         return $"{dataPath}/query?q={Uri.EscapeDataString(soql)}";
     }
 
     /// <summary>
-    /// Whether a URL is within <see cref="MaxUrlBytes"/>, counted in bytes as sent (UTF-8; an escaped query is ASCII,
-    /// so its bytes are its characters).
+    /// URL within <see cref="MaxUrlBytes"/>, counted in bytes as sent (UTF-8; escaped query is ASCII: bytes = chars).
     /// </summary>
     internal static bool FitsUrlLimit(string url)
     {
@@ -197,7 +190,7 @@ public sealed class SalesforceRestClient : ISalesforceRestClient
                $"({string.Join(",", values.Select(SoqlLiteral))})";
     }
 
-    /// <summary>A value as a SOQL string literal: quoted, with backslashes and quotes escaped.</summary>
+    /// <summary>Value as SOQL string literal: quoted, backslashes and quotes escaped.</summary>
     internal static string SoqlLiteral(string value)
     {
         return $"'{value.Replace("\\", "\\\\").Replace("'", "\\'")}'";

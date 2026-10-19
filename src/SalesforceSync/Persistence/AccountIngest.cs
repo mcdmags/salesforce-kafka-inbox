@@ -4,7 +4,8 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Persistence;
 
 /// <summary>
-/// The account events an Account aggregate calls for. Knows the aggregate and the event, nothing of Salesforce (that is <see cref="ToSalesforce.AccountSync"/>).
+/// Account events an Account aggregate calls for. Knows aggregate + event, not Salesforce
+/// (<see cref="ToSalesforce.AccountSync"/>).
 /// </summary>
 public sealed class AccountIngest(IRepository<AccountInboxRow> inbox) : IAggregateIngest
 {
@@ -16,8 +17,8 @@ public sealed class AccountIngest(IRepository<AccountInboxRow> inbox) : IAggrega
     }
 
     /// <summary>
-    /// The Account's event: the Account (with its Profile) when it changed or Before is missing; its delete, with its
-    /// Profile if that has a key of its own, when it is gone.
+    /// Account event: Account (with Profile) when changed or Before missing; delete (with Profile if it has own key)
+    /// when gone.
     /// </summary>
     internal IEnumerable<AccountEvent> Project(AggregateChange change)
     {

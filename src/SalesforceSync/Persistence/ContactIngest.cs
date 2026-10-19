@@ -4,7 +4,8 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Persistence;
 
 /// <summary>
-/// The contact events an Account aggregate calls for. Knows the aggregate and the event, nothing of Salesforce (that is <see cref="ToSalesforce.ContactSync"/>).
+/// Contact events an Account aggregate calls for. Knows aggregate + event, not Salesforce
+/// (<see cref="ToSalesforce.ContactSync"/>).
 /// </summary>
 public sealed class ContactIngest(IRepository<ContactInboxRow> inbox) : IAggregateIngest
 {
@@ -15,7 +16,7 @@ public sealed class ContactIngest(IRepository<ContactInboxRow> inbox) : IAggrega
         return InboxIngest.StoreAsync(Project(change), ContactEvent.Reader, inbox, ct);
     }
 
-    /// <summary>The contacts of the aggregate that are new or changed, and a delete for each that went.</summary>
+    /// <summary>New or changed contacts, plus a delete per removed one.</summary>
     internal IEnumerable<ContactEvent> Project(AggregateChange change)
     {
         return AggregateProjection.ChildEvents(change, s => s.Contacts, c => c.ExternalId,

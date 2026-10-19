@@ -9,7 +9,7 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// CPU-only hot paths: header parsing, reading events, type-aware normalize + compare.
+/// CPU-only hot paths: header parsing, event reading, type-aware normalize + compare.
 /// </summary>
 [MemoryDiagnoser]
 public class MicroBenchmarks
@@ -23,7 +23,7 @@ public class MicroBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        // Full records, as the source sends them: a claim's rows, one per entity
+        // Full records as source sends them: a claim's rows, one per entity
         _tenEvents = [.. Enumerable.Range(1, 10).Select(v => new InboxEvent(
             EntityId: $"ACC-{v:D6}",
             Payload: new JsonObject
@@ -68,7 +68,7 @@ public class MicroBenchmarks
         return SalesforceLimitInfo.Parse(LimitHeader);
     }
 
-    /// <summary>What the consumer does per message: typed read + validation (entity id, event time).</summary>
+    /// <summary>Consumer per message: typed read + validation (entity id, event time).</summary>
     [Benchmark]
     public bool ReadAndValidateEvent()
     {

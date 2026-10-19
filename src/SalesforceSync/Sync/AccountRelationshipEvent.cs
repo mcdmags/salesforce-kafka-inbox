@@ -1,9 +1,9 @@
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Inbox event for an account-to-account relationship (entity type "accountRelationship", key =
-/// accountRelationship.externalId), as <see cref="AccountAggregate"/> splits it out of its first Account's aggregate:
-/// the relationship as the source system sends it (camelCase JSON, full record), or a delete (its key only).
+/// Inbox event for account-to-account relationship (entity type "accountRelationship", key =
+/// accountRelationship.externalId), split by <see cref="AccountAggregate"/> from its first Account's aggregate:
+/// relationship as source sends it (camelCase JSON, full record), or delete (key only).
 /// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" },
 ///   "accountRelationship": { "externalId": "REL-1", "accountExternalId": "ACC-1", "relatedAccountExternalId": "ACC-2",
 ///                            "type": "Parent", "isActive": true } }
@@ -13,7 +13,7 @@ public sealed record AccountRelationshipEvent(EventMeta? Meta, AccountRelationsh
 {
     public const string Type = "accountRelationship";
 
-    /// <summary>How an inbox event of this type is read: the entity's id and the meta.</summary>
+    /// <summary>How inbox events of this type are read: entity id + meta.</summary>
     public static readonly EventReader<AccountRelationshipEvent> Reader = new(Type, e => e.AccountRelationship?.ExternalId, e => e.Meta);
 }
 
@@ -22,7 +22,7 @@ public sealed class AccountRelationshipPayload
 {
     public string? ExternalId { get; set; }
 
-    /// <summary>External ids of the two accounts. Both required. An event without them is dead-lettered (INVALID_EVENT).</summary>
+    /// <summary>External ids of the two accounts. Both required; missing → dead-lettered (INVALID_EVENT).</summary>
     public string? AccountExternalId { get; set; }
     public string? RelatedAccountExternalId { get; set; }
 

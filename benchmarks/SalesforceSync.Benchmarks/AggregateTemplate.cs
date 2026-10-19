@@ -6,30 +6,30 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// The shape of the aggregates the benchmark publishes, as an example JSON the workload (<see cref="AggregateWorkload"/>) copies and
-/// modifies. The built-in example is what the benchmark always used; <c>--template my.json</c> (or the environment
-/// variable <see cref="Variable"/>) replaces it with yours, so the events have the fields of your <c>AccountEvent</c>.
+/// Shape of published aggregates: example JSON <see cref="AggregateWorkload"/> copies and modifies. Built-in example by
+/// default; <c>--template my.json</c> (or env var <see cref="Variable"/>) swaps in yours, so events get your
+/// <c>AccountEvent</c> fields.
 /// <para>
-/// The file is an account aggregate message, <c>{ "meta": ..., "before": ..., "after": { the account, "profile",
-/// "accountRelationships": [ one example ], "contacts": [ one example ] } }</c> (only <c>after</c> is read; a bare snapshot
-/// works too). Every event the workload publishes is a copy of it with:
+/// File = account aggregate message <c>{ "meta": ..., "before": ..., "after": { the account, "profile",
+/// "accountRelationships": [ one example ], "contacts": [ one example ] } }</c> (only <c>after</c> read; bare snapshot
+/// ok). Every published event is a copy with:
 /// </para>
 /// <list type="bullet">
-/// <item>the ids set (the account's <c>externalId</c>, each child's, and a relationship's <c>relatedAccountExternalId</c>);</item>
-/// <item>the version markers the end-state check reads set (<see cref="Markers"/>): the account's <c>description</c> "vN" and its
-/// <c>profile.score</c> N, a relationship's <c>name</c> "vN", a contact's <c>lastName</c> "vN";</item>
-/// <item>in every other text, <c>{key}</c> replaced by the entity's key (an email, a name that must be unique);</item>
-/// <item>everything else as in the file: the same properties, the same values.</item>
+/// <item>ids set (account <c>externalId</c>, each child's, relationship <c>relatedAccountExternalId</c>);</item>
+/// <item>version markers set (<see cref="Markers"/>): account <c>description</c> "vN" and <c>profile.score</c> N,
+/// relationship <c>name</c> "vN", contact <c>lastName</c> "vN";</item>
+/// <item>other text: <c>{key}</c> → entity key (unique emails, names);</item>
+/// <item>everything else as in file.</item>
 /// </list>
-/// A file that doesn't conform is refused with the list of what is wrong: a property the payload class doesn't have
-/// (a typo, or a field you removed from <c>AccountEvent</c>), a value of the wrong type, a missing marker.
+/// Nonconforming file refused, problems listed: property payload class lacks (typo, field removed from
+/// <c>AccountEvent</c>), wrong value type, missing marker.
 /// </summary>
 public sealed class AggregateTemplate
 {
-    /// <summary>The environment variable that names the template file (child benchmark processes inherit it).</summary>
+    /// <summary>Env var naming template file (child benchmark processes inherit it).</summary>
     public const string Variable = "SFSYNC_BENCH_TEMPLATE";
 
-    /// <summary>The properties the workload sets itself because the end-state check reads them back from the org.</summary>
+    /// <summary>Properties workload sets itself; end-state check reads them back from org.</summary>
     public static class Markers
     {
         public const string Account = "description", ProfileScore = "score", Relationship = "name", Contact = "lastName";
@@ -54,7 +54,7 @@ public sealed class AggregateTemplate
         }
         """;
 
-    /// <summary>The example the benchmark has always used.</summary>
+    /// <summary>Example benchmark always used.</summary>
     public static AggregateTemplate Default { get; } = Parse(DefaultJson, BuiltInSource);
 
     private static readonly Lazy<AggregateTemplate> FromEnvironment = new(() =>
@@ -71,16 +71,16 @@ public sealed class AggregateTemplate
         _contact = contact;
     }
 
-    /// <summary>The template the run uses: the file named by <see cref="Variable"/>, else <see cref="Default"/>.</summary>
+    /// <summary>Run's template: file named by <see cref="Variable"/>, else <see cref="Default"/>.</summary>
     public static AggregateTemplate Current => FromEnvironment.Value;
 
-    /// <exception cref="InvalidDataException">The file doesn't conform.</exception>
+    /// <exception cref="InvalidDataException">File doesn't conform.</exception>
     public static AggregateTemplate Load(string path)
     {
         return Parse(File.ReadAllText(path), path);
     }
 
-    /// <exception cref="InvalidDataException">The JSON doesn't conform: what is wrong, one per line.</exception>
+    /// <exception cref="InvalidDataException">JSON doesn't conform; one problem per line.</exception>
     public static AggregateTemplate Parse(string json, string source)
     {
         var problems = new List<string>();
@@ -103,13 +103,13 @@ public sealed class AggregateTemplate
             throw Refused(source, problems);
         }
 
-        // An aggregate message (the account is its "after", else its "before"), or the snapshot itself
+        // Aggregate message (account = "after", else "before"), or the snapshot itself
         if ((root["after"] ?? root["before"] ?? (root.ContainsKey("meta") ? null : root)) is not JsonObject snapshot)
         {
             throw Refused(source, ["there is no account: the message needs an \"after\" (or \"before\") object"]);
         }
 
-        // An example without a child leaves the child as the built-in example has it
+        // Example without a child → built-in child
         var builtIn = source == BuiltInSource ? null : Default;
         var relationship = FirstOf(snapshot, "accountRelationships") ?? builtIn?._relationship ?? [];
         var contact = FirstOf(snapshot, "contacts") ?? builtIn?._contact ?? [];
@@ -132,7 +132,7 @@ public sealed class AggregateTemplate
         var template = new AggregateTemplate(account, (JsonObject)relationship.DeepClone(), (JsonObject)contact.DeepClone());
         if (problems.Count == 0)
         {
-            // What the consumer would make of it: a valid aggregate whose values have the payload classes' types
+            // What consumer would make of it: valid aggregate, values of payload classes' types
             var sample = new JsonObject
             {
                 ["meta"] = new JsonObject { ["time"] = "2026-01-01T00:00:00Z", ["type"] = "inserted" },
@@ -147,7 +147,7 @@ public sealed class AggregateTemplate
         return problems.Count == 0 ? template : throw Refused(source, problems);
     }
 
-    /// <summary>The account's snapshot at <paramref name="version"/>, with these children.</summary>
+    /// <summary>Account snapshot at <paramref name="version"/>, with these children.</summary>
     public JsonObject Account(string key, long version, JsonArray relationships, JsonArray contacts)
     {
         var account = Expand((JsonObject)_account.DeepClone(), key);
@@ -159,7 +159,7 @@ public sealed class AggregateTemplate
         return account;
     }
 
-    /// <summary>A relationship of the account at its next <paramref name="version"/>, naming <paramref name="related"/>.</summary>
+    /// <summary>Relationship at next <paramref name="version"/>, naming <paramref name="related"/>.</summary>
     public JsonObject Relationship(string id, string related, long version)
     {
         var relationship = Expand((JsonObject)_relationship.DeepClone(), id);
@@ -169,7 +169,7 @@ public sealed class AggregateTemplate
         return relationship;
     }
 
-    /// <summary>A contact of the account at its next <paramref name="version"/>.</summary>
+    /// <summary>Contact at next <paramref name="version"/>.</summary>
     public JsonObject Contact(string id, long version)
     {
         var contact = Expand((JsonObject)_contact.DeepClone(), id);
@@ -183,7 +183,7 @@ public sealed class AggregateTemplate
         return snapshot[list] is JsonArray { Count: > 0 } items ? items[0] as JsonObject : null;
     }
 
-    /// <summary>Replaces <c>{key}</c> in every text of the copy.</summary>
+    /// <summary>Replaces <c>{key}</c> in every text of copy.</summary>
     private static JsonObject Expand(JsonObject copy, string key)
     {
         foreach (var (name, value) in copy.ToList())
@@ -199,7 +199,7 @@ public sealed class AggregateTemplate
         return copy;
     }
 
-    /// <summary>Every property of the example is a property of the payload class (names without regard to case), at every level.</summary>
+    /// <summary>Every example property exists on payload class (case-insensitive), at every level.</summary>
     private static void CheckShape(JsonNode? node, Type type, string path, List<string> problems)
     {
         if (node is JsonArray items)

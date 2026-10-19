@@ -4,10 +4,8 @@ using System.Text.Json.Nodes;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The Kafka aggregate split into per-entity events (the types' ingests): only what changed
-/// between before and after is stored, a removed child is a delete, and every event is one its type's strategy reads
-/// and maps.
-/// No database, no Kafka.
+/// Kafka aggregate → per-entity events (types' ingests): only before→after changes stored, removed child = delete,
+/// every event readable and mappable by its type's strategy. No database, no Kafka.
 /// </summary>
 public sealed class AccountAggregateTests
 {

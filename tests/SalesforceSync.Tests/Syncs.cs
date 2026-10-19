@@ -4,8 +4,8 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The three ingests as the app builds them (it registers each once in DI), and the aggregate. The tests that use only
-/// the projection need no inbox.
+/// Three ingests as the app builds them (registers each once in DI), plus the aggregate. Tests using only the
+/// projection need no inbox.
 /// </summary>
 internal static class Syncs
 {
@@ -15,10 +15,10 @@ internal static class Syncs
 
     public static readonly AccountAggregate Aggregate = new();
 
-    /// <summary>One entity's event out of an aggregate: its type (which inbox stores it) and the event as stored.</summary>
+    /// <summary>One entity's event from an aggregate: its type (which inbox stores it) and event as stored.</summary>
     public sealed record EntityEvent(string EntityType, string Json);
 
-    /// <summary>The per-entity events of an aggregate, in the order of the types (the Account, its relationships, its contacts).</summary>
+    /// <summary>Per-entity events of an aggregate, in type order (Account, its relationships, its contacts).</summary>
     public static bool TrySplit(string json, out List<EntityEvent>? events, out string? problem)
     {
         events = null;

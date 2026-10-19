@@ -5,8 +5,8 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Inbox;
 
 /// <summary>
-/// Runs N parallel worker loops. Each iteration gets a fresh scope (fresh typed HttpClient) and runs one batch of
-/// every entity type (accounts, relationships, ...). Each loop starts at a different type, so none waits behind another.
+/// N parallel worker loops. Each iteration: fresh scope (fresh typed HttpClient), one batch of every entity type.
+/// Loops start at different types so none waits behind another.
 /// </summary>
 public sealed class InboxWorkerService(
     IServiceScopeFactory scopes,
@@ -54,11 +54,10 @@ public sealed class InboxWorkerService(
     }
 
     /// <summary>
-    /// One pass: a batch of every registered entity type, in a fresh scope (fresh typed HttpClient). Starts at
-    /// type <paramref name="rotation"/> mod N so loops don't queue behind the same type. Benchmarks also call it,
-    /// so they drive exactly what the worker runs.
+    /// One pass: a batch of every registered type, fresh scope. Starts at type <paramref name="rotation"/> mod N so
+    /// loops don't queue behind one type. Benchmarks call it too: same as worker.
     /// </summary>
-    /// <returns>Inbox rows processed across all types (0 = nothing to do).</returns>
+    /// <returns>Inbox rows processed across types (0 = nothing to do).</returns>
     internal static async Task<int> SyncOnceAsync(IServiceScopeFactory scopes, int rotation, CancellationToken ct)
     {
         await using var scope = scopes.CreateAsyncScope();

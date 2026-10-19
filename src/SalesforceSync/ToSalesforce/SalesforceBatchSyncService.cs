@@ -6,49 +6,48 @@ using SalesforceSync.Sync;
 
 namespace SalesforceSync.ToSalesforce;
 
-/// <summary>What went wrong with one record of an entity, and whether retrying the same data can help.</summary>
+/// <summary>One record's failure; Permanent = retrying same data can't help.</summary>
 public sealed record Failure(string Error, bool Permanent);
 
 /// <summary>
-/// What a type does with a batch's valid events: send them to Salesforce, however it likes (<see cref="SalesforceCalls"/>
-/// has the calls it is usually made of).
+/// Type's handling of a batch's valid events: send to Salesforce however it likes (usual calls:
+/// <see cref="SalesforceCalls"/>).
 /// </summary>
-/// <returns>The entities that failed, by entity id, with why. An entity not in it is done.</returns>
+/// <returns>Failed entities by entity id, with why. Not in it = done.</returns>
 public delegate Task<Dictionary<string, List<Failure>>> SendStep<TEvent>(IReadOnlyList<ReadEvent<TEvent>> events, CancellationToken ct);
 
 /// <summary>
-/// The flow of one batch of one entity type, from the inbox to Salesforce and back; the same for every type. Only the
-/// flow is here. What happens with the events (how they map, what is read, written and how answers are read) is the
-/// type's own, passed in as the <see cref="SendStep{TEvent}"/>.
+/// Flow of one batch of one entity type, inbox → Salesforce → back; same for every type. Only flow here; event handling
+/// (mapping, reads, writes, reading answers) is the type's, passed as <see cref="SendStep{TEvent}"/>.
 /// <list type="number">
-/// <item>Nothing starts while this process is paused (Salesforce asked for it).</item>
-/// <item><b>Claim</b> up to <see cref="SyncOptions.BatchSize"/> due entities from the inbox table: leased to this
-/// worker, so no other worker (in any pod) takes them until the lease ends. One row per entity: its newest event.</item>
-/// <item><b>Parse</b> each row's event (<see cref="EventReader{TEvent}"/>). A row that can't be read is dead.</item>
-/// <item><b>Send</b>: the type's step. It runs outside any database transaction (Salesforce can't join one) and is
-/// given up on before the lease runs out, so another worker never takes an entity while this one can still write it.</item>
-/// <item><b>Record</b> each entity's outcome in the inbox: done, retried later, or dead. If the whole step fails, every
-/// claimed entity is held (the write's outcome is unknown), deferred (rate limited), stopped (a mapping error) or retried.</item>
+/// <item>Nothing starts while process is paused (Salesforce asked).</item>
+/// <item><b>Claim</b> ≤ <see cref="SyncOptions.BatchSize"/> due entities from inbox table, leased to this worker: no
+/// other worker (any pod) takes them until lease ends. One row per entity = its newest event.</item>
+/// <item><b>Parse</b> each row's event (<see cref="EventReader{TEvent}"/>). Unreadable row = dead.</item>
+/// <item><b>Send</b>: type's step. Outside any DB transaction (Salesforce can't join one); abandoned before lease ends,
+/// so no other worker takes an entity while this one can still write it.</item>
+/// <item><b>Record</b> each outcome in inbox: done, retried later, or dead. Whole step fails → all claimed entities
+/// held (write outcome unknown), deferred (rate limited), stopped (mapping error) or retried.</item>
 /// </list>
 /// </summary>
 public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, IOptions<SyncOptions> options, ILogger<SalesforceBatchSyncService> log)
 {
     /// <summary>
-    /// Share of the lease a batch may spend before its Salesforce call is cancelled. The rest is margin for recording
-    /// the outcome. A write cancelled this way has an unknown outcome and puts its entities on hold.
+    /// Share of lease a batch may use before its Salesforce call is cancelled; rest = margin to record outcome. Write
+    /// cancelled this way = unknown outcome → entities on hold.
     /// </summary>
     private const double LeaseUsableFraction = 0.8;
 
-    /// <summary>Recording a hold must not be cut short by the cancellation that caused it (shutdown), and must not hang it.</summary>
+    /// <summary>Hold recording must survive the cancellation that caused it (shutdown), without hanging.</summary>
     private static readonly TimeSpan HoldRecordingTimeout = TimeSpan.FromSeconds(10);
 
     private readonly SyncOptions _opt = options.Value;
 
-    /// <param name="reader">Reads and validates the type's events.</param>
-    /// <param name="inbox">The type's inbox table.</param>
-    /// <param name="send">What the type does with the valid events.</param>
+    /// <param name="reader">Reads, validates events.</param>
+    /// <param name="inbox">Type's inbox table.</param>
+    /// <param name="send">Type's handling of valid events.</param>
     /// <param name="ct">Shutdown.</param>
-    /// <returns>Inbox rows processed (0 = nothing to do, or no capacity right now).</returns>
+    /// <returns>Inbox rows processed (0 = nothing to do or no capacity).</returns>
     public async Task<int> SyncBatchAsync<TEvent, TRow>(EventReader<TEvent> reader, IRepository<TRow> inbox, SendStep<TEvent> send,
         CancellationToken ct)
         where TRow : InboxRow, IInboxRow, new()
@@ -58,7 +57,7 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
             return 0;
         }
 
-        // Started before the claim, so the margin is measured from when the lease began
+        // Started before claim: margin measured from lease start
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
 
@@ -77,8 +76,8 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
         }
         catch (UnknownOutcomeException ex)
         {
-            // Salesforce may still apply the write, so the entities aren't written again for a while. Caught on
-            // shutdown too. If the hold can't be recorded (or the process is killed first), the lease still protects them
+            // Salesforce may still apply the write → no rewrite for a while. Caught on shutdown too. Hold not recorded
+            // (or process killed first) → lease still protects them
             log.LogWarning(ex, "{Type} batch: holding {Count} events for {Hold}", reader.EntityType, claim.Events.Count, _opt.UnknownOutcomeHold);
             using var recording = new CancellationTokenSource(HoldRecordingTimeout);
             await inbox.ReleaseAsync(claim, new Release(_opt.UnknownOutcomeHold, $"UNKNOWN_OUTCOME: {ex.Message}"), recording.Token);
@@ -87,8 +86,8 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
         }
         catch (MappingErrorException ex)
         {
-            // The inbox stops (every due row waits) with the error on the rows to fix. Nothing is dead-lettered and the
-            // rows go on after the deploy with no replay
+            // Inbox stops (every due row waits), error on rows to fix. Nothing dead-lettered; rows resume after deploy,
+            // no replay
             log.LogError(ex, "{Type} inbox stopped for {Hold} by {Count} mapping error(s), fix the mapping or add the field: {Errors}",
                 reader.EntityType, _opt.MappingErrorHold, ex.Errors.Count,
                 string.Join("; ", ex.Errors.Select(e => $"{e.Key}: {e.Error.Code} {e.Error.Message}")));
@@ -106,8 +105,8 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // A request failed that Salesforce provably did not apply (the read or a write): every entity is retried.
-            // Records saved by earlier calls of the batch are safe: the retry reads them and writes only what differs
+            // Request provably not applied by Salesforce (read or write) → retry every entity. Records saved by earlier
+            // calls are safe: retry reads them, writes only diffs
             log.LogError(ex, "{Type} batch failed", reader.EntityType);
             await inbox.FailAllAsync(claim, ex.Message, ct);
             return claim.Events.Count;
@@ -118,8 +117,8 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
     }
 
     /// <summary>
-    /// Each claimed row's event, read. A row that can't be read, or is about another entity than its row (the lease is on
-    /// the row's entity), is dead: retrying can't fix it.
+    /// Each claimed row's event, read. Dead (retry can't fix): unreadable row, or event about another entity than its
+    /// row (lease is on row's entity).
     /// </summary>
     private static (List<ReadEvent<TEvent>> Events, List<FailedEvent> Dead) Parse<TEvent>(EventReader<TEvent> reader, IReadOnlyList<InboxEvent> rows)
     {
@@ -149,7 +148,7 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
         return new FailedEvent(row.EntityId, $"{SalesforceErrors.InvalidEvent}: {reader.EntityType} {row.EntityId}: {why}");
     }
 
-    /// <summary>Done: no failure. Dead: a failure retrying can't fix, and the unreadable rows. Failed: the rest, retried with backoff.</summary>
+    /// <summary>Done: no failure. Dead: unfixable-by-retry failures + unreadable rows. Failed: rest, retried with backoff.</summary>
     private BatchOutcomes Outcomes<TEvent>(string entityType, List<ReadEvent<TEvent>> events, List<FailedEvent> dead,
         Dictionary<string, List<Failure>> failures)
     {

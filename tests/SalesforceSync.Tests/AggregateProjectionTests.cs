@@ -4,8 +4,8 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// Each entity type takes only what it needs from an aggregate (<see cref="IAggregateIngest"/>): the Account its own
-/// part, a child type its own list. <see cref="AccountAggregateTests"/> covers the split of a whole message.
+/// Each type takes only what it needs from an aggregate (<see cref="IAggregateIngest"/>): Account its own part,
+/// child type its own list. <see cref="AccountAggregateTests"/> covers the split of a whole message.
 /// </summary>
 public sealed class AggregateProjectionTests
 {

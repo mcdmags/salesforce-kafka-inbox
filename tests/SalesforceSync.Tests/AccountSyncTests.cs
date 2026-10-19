@@ -152,7 +152,7 @@ public sealed class AccountSyncTests
     [Fact]
     public async Task Without_the_record_type_in_the_org_the_account_waits_for_it()
     {
-        // The mock org has no record type of this name: only the event decides nothing, the org does
+        // Mock org has no record type of this name: org decides, not event
         var org = _sync.Org;
         await SyncAsync(Events.Account(Acme, 1, "inserted"));
 

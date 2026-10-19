@@ -73,18 +73,18 @@ fails a stale record and a missed delete.
 
 ### Using your own aggregate
 
-The aggregates are copies of an example JSON, so they can have the fields of your own `AccountEvent`. Pass your file
-with `--template` (both `--run` and `--load` take it; the child benchmark processes inherit it through the
-`SFSYNC_BENCH_TEMPLATE` environment variable):
+Aggregates are copies of an example JSON, so they can have your own `AccountEvent` fields. Pass your file with
+`--template` (`--run` and `--load` both take it; child benchmark processes inherit it via the `SFSYNC_BENCH_TEMPLATE`
+environment variable):
 
 ```
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --template my-aggregate.json --run full
 ```
 
-`benchmarks/SalesforceSync.Benchmarks/example-aggregate.json` has every field of the current events: start from it. The
-file is an aggregate message (`{ meta, before, after }`); only `after` is read, as the example of the account, with one
-example relationship in `accountRelationships` and one contact in `contacts` (a bare account snapshot works too, and
-a missing child example is the built-in one). Every aggregate the workload publishes is a copy of it with:
+`benchmarks/SalesforceSync.Benchmarks/example-aggregate.json` has every field of the current events: start from it. File =
+aggregate message (`{ meta, before, after }`); only `after` is read: the account, one example relationship in
+`accountRelationships`, one contact in `contacts` (bare account snapshot works too; missing child example = built-in).
+Every published aggregate is a copy of it with:
 
 - **the ids set**: the account's `externalId`, each child's, a relationship's `relatedAccountExternalId`;
 - **the version markers set**, because the end-state check reads them back from the org: the account's `description`
@@ -93,14 +93,11 @@ a missing child example is the built-in one). Every aggregate the workload publi
 - **`{key}` in any other text replaced** by the entity's key (`"email": "{key}@example.com"`, to make values unique);
 - **everything else as in your file**: the same properties and values, in every event.
 
-The file must conform to the event. It is checked before the run, and refused with every problem listed: a property
-the payload class doesn't have (a typo, or a field you removed from the event class), a value of the wrong type
-(`"annualRevenue": "lots"`), a missing `profile`, or anything the sync can't read as an aggregate. With no `--template` the
-workload is exactly what it always was (the same aggregates, byte for byte). Fields your sync maps to Salesforce
-are written there and checked only through the markers; add your own checks to `AggregateWorkload.OrgCheck` if you need more.
-
-**Results pending**: the benchmarks have not been run on this workload yet; the numbers on this page are from the
-earlier workload.
+The file must conform to the event. Checked before the run; refused with every problem listed: a property the payload
+class lacks (typo, or field removed from the event class), a wrong-type value (`"annualRevenue": "lots"`), a missing
+`profile`, anything the sync can't read as an aggregate. Without `--template` the workload is unchanged (same
+aggregates, byte for byte). Fields your sync maps to Salesforce are written there, checked only via the markers; add
+checks to `AggregateWorkload.OrgCheck` for more.
 
 ## Environment
 

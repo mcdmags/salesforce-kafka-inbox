@@ -19,20 +19,19 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// End-to-end: put N account aggregates (<see cref="AggregateWorkload"/>: Account changes, relationships and contacts
-/// added, changed, removed and re-added, a few whole accounts deleted), split by the types' ingests
-/// into the per-entity events the consumer stores, into the real Postgres inboxes, and drain them with P "pods" x W
-/// parallel worker loops. A pod is wired exactly like the worker
-/// (<see cref="SyncServiceCollectionExtensions"/>, rate limiter included); its loops run the worker's own pass
-/// (<see cref="InboxWorkerService.SyncOnceAsync"/>) over every registered entity type. Only the Salesforce HTTP
-/// endpoint is fake. A pod is an independent service provider (own connection pool, rate limiter, HTTP client), like
-/// a separate process. All pods share the Postgres inbox and one Salesforce org.
+/// End-to-end: N account aggregates (<see cref="AggregateWorkload"/>: Account changes, relationships/contacts added,
+/// changed, removed, re-added, a few accounts deleted), split by the types' ingests into per-entity events as the
+/// consumer stores them, into real Postgres inboxes, drained by P "pods" x W parallel worker loops. Pod wired exactly
+/// like the worker (<see cref="SyncServiceCollectionExtensions"/>, rate limiter included); its loops run the worker's
+/// own pass (<see cref="InboxWorkerService.SyncOnceAsync"/>) over every registered entity type. Only the Salesforce
+/// HTTP endpoint is fake. Pod = independent service provider (own connection pool, rate limiter, HTTP client), like a
+/// separate process. Pods share the Postgres inbox and one Salesforce org.
 /// <para>
-/// Each iteration also verifies correctness. The org rejects no out-of-order write, so a race would land. Checks:
-/// every account, relationship and contact the aggregates end with is in the org at its newest version (a
-/// relationship or contact names the right Accounts); every one they removed or deleted is absent; the org's write
-/// history shows each record's versions only moving forward; the claim audit (sql/claim-audit.sql) shows no two
-/// overlapping claims on the same entity; every entity's one inbox row holds its newest event and ends done.
+/// Each iteration also verifies correctness. Org rejects no out-of-order write, so a race would land. Checks: every
+/// account, relationship, contact the aggregates end with is in org at newest version (relationship/contact names
+/// right Accounts); every removed/deleted one absent; org write history shows each record's versions only moving
+/// forward; claim audit (sql/claim-audit.sql) shows no overlapping claims on one entity; every entity's one inbox row
+/// holds its newest event and ends done.
 /// </para>
 /// </summary>
 [Config(typeof(DrainConfig))]
@@ -56,14 +55,14 @@ public abstract class DrainBenchmarkBase
     /// <summary>Worker loops per pod.</summary>
     public abstract int Workers { get; set; }
 
-    /// <summary>Independent worker processes sharing the inbox (Kubernetes replicas).</summary>
+    /// <summary>Independent worker processes sharing inbox (Kubernetes replicas).</summary>
     public abstract int Pods { get; set; }
 
-    /// <summary>Account aggregates (Kafka messages); each is split into one or more entity events.</summary>
+    /// <summary>Account aggregates (Kafka messages); each splits into ≥1 entity events.</summary>
     public abstract int Events { get; set; }
 
     /// <summary>
-    /// Fewer accounts = more updates per account = more coalescing (events overwriting an unclaimed row) and ordering
+    /// Fewer accounts = more updates per account = more coalescing (events overwriting unclaimed row) and ordering
     /// pressure.
     /// </summary>
     public abstract int Accounts { get; set; }
@@ -71,10 +70,10 @@ public abstract class DrainBenchmarkBase
     /// <summary>Simulated Salesforce round trip.</summary>
     public abstract int LatencyMs { get; set; }
 
-    /// <summary>Entities per batch while streaming; null leaves the worker's default.</summary>
+    /// <summary>Entities per batch while streaming; null = worker default.</summary>
     protected virtual int? BatchSize => 10;
 
-    /// <summary>False: the whole inbox is loaded before draining. True: events keep arriving while pods drain.</summary>
+    /// <summary>False: whole inbox loaded before draining. True: events keep arriving while pods drain.</summary>
     protected abstract bool StreamIngest { get; }
 
     private NpgsqlDataSource _db = default!;
@@ -84,21 +83,21 @@ public abstract class DrainBenchmarkBase
     private List<IAggregateIngest> _ingests = [];
     private List<(AggregateChange Change, int Events)> _aggregates = [];
 
-    /// <summary>The workload's aggregates as the consumer reads them, and how many entity events each makes.</summary>
+    /// <summary>Workload aggregates as consumer reads them, and entity events each makes.</summary>
     protected IReadOnlyList<(AggregateChange Change, int Events)> Aggregates => _aggregates;
     private List<IngestRow> _events = [];
     protected IReadOnlyList<IngestRow> EntityEvents => _events;
     private AggregateWorkload _workload = default!;
     private Dictionary<string, DateTimeOffset> _newest = [];
 
-    // The tables as the EF model names them (only the model is read: nothing connects to this address)
+    // Tables as EF model names them (only model read: nothing connects)
     private static readonly Dictionary<string, string> InboxOf = FromModel(model => new Dictionary<string, string>
     {
         [AccountSync.Type] = model.TableOf<AccountInboxRow>(),
         [AccountRelationshipSync.Type] = model.TableOf<AccountRelationshipInboxRow>(),
         [ContactSync.Type] = model.TableOf<ContactInboxRow>()
     });
-    // Every inbox of the model: AddInboxSync runs a worker per synced object, and each one claims from its own table
+    // Every inbox of model: AddInboxSync runs a worker per synced object, each claims from own table
     protected static readonly string[] InboxTables = FromModel(model => model.InboxTables.ToArray());
 
     private static T FromModel<T>(Func<SyncDbContext, T> read)
@@ -108,8 +107,8 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// An entity event as the consumer stores it: entity type and its inbox table, entity id, event time (the
-    /// aggregate's meta.time) and payload.
+    /// Entity event as consumer stores it: entity type, its inbox table, entity id, event time (aggregate's meta.time),
+    /// payload.
     /// </summary>
     protected sealed record IngestRow(string EntityType, string Table, string EntityId, DateTimeOffset EventTime, string Payload);
 
@@ -119,7 +118,7 @@ public abstract class DrainBenchmarkBase
         _db = NpgsqlDataSource.Create(BenchmarkDb.ConnectionString);
         Contexts = SyncDbContext.CreateFactory(_db);
         SyncSchema.MigrateAsync(Contexts).GetAwaiter().GetResult();
-        // A plain command: EF's raw SQL formats {...} as parameter placeholders, and the script has JSON literals
+        // Plain command: EF raw SQL formats {...} as parameter placeholders; script has JSON literals
         using (var audit = _db.CreateCommand(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "claim-audit.sql"))))
         {
             audit.ExecuteNonQuery();
@@ -129,12 +128,12 @@ public abstract class DrainBenchmarkBase
         {
             Latency = TimeSpan.FromMilliseconds(LatencyMs),
             EnforceDailyLimit = false,
-            // The pods have no OAuth step (no auth handler): not what is measured
+            // Pods have no OAuth step (no auth handler): not measured
             RequireAccessToken = false
         });
 
         _pods = [.. Enumerable.Range(0, Pods).Select(_ => BuildPod())];
-        // What the consumer stores an aggregate's events with, one per entity type
+        // What consumer stores an aggregate's events with, one per entity type
         _ingests = [.. _pods[0].GetServices<IAggregateIngest>()];
     }
 
@@ -173,7 +172,7 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// Stores the aggregates one at a time, as fast as possible, like the Kafka consumer
+    /// Stores aggregates one at a time, as fast as possible, like the Kafka consumer
     /// (<see cref="IAggregateIngest.IngestAsync"/>).
     /// </summary>
     protected virtual async Task IngestAsync(CancellationToken ct)
@@ -184,7 +183,7 @@ public abstract class DrainBenchmarkBase
         }
     }
 
-    /// <summary>One aggregate: every entity type stores its events of it.</summary>
+    /// <summary>One aggregate: every entity type stores its events.</summary>
     protected async Task IngestAsync(AggregateChange change, CancellationToken ct)
     {
         foreach (var ingest in _ingests)
@@ -203,7 +202,7 @@ public abstract class DrainBenchmarkBase
         {
             ct.ThrowIfCancellationRequested();
 
-            // The worker's own pass: one batch of every registered entity type (accounts, relationships, contacts)
+            // Worker's own pass: one batch of every registered entity type
             int processed;
             try
             {
@@ -211,7 +210,7 @@ public abstract class DrainBenchmarkBase
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                // A worker that dies leaves its lease held until it expires, and the drain would only time out
+                // Dead worker holds its lease until expiry; drain would just time out
                 Console.Error.WriteLine($"// WORKER DIED {ex}");
                 throw;
             }
@@ -231,7 +230,7 @@ public abstract class DrainBenchmarkBase
                 return;
             }
 
-            await Task.Delay(2, ct); // other workers hold the remaining accounts, or more events are on the way
+            await Task.Delay(2, ct); // others hold remaining accounts, or more events coming
         }
     }
 
@@ -245,8 +244,8 @@ public abstract class DrainBenchmarkBase
     // ---------- Setup ----------
 
     /// <summary>
-    /// One "pod": own connection pool, limiter and HTTP stack; shares Postgres and the org. Wired with the worker's
-    /// registrations; only options, data source and primary HTTP handler (the mock org) differ.
+    /// One "pod": own connection pool, limiter, HTTP stack; shares Postgres and org. Worker's registrations; only
+    /// options, data source, primary HTTP handler (mock org) differ.
     /// </summary>
     private ServiceProvider BuildPod()
     {
@@ -266,12 +265,12 @@ public abstract class DrainBenchmarkBase
             o.Workers = Workers;
             if (StreamIngest && BatchSize is { } size)
             {
-                o.BatchSize = size;     // streaming: small batches, so entities are claimed again and again
+                o.BatchSize = size;     // streaming: small batches → entities claimed again and again
             }
 
             o.Lease = TimeSpan.FromMinutes(5);
-            // A relationship can be claimed before its Accounts are in the org (DEPENDENCY_NOT_SYNCED): retry it
-            // within milliseconds rather than the production 30 s, so the benchmark measures the pipeline
+            // Relationship can be claimed before its Accounts are in org (DEPENDENCY_NOT_SYNCED): retry in ms, not
+            // production 30 s, so benchmark measures pipeline
             o.RetryBaseDelay = TimeSpan.FromMilliseconds(10);
             o.MaxRetryDelay = TimeSpan.FromMilliseconds(500);
             o.MaxRetries = 50;
@@ -296,7 +295,7 @@ public abstract class DrainBenchmarkBase
         await db.Database.ExecuteAsync("TRUNCATE sf_claim_audit", default);
 
         (_workload, _events, _aggregates) = Generate(Events, Accounts, _pods[0].GetRequiredService<AccountAggregate>());
-        // Per entity, its newest event: what its one inbox row must end with
+        // Per entity newest event: what its one inbox row must end with
         _newest = _events.GroupBy(e => e.EntityId).ToDictionary(g => g.Key, g => g.Max(e => e.EventTime), StringComparer.Ordinal);
         if (!StreamIngest)
         {
@@ -305,9 +304,9 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// The workload's aggregates, as the consumer reads them, and as the entity events they make, in publish order:
-    /// split by the types' ingests, each read by its type's reader (entity id, time). A
-    /// relationship or contact may be claimed before its Account is in the org (DEPENDENCY_NOT_SYNCED, retried).
+    /// Workload aggregates as consumer reads them, and entity events they make, in publish order: split by types'
+    /// ingests, each read by its type's reader (entity id, time). Relationship/contact may be claimed before its
+    /// Account is in org (DEPENDENCY_NOT_SYNCED, retried).
     /// </summary>
     private static (AggregateWorkload Workload, List<IngestRow> Events, List<(AggregateChange, int)> Aggregates) Generate(
         int aggregates, int accounts, AccountAggregate accountAggregate)
@@ -340,12 +339,12 @@ public abstract class DrainBenchmarkBase
 
     private sealed record EntityEvent(string EntityType, string Json);
 
-    // Neither projection needs an inbox
+    // Projections need no inbox
     private static readonly AccountIngest AccountIngest = new(null!);
     private static readonly AccountRelationshipIngest RelationshipIngest = new(null!);
     private static readonly ContactIngest ContactIngest = new(null!);
 
-    /// <summary>The entity events of an aggregate, in the order of the types (the Account, its relationships, its contacts).</summary>
+    /// <summary>Aggregate's entity events, in type order (Account, relationships, contacts).</summary>
     private static List<EntityEvent> Split(AggregateChange change)
     {
         return
@@ -380,9 +379,8 @@ public abstract class DrainBenchmarkBase
     }
 
     /// <summary>
-    /// Loads the events to match storing them one by one (InboxRepository.AddAsync): per entity one row with its
-    /// newest event (of two equally new, the one stored later), entity due. Copied into a temporary table first,
-    /// since one insert can't overwrite a row twice.
+    /// Loads events to match storing one by one (InboxRepository.AddAsync): per entity one row with newest event
+    /// (equally new: later stored), entity due. Via temp table: one insert can't overwrite a row twice.
     /// </summary>
     private async Task PreloadAsync(NpgsqlConnection conn)
     {
@@ -425,26 +423,24 @@ public abstract class DrainBenchmarkBase
         {
             return await db.Database.QuerySingleAsync<long>(sql, default);
         }
-        // One query over both inbox tables, one row per entity
+        // One query over all inbox tables, one row per entity
         var inbox = string.Join(" UNION ALL ", InboxTables.Select(t => $"SELECT entity_id, event_time, next_attempt_at, attempt_count FROM {t}"));
         var rows = await Count($"SELECT count(*) FROM ({inbox}) i");
         var notDone = await Count($"SELECT count(*) FROM ({inbox}) i WHERE next_attempt_at IS NOT NULL");
-        // Every entity's row holds its newest event (the entity ids of the types never collide: ACC-, REL- and CON-)
+        // Every entity row holds newest event (ids never collide across types: ACC-, REL-, CON-)
         var stale = (await db.Database.QueryAsync<StoredEvent>($"SELECT entity_id AS EntityId, event_time AS EventTime FROM ({inbox}) i", default))
             .Count(r => _newest.GetValueOrDefault(r.EntityId) != r.EventTime);
-        // An entity claim takes the entity's row once its newest events have overwritten it, so entity events per claim
-        // is the coalescing (claims also count retries and deferrals). Counting records written instead would mix in
-        // that an account event writes two records (Account, Profile).
+        // Claim takes entity row after newest events overwrote it → entity events per claim = coalescing (claims also
+        // count retries, deferrals). Counting records written would mix in account event writing two (Account, Profile).
         var claims = await Count("SELECT count(*) FROM sf_claim_audit");
         var batches = await Count("SELECT count(*) FROM (SELECT DISTINCT inbox, claim_txid FROM sf_claim_audit) b");
         var overlaps = await Count("SELECT count(*) FROM sf_claim_overlaps");
-        // attempt_count counts the failures of the row's event, so retries = attempt_count (of the last event
-        // only: a newer event starts again at 0). Mostly relationships claimed before their Accounts were in the org
-        // (DEPENDENCY_NOT_SYNCED).
+        // attempt_count = failures of row's event, so retries = attempt_count (last event only: newer event restarts
+        // at 0). Mostly relationships claimed before their Accounts were in org (DEPENDENCY_NOT_SYNCED).
         var retries = await Count($"SELECT coalesce(sum(attempt_count), 0) FROM ({inbox}) i");
         var relationshipEvents = _events.Count(e => e.EntityType == AccountRelationshipSync.Type);
         var contactEvents = _events.Count(e => e.EntityType == ContactSync.Type);
-        // A delete is the split's event with meta.type deleted (no payload field is named type with that value)
+        // Delete = split event with meta.type deleted (no payload field named type has that value)
         var deleteEvents = _events.Count(e => e.Payload.Contains("\"type\":\"deleted\"", StringComparison.Ordinal));
         var deleted = _workload.Final.Values.Count(e => !e.Present);
 
@@ -466,7 +462,7 @@ public abstract class DrainBenchmarkBase
         }
     }
 
-    /// <summary>An inbox row's entity and event time, as the verification reads them.</summary>
+    /// <summary>Inbox row's entity and event time, as verification reads them.</summary>
     private sealed record StoredEvent(string EntityId, DateTimeOffset EventTime);
 }
 
@@ -492,10 +488,10 @@ public class InboxDrainBenchmarks : DrainBenchmarkBase
 }
 
 /// <summary>
-/// Aggregates keep arriving (in publish order, like Kafka, each split and stored as the consumer does) while the
-/// pods drain. The same entity is claimed, released and claimed again many times by different workers in different
-/// pods. Its row is overwritten while a worker writes the event it claimed, including a delete over an upsert and an
-/// upsert over a delete: the races the lease and the outcomes' check of the claimed event time must handle.
+/// Aggregates keep arriving (publish order, like Kafka, each split and stored as consumer does) while pods drain.
+/// Same entity claimed, released, reclaimed many times by different workers in different pods. Its row is overwritten
+/// while a worker writes the event it claimed, incl. delete over upsert and upsert over delete: races the lease and
+/// the outcomes' claimed-event-time check must handle.
 /// </summary>
 public class StreamingIngestBenchmarks : DrainBenchmarkBase
 {

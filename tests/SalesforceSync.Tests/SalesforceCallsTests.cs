@@ -7,7 +7,7 @@ using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
 
-/// <summary>The Salesforce calls the send steps are made of, against the mock org.</summary>
+/// <summary>Salesforce calls the send steps are made of, vs the mock org.</summary>
 public sealed class SalesforceCallsTests
 {
     private static readonly CancellationToken Ct = CancellationToken.None;
@@ -57,7 +57,7 @@ public sealed class SalesforceCallsTests
         {
             ["Name"] = "Acme",
             ["AnnualRevenue"] = 1250000.5m,
-            ["Active__c"] = null, // an unset checkbox is false in Salesforce
+            ["Active__c"] = null, // unset checkbox = false in Salesforce
             ["Customer_Since__c"] = new DateOnly(2020, 1, 15),
             ["Last_Contacted__c"] = new DateTimeOffset(2026, 10, 12, 1, 2, 3, 456, TimeSpan.Zero), // Salesforce keeps whole seconds
             ["Description"] = ""

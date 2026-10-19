@@ -7,25 +7,25 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// Drain benchmark input: account aggregates as the upstream publishes them (<c>{ meta, before, after }</c>, see
-/// <see cref="AccountAggregate"/>), and the state the org must end in. Every aggregate changes its Account (Description
-/// "vN" and Profile score N, N the account's version). Now and then it also adds, changes or removes a relationship or
-/// contact (a removed one may return later as a new record). A few accounts are deleted with all their children.
-/// The aggregates are copies of an example (<see cref="AggregateTemplate"/>), so they have the fields of your event.
-/// The benchmark stores what the types' ingests makes of each aggregate, as the Kafka consumer
-/// does. Seeded, no I/O, so every iteration gets the same workload.
+/// Drain benchmark input: account aggregates as upstream publishes them (<c>{ meta, before, after }</c>, see
+/// <see cref="AccountAggregate"/>), plus the state the org must end in. Every aggregate changes its Account (Description
+/// "vN", Profile score N; N = account version). Now and then also adds/changes/removes a relationship or contact
+/// (removed one may return as new record). A few accounts deleted with all children.
+/// Aggregates are copies of an example (<see cref="AggregateTemplate"/>), so they have your event's fields.
+/// Benchmark stores what the types' ingests make of each aggregate, like the Kafka consumer. Seeded, no I/O: same
+/// workload every iteration.
 /// </summary>
 public sealed class AggregateWorkload
 {
-    /// <summary>Share of aggregates that touch one of the account's relationships, and one of its contacts.</summary>
+    /// <summary>Share of aggregates touching one of the account's relationships / contacts.</summary>
     private const double RelationshipShare = 0.15, ContactShare = 0.15;
 
-    /// <summary>A touched child the aggregate already has is deleted this often, else changed.</summary>
+    /// <summary>Touched child already present: deleted this often, else changed.</summary>
     private const double RemovalShare = 0.3;
 
     /// <summary>
-    /// An aggregate of a deletable account (<see cref="IsDeletable"/>) with a few versions is its delete this often;
-    /// a deleted account gets no further aggregates.
+    /// Aggregate of a deletable account (<see cref="IsDeletable"/>) with a few versions is its delete this often;
+    /// deleted account gets no more aggregates.
     /// </summary>
     private const double AccountDeleteShare = 0.02;
 
@@ -34,11 +34,11 @@ public sealed class AggregateWorkload
 
     public static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-    /// <summary>An entity as the org must end: present with its newest version (and the Accounts it names), or absent.</summary>
-    /// <param name="Account">The Account a relationship or contact names (Text foreign key).</param>
-    /// <param name="Related">The other Account of a relationship.</param>
-    /// <param name="Present">Whether the record must exist.</param>
-    /// <param name="Version">The newest version: an Account's Description "vN" and Profile score, a child's "vN".</param>
+    /// <summary>Entity as org must end: present at newest version (and Accounts it names), or absent.</summary>
+    /// <param name="Account">Account a relationship or contact names (Text foreign key).</param>
+    /// <param name="Related">Relationship's other Account.</param>
+    /// <param name="Present">Record must exist.</param>
+    /// <param name="Version">Newest version: Account Description "vN" and Profile score, child "vN".</param>
     public sealed record Expected(bool Present, long Version, string? Account = null, string? Related = null);
 
     private readonly Random _random;
@@ -59,20 +59,20 @@ public sealed class AggregateWorkload
         _deleted = new bool[accounts];
     }
 
-    /// <summary>The aggregates (Kafka messages), in publish order; the n-th one's meta.time is <see cref="BaseTime"/> + n ms.</summary>
+    /// <summary>Aggregates (Kafka messages) in publish order; n-th meta.time = <see cref="BaseTime"/> + n ms.</summary>
     public List<string> Aggregates { get; } = [];
 
-    /// <summary>Every entity the aggregates name, by entity type (<see cref="AccountSync.Type"/>, ...) and key.</summary>
+    /// <summary>Every entity named, by entity type (<see cref="AccountSync.Type"/>, ...) and key.</summary>
     public Dictionary<(string Type, string Key), Expected> Final { get; } = [];
 
     /// <summary>
-    /// <paramref name="aggregates"/> aggregates over <paramref name="accounts"/> accounts: a random account each, now
-    /// and then in a burst of 2-5 in a row (coalescing and ordering pressure).
+    /// <paramref name="aggregates"/> aggregates over <paramref name="accounts"/> accounts: random account each, sometimes
+    /// a burst of 2-5 in a row (coalescing and ordering pressure).
     /// </summary>
-    /// <param name="aggregates">How many aggregates (Kafka messages).</param>
-    /// <param name="accounts">How many distinct accounts.</param>
-    /// <param name="seed">The random seed: the same seed and template make the same workload.</param>
-    /// <param name="template">The shape of the aggregates; the run's (<see cref="AggregateTemplate.Current"/>) when null.</param>
+    /// <param name="aggregates">Aggregate count (Kafka messages).</param>
+    /// <param name="accounts">Distinct account count.</param>
+    /// <param name="seed">Random seed: same seed + template = same workload.</param>
+    /// <param name="template">Aggregate shape; null = run's (<see cref="AggregateTemplate.Current"/>).</param>
     public static AggregateWorkload Generate(int aggregates, int accounts, int seed = 42, AggregateTemplate? template = null)
     {
         var workload = new AggregateWorkload(accounts, seed, template ?? AggregateTemplate.Current);
@@ -121,13 +121,13 @@ public sealed class AggregateWorkload
         }.ToJsonString());
     }
 
-    /// <summary>The account's next snapshot: the Account changed, its children as they were, maybe one of them touched.</summary>
+    /// <summary>Account's next snapshot: Account changed, children as before, maybe one touched.</summary>
     private JsonObject Next(int account, long version, JsonObject? before)
     {
         var relationships = before?["accountRelationships"]?.DeepClone().AsArray() ?? [];
         var contacts = before?["contacts"]?.DeepClone().AsArray() ?? [];
 
-        // A relationship names a second Account that has been published and is never deleted
+        // Relationship names a second Account: already published, never deleted
         var other = _random.Next(_versions.Length);
         if (_random.NextDouble() < RelationshipShare && other != account && _versions[other] > 0 && !IsDeletable(other))
         {
@@ -142,7 +142,7 @@ public sealed class AggregateWorkload
         return _template.Account(Key(account), version, relationships, contacts);
     }
 
-    /// <summary>Removes the child if the list has it (<see cref="RemovalShare"/>), else adds it at its next version.</summary>
+    /// <summary>Removes child if listed (<see cref="RemovalShare"/>), else adds it at next version.</summary>
     private void Touch(JsonArray children, string type, string id, Func<string, long, JsonObject> build)
     {
         var existing = children.FirstOrDefault(c => (string?)c?["externalId"] == id);
@@ -160,8 +160,8 @@ public sealed class AggregateWorkload
     }
 
     /// <summary>
-    /// A tenth of the accounts may be deleted. No other account's relationship names them, so a relationship never
-    /// outlives an Account it names (the source system removes it first).
+    /// A tenth of accounts may be deleted. No other account's relationship names them, so a relationship never
+    /// outlives an Account it names (source removes it first).
     /// </summary>
     private static bool IsDeletable(int account)
     {
@@ -169,8 +169,8 @@ public sealed class AggregateWorkload
     }
 
     /// <summary>
-    /// The end state: an account present at its version unless deleted; a child present at its version, naming its
-    /// Accounts, if its account's last snapshot has it, else absent (removed, or deleted with its account).
+    /// End state: account present at its version unless deleted; child present at its version, naming its Accounts,
+    /// if its account's last snapshot has it, else absent (removed, or deleted with account).
     /// </summary>
     private void Expect()
     {
@@ -208,11 +208,11 @@ public sealed class AggregateWorkload
     // ---------- The check ----------
 
     /// <summary>
-    /// Compares the org with <see cref="Final"/>. The org rejects no out-of-order write, so a race lands there. Checks:
-    /// every entity at its newest version on every record it writes (a relationship or contact names the right,
-    /// existing Accounts), every removed or deleted one absent, and each record's write history only moving forward.
+    /// Compares org with <see cref="Final"/>. Org rejects no out-of-order write, so a race lands. Checks: every entity
+    /// at newest version on every record it writes (relationship/contact names right, existing Accounts), every
+    /// removed/deleted one absent, each record's write history only moving forward.
     /// </summary>
-    /// <returns>What is wrong, per entity, and how many records received an older version after a newer one.</returns>
+    /// <returns>What is wrong per entity, and how many records got an older version after a newer one.</returns>
     public (List<string> Wrong, int Regressions) Check(FakeSalesforceStore org)
     {
         var check = new OrgCheck(org);
@@ -220,12 +220,12 @@ public sealed class AggregateWorkload
         return (wrong, check.Regressions);
     }
 
-    /// <summary>One run of <see cref="Check"/> over the org.</summary>
+    /// <summary>One <see cref="Check"/> run over the org.</summary>
     private sealed class OrgCheck(FakeSalesforceStore org)
     {
         private const string RelationshipObject = "Account_Relationship__c";
 
-        /// <summary>The object an entity type's record is (an Account's Profile__c goes with it).</summary>
+        /// <summary>Object of an entity type's record (Account's Profile__c goes with it).</summary>
         private static readonly Dictionary<string, string> ObjectOf = new()
         {
             [AccountSync.Type] = "Account",
@@ -235,7 +235,7 @@ public sealed class AggregateWorkload
 
         public int Regressions { get; private set; }
 
-        /// <summary>Null when the entity is as expected, else what is wrong.</summary>
+        /// <summary>Null when as expected, else what is wrong.</summary>
         public string? Problem(string type, string key, Expected expected)
         {
             return !expected.Present ? Absent(type, key)
@@ -244,7 +244,7 @@ public sealed class AggregateWorkload
                 : Contact(key, expected);
         }
 
-        /// <summary>A removed child, or a deleted account with its Profile: no record left.</summary>
+        /// <summary>Removed child, or deleted account with Profile: no record left.</summary>
         private string? Absent(string type, string key)
         {
             return org.FindByExternalId(ObjectOf[type], key) is null && (type != AccountSync.Type || org.FindByExternalId("Profile__c", key) is null)
@@ -252,7 +252,7 @@ public sealed class AggregateWorkload
                 : $"{key}: expected deleted, still in the org";
         }
 
-        /// <summary>Newest version on both records (Description "vN" on the Account, Score__c = N on the Profile).</summary>
+        /// <summary>Newest version on both records (Account Description "vN", Profile Score__c = N).</summary>
         private string? Account(string key, long expected)
         {
             var accountVersions = Versions("Account", key, "Description");
@@ -264,7 +264,7 @@ public sealed class AggregateWorkload
                 : $"{key}: expected v{expected}, account v{accountVersions.LastOrDefault()}, profile v{profileVersions.LastOrDefault()}";
         }
 
-        /// <summary>Newest version (Name "vN"), linked to the right two Accounts (Text foreign keys), both of which exist.</summary>
+        /// <summary>Newest version (Name "vN"), linked to right two Accounts (Text foreign keys), both existing.</summary>
         private string? Relationship(string key, Expected expected)
         {
             var versions = Versions(RelationshipObject, key, "Name");
@@ -288,8 +288,8 @@ public sealed class AggregateWorkload
         }
 
         /// <summary>
-        /// The versions ("vN" in <paramref name="field"/>) in the order the org received them, of the record that has
-        /// the key now (a re-added child is a new record with its own history).
+        /// Versions ("vN" in <paramref name="field"/>) in org receive order, of the record with the key now (re-added
+        /// child = new record, own history).
         /// </summary>
         private List<long> Versions(string sobject, string key, string field)
         {
@@ -298,7 +298,7 @@ public sealed class AggregateWorkload
                 .Select(w => long.Parse(((string)w[field]!)[1..], CultureInfo.InvariantCulture))]);
         }
 
-        /// <summary>Counts a regression if the versions don't only move forward.</summary>
+        /// <summary>Counts a regression unless versions only move forward.</summary>
         private List<long> Forward(List<long> versions)
         {
             if (!versions.Zip(versions.Skip(1)).All(p => p.First < p.Second))

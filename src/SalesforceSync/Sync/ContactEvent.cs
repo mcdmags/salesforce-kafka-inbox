@@ -1,9 +1,9 @@
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// Inbox event for a contact (entity type "contact", key = contact.externalId), as <see cref="AccountAggregate"/> splits
-/// it out of its account's aggregate: the contact as the source system sends it (camelCase JSON, full record), named
-/// by its Account, or a delete (its key only).
+/// Inbox event for a contact (entity type "contact", key = contact.externalId), split by <see cref="AccountAggregate"/>
+/// from its account's aggregate: contact as source sends it (camelCase JSON, full record), named by its Account, or
+/// delete (key only).
 /// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "inserted" },
 ///   "contact": { "externalId": "CON-1", "accountExternalId": "ACC-1", "firstName": "Ada", "lastName": "Lovelace",
 ///                "email": "ada@example.com", "phone": "+1 555 0101" } }
@@ -13,7 +13,7 @@ public sealed record ContactEvent(EventMeta? Meta, ContactPayload? Contact)
 {
     public const string Type = "contact";
 
-    /// <summary>How an inbox event of this type is read: the entity's id and the meta.</summary>
+    /// <summary>How inbox events of this type are read: entity id + meta.</summary>
     public static readonly EventReader<ContactEvent> Reader = new(Type, e => e.Contact?.ExternalId, e => e.Meta);
 }
 
@@ -22,12 +22,12 @@ public sealed class ContactPayload
 {
     public string? ExternalId { get; set; }
 
-    /// <summary>External id of the contact's account. Required. An event without it is dead-lettered (INVALID_EVENT).</summary>
+    /// <summary>External id of contact's account. Required; missing → dead-lettered (INVALID_EVENT).</summary>
     public string? AccountExternalId { get; set; }
 
     public string? FirstName { get; set; }
 
-    /// <summary>Required in Salesforce. An event without it is refused (REQUIRED_FIELD_MISSING) and dead-lettered.</summary>
+    /// <summary>Required in Salesforce; missing → refused (REQUIRED_FIELD_MISSING), dead-lettered.</summary>
     public string? LastName { get; set; }
 
     public string? Email { get; set; }

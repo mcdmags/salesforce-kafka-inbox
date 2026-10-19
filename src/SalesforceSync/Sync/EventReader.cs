@@ -4,26 +4,26 @@ using System.Text.Json;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// How to read an event of one type: whose it is (the entity id) and when and what happened (its meta). Shared by the two
-/// halves of the sync, so they agree on what a valid event is: ingest (<see cref="Persistence.IAggregateIngest"/>)
-/// stores only events that read, and the engine reads claimed rows the same way. Knows nothing of Salesforce or aggregates.
+/// How to read one type's event: whose (entity id), when + what (meta). Shared by both sync halves so they agree on
+/// validity: ingest (<see cref="Persistence.IAggregateIngest"/>) stores only events that read; engine reads claimed
+/// rows same way. Knows no Salesforce or aggregates.
 /// </summary>
-/// <typeparam name="TEvent">The inbox payload (the whole event envelope).</typeparam>
-/// <param name="EntityType">The type's name, e.g. "account": the object name of its events, and how logs name it.</param>
-/// <param name="EntityId">The id of the entity an event is about (e.g. account.externalId), or null if it has none.</param>
-/// <param name="Meta">The event's meta, or null if it has none: when the event happened (meta.time, which must have an
-/// explicit offset) and what happened (meta.type: inserted, updated or deleted).</param>
+/// <typeparam name="TEvent">Inbox payload (whole event envelope).</typeparam>
+/// <param name="EntityType">Type name, e.g. "account": object name of its events; used in logs.</param>
+/// <param name="EntityId">Id of entity event is about (e.g. account.externalId), null if none.</param>
+/// <param name="Meta">Event meta, null if none: when (meta.time, explicit offset required) + what (meta.type:
+/// inserted, updated, deleted).</param>
 public sealed record EventReader<TEvent>(
     string EntityType,
     Func<TEvent, string?> EntityId,
     Func<TEvent, EventMeta?> Meta)
 {
     /// <summary>
-    /// Reads and validates a raw event: valid JSON for <typeparamref name="TEvent"/>, an entity with a non-empty id,
-    /// a time with an explicit offset, and a type of inserted, updated or deleted. The Kafka consumer stores only events
-    /// that pass (anything else can never be synced). The engine reads claimed rows the same way.
+    /// Reads, validates raw event: valid JSON for <typeparamref name="TEvent"/>, entity with non-empty id, time with
+    /// explicit offset, type inserted/updated/deleted. Kafka consumer stores only passing events (rest can never
+    /// sync). Engine reads claimed rows same way.
     /// </summary>
-    /// <returns>False with <paramref name="problem"/> saying why the event can never be synced.</returns>
+    /// <returns>False with <paramref name="problem"/> = why event can never sync.</returns>
     public bool TryRead(string json, [NotNullWhen(true)] out ReadEvent<TEvent>? read, [NotNullWhen(false)] out string? problem)
     {
         read = null;
@@ -64,5 +64,5 @@ public sealed record EventReader<TEvent>(
     }
 }
 
-/// <summary>An inbox event that passed <see cref="EventReader{TEvent}.TryRead"/>: the typed event, whose it is and when.</summary>
+/// <summary>Inbox event that passed <see cref="EventReader{TEvent}.TryRead"/>: typed event, whose, when.</summary>
 public sealed record ReadEvent<TEvent>(TEvent Event, string EntityId, DateTimeOffset Time);

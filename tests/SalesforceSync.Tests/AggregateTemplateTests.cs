@@ -4,8 +4,8 @@ using SalesforceSync.Benchmarks;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The example JSON the benchmark's aggregates are copies of (<see cref="AggregateTemplate"/>, compiled in from
-/// benchmarks/): your fields stay, the ids and the version markers are set, and a file that doesn't fit the event is refused.
+/// Example JSON the benchmark's aggregates copy (<see cref="AggregateTemplate"/>, compiled in from benchmarks/):
+/// your fields stay, ids and version markers are set, a file not fitting the event is refused.
 /// </summary>
 public sealed class AggregateTemplateTests
 {

@@ -10,8 +10,8 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// A failed write is "not applied" only when the failure proves it; otherwise its outcome is unknown and the
-/// entities must be held. A failed read is never an unknown outcome: nothing was written.
+/// Failed write = "not applied" only when the failure proves it; else outcome unknown, entities held.
+/// Failed read is never unknown: nothing written.
 /// </summary>
 public sealed class WriteOutcomeTests
 {
@@ -124,7 +124,7 @@ public sealed class WriteOutcomeTests
     }
 
     /// <summary>
-    /// Fails the read (a query) or the write (a Collections upsert or delete) before it reaches the org.
+    /// Fails the read (query) or write (Collections upsert or delete) before it reaches the org.
     /// </summary>
     private sealed class FailingHandler : DelegatingHandler
     {
@@ -135,7 +135,7 @@ public sealed class WriteOutcomeTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            // A write is a collections call (upsert or delete); a read is a query
+            // Write = collections call (upsert or delete); read = query
             var path = request.RequestUri!.AbsolutePath;
             var isWrite = path.Contains("/composite/sobjects", StringComparison.Ordinal);
             return (isWrite ? !FailWrites : !FailReads) || (!isWrite && !path.EndsWith("/query", StringComparison.Ordinal))

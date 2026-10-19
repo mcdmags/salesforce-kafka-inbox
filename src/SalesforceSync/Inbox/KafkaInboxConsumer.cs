@@ -7,16 +7,14 @@ namespace SalesforceSync.Inbox;
 
 /// <summary>
 /// Kafka -> Postgres inboxes. One topic (<c>Kafka:Topic</c>, <see cref="AccountAggregate.DefaultTopic"/>) carries
-/// account aggregates: an Account with its children, before and after a change. Each message is read once
-/// (<see cref="AccountAggregate.TryRead"/>); then every entity type takes the events it needs from it (Account,
-/// relationships, contacts; deletes included, <see cref="IAggregateIngest.IngestAsync"/>) and stores them in its
-/// inbox table with the entity's id, in the entity's one row unless that holds a newer event. The Kafka message key and arrival
-/// order are not used: an entity's events are ordered by their own time (the aggregate's), so they may come over
-/// any partition, in any order. The offset is stored for commit only after every event of the message is in its
-/// inbox. A store is idempotent, so a crash halfway through a message is safe: redelivery overwrites the stored
-/// events with themselves (or changes nothing once synced) and stores the rest for the first time. A message with
-/// no valid aggregate can never be synced: it is logged with its offset and skipped. So is an entity event that is
-/// invalid on its own; the others are stored.
+/// account aggregates: Account + children, before/after a change. Each message read once
+/// (<see cref="AccountAggregate.TryRead"/>); every entity type takes its events (Account, relationships, contacts;
+/// deletes too, <see cref="IAggregateIngest.IngestAsync"/>) and stores them in its inbox table by entity id, in the
+/// entity's one row unless it holds a newer event. Kafka key and arrival order unused: events are ordered by own time
+/// (the aggregate's), so any partition, any order. Offset stored for commit only after all message's events are in
+/// inboxes. Store is idempotent → crash mid-message is safe: redelivery overwrites stored events with themselves
+/// (no-op once synced), stores the rest first time. Message with no valid aggregate can never sync: logged with
+/// offset, skipped. Same for an individually invalid entity event; others stored.
 /// </summary>
 public sealed class KafkaInboxConsumer(
     IConsumer<string, string> consumer,
@@ -27,7 +25,7 @@ public sealed class KafkaInboxConsumer(
 {
     private static readonly TimeSpan StoreRetryDelay = TimeSpan.FromSeconds(2);
 
-    // Consume() blocks, so run the loop off the host's startup path.
+    // Consume() blocks: run loop off host startup path
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
         return Task.Run(() => RunAsync(stoppingToken), stoppingToken);
@@ -35,7 +33,7 @@ public sealed class KafkaInboxConsumer(
 
     private async Task RunAsync(CancellationToken ct)
     {
-        // The ingests are only asked to store events here; the scope lives as long as the consumer uses them
+        // Scope lives as long as consumer uses the ingests
         using var scope = scopes.CreateScope();
         var ingests = scope.ServiceProvider.GetServices<IAggregateIngest>().ToList();
         var topic = config["Kafka:Topic"] is { Length: > 0 } configured ? configured : AccountAggregate.DefaultTopic;
@@ -67,7 +65,7 @@ public sealed class KafkaInboxConsumer(
         }
     }
 
-    /// <returns>False when the consumer is shutting down. True with a null message after a consume error that isn't fatal.</returns>
+    /// <returns>False on shutdown. True with null message after non-fatal consume error.</returns>
     private bool TryConsume(CancellationToken ct, out ConsumeResult<string, string>? message)
     {
         message = null;
@@ -88,14 +86,12 @@ public sealed class KafkaInboxConsumer(
     }
 
     /// <summary>
-    /// Stores the valid entity events of an aggregate in their types' inboxes, then its offset. Skips what can never
-    /// be synced.
+    /// Stores an aggregate's valid entity events in their inboxes, then its offset. Skips never-syncable.
     /// </summary>
     private async Task IngestAsync(ConsumeResult<string, string> message, IReadOnlyList<IAggregateIngest> ingests,
         CancellationToken ct)
     {
-        // Retrying can't fix an invalid event and would block every later event on the partition. Log where it is
-        // (to fix or replay at the source) and move on
+        // Retry can't fix invalid event, would block later partition events. Log location (fix/replay at source), move on
         if (!aggregate.TryRead(message.Message.Value, out var change, out var problem))
         {
             log.LogError("Skipping malformed account aggregate at {Offset}: {Problem}", message.TopicPartitionOffset, problem);
@@ -125,10 +121,9 @@ public sealed class KafkaInboxConsumer(
     }
 
     /// <summary>
-    /// Marks the message as handled; the client commits stored offsets in the background (EnableAutoOffsetStore=false
-    /// with auto commit, set in AddKafkaIngest). If a rebalance revoked the partition since the message was consumed,
-    /// the store fails. Harmless: the new owner re-reads from the last commit, and a re-stored event changes
-    /// nothing once synced.
+    /// Marks message handled; client commits stored offsets in background (EnableAutoOffsetStore=false with auto
+    /// commit, set in AddKafkaIngest). Partition revoked by rebalance since consume → store fails. Harmless: new owner
+    /// re-reads from last commit; re-stored event is a no-op once synced.
     /// </summary>
     private void StoreOffset(ConsumeResult<string, string> result)
     {
@@ -143,7 +138,7 @@ public sealed class KafkaInboxConsumer(
         }
     }
 
-    /// <summary>Consumes the message again next. Impossible, and not needed, if the partition was reassigned.</summary>
+    /// <summary>Consume message again next. Impossible (and unneeded) if partition reassigned.</summary>
     private void Rewind(ConsumeResult<string, string> result)
     {
         try

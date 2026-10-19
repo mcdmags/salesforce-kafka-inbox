@@ -1,13 +1,12 @@
 namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
-/// Syncs one entity type from its inbox table to Salesforce; the worker loops run every registered one in turn. The
-/// send half of the sync: it knows the inbox and Salesforce, nothing of aggregates or Kafka (that is
-/// <see cref="Persistence.IAggregateIngest"/>).
+/// Syncs one entity type, inbox table → Salesforce; worker loops run every registered one in turn. Send half: knows
+/// inbox + Salesforce, not aggregates or Kafka (that is <see cref="Persistence.IAggregateIngest"/>).
 /// </summary>
 public interface IEntitySync
 {
-    /// <summary>The type's name, e.g. "account".</summary>
+    /// <summary>Type name, e.g. "account".</summary>
     string EntityType { get; }
 
     /// <returns>Inbox rows processed (0 = nothing to do).</returns>

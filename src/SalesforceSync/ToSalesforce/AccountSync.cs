@@ -6,10 +6,9 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
-/// Account + its Profile__c, written in the same batch (Accounts first). The Profile names its Account by the Account's
-/// external id (a Text foreign key). An event without a <c>profile</c> writes only the Account.
-/// The flow (claim, parse, record, ...) is <see cref="SalesforceBatchSyncService"/>'s; what happens with the events is
-/// <see cref="Send"/>, top to bottom.
+/// Account + its Profile__c, same batch (Accounts first). Profile names its Account by external id (Text foreign key).
+/// Event without <c>profile</c> → only Account written.
+/// Flow (claim, parse, record, ...) = <see cref="SalesforceBatchSyncService"/>; event handling = <see cref="Send"/>.
 /// </summary>
 public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCalls salesforce, IRepository<AccountInboxRow> inbox) : IEntitySync
 {
@@ -31,7 +30,7 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = events.Except(deletes).ToList();
 
-        // An upsert needs the account in the event, and both record types
+        // Upsert needs account in event + both record types
         foreach (var e in upserts.Where(e => e.Event.Account is null))
         {
             SalesforceCalls.Fail(failures, e.EntityId, SalesforceErrors.InvalidEvent, "account is required", permanent: true);
@@ -50,16 +49,16 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
             upserts = [];
         }
 
-        // The record each upsert wants: the fields as Salesforce names them
+        // Wanted record per upsert, Salesforce field names
         var wantedAccounts = upserts.Select(e => (e.EntityId, Fields: AccountFields(e.Event.Account!, accountType!))).ToList();
-        var wantedProfiles = upserts.Where(e => e.Event.Account!.Profile is not null) // no profile in the event: leave Salesforce's alone
+        var wantedProfiles = upserts.Where(e => e.Event.Account!.Profile is not null) // no profile in event: leave Salesforce's
             .Select(e => (e.EntityId, ExternalId: ProfileKey(e), Fields: ProfileFields(e, profileType!))).ToList();
 
-        // READ what Salesforce has: the Ids a delete needs, the values an upsert is compared with
+        // READ Salesforce state: Ids for deletes, values to compare
         var accountsNow = await salesforce.ReadAsync(AccountObject, wantedAccounts.SelectMany(w => w.Fields.Keys), events.Select(e => e.EntityId), ct);
         var profilesNow = await salesforce.ReadAsync(ProfileObject, wantedProfiles.SelectMany(w => w.Fields.Keys), events.Select(ProfileKey), ct);
 
-        // DECIDE what to send: a record Salesforce lacks is created, one that differs is updated, one that is as wanted is left alone
+        // DECIDE: missing → create, differs → update, same → skip
         var accounts = wantedAccounts
             .Select(w => (w.EntityId, ExternalId: w.EntityId, Fields: SalesforceCalls.Changes(w.Fields, Now(accountsNow, w.EntityId))))
             .Where(x => x.Fields.Count > 0).ToList();
@@ -67,11 +66,11 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
             .Select(w => (w.EntityId, w.ExternalId, Fields: SalesforceCalls.Changes(w.Fields, Now(profilesNow, w.ExternalId))))
             .Where(x => x.Fields.Count > 0).ToList();
 
-        // WRITE. Accounts first, and a profile only if its account was saved
+        // WRITE. Accounts first; profile only if its account saved
         await salesforce.UpsertAsync(AccountObject, accounts, failures, ct);
         await salesforce.UpsertAsync(ProfileObject, profiles.Where(p => !failures.ContainsKey(p.EntityId)), failures, ct);
 
-        // A delete removes the Profile, then the Account (children first). A record Salesforce lacks is already deleted
+        // Delete Profile, then Account (children first). Record Salesforce lacks = already deleted
         await salesforce.DeleteAsync(deletes.Where(e => profilesNow.ContainsKey(ProfileKey(e)))
             .Select(e => (e.EntityId, profilesNow[ProfileKey(e)].GetProperty("Id").GetString()!)), failures, ct);
         await salesforce.DeleteAsync(deletes.Where(e => accountsNow.ContainsKey(e.EntityId) && !failures.ContainsKey(e.EntityId))
@@ -80,9 +79,9 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         return failures;
     }
 
-    // ---- the mapping: event -> the fields Salesforce names ----
+    // ---- mapping: event -> Salesforce fields ----
 
-    /// <summary>The Profile's own key, or the Account's when the event doesn't give one.</summary>
+    /// <summary>Profile's own key, else Account's.</summary>
     private static string ProfileKey(ReadEvent<AccountEvent> e)
     {
         return e.Event.Account?.Profile?.ExternalId ?? e.EntityId;
@@ -106,7 +105,7 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
             ["Phone"] = a.Phone,
             ["Website"] = a.Website,
             ["Active__c"] = a.IsActive,
-            // A list in the event, a ';'-separated multi-select picklist in Salesforce
+            // list in event, ';'-separated multi-select picklist in Salesforce
             ["Tags__c"] = a.Tags is null ? null : string.Join(';', a.Tags),
             ["Customer_Since__c"] = a.CustomerSince,
             ["Last_Contacted__c"] = a.LastContactedAt,
@@ -120,7 +119,7 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         return new Dictionary<string, object?>
         {
             ["Name"] = p.Name,
-            ["AccountId__c"] = e.EntityId, // the Profile belongs to the event's Account
+            ["AccountId__c"] = e.EntityId, // Profile belongs to event's Account
             ["Tier__c"] = p.Tier,
             ["Score__c"] = p.Score,
             ["Discount__c"] = p.DiscountPercent,

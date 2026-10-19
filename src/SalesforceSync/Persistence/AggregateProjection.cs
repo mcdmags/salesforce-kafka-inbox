@@ -4,10 +4,10 @@ using SalesforceSync.Sync;
 
 namespace SalesforceSync.Persistence;
 
-/// <summary>What the types' ingests share: how events are written, and how a list of children is compared.</summary>
+/// <summary>Shared by ingests: event serialization, child list comparison.</summary>
 internal static class AggregateProjection
 {
-    /// <summary>Compact, unset properties left out: what an entity's event looks like in its inbox.</summary>
+    /// <summary>Compact, unset properties omitted: event form in inbox.</summary>
     private static readonly JsonSerializerOptions StoredJson = new(EventJson.Options)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -19,9 +19,9 @@ internal static class AggregateProjection
     }
 
     /// <summary>
-    /// A child list's events: each child of After that is new or changed (with the Account's key set), then a delete for
-    /// each child of Before that After lacks. A delete of the Account deletes every child Before has. A child without an
-    /// external id can't be matched: it is passed on as a change, for its type's read to reject, and never taken for a delete.
+    /// Child list events: each new/changed After child (Account key set), then a delete per Before child After lacks.
+    /// Account delete → delete every Before child. Child without external id can't be matched: passed on as a change
+    /// for its type's read to reject, never taken as a delete.
     /// </summary>
     public static IEnumerable<TEvent> ChildEvents<TChild, TEvent>(AggregateChange change, Func<AccountSnapshot, List<TChild?>?> list,
         Func<TChild, string?> idOf, Action<TChild, string> setAccountKey, Func<string, TChild> keyOnly, Func<EventMeta, TChild, TEvent> toEvent)
@@ -56,7 +56,7 @@ internal static class AggregateProjection
         }
     }
 
-    /// <summary>Children by external id (the last one if two share an id); a child without one can't be told apart.</summary>
+    /// <summary>Children by external id (last wins on dupes); child without one can't be told apart.</summary>
     private static Dictionary<string, TChild> KeyedById<TChild>(List<TChild?>? children, Func<TChild, string?> idOf) where TChild : class
     {
         var keyed = new Dictionary<string, TChild>(StringComparer.Ordinal);

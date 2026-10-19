@@ -4,25 +4,25 @@ using System.Text.Json;
 namespace SalesforceSync.Sync;
 
 /// <summary>
-/// The Kafka event: an Account aggregate, its state before and after the change. Each snapshot holds the Account (with
-/// its Profile, as an account event has it) and its children, the account relationships and the contacts:
+/// Kafka event: Account aggregate, state before + after change. Each snapshot = Account (with Profile, as in account
+/// event) + children (account relationships, contacts):
 /// <code>{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" },
 ///   "before": { "externalId": "ACC-1", "name": "Acme", "profile": { ... },
 ///               "accountRelationships": [ { "externalId": "REL-1", "relatedAccountExternalId": "ACC-2", ... } ],
 ///               "contacts": [ { "externalId": "CON-1", "lastName": "Lovelace", ... } ] },
 ///   "after": { ... } }</code>
-/// <see cref="TryRead"/> checks it into an <see cref="AggregateChange"/>; each entity type then projects the events it needs
-/// (its <see cref="Persistence.IAggregateIngest"/>) and stores them in its inbox. Only what changed is stored: an unchanged child costs
-/// no inbox row, no claim, no Salesforce read. No I/O.
+/// <see cref="TryRead"/> validates it into an <see cref="AggregateChange"/>; each entity type projects its events
+/// (<see cref="Persistence.IAggregateIngest"/>), stores in its inbox. Only changes stored: unchanged child = no inbox
+/// row, claim or Salesforce read. No I/O.
 /// </summary>
 public sealed class AccountAggregate
 {
     public const string DefaultTopic = "account-changes";
 
     /// <summary>
-    /// Reads an aggregate message: valid JSON, a meta with a time (with an offset) and a type, before or after, one account.
+    /// Reads aggregate message: valid JSON, meta with time (with offset) + type, before or after, one account.
     /// </summary>
-    /// <returns>False with <paramref name="problem"/> when the message is no aggregate the sync can read.</returns>
+    /// <returns>False with <paramref name="problem"/> when message isn't a readable aggregate.</returns>
     public bool TryRead(string json, [NotNullWhen(true)] out AggregateChange? change, [NotNullWhen(false)] out string? problem)
     {
         change = null;
@@ -53,7 +53,7 @@ public sealed class AccountAggregate
         return true;
     }
 
-    /// <summary>What is wrong with the event's meta (a time with an offset, a type) and snapshots (not both missing, one account), if anything.</summary>
+    /// <summary>What's wrong with meta (time with offset, type) or snapshots (not both missing, one account), if anything.</summary>
     private static string? ProblemWith(EventMeta? meta, AccountSnapshot? before, AccountSnapshot? after)
     {
         if (meta?.Timestamp() is null)
@@ -79,10 +79,10 @@ public sealed class AccountAggregate
     }
 }
 
-/// <summary>The Kafka message: meta and the Account aggregate's snapshots before and after the change.</summary>
+/// <summary>Kafka message: meta + aggregate snapshots before/after change.</summary>
 public sealed record AccountAggregateEvent(EventMeta? Meta, AccountSnapshot? Before, AccountSnapshot? After);
 
-/// <summary>An Account as an aggregate snapshot has it: the account event's Account and Profile, plus its children.</summary>
+/// <summary>Account in a snapshot: account event's Account + Profile, plus children.</summary>
 public sealed class AccountSnapshot : AccountPayload
 {
     public List<AccountRelationshipPayload?>? AccountRelationships { get; set; }

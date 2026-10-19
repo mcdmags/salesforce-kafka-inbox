@@ -4,26 +4,25 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
-/// The Salesforce calls the types' send steps are made of, each one API call (or a few, for a big batch) and nothing
-/// else: no decisions about what to write, that is each type's. Answers a record fails with are put in the
-/// <c>failures</c> of its entity, as <see cref="Failure"/>s.
+/// Salesforce calls the types' send steps are made of: each one API call (a few for big batches), no decisions about
+/// what to write (type's job). Record failures go in its entity's <c>failures</c> as <see cref="Failure"/>s.
 /// </summary>
 public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordTypeCache recordTypes, SalesforceErrors errors)
 {
-    /// <summary>The field every object is matched by.</summary>
+    /// <summary>Field every object is matched by.</summary>
     public const string ExternalIdField = "ExternalId__c";
 
-    /// <summary>The Id of an active record type of an object, by developer name; Salesforce takes a record type as an Id. Null if the org has none.</summary>
+    /// <summary>Id of an object's active record type by developer name (Salesforce takes an Id). Null if org has none.</summary>
     public Task<string?> RecordTypeIdAsync(string sobject, string developerName, CancellationToken ct)
     {
         return recordTypes.IdOfAsync(sobject, developerName, ct);
     }
 
     /// <summary>
-    /// What Salesforce has now for the records with these external ids (queries of up to 200 ids): the fields, the Id (a
-    /// delete needs it) and the external id they are found by. A record Salesforce doesn't have isn't in the result.
+    /// Current Salesforce records for these external ids (queries of ≤ 200 ids): fields, Id (deletes need it), external
+    /// id. Missing record = absent from result.
     /// </summary>
-    /// <exception cref="MappingErrorException">The org has no such field on the object.</exception>
+    /// <exception cref="MappingErrorException">Org lacks such a field on the object.</exception>
     public async Task<Dictionary<string, JsonElement>> ReadAsync(string sobject, IEnumerable<string> fields, IEnumerable<string> externalIds,
         CancellationToken ct)
     {
@@ -40,7 +39,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
             }
             catch (SalesforceResponseException ex) when (ex.ErrorCode == "INVALID_FIELD")
             {
-                // The org has no such field: the mapping is wrong for every entity of the type
+                // Org lacks field: mapping wrong for every entity of the type
                 throw new MappingErrorException([.. ids.Select(id => (id, new SalesforceError(null, "INVALID_FIELD", ex.Message)))]);
             }
         }
@@ -49,11 +48,11 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     }
 
     /// <summary>
-    /// What to send for a record: for a new one, its non-empty fields; for one Salesforce has, only the fields that differ.
-    /// Empty = nothing to send (it is as wanted). Values are normalized and put in the form Salesforce takes.
+    /// What to send: new record → non-empty fields; existing → only differing fields. Empty = nothing to send. Values
+    /// normalized to Salesforce's form.
     /// </summary>
-    /// <param name="wanted">The record's fields by API name; a null clears the field.</param>
-    /// <param name="current">The record as Salesforce has it, or null if it doesn't.</param>
+    /// <param name="wanted">Fields by API name; null clears the field.</param>
+    /// <param name="current">Record in Salesforce, null if absent.</param>
     public static Dictionary<string, object?> Changes(Dictionary<string, object?> wanted, JsonElement? current)
     {
         var changes = new Dictionary<string, object?>();
@@ -71,15 +70,15 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     }
 
     /// <summary>
-    /// One call creates or updates all the records (up to 200 per call): Salesforce finds each by its external id. Each
-    /// record is saved or fails on its own; a failure is added to its entity's failures.
+    /// One call creates/updates all records (≤ 200 per call), matched by external id. Each record saves or fails on its
+    /// own; failure → its entity's failures.
     /// </summary>
-    /// <param name="sobject">The object's API name.</param>
-    /// <param name="items">The entity each record belongs to, the record's external id and the fields to send (<see cref="Changes"/>).</param>
-    /// <param name="failures">Where a record's failure is added, by entity.</param>
-    /// <param name="ct">Cancels the calls; shutdown or the lease deadline, not a failure.</param>
-    /// <exception cref="UnknownOutcomeException">The call failed without proving that Salesforce didn't apply it.</exception>
-    /// <exception cref="MappingErrorException">Salesforce refused a field: it is not in the org, or can't be set.</exception>
+    /// <param name="sobject">Object API name.</param>
+    /// <param name="items">Owning entity, record's external id, fields to send (<see cref="Changes"/>).</param>
+    /// <param name="failures">Where record failures go, by entity.</param>
+    /// <param name="ct">Cancels calls; shutdown or lease deadline, not a failure.</param>
+    /// <exception cref="UnknownOutcomeException">Call failed without proof Salesforce didn't apply it.</exception>
+    /// <exception cref="MappingErrorException">Salesforce refused a field: not in org, or not settable.</exception>
     public async Task UpsertAsync(string sobject, IEnumerable<(string Key, string ExternalId, Dictionary<string, object?> Fields)> items,
         Dictionary<string, List<Failure>> failures, CancellationToken ct)
     {
@@ -103,7 +102,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
             }
         }
 
-        // A record type the org rejected may since have been created, activated or assigned: read it again next time
+        // Rejected record type may since be created/activated/assigned: re-read next time
         if (failures.Values.Any(list => list.Any(f => f.Error.StartsWith(SalesforceErrors.InvalidRecordType, StringComparison.Ordinal))))
         {
             await recordTypes.InvalidateAsync(sobject, ct);
@@ -112,8 +111,8 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
         ThrowIfMappingErrors(failures);
     }
 
-    /// <summary>One call deletes records by Salesforce Id (up to 200 per call). A record that is gone already is what the delete wanted.</summary>
-    /// <exception cref="UnknownOutcomeException">The call failed without proving that Salesforce didn't apply it.</exception>
+    /// <summary>One call deletes records by Salesforce Id (≤ 200 per call). Already gone = success.</summary>
+    /// <exception cref="UnknownOutcomeException">Call failed without proof Salesforce didn't apply it.</exception>
     public async Task DeleteAsync(IEnumerable<(string Key, string Id)> targets, Dictionary<string, List<Failure>> failures, CancellationToken ct)
     {
         foreach (var chunk in targets.Chunk(SalesforceRestClient.MaxCollectionRecords))
@@ -126,7 +125,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
         }
     }
 
-    /// <summary>Adds a failure of the entity.</summary>
+    /// <summary>Adds a failure to the entity.</summary>
     public static void Fail(Dictionary<string, List<Failure>> failures, string key, string code, string message, bool permanent = false)
     {
         if (!failures.TryGetValue(key, out var list))
@@ -137,7 +136,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
         list.Add(new Failure($"{code}: {message}", permanent));
     }
 
-    /// <summary>Runs a write. If it fails without proving Salesforce didn't apply it, the outcome is unknown.</summary>
+    /// <summary>Runs a write. Fails without proof Salesforce didn't apply it → outcome unknown.</summary>
     private static async Task<IReadOnlyList<RecordResult>> GuardedAsync(Func<Task<IReadOnlyList<RecordResult>>> write)
     {
         try
@@ -151,9 +150,9 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     }
 
     /// <summary>
-    /// What a record's errors mean. A parent that isn't there (an org rule's message) or records still pointing at one we
-    /// delete (their own deletes come through their inboxes) is waited for, not given up on; so is a record type that
-    /// was deactivated. The data's own errors (<see cref="SalesforceErrors.IsPermanent"/>) are given up on; the rest is retried.
+    /// Classifies a record's errors. Waited for, not abandoned: missing parent (org rule's message), records still
+    /// pointing at one we delete (their deletes come via their inboxes), deactivated record type. Data's own errors
+    /// (<see cref="SalesforceErrors.IsPermanent"/>) abandoned; rest retried.
     /// </summary>
     private void AddFailures(Dictionary<string, List<Failure>> failures, string key, RecordResult result, bool isDelete)
     {
@@ -180,8 +179,8 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     }
 
     /// <summary>
-    /// A field the code sends that Salesforce lacks or won't let us set: the mapping is wrong for every event of that kind,
-    /// so only a code change or a field in the org fixes it. The caller stops the inbox rather than spend each entity's attempts.
+    /// Field we send that Salesforce lacks or won't let us set: mapping wrong for every event of that kind; only code
+    /// change or org field fixes it. Caller stops inbox rather than burn each entity's attempts.
     /// </summary>
     private static void ThrowIfMappingErrors(Dictionary<string, List<Failure>> failures)
     {
@@ -194,7 +193,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     }
 }
 
-/// <summary>Entities whose mapping Salesforce rejects, with what to fix.</summary>
+/// <summary>Entities whose mapping Salesforce rejects, with fix hint.</summary>
 public sealed class MappingErrorException(IReadOnlyList<(string Key, SalesforceError Error)> errors)
     : Exception($"{errors.Count} mapping error(s), e.g. {errors[0].Error.Code}: {errors[0].Error.Message}")
 {

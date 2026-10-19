@@ -7,8 +7,8 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The three syncs over in-memory inboxes and a mock org: an event synced as a worker syncs a claimed row (claim, parse,
-/// read, decide, write, record), with no database.
+/// Three syncs over in-memory inboxes and a mock org: event synced as a worker syncs a claimed row (claim, parse,
+/// read, decide, write, record), no database.
 /// </summary>
 internal sealed class SyncHarness
 {
@@ -36,7 +36,7 @@ internal sealed class SyncHarness
     public AccountRelationshipSync Relationship { get; }
     public ContactSync Contact { get; }
 
-    /// <summary>Stores an event in the type's inbox and syncs a batch.</summary>
+    /// <summary>Stores an event in the type's inbox, syncs a batch.</summary>
     /// <returns>Rows processed.</returns>
     public Task<int> SyncAsync(string type, string key, string json)
     {

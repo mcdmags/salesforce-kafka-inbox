@@ -7,7 +7,7 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The raw event format: what the Kafka consumer admits into the inbox, and the inbox's own rules.
+/// Raw event format: what the Kafka consumer admits into the inbox, and the inbox's own rules.
 /// </summary>
 public sealed class InboxEventTests
 {
@@ -15,7 +15,7 @@ public sealed class InboxEventTests
 
     private static readonly EventReader<AccountRelationshipEvent> Relationships = AccountRelationshipEvent.Reader;
 
-    // ---------- What the consumer admits (the same typed read the engine uses) ----------
+    // ---------- What the consumer admits (same typed read the engine uses) ----------
 
     [Theory]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" }, "account": { "externalId": "ACC-1" } }""", "ACC-1", 456)]
@@ -95,7 +95,7 @@ public sealed class InboxEventTests
     [Fact]
     public void Every_change_to_the_model_has_its_migration()
     {
-        // Only the model and the migrations' snapshot are compared
+        // Only model and migrations' snapshot compared
         using var db = SyncDbContext.ForModel();
 
         db.Database.HasPendingModelChanges().Should().BeFalse(

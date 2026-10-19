@@ -14,38 +14,37 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The parts of the Salesforce half wired for tests: a real client on the given HTTP stack, its own record type cache,
-/// no database.
+/// Salesforce half wired for tests: real client on given HTTP stack, own record type cache, no database.
 /// </summary>
 internal static class SalesforceStep
 {
     private const string OrgUrl = "https://fake.my.salesforce.com";
 
-    // What appsettings.json supplies in the running worker; the tests spell out the URLs these make
+    // What appsettings.json supplies in the running worker; tests spell out the URLs these make
     private static readonly SalesforceOptions Org = new() { BaseApiPath = "/services/data", ApiVersion = "v62.0" };
 
-    /// <summary>A client on <paramref name="http"/> with the default API path and version.</summary>
+    /// <summary>Client on <paramref name="http"/> with default API path and version.</summary>
     public static SalesforceRestClient Client(HttpClient http)
     {
         return new SalesforceRestClient(http, Options.Create(Org));
     }
 
-    /// <summary>The path of the REST calls with the default options.</summary>
+    /// <summary>REST call path with default options.</summary>
     public static readonly string DataPath = Org.DataPath;
 
-    /// <summary>The Salesforce calls on <paramref name="http"/>: no database, their own record type cache.</summary>
+    /// <summary>Salesforce calls on <paramref name="http"/>: no database, own record type cache.</summary>
     public static SalesforceCalls Calls(HttpClient http, IOptions<SalesforceOptions> options)
     {
         return new(Client(http), RecordTypes(http), new SalesforceErrors(options));
     }
 
-    /// <summary>The flow of a batch, with a rate limiter that is never paused unless told to be.</summary>
+    /// <summary>Batch flow, rate limiter never paused unless told.</summary>
     public static SalesforceBatchSyncService Flow(ISalesforceRateLimiter? limiter = null, SyncOptions? options = null)
     {
         return new(limiter ?? new NotPaused(), Options.Create(options ?? new SyncOptions()), NullLogger<SalesforceBatchSyncService>.Instance);
     }
 
-    /// <summary>A record type cache reading through <paramref name="http"/>; with <paramref name="shared"/>, a pod sharing that cache with others.</summary>
+    /// <summary>Record type cache reading through <paramref name="http"/>; with <paramref name="shared"/>, a pod sharing that cache with others.</summary>
     public static RecordTypeCache RecordTypes(HttpClient http, IDistributedCache? shared = null)
     {
         var services = new ServiceCollection();
@@ -56,8 +55,8 @@ internal static class SalesforceStep
     }
 
     /// <summary>
-    /// A client of the org through <paramref name="handler"/>, at the address the caches are keyed by, with the mock
-    /// org's first access token (as after OAuth: the Salesforce step has no auth handler).
+    /// Client of the org through <paramref name="handler"/>, at the address caches are keyed by, with mock org's first
+    /// access token (as after OAuth: Salesforce step has no auth handler).
     /// </summary>
     public static HttpClient Http(HttpMessageHandler handler)
     {
@@ -66,7 +65,7 @@ internal static class SalesforceStep
         return http;
     }
 
-    /// <summary>A limiter that is never paused and never asked for a token: the Salesforce step calls it through the client only.</summary>
+    /// <summary>Limiter never paused, never asked for a token: Salesforce step calls it through the client only.</summary>
     public sealed class NotPaused : ISalesforceRateLimiter
     {
         public bool IsPaused { get; set; }

@@ -3,7 +3,7 @@ using System.Text.Json.Nodes;
 
 namespace SalesforceSync.Tests;
 
-/// <summary>Inbox events as the sources send them, for the tests that sync them.</summary>
+/// <summary>Inbox events as sources send them, for tests that sync them.</summary>
 internal static class Events
 {
     public static DateTimeOffset TimeOf(string json)
@@ -11,7 +11,7 @@ internal static class Events
         return DateTimeOffset.Parse((string)JsonNode.Parse(json)!["meta"]!["time"]!, CultureInfo.InvariantCulture);
     }
 
-    /// <summary>An Account event at second <paramref name="second"/> of a fixed minute; fields of <paramref name="account"/> override the defaults.</summary>
+    /// <summary>Account event at second <paramref name="second"/> of a fixed minute; fields of <paramref name="account"/> override defaults.</summary>
     public static string Account(string key, int second, string type = "updated", Action<JsonObject>? account = null)
     {
         var body = new JsonObject { ["externalId"] = key, ["name"] = "Acme" };
