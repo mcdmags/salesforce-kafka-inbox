@@ -359,6 +359,59 @@ median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest sing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
 
+## Latest run: plain-crud with bigger batches and no lock token, at e7cb88d
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at e7cb88d, on 2026-10-19, against the
+[run before it](#latest-run-plain-crud-with-the-record-type-cache-on-hybridcache-at-69f53f7). Since then: the batch
+defaults are 180 entities (`Sync:BatchSize`, a full write call: one entity is one record of an object), 200 entities at
+most, and 200 external ids per query; the inbox lost its `lock_token` (an outcome needs the row still pending with the
+event the claim read); the token bucket is gone (the limiter only pauses); the Account aggregate is read into classes and
+each entity type projects its own events. Same workload and environment; the database was recreated. The streaming
+benchmarks pin `BatchSize` at 10 and are unaffected by the new defaults.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures, and no iteration timed out.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency), and streaming
+(50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 137.42 ms | 834.75 ms | 24.25 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 1 | 1,000 | 2,113 | 608.00 ms | 2,969.79 ms | 78.62 MB | 69 | 23 | 1.91 | 3,254 | 1141 |
+| 1 | 3 | 100 | 990 | 73.04 ms | 369.85 ms | 25.28 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 375.72 ms | 946.39 ms | 81.25 MB | 68 | 21 | 1.93 | 3,230 | 1117 |
+| 4 | 1 | 100 | 990 | 78.62 ms | 297.35 ms | 26.94 MB | 24 | 8 | 5.72 | 1,128 | 138 |
+| 4 | 1 | 1,000 | 2,113 | 315.58 ms | 732.50 ms | 82.07 MB | 76 | 26 | 1.89 | 3,291 | 1178 |
+| 4 | 3 | 100 | 990 | 104.98 ms | 268.69 ms | 36.91 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 4 | 3 | 1,000 | 2,113 | 367.09 ms | 475.31 ms | 87.46 MB | 63 | 19 | 1.99 | 3,122 | 1009 |
+| 8 | 1 | 100 | 990 | 84.09 ms | 230.09 ms | 31.6 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 8 | 1 | 1,000 | 2,113 | 366.58 ms | 493.14 ms | 87.23 MB | 76 | 24 | 1.83 | 3,413 | 1300 |
+| 8 | 3 | 100 | 990 | 170.60 ms | 290.84 ms | 48.88 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 8 | 3 | 1,000 | 2,113 | 417.80 ms | 566.32 ms | 128.31 MB | 66 | 20 | 1.94 | 3,216 | 1103 |
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.765 s | 182.02 MB | 1,166 | 531 | 2.54 | 2,548 | 6 |
+| 4 | 3 | 2.489 s | 388.91 MB | 4,530 | 1,981 | 1.49 | 4,326 | 4 |
+| 8 | 1 | 2.085 s | 287.06 MB | 2,630 | 1,155 | 1.69 | 3,801 | 4 |
+| 8 | 3 | 5.885 s | 1407.57 MB | 15,729 | 7,232 | 1.20 | 5,382 | 3 |
+
+- **Half the API calls, from the bigger batches.** One worker on one pod with 100 accounts takes 22 calls and 8 write
+  requests where it took 47 and 17; with 1,000 accounts 69 and 23 against 151 and 47. Each object is now read and written
+  with one call for up to 180 entities instead of two. The 25 ms column roughly halves with it (835 ms against 1,576 ms,
+  2.97 s against 5.61 s), since latency is paid per call; at 0 ms the means are within noise.
+- **Streaming is unchanged**, as it should be: batches of 10, so the same claims and calls (4 workers on 1 pod: 1,166 calls
+  against 1,158).
+- **Streaming with 8 workers on 3 pods is still the outlier** (5.9 s, 15,729 API calls, coalescing 1.20). It is not the
+  rate limiter, as guessed in the run before: the token bucket is gone and nothing changed. With 24 workers on 50 hot
+  accounts almost every event becomes a batch of its own (about 1.2 rows per claim), and each batch pays its fixed read and
+  upsert calls. This is the effect of many workers on few entities, not a defect; not tested further.
+- **This run found a bug, fixed at e7cb88d.** With `lock_token` gone, ending the lease of the rows an outcome did not
+  record skipped any row whose `last_updated` equalled the transaction's `now()`, and a store of a newer event can start
+  in the same microsecond. That row kept its lease until it expired (5 minutes in the benchmark) and the drain timed out
+  (`NA` for three streaming scenarios in two earlier runs of this branch). The outcome statements now return the ids they
+  recorded, and the lease of the others is ended by id.
+
 ## Latest run: plain-crud with the record type cache on HybridCache, at 69f53f7
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at 69f53f7, on 2026-10-19, against the
