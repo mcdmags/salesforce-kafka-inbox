@@ -110,7 +110,7 @@ public static class AccountSync
 public sealed record AccountEvent(EventMeta? Meta, AccountPayload? Account);
 
 /// <summary>The <c>account</c> object of an <see cref="AccountEvent"/>.</summary>
-public sealed class AccountPayload
+public class AccountPayload
 {
     public string? ExternalId { get; set; }
     public string? Name { get; set; }

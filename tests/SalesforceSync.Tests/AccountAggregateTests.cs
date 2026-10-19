@@ -122,12 +122,13 @@ public sealed class AccountAggregateTests
 
     [Theory]
     [InlineData("not json", "Not a valid account aggregate")]
-    [InlineData("[1]", "not a JSON object")]
+    [InlineData("[1]", "Not a valid account aggregate")]
+    [InlineData("null", "not a JSON object")]
     [InlineData(/*lang=json,strict*/ """{ "after": { "externalId": "ACC-1" } }""", "event time")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03", "type": "updated" }, "after": { "externalId": "ACC-1" } }""", "event time")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "upsert" }, "after": { "externalId": "ACC-1" } }""", "event type")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" } }""", "before or after")]
-    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "after": [1] }""", "account object")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "after": [1] }""", "Not a valid account aggregate")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "after": { "name": "x" } }""", "non-empty externalId")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "before": { "externalId": "ACC-1" }, "after": { "externalId": "ACC-2" } }""", "different")]
     public void A_message_that_is_no_aggregate_is_rejected_with_the_reason(string json, string reason)
