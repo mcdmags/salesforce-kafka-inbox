@@ -432,6 +432,86 @@ now read by its index (87,641 index scans, 8 sequential), and the queue was empt
 truncate the audit for every iteration, so there it grew only to a few thousand rows, but it still cost them a few percent:
 the numbers of earlier runs in this file are somewhat pessimistic.
 
+## Latest run: plain-crud with outcomes matched by lease end, at a831e32
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at a831e32, on 2026-10-20, against the
+[run before it](#latest-run-plain-crud-without-transactions-in-the-inbox-at-e801333). Since then the claim returns each
+row's lease end (`next_attempt_at` as it set it), and every outcome and lease end matches it as well as the event time:
+a statement retried after a lost reply, or a worker slower than its lease, can no longer end another worker's lease or
+count a failure twice. One more array in each outcome statement's `unnest`; the database was recreated.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures, and no iteration timed out.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency), and streaming
+(50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 107.48 ms | 795.48 ms | 19.42 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 1 | 1,000 | 2,113 | 422.41 ms | 2,615.70 ms | 57.77 MB | 69 | 23 | 1.91 | 3,255 | 1142 |
+| 1 | 3 | 100 | 990 | 63.16 ms | 377.43 ms | 19.93 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 187.43 ms | 861.84 ms | 60.05 MB | 68 | 21 | 1.93 | 3,230 | 1117 |
+| 4 | 1 | 100 | 990 | 66.72 ms | 274.58 ms | 21.19 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 4 | 1 | 1,000 | 2,113 | 238.03 ms | 718.66 ms | 65.21 MB | 76 | 26 | 1.81 | 3,449 | 1336 |
+| 4 | 3 | 100 | 990 | 90.31 ms | 251.98 ms | 37.32 MB | 25 | 8 | 6.32 | 1,021 | 31 |
+| 4 | 3 | 1,000 | 2,113 | 351.76 ms | 441.31 ms | 85.88 MB | 64 | 20 | 2.00 | 3,120 | 1007 |
+| 8 | 1 | 100 | 990 | 78.33 ms | 212.08 ms | 25.67 MB | 23 | 8 | 6.32 | 1,021 | 31 |
+| 8 | 1 | 1,000 | 2,113 | 195.60 ms | 475.65 ms | 68.55 MB | 76 | 24 | 1.88 | 3,321 | 1208 |
+| 8 | 3 | 100 | 990 | 136.81 ms | 269.59 ms | 50.04 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 8 | 3 | 1,000 | 2,113 | 413.44 ms | 510.06 ms | 117.46 MB | 70 | 24 | 1.94 | 3,217 | 1104 |
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.897 s | 214.97 MB | 1,267 | 575 | 2.44 | 2,639 | 9 |
+| 4 | 3 | 2.381 s | 387.51 MB | 4,512 | 1,972 | 1.50 | 4,297 | 4 |
+| 8 | 1 | 2.131 s | 300.63 MB | 2,764 | 1,216 | 1.67 | 3,856 | 3 |
+| 8 | 3 | 4.604 s | 1209.24 MB | 14,169 | 6,480 | 1.23 | 5,225 | 3 |
+
+- **The same calls and timings within the noise of the runs** (streaming 8 workers on 3 pods 4.60 s against 4.56 s,
+  14,169 calls against 14,274; one worker on one pod with 100 accounts 107 ms against 101 ms): the extra lease-end
+  comparison is on rows already found by primary key, and costs nothing measurable.
+
+## Latest run: plain-crud without transactions in the inbox, at e801333
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at e801333, on 2026-10-20, against the
+[run before it](#latest-run-plain-crud-with-the-simpler-inbox-repository-at-295d018). Since then the inbox repository
+uses no explicit transaction: the claim is one statement, and the outcome statements commit one by one (a lost claim
+commit leaves its rows leased until the lease expires instead of freeing them by id). The database was recreated.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures, and no iteration timed out.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency), and streaming
+(50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 100.51 ms | 766.37 ms | 19.33 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 1 | 1,000 | 2,113 | 321.75 ms | 2,592.45 ms | 59.52 MB | 69 | 23 | 1.91 | 3,255 | 1142 |
+| 1 | 3 | 100 | 990 | 59.72 ms | 357.14 ms | 19.91 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 305.01 ms | 832.59 ms | 62.15 MB | 68 | 21 | 1.93 | 3,230 | 1117 |
+| 4 | 1 | 100 | 990 | 62.54 ms | 270.36 ms | 21.03 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 4 | 1 | 1,000 | 2,113 | 284.27 ms | 701.69 ms | 61.42 MB | 77 | 26 | 1.83 | 3,398 | 1285 |
+| 4 | 3 | 100 | 990 | 90.83 ms | 253.77 ms | 30.98 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 4 | 3 | 1,000 | 2,113 | 339.99 ms | 393.22 ms | 83.59 MB | 64 | 20 | 1.99 | 3,123 | 1010 |
+| 8 | 1 | 100 | 990 | 75.76 ms | 206.12 ms | 25.85 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 8 | 1 | 1,000 | 2,113 | 250.95 ms | 458.38 ms | 68.06 MB | 72 | 22 | 1.85 | 3,368 | 1255 |
+| 8 | 3 | 100 | 990 | 145.27 ms | 241.15 ms | 55 MB | 24 | 8 | 5.97 | 1,090 | 100 |
+| 8 | 3 | 1,000 | 2,113 | 306.18 ms | 547.80 ms | 103.02 MB | 68 | 22 | 1.98 | 3,148 | 1035 |
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.823 s | 212.51 MB | 1,235 | 561 | 2.46 | 2,624 | 8 |
+| 4 | 3 | 2.331 s | 381.17 MB | 4,453 | 1,937 | 1.50 | 4,283 | 4 |
+| 8 | 1 | 2.038 s | 298.55 MB | 2,700 | 1,190 | 1.69 | 3,817 | 3 |
+| 8 | 3 | 4.555 s | 1230.85 MB | 14,274 | 6,530 | 1.23 | 5,233 | 3 |
+
+- **Streaming with many workers is faster**: 8 workers on 3 pods 4.56 s against 6.36 s (14,274 calls against 16,433,
+  1,231 MB against 1,451 MB), 4 workers on 3 pods 2.33 s against 2.50 s. A claim is one round trip instead of three
+  (`BEGIN`, the statement, `COMMIT`), and the outcomes two fewer, so rows are leased for less time and more of them are
+  claimed together.
+- **The preloaded drain is the same within the noise** (one worker on one pod with 100 accounts 101 ms against 106 ms;
+  the same 22 calls and 8 write requests).
+
 ## Latest run: plain-crud with the simpler inbox repository, at 295d018
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at 295d018, on 2026-10-19, against the
