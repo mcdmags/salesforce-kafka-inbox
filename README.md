@@ -42,12 +42,12 @@ account, is deleted in Salesforce. Several things make this harder than "consume
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire can still record, but only on a row that is still pending with the event it read (see [Why there is no lock token](#why-there-is-no-lock-token)). |
 | Mapping errors | A field the code sends that Salesforce doesn't have (`INVALID_FIELD`) or won't let us set (`INVALID_FIELD_FOR_INSERT_UPDATE`) is wrong for every event of that kind, so it **stops the inbox** instead of dead-lettering one entity at a time. Salesforce itself finds it: `INVALID_FIELD` on the read (the read selects every field the code sends, so a field missing in the org shows before anything is written) or `INVALID_FIELD_FOR_INSERT_UPDATE` / `INVALID_FIELD` in a write's answer (the other entities of that write are saved already and are read as unchanged next time). The batch's rows and every other due row of that inbox are then held (`MAPPING_ERROR`) for `Sync:MappingErrorHold` (5 minutes), with the error on the row (`last_error`: the field and the object) and an ERROR in the log. Nothing is dead-lettered and no attempt is spent, so after the fix is deployed (or the field added) the rows go on with no replay. The rows named are those whose records send the column Salesforce names (all of the object's when it names none). Nothing is cached about the org's fields, so a field that was only just added is found at once. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](#unknown-outcomes). |
-| Records that belong together | Written in the same batch, **parents first**: the Accounts' **upsert** is one call, then the Profiles' is another. The org's foreign keys are **Text fields holding the parent's external id** (`Profile__c.AccountId__c` = the account key), declared with `[SObjectForeignKey]`: written as the text, never resolved to an Id, never a reference. A parent of another inbox (a relationship's or a contact's Account) must already be in Salesforce: the read checks, and a missing one makes the entity wait (`DEPENDENCY_NOT_SYNCED`) with nothing sent. Each record is saved or rejected on its own (`allOrNone: false`); the entity is done only when all of its records are in. An entity that failed in one call is not sent in the next: its outcome is already decided. See [Writing to Salesforce](#writing-to-salesforce). |
+| Records that belong together | Written in the same batch, **parents first**: the Accounts' **upsert** is one call, then the Profiles' is another. The org's foreign keys are **Text fields holding the parent's external id** (`Profile__c.AccountId__c` = the account key), written as the text, never resolved to an Id, never a reference. A parent of another inbox (a relationship's or a contact's Account) must already be in Salesforce: the read checks, and a missing one makes the entity wait (`DEPENDENCY_NOT_SYNCED`) with nothing sent. Each record is saved or rejected on its own (`allOrNone: false`); the entity is done only when all of its records are in. An entity that failed in one call is not sent in the next: its outcome is already decided. See [Writing to Salesforce](#writing-to-salesforce). |
 | Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. `inserted` and `updated` are the same to the sync. |
 | Deletes | A child gone from an aggregate's `after` (or the whole Account, when `after` is missing) is a `deleted` event in its inbox, ordered by `meta.time` like any other: an older insert can't bring it back, a newer one recreates it. The batch's read finds the record's Id by its external id, and every record to delete goes into one **sObject Collections delete** by Id (`DELETE /composite/sobjects?ids=...&allOrNone=false`), after the batch's upserts. A record the read doesn't find (never synced, or deleted already) costs nothing and is done. Already deleted is success, a refusal is permanent or transient by its code, a lost answer is held (`UNKNOWN_OUTCOME`). See [Deletes](#deletes). |
 | Change-only updates | **Diff against Salesforce by the value's .NET type**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are put in a canonical form by their type (`""` = `null`, numbers as decimals, date/time to the second, time to the millisecond; a checkbox `null` equals Salesforce's `false`) and only fields that differ are sent. The org's field metadata is not read, so a value Salesforce stores differently (a number with more decimals than the field's scale, multi-select values in another order than the picklist's) looks changed and is written again: the mapping should send values as Salesforce stores them. A new record's `null` checkbox is not sent (Salesforce defaults it to `false`). The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
 | Batching and API calls | Every call is one operation on many records (`SelectAsync`, `UpsertAsync`, `DeleteAsync`); there is no Composite request. **One read call per object** per batch of up to `Sync:BatchSize` entities (180, max 200): a query of up to 200 external ids (the row type's `MaxValuesPerQuery`), whose URL fits Salesforce's 16,384-byte limit on a call's URI and headers (long ids split a query further). Then, after the diff, the writes: **one `UpsertAsync` per object** (≤180 records, the row type's `MaxRecordsPerWrite`, under Salesforce's 200), parents first, with exactly the planned fields, matched by external id; then **one `DeleteAsync`** of the Ids to delete (≤180). So a batch of new Accounts with their Profiles costs 4 calls (two reads, two upserts), an Account-only change 3 (two reads, one upsert: the Profile is read too), and relationships and contacts 3 (their own object and the Account they point at, read; one upsert). A batch of deletes only is its reads plus one delete, and a delete Salesforce has nothing for costs the reads only. See [One call per object](#one-call-per-object) for the cost against Composite requests. The first batch of a pod, and then every 15 minutes (`Salesforce:RecordTypeRefreshInterval`), adds one query on `RecordType` per object that has a record type. Request bodies are gzipped, responses accepted compressed. |
-| Record types | Every synced object has a record type, named by developer name on its sObject class (`[SObject("Account", …, RecordType = "Business")]`). Its Id comes from one SOQL query on `RecordType` per object, cached in the process for `Salesforce:RecordTypeRefreshInterval` (15 minutes), and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't have (or not active) fails that entity alone before any write (`INVALID_RECORD_TYPE`, retried) and makes the next batch read the record types again. See [Record types](#record-types). |
+| Record types | Every synced object has a record type, named by developer name in its sync (`Business` for Account, `Standard` for the others). Its Id comes from one SOQL query on `RecordType` per object, cached in the process for `Salesforce:RecordTypeRefreshInterval` (15 minutes), and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't have (or not active) fails that entity alone before any write (`INVALID_RECORD_TYPE`, retried) and makes the next batch read the record types again. See [Record types](#record-types). |
 | Bad records | A value Salesforce rejects (too long, wrong type, required field emptied, a validation rule) fails only its own unit, by Salesforce's answer for that record (permanent or transient by its code; a required field emptied on an *update* is retried until `MaxRetries`, since the code can also mean the record was deleted meanwhile); an unknown or read-only field is a mapping error and stops the inbox; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a parent not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
 | Postgres failures | Every unit of work (claim, outcomes, ingest, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` around a transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (new transaction, change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; a claim retried after an unknown commit first releases what the lost attempt leased. A batch's outcomes are recorded with one statement per kind of outcome, not per entity. |
@@ -63,16 +63,15 @@ Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per 
                                                        │  claim entities: their inbox rows, SKIP LOCKED
                                                        ▼
                               InboxWorkerService ×N loops (any number of pods), round-robin over:
-                                AccountSync ─┐                   (strategy: typed event → mapping →
-                                AccountRelationshipSync ─┤                 sObject → records, + queries)
-                                ContactSync ─┤
+                                AccountSync ─┐
+                                AccountRelationshipSync ─┤   each: SalesforceBatchSyncService.SyncBatchAsync
+                                ContactSync ─┤                 (reader, inbox, its Send step)
                                                                 ▼
-                              SalesforceBatchSyncService.SyncBatchAsync<TEvent, TRow>(strategy, IRepository<TRow>)
-                                claim → each entity's newest event → map
-                                → normalize → 1 query per object → decide (diff + parents)
-                                → write: 1 collections upsert per level and object, parents first, and
-                                  1 collections delete (by Id) last
-                                → per-record results → outcome per entity → record outcomes
+                              the flow (SalesforceBatchSyncService): claim → parse each entity's newest event
+                                → the type's Send step: read what Salesforce has (1 query per object)
+                                  → decide (create / changed fields / nothing / wait for a parent)
+                                  → write: 1 collections upsert per object, parents first, then 1 delete (by Id)
+                                → per-record answers → outcome per entity → record outcomes
                                                        │  inbox: IRepository<TRow> (EF Core + raw SQL, PostgresRetryStrategy)
                                                        │  in-memory pause (Sforce-Limit-Info, limit errors)
                                                        ▼
@@ -86,8 +85,8 @@ The sync is three layers, each with one job:
 | Layer | Classes | Does |
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `SelectAsync`, and `UpsertAsync` and `DeleteAsync` for Collections upserts and deletes); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext` and `PostgresRetryStrategy`) | Sends requests and returns raw results. Decides nothing. |
-| **Business flow** | `SalesforceBatchSyncService` | `SyncBatchAsync` is the sync as a list of steps: claim → map each entity's event → `WriteToSalesforceAsync` (normalize → read → diff → send) → record outcomes, with the three ways a batch can fail (unknown outcome → hold, rate limited → defer, anything else → retry all). |
-| **Rules, no I/O** | in `Sync/`, one file per step, in the order a batch runs them: `PreparedBatch` (`Prepare`: read and map; `Outcomes`: entity results → inbox outcomes), then `Normalizer` (values in canonical form via `FieldValues`, record types to their Ids via `RecordTypeCache`), `Reader` (the read's SOQL and what it found), `Differ` (the diff: changed fields, create / update / delete / unchanged, `DEPENDENCY_NOT_SYNCED`), `Sender` (one upsert per object, parents first, then the delete; an entity that failed is not sent again) and `Interpreter` (one record's answer → saved, retry or dead-letter); and `AccountAggregate` (a Kafka aggregate → the changed entities' events) | Pure and deterministic, except `Normalizer` (through `RecordTypeCache`), `Reader` and `Sender`, which call the client; unit-tested without a database or HTTP. |
+| **The flow** | `SalesforceBatchSyncService` | `SyncBatchAsync` is the shared structure of a batch and nothing else: paused? → claim → parse each entity's event → the type's **send step** (a delegate) → record outcomes, with the ways a batch can fail as a whole (unknown outcome → hold, mapping error → stop the inbox, rate limited → defer, anything else → retry all). The lease deadline is here too. |
+| **What a type does** | `AccountSync`, `AccountRelationshipSync`, `ContactSync` (`ToSalesforce/`) | Each is one send step, written top to bottom: map its events to the fields Salesforce names, **read** what Salesforce has (`SalesforceCalls.ReadAsync`), **decide** per entity (`SalesforceCalls.Changes`: create with the non-empty fields, update the fields that differ, or nothing; wait for a missing parent), **write** (`SalesforceCalls.UpsertAsync` / `DeleteAsync`). `SalesforceCalls` is a small toolbox of one-call primitives (record types, read, changes, upsert, delete, and what an answer means); the types call what they need and can do it differently. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`). The
 model defines every table in `OnModelCreating` (partial indexes with `HasFilter`, autovacuum settings with
@@ -193,7 +192,7 @@ The example above stores two events: `REL-1` updated (its type changed) and `CON
 fields of a record are sent is still the engine's diff against Salesforce, not this comparison: a changed child
 writes only the fields that differ from what Salesforce has ([An event is the full record](#an-event-is-the-full-record)).
 
-The per-entity events are what the inboxes store and the strategies read. Each is one entity object next to `meta`:
+The per-entity events are what the inboxes store and the syncs read. Each is one entity object next to `meta`:
 
 ```json
 { "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" },
@@ -217,7 +216,7 @@ The per-entity events are what the inboxes store and the strategies read. Each i
   `accountRelationships` → accountRelationship, `contacts` → contact. Each type has its own typed event class, its own
   inbox table and its own worker pass.
 - **Entity id**: `<object>.externalId`, the record's Salesforce external id (`ExternalId__c`). It is read from the
-  deserialized event (`SyncStrategy.EntityId`) and stored in the inbox row's `entity_id` column.
+  deserialized event (`EventReader`) and stored in the inbox row's `entity_id` column.
 - **Order**: `meta.time`, an ISO-8601 time with an offset or `Z`. **The Kafka message key is not used, and neither is
   arrival order**: an entity's events may come over any partition, through any consumer, in any order. The event with
   the newest `meta.time` wins; an event that is not newer than what was already synced is not stored. This relies on
@@ -246,7 +245,7 @@ Every event carries the entity's complete current state. There is no "field not 
 - The one thing that isn't cleared by absence is a whole object: an account event **without a `profile`** writes
   only the Account and leaves the Profile in Salesforce as it is.
 
-Other rules (in the strategies, `AccountSync`, `AccountRelationshipSync` and `ContactSync`):
+Other rules (in the syncs, `AccountSync`, `AccountRelationshipSync` and `ContactSync`):
 
 - **account**: `profile.externalId` defaults to the account's `externalId`, and the Profile always belongs to the
   event's account (`AccountId__c` = the account's `externalId`).
@@ -256,42 +255,34 @@ Other rules (in the strategies, `AccountSync`, `AccountRelationshipSync` and `Co
 - **contact**: `accountExternalId` is the contact's Account (by external id, written to `AccountId__c`); an event without it is dead-lettered
   (`INVALID_EVENT`), and one without `lastName` (required on Contact) with `REQUIRED_FIELD_MISSING`.
 
-## The three typed layers
+## What an object is made of
 
-An event passes through three kinds of types on its way to the generic engine. Each knows one thing; all three of an
-object live in three files (`Sync/<Object>Event.cs`, `ToSalesforce/<Object>SObjects.cs`, `ToSalesforce/<Object>Sync.cs`):
+An object has two halves that share only its event: persisting an aggregate's events to its inbox, and sending them to
+Salesforce. Each half is its own folder and namespace (the build checks that `Persistence` and `ToSalesforce` never
+reference each other).
 
-| Layer | Where | Knows |
+| Part | Where | Knows |
 |---|---|---|
-| **Inbox payload** (`AccountPayload`, `ProfilePayload`, `AccountRelationshipPayload`, `ContactPayload`, in the `AccountEvent` / `AccountRelationshipEvent` / `ContactEvent` envelopes) | `Sync/<Object>Event.cs` | The event as the source system sends it. PascalCase CLR properties, bound from camelCase JSON; no attributes, no Salesforce names. |
-| **Salesforce sObject** (`AccountSObject`, `ProfileSObject`, `AccountRelationshipSObject`, `ContactSObject`) | `ToSalesforce/<Object>SObjects.cs` | The org. One flat class per object; `[SObject]` names the object, its external id field and its record type (developer name), `[JsonPropertyName]` names each field, `[SObjectForeignKey]` marks a Text field holding a parent's external id (`[SObjectLookup]` a real Lookup field, which none of the examples has). |
-| **Mapping** (`AccountSync.ToAccount`, `AccountSync.ToProfile`, `AccountRelationshipSync.ToRelationship`, `ContactSync.ToContact`) | `ToSalesforce/<Object>Sync.cs` | How one becomes the other: hand-written static methods, one line per field, converting only where the types differ (the `tags` list becomes a `;`-separated multi-select value). |
+| **Event** (`AccountEvent` with `AccountPayload` and `ProfilePayload`, `AccountRelationshipEvent`, `ContactEvent`) and its `EventReader` | `Sync/<Object>Event.cs` | The event as the source system sends it: PascalCase CLR properties bound from camelCase JSON, no attributes, no Salesforce names. The reader says whose an event is and when it happened (`meta`). |
+| **Ingest** (`AccountIngest`, `AccountRelationshipIngest`, `ContactIngest`, each an `IAggregateIngest`) | `Persistence/<Object>Ingest.cs` | What an Account aggregate calls for of this type (`Project`) and storing it in the type's inbox. No Salesforce. |
+| **Sync** (`AccountSync`, `AccountRelationshipSync`, `ContactSync`, each an `IEntitySync`) | `ToSalesforce/<Object>Sync.cs` | Salesforce's names (object, fields, record type developer name) and what to send for an event. No aggregates. |
 
 ```
 raw event JSON ─► AccountEvent { AccountPayload { …, ProfilePayload } }     System.Text.Json (Web defaults)
-               ─► AccountSync.ToAccount / ToProfile ─► AccountSObject, ProfileSObject
-               ─► SObjectRecord.From(referenceId, sobject) ─► SObjectRecord ─► engine (normalize, diff, write)
+               ─► AccountSync: the fields as Salesforce names them (a Dictionary per record, one line per field)
+               ─► SalesforceCalls.Changes (against what the read found) ─► UpsertAsync / DeleteAsync
 ```
 
-**Salesforce API names live only on the sObject classes.** Nothing else in the sync spells a field or object name:
-the strategies' queries (`SoqlQuery.RecordsOf<AccountSObject>(units)`), the foreign keys and the records all read them
-from the attributes. Pointing the sync at an org whose fields are named differently (`LLC_BI__Active__c` instead of
-`Active__c`) means editing the attribute strings and nothing else.
-
-`SObjectRecord.From` turns any sObject instance into the engine's record: object, external id field, record type and
-field names from the attributes, every property as a field (nulls included, see above; a `[SObjectForeignKey]`
-property too, also listed as a parent to send first and to wait for), every `[SObjectLookup]` property as a lookup by
-the target's external id. The attributes are read by reflection once per class
-(`SObjectMetadata<TSObject>.Instance`, with compiled property getters), not per event; a class declared wrongly (a
-property without `[JsonPropertyName]`, no external id property, a blank record type) fails the first time it is used.
-`RecordType` is a required member of `[SObject]`, so leaving it out doesn't compile. A unit test checks
-every name on every sObject class, record type included, against the mock org's schema (`FakeSchema`, whose `RecordType` rows
-answer the record type query and which rejects an unknown `RecordTypeId` like Salesforce), which catches typos.
+**Salesforce API names live only in the sync classes** (`AccountSync` and the others): the object name, the field names
+and the record type developer name are written there, next to the line that maps each field. Pointing the sync at an org
+whose fields are named differently (`LLC_BI__Active__c` instead of `Active__c`) means editing those strings and
+nothing else. A typo is found by the integration and unit tests, which run every sync against the mock org (whose
+schema, `FakeSchema`, rejects an unknown field or `RecordTypeId` like Salesforce).
 
 ## The inbox
 
 **Ingest.** `KafkaInboxConsumer` splits each message ([Event format](#event-format)) and reads each event it gets
-with the typed event of its entity type (`SyncStrategy.TryRead`, the same read the engine uses), storing it only if
+with the typed event of its entity type (`EventReader.TryRead`, the same read the flow uses), storing it only if
 it is valid: valid JSON for that type, the entity object with a non-empty id, a `meta.time` with an explicit offset,
 and a `meta.type` of `inserted`, `updated` or `deleted`. A message that is no aggregate (no time with an offset, no
 valid type, neither snapshot, no account `externalId`, `before` and `after` of different accounts), or an event that
@@ -698,20 +689,22 @@ has no migration.
 A batch is written with plain, bulk calls: **one sObject Collections upsert per object**
 (`PATCH /composite/sobjects/{SObject}/{ExternalIdFieldName}`, parents first), then **one sObject Collections delete** by
 Id for the records to delete (`DELETE /composite/sobjects?ids=...`, [Deletes](#deletes)). Each is one call and takes up
-to 200 records; there is no Composite request. The steps, in the order the code reads (one file per step in `Sync/`):
+to 200 records; there is no Composite request. The steps, in the order a type's send step runs them (`ToSalesforce/AccountSync.cs`
+reads like this, top to bottom; the calls are in `SalesforceCalls`):
 
-1. **Normalize** (`Normalizer`): each record's values are put in a canonical form by their .NET type, and its record
-   type becomes its `RecordTypeId` (`RecordTypeCache`). An entity whose record type the org doesn't have fails here,
-   alone; everything else Salesforce rejects, it rejects at the write.
-2. **Read** (`Reader`): one query per object (`SelectAsync`), by external id, for what the
-   diff compares.
-3. **Diff** (`Differ`): each record becomes a create (all its non-empty fields), an update (only the fields that
-   differ), a delete (by the Id the read found) or nothing. An entity with nothing to send is `Unchanged`; one whose
-   parent is in neither Salesforce nor the entity waits (`DEPENDENCY_NOT_SYNCED`).
-4. **Send** (`Sender`): the objects with changes, each after the objects its records point at, one `UpsertAsync` each
-   (200 records a call at most), then the deletes. An entity that failed in a call is left out of the next ones.
-5. **Interpret** (`Interpreter`): each record's answer says saved, retry or dead-letter; an entity's outcome is
-   its worst record's.
+1. **Record types** (`RecordTypeIdAsync`, via `RecordTypeCache`): the object's record type developer name becomes its
+   `RecordTypeId`. An entity whose record type the org doesn't have fails here, alone (`INVALID_RECORD_TYPE`, retried);
+   everything else Salesforce rejects, it rejects at the write.
+2. **Read** (`ReadAsync`): one query per object, by external id (up to 200 ids a query), for the fields the type
+   sends, the external id and the Id (a delete needs it).
+3. **Decide** (`Changes`, and the type's own rules): each record becomes a create (all its non-empty fields), an update
+   (only the fields that differ, values compared in their .NET type's canonical form, `FieldValues`), a delete (by the Id
+   the read found) or nothing. An entity with nothing to send is done; one whose parent is in neither Salesforce nor
+   the entity waits (`DEPENDENCY_NOT_SYNCED`).
+4. **Write** (`UpsertAsync`, `DeleteAsync`): one upsert per object, each after the objects its records point at (an
+   entity's record is not sent once an earlier record of the entity failed), then the deletes (200 records a call at
+   most). Each record's answer says saved, retry or dead-letter (`SalesforceErrors`); an entity's outcome is its worst
+   record's.
 
 **The external id in an upsert: the field's name once, each record's value.** In
 `PATCH /composite/sobjects/{SObject}/{ExternalIdField}` the last part is the **name** of the field the records are matched
@@ -730,26 +723,17 @@ Lookup field holding a Salesforce Id:
 | `Account_Relationship__c` | `AccountId__c`, `RelatedAccountId__c` | the two Accounts' `ExternalId__c` |
 | `Contact` | `AccountId__c` | the Account's `ExternalId__c` (the standard `AccountId` lookup is left alone) |
 
-The sObject class marks such a field `[SObjectForeignKey(typeof(AccountSObject))]`:
-
-```csharp
-[JsonPropertyName("AccountId__c"), SObjectForeignKey(typeof(AccountSObject))]
-public string? AccountId { get; set; }
-```
-
-For normalization, the read, the diff and the write it is an ordinary string field: compared with the event's value,
-written as the text when it differs (an unchanged key is not sent), never resolved to an Id, never a `@{reference}`.
-The attribute is used for two things only:
+For the read, the diff and the write it is an ordinary string field: compared with the event's value, written as the
+text when it differs (an unchanged key is not sent), never resolved to an Id, never a `@{reference}`. What a type does
+with it is two things only:
 
 - **Order.** The org's automation rejects a child whose parent doesn't exist yet, so an object is upserted after the
-  objects its records point at (`Sender`): the Accounts' upsert, then the Profiles' upsert carrying `AccountId__c` = the
+  objects its records point at: `AccountSync` upserts the Accounts, then the Profiles carrying `AccountId__c` = the
   account key. The order is of objects, not of records: it is the same for every entity of the batch.
 - **Parent check, when the parent comes from another inbox** (a relationship's two Accounts, a contact's Account).
-  The strategy's queries read the parent's object by external id
-  (`SELECT Id, ExternalId__c FROM Account WHERE ExternalId__c IN (...)`, `SoqlQuery.LookupTargetsOf<AccountSObject>`)
-  only to know it exists. A parent that is neither there nor in the same entity makes the entity wait
-  (`DEPENDENCY_NOT_SYNCED`) with nothing sent. When the parent is written by the same entity (a Profile's Account),
-  no query is needed: the parent's upsert goes first.
+  The type reads the parent's object by external id (`SELECT Id, ExternalId__c FROM Account WHERE ExternalId__c IN (...)`)
+  only to know it exists. A parent that isn't there makes the entity wait (`DEPENDENCY_NOT_SYNCED`) with nothing sent.
+  When the parent is written by the same entity (a Profile's Account), no query is needed: the parent's upsert goes first.
 
 **A child whose parent failed is not sent.** The calls are in order, so the Profiles' upsert comes after the Accounts'
 answer is known. An entity whose Account failed is left out of the Profiles' upsert, and its outcome is the Account's
@@ -778,9 +762,8 @@ by external id with exactly the planned fields, one call per object (≤ the row
 built-in objects, under Salesforce's 200; more records of one object take further calls), parents first. Records to
 delete go last in one Collections delete by Id ([Deletes](#deletes)).
 
-The rule lives in the engine (`SalesforceBatchSyncService`, `SalesforceRestClient`) and knows no object by name: a new strategy writing, say,
-Accounts and their Addresses gets it with no code of its own; its classes only declare their foreign keys, which give
-the order.
+The calls are `SalesforceCalls` and `SalesforceRestClient`, which know no object by name: a new sync writing, say,
+Accounts and their Addresses uses them as they are; it only decides which object goes first.
 
 | Batch | Calls |
 |---|---|
@@ -838,12 +821,10 @@ to three ids per entity (itself and two Accounts).
 
 ### Record types
 
-Every synced object must have a record type, and each sObject class names it by **developer name**:
+Every synced object must have a record type, and each sync names it by **developer name**:
 
 ```csharp
-[SObject("Account", ExternalIdField = "ExternalId__c", RecordType = "Business")]
-[SObject("Profile__c", ExternalIdField = "ExternalId__c", RecordType = "Standard")]
-[SObject("Account_Relationship__c", ExternalIdField = "ExternalId__c", RecordType = "Standard")]
+new Dictionary<string, object?> { ["Name"] = a.Name, ... }, RecordType: "Business"   // AccountSync
 ```
 
 These are defaults; they must match record types in the org (see
@@ -956,9 +937,8 @@ A record is deleted when it is gone from its account's aggregate: a relationship
 `after` doesn't, or every record of an account whose `after` is missing (or whose `meta.type` is `deleted`)
 ([Event format](#event-format)). The split stores a `deleted` event for it in its own inbox, and from there it is an
 event like any other: one row per entity, ordered by `meta.time`, claimed, leased, retried, held and dead-lettered
-by the same code. Each strategy's `Map` decides the action: for a `deleted` event it returns its records as deletes
-(`SObjectRecord.Deleting<ContactSObject>("contact", key)`), otherwise as upserts; the engine has no delete path of its
-own.
+by the same code. Each sync's send step decides the action: for a `deleted` event it deletes the records the read found
+(`SalesforceCalls.DeleteAsync`), otherwise it upserts them; the flow has no delete path of its own.
 
 **What Salesforce documents.** The [REST API Developer Guide](https://resources.docs.salesforce.com/latest/latest/en-us/sfdc/pdf/api_rest.pdf)
 and the [SOAP API Developer Guide](https://resources.docs.salesforce.com/latest/latest/en-us/sfdc/pdf/apex_api.pdf)
@@ -1063,159 +1043,35 @@ come from the parent's upsert answer rather than from a reference. That is not b
 
 ## Adding a Salesforce object
 
-The engine (`SalesforceBatchSyncService.SyncBatchAsync<TEvent, TRow>`) owns claiming, ordering, coalescing, rate
-limits, batching, normalization, diffing, parents first, retries and dead-lettering. Nothing in the engine, the consumer or
-the worker loops names an object. An object supplies, in one file: a payload class, an sObject class and a static class with the mapping and the strategy,
-which says how an event becomes records, upserts or deletes; and an inbox row class (which selects the object's inbox
-table) in `SalesforceSync.Data/Inbox/`. `AddInboxSync` registers its sync as an `IEntitySync` and its ingest as an `IAggregateIngest`, which do
-`IEntitySync` through the shared `IRepository<TRow>`, and its projection as an `EntityIngestService<TEvent, TRow>`
-(`IAggregateIngest`). Its events come from the account aggregate
-(its projection's `Project` takes them from the aggregate: a child type reads its own list of the snapshot); an object that
-isn't part of the aggregate needs its list added to `AccountSnapshot`, or a topic of its own.
+The flow (`SalesforceBatchSyncService`) owns claiming, the lease deadline, parsing, and the way a failed batch is held,
+deferred, stopped or retried; `SalesforceCalls` has the Salesforce calls a send step is made of. Nothing in them, the
+consumer or the worker loops names an object. An object supplies:
+
+- its **event** and payload classes (`Sync/<Object>Event.cs`) with an `EventReader` (which property is the entity id, which
+  is the meta);
+- its **ingest** (`Persistence/<Object>Ingest.cs`, an `IAggregateIngest`): `Project`, the events of this type an aggregate
+  calls for (a child type reads its own list of the snapshot), stored in its inbox;
+- its **sync** (`ToSalesforce/<Object>Sync.cs`, an `IEntitySync`): a `Send` step, which maps the events to Salesforce's
+  fields and does the read, the decision and the write with `SalesforceCalls`; the flow runs it
+  (`batch.SyncBatchAsync(Event.Reader, inbox, Send, ct)`);
+- an **inbox row class** (which selects the object's inbox table) in `SalesforceSync.Data/Inbox/`, and its EF migration.
+
+`AddInboxSync` registers each ingest as an `IAggregateIngest` and each sync as an `IEntitySync`, parents first:
 
 ```csharp
-// 1. Payload: the event as the source sends it  { "meta": {...}, "accountRelationship": { "externalId": ..., ... } }
-public sealed record AccountRelationshipEvent(EventMeta? Meta, AccountRelationshipPayload? AccountRelationship);
-
-public sealed class AccountRelationshipPayload
-{
-    public string? ExternalId { get; set; }
-    public string? AccountExternalId { get; set; }
-    public string? RelatedAccountExternalId { get; set; }
-    public string? Type { get; set; }
-    public bool? IsActive { get; set; }
-}
-
-// 2. sObject: the only place with Salesforce API names. RecordType is the developer name of the record type every
-//    record gets (required; it must exist in the org, be active and be assigned to the run-as user)
-[SObject("Account_Relationship__c", ExternalIdField = "ExternalId__c", RecordType = "Standard")]
-public sealed class AccountRelationshipSObject
-{
-    [JsonPropertyName("ExternalId__c")] public string? ExternalId { get; set; }
-
-    // A foreign key: a Text field holding the parent's external id; the parent's class knows its object and id field
-    [JsonPropertyName("AccountId__c"), SObjectForeignKey(typeof(AccountSObject))]
-    public string? AccountId { get; set; }
-
-    [JsonPropertyName("RelatedAccountId__c"), SObjectForeignKey(typeof(AccountSObject))]
-    public string? RelatedAccountId { get; set; }
-
-    [JsonPropertyName("Type__c")] public string? Type { get; set; }
-    [JsonPropertyName("Active__c")] public bool? Active { get; set; }
-}
-
-// 3. Inbox row (in SalesforceSync.Data/Inbox): the object's inbox table. Every column is on InboxRow, so every object's inbox has the same fields;
-//    the row type gives its batch's query and write sizes (IInboxRow; checked at registration: 1 to 2,000 ids per
-//    query, 1 to 200 records per upsert or delete)
-public sealed class AccountRelationshipInboxRow : InboxRow, IInboxRow
-{
-    // A full batch's read: a query of up to 100 ids per object, up to 3 ids per relationship (itself, two Accounts)
-    public static int MaxValuesPerQuery => 100;
-    // A margin under Salesforce's 200
-    public static int MaxRecordsPerWrite => 180;
-}
-//    ... and in SyncDbContext.OnModelCreating
-//    modelBuilder.Entity<AccountRelationshipInboxRow>(entity => ConfigureInbox(entity, "sf_account_relationship_inbox"));
-//    Then a migration creates the table: dotnet ef migrations add <Name> --project src/SalesforceSync.Data --output-dir Migrations
-
-// 4. Mapping and strategy: how to read an event (id, time, type), event -> records, and what to read
-public static class AccountRelationshipSync
-{
-    public const string Type = "accountRelationship";
-
-    public static readonly SyncStrategy<AccountRelationshipEvent> Strategy = new(Type,
-        EntityId: e => e.AccountRelationship?.ExternalId,   // the only places that know where the id
-        Meta: e => e.Meta,                                  // and the meta (time and type) are in the event
-        Map: Map,                                           // the action: the records to upsert or delete
-        Queries: Queries);
-
-    // Throwing dead-letters the event (INVALID_EVENT)
-    public static SyncUnit Map(string relationshipKey, AccountRelationshipEvent e)
-    {
-        // A delete needs the key only; the read finds the record's Id, and nothing is sent if there is none
-        if (e.Meta?.IsDelete() == true)
-            return new SyncUnit([SObjectRecord.Deleting<AccountRelationshipSObject>("rel", relationshipKey)]);
-
-        var payload = e.AccountRelationship;
-        if (string.IsNullOrWhiteSpace(payload?.AccountExternalId) || string.IsNullOrWhiteSpace(payload.RelatedAccountExternalId))
-            throw new ArgumentException("accountExternalId and relatedAccountExternalId are required");
-
-        return new SyncUnit([SObjectRecord.From("rel", ToRelationship(payload))]);
-    }
-
-    // The relationships themselves (to diff) and the Accounts they point at (to know they exist)
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units) =>
-    [
-        SoqlQuery.RecordsOf<AccountRelationshipSObject>(units),
-        SoqlQuery.LookupTargetsOf<AccountSObject>(units)
-    ];
-
-    // The mapping: explicit, one line per field
-    public static AccountRelationshipSObject ToRelationship(AccountRelationshipPayload payload) => new()
-    {
-        ExternalId = payload.ExternalId,
-        AccountId = payload.AccountExternalId,
-        RelatedAccountId = payload.RelatedAccountExternalId,
-        Type = payload.Type,
-        Active = payload.IsActive
-    };
-}
+AddEntitySync<AccountRelationshipIngest, AccountRelationshipSync, AccountRelationshipInboxRow>(services);
 ```
 
-Register it in `AddInboxSync` (the open generic `InboxRepository<TRow>` is registered once and serves every row type):
+`ToSalesforce/ContactSync.cs` is the smallest complete example (88 lines): it parses nothing itself (the flow did), maps a
+contact to its fields, reads the contacts and the Accounts they point at, waits for a missing Account, and upserts or
+deletes. A step may do all of this differently (another write order, another API): the flow only needs the entities that
+failed, and why.
 
-```csharp
-AddEntitySync<AccountRelationshipEvent, AccountRelationshipInboxRow>(services, AccountRelationshipSync.Strategy);
-```
-
-Once its migration exists, the object's inbox table is created at startup, the consumer stores the events the split
-gives its type there, and the worker loops sync it. A record whose parent isn't in Salesforce yet (`DEPENDENCY_NOT_SYNCED`) is retried with backoff, so
-related objects can arrive in any order. A strategy may build `SObjectRecord`s by hand; the typed layers are how the built-in objects do it, not something the
-engine requires.
-
-**Contact** has the same shape. `Sync/ContactSync.cs` is the complete example: `ContactEvent` / `ContactPayload` (the
-`contact` object of the event), `ContactSObject`, and the strategy, which reads
-the contacts and the Accounts they point at, like relationships (its inbox row is `ContactInboxRow`, `sf_contact_inbox`, in `SalesforceSync.Data/Inbox/`):
-
-```csharp
-// The Account by its external id, in a Text field; the read checks the Account exists
-[SObject("Contact", ExternalIdField = "ExternalId__c", RecordType = "Standard")]
-public sealed class ContactSObject
-{
-    [JsonPropertyName("ExternalId__c")] public string? ExternalId { get; set; }
-
-    [JsonPropertyName("AccountId__c"), SObjectForeignKey(typeof(AccountSObject))]
-    public string? AccountId { get; set; }
-
-    [JsonPropertyName("LastName")] public string? LastName { get; set; }
-    // ... FirstName, Email, Phone
-}
-
-public static class ContactSync
-{
-    public const string Type = "contact";
-
-    public static readonly SyncStrategy<ContactEvent> Strategy =
-        new(Type, e => e.Contact?.ExternalId, e => e.Meta, Map, Queries);
-
-    // The contacts themselves (to diff) and the Accounts they point at (to know they exist)
-    public static IEnumerable<SoqlQuery> Queries(IReadOnlyCollection<SyncUnit> units) =>
-    [
-        SoqlQuery.RecordsOf<ContactSObject>(units),
-        SoqlQuery.LookupTargetsOf<AccountSObject>(units)
-    ];
-    // Map (a delete for a deleted event, else the upsert) and ToContact as for relationships
-}
-```
-
-registered the same way:
-
-```csharp
-AddEntitySync<ContactEvent, ContactInboxRow>(services, ContactSync.Strategy);
-```
-
-Contact is a standard object, so it has no record type of its own out of the box; like the others, the sync expects
-one named `Standard` (see [step 4](#4-create-the-objects-and-fields)), or change `RecordType` on `ContactSObject`.
+Once its migration exists, the object's inbox table is created at startup, the consumer stores the events the aggregate
+gives its type there, and the worker loops sync it. A record whose parent isn't in Salesforce yet
+(`DEPENDENCY_NOT_SYNCED`) is retried with backoff, so related objects can arrive in any order. A new object needs the
+record type its sync names (`Standard` for the built-in ones, see [step 4](#4-create-the-objects-and-fields)), or change it
+in the sync.
 
 **Why `SemaphoreSlim` isn't used for parallel batches:** it limits concurrency within one process, while
 Salesforce's limits are org-wide. Parallelism comes from competing worker loops in every pod pulling from the
@@ -1232,13 +1088,15 @@ src/
     Hosting/                      The options validators
     RateLimiting/                 The process's rate limiter, in memory: SalesforceRateLimiter (pause, from
                                   Sforce-Limit-Info and limit errors); it serves Infrastructure's port
-    ToSalesforce/                 The engine (SalesforceBatchSyncService.cs: the flow), PreparedBatch and one file per step of the write path (Normalizer, Reader, Differ, Sender, Interpreter), EntitySyncService, the
-                                  strategy and event meta, the engine's model types, AccountAggregate (a Kafka
-                                  aggregate → AggregateChange; each type projects its events), AggregateChange, and one file per synced object
-                                  (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy)
+    Sync/                         What both halves share: the events and their payloads (AccountEvent, ...), EventMeta,
+                                  EventReader, EventJson, AccountAggregate (a Kafka aggregate → AggregateChange)
+    Persistence/                  An aggregate's events into the inboxes: IAggregateIngest and one ingest per object
+                                  (AccountIngest, AccountRelationshipIngest, ContactIngest)
+    ToSalesforce/                 The inbox to Salesforce: SalesforceBatchSyncService (the flow), SalesforceCalls (the calls
+                                  a send step is made of), IEntitySync and one sync per object (AccountSync,
+                                  AccountRelationshipSync, ContactSync: its mapping and send step)
   SalesforceSync.Infrastructure/  The Salesforce API calls (references no other project of ours):
-    Salesforce/                   The REST client and its request/result types, RecordTypeCache, FieldValues, errors,
-                                  SObjectMetadata and the attributes the sObject classes are read by
+    Salesforce/                   The REST client and its request/result types, RecordTypeCache, FieldValues, errors
     RateLimiting/                 The HTTP side of rate limiting: SalesforceRateLimitHandler, the limits header, options,
                                   and the port the entry project serves (ISalesforceRateLimiter)
   SalesforceSync.Data/            Everything that touches Postgres (references no other project of ours):
@@ -1259,9 +1117,9 @@ src/
                                   and removed) to Kafka
   SalesforceSync.AppHost/         Aspire: Postgres + pgAdmin, Kafka + Kafka UI, mock Salesforce, worker, generator, benchmarks
 tests/
-  SalesforceSync.Tests/           Unit tests: the Salesforce half of the engine with every strategy (and test-only
-                                  Lookup objects, LookupObjects.cs) against the in-memory org, the engine's flow with a
-                                  stand-in inbox, the pure write-path rules, type normalization, error classification, execution strategy, limits
+  SalesforceSync.Tests/           Unit tests: the flow (with a stand-in inbox), the Salesforce calls and the three syncs
+                                  against the in-memory org, the ingests and the aggregate, type normalization, error
+                                  classification, execution strategy, limits
   SalesforceSync.IntegrationTests/  End-to-end tests: Postgres + Kafka in Testcontainers, worker pods and the mock org
                                   in-process; Kafka in, assertions on the mock org + inbox
 benchmarks/
@@ -1404,46 +1262,38 @@ Rate limits (`RateLimitTests`, each with its own fixture, i.e. its own container
 
 ### Unit tests
 
-Unit tests (`dotnet test tests/SalesforceSync.Tests`, no Docker) run the Salesforce half of the engine with every
-strategy against the in-memory org: 4 calls per batch of new Accounts and Profiles (a read of each object and an upsert
-of each, the Profiles carrying the account key), the exact verbs, bodies and `allOrNone` flags sent,
-one upsert per object whatever the strategy's classes, an object of more records than a call takes in several calls, values
-Salesforce stores differently written once rather than on every event, a bad value failing only its own unit before
-any call, a validation error or a row lock costing only its own entity, an Account saved without its Profile, a
-create losing a race, a failed new Account's Profile not being sent and nobody else dead-lettered, create or update decided by
-what Salesforce has, a Profile moved to another Account (its key rewritten), relationships with their Accounts' keys
-and missing dependencies (found by the read, or the org's rejection with its message configured in
-`Salesforce:ParentMissingMessages`, permanent without it), the mock org rejecting a key whose parent doesn't exist,
-gzip, clearing fields that became empty, an Account-only change sent as one upsert with only that field,
-Account-only and Profile-only changes as two upserts (Accounts first), an entity written in two
-upserts saved only when both are while the other entities keep their outcome, a lost answer of the Profile upsert
-holding the whole batch (the retry then finds both applied and writes nothing), a later call of
-a batch failing as a whole failing, holding or deferring the whole batch. Contacts: a new one as one upsert (its non-empty fields, the Account's
-key as text, the `RecordTypeId`), an unchanged one read and not written, a changed one as one upsert with only
-the changed fields, a missing Account as `DEPENDENCY_NOT_SYNCED` before any write, bad values and Salesforce
-rejections costing only their own entity, a lost answer as an unknown outcome, the upsert call's per-record answer
-(`created`). As pure rules (`WriteRulesTests`): the diff, the plan, the calls and the reading of the answers: the upserts
-(one per object, parents first whatever the order of the records, also for objects the sync has no strategy for; 200
-records of one object a call, each once; objects that point at each other refused), a foreign key written only when its
-text differs, a missing parent waiting with nothing sent, a failed entity not sent in the next call while the others are,
-the configured "parent missing" message meaning wait, one outcome per entity across upserts, and an update upserted onto
-a deleted record. Also: each mapper (an AutoFixture payload in, the expected
-sObject out, nulls passed through), sObject → record (names from the attributes, nulls included, foreign keys as
-fields and parents, lookups and external id), the guard that every Salesforce name on an sObject class exists in the mock org's schema, the event mapping
-(account with and without a profile, relationships, contacts, missing Account ids, camelCase and PascalCase bodies), what the
-engine does with a claim (the claimed event is the full record, invalid rows alone), what the consumer
-admits (the typed read: id, time with offset, `meta.type`), the classification of failed writes (unknown outcome or
-not), every normalization rule (empty text, numbers, date/time precision, checkbox null) and the record type resolution, error classification, the Postgres execution strategy (retried, not retried, gives up), the pause
-(`SalesforceRateLimiterTests`: not paused, paused, a shorter pause not cutting a longer one, rate limited after `MaxWait`), startup validation (including every
-registered row type's query and write limits) and throttle decisions. Deletes: one Collections delete by the Ids the
-read found, a record Salesforce doesn't have costing the read only, the upserts before the delete and the delete without a body, a refused delete permanent or transient by its code, an already deleted record as
-success, a lost answer as an unknown outcome, an Account's delete waiting (`DEPENDENCY_NOT_SYNCED`) while a contact
-still names it in an org that refuses that, its Profile deleted first, and Salesforce itself deleting it and leaving
-the contact alone; as pure rules, the planner (a delete only for what the read found), the
-calls (the delete last, split by `MaxRecordsPerWrite`) and the URL of 200 Ids fitting, 201 refused. The aggregate
-split (`AccountAggregateTests`): an insert, an unchanged aggregate storing nothing, a child added, changed, unchanged
-or removed (in both lists), an account or Profile change, a deleted account in its three forms (Profile before
-Account, every child deleted), property order not counting, invalid messages, and a child without an id. The mock
+Unit tests (`dotnet test tests/SalesforceSync.Tests`, no Docker):
+
+- **The flow** (`SalesforceBatchSyncServiceTests`): nothing claimed while paused or when nothing is due; the claimed
+  events parsed and handed to the send step; an unreadable row, or one about another entity than its row, dead on its
+  own while the others sync; entities done, retried or dead by what the step reports (the permanent error first); a
+  write of unknown outcome holding every claimed entity, a mapping error stopping the inbox with the error on the rows,
+  a rate limit handing the batch back as no work, any other failure retrying all, the step given up on at 80% of the
+  lease, and shutdown recorded as nothing.
+- **The Salesforce calls** (`SalesforceCallsTests`, against the in-memory org): what to send for a record (a new one's
+  non-empty fields, an existing one's differing fields, nothing when it is as wanted, a null clearing a field, values in
+  the form Salesforce takes), record types by developer name, a read by external id (200 ids a query, a field the org
+  lacks as a mapping error), an upsert creating then updating and 200 records a call, a record's failure on its entity
+  and permanent only when the data is wrong, a missing parent (the org's configured message) waited for, a field the org
+  lacks as a mapping error, a delete by Id, an already deleted record as success, a delete waiting for records that still
+  name it. A failed write is "not applied" only when the failure proves it, else an unknown outcome
+  (`WriteOutcomeTests`).
+- **The three syncs** (`AccountSyncTests`, `AccountRelationshipSyncTests`, `ContactSyncTests`, a mock org and in-memory
+  inboxes): an Account created with its Profile (the Account's key as text, record type, tags as a multi-select value),
+  a Profile with a key of its own, an event without a profile leaving Salesforce's alone, only the fields that differ sent
+  and nothing for an event that changes nothing, a missing field clearing it, deletes (Profile first, an absent record
+  already deleted), a failed Account dead and its Profile not sent, a retried failure, an event without its account dead,
+  two queries and one upsert per object; relationships and contacts waiting for a missing Account and sent once it is
+  there, dead without their Accounts' keys, a contact without its required last name dead, updates with only the
+  changed fields, deletes.
+- **Also**: the aggregate split and the ingests (`AccountAggregateTests`, `AggregateProjectionTests`: an insert, an
+  unchanged aggregate storing nothing, children added, changed, unchanged or removed, a deleted account in its forms,
+  invalid messages, a child without an id); what the consumer admits (`InboxEventTests`: the typed read, id, time with
+  offset, `meta.type`); every normalization rule (`FieldValuesTests`); error classification, the Postgres execution
+  strategy, the pause (`SalesforceRateLimiterTests`), startup validation (every registered row type's limits) and
+  throttle decisions.
+
+The mock
 org against the REST and SOAP API guides (`FakeSalesforceTests`): a Collections delete answering 200 per Id in order,
 a malformed Id failing alone without an `id`, an Id in the Recycle Bin, one never seen and one with a wrong suffix
 told apart, a 15-character Id, `allOrNone=true` rolling back (`ALL_OR_NONE_OPERATION_ROLLED_BACK`), more than 200
@@ -1505,9 +1355,8 @@ workers in 1 pod; it still checks correctness on every iteration.
 
 Results, the SQL statement measurements and the before/after of this tuning: [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
-The micro benchmarks need no database: header parsing, preparing a claim's rows (`PrepareTenEntities`), the
-consumer's typed read of an event (`ReadAndValidateEvent`), the typed mapping (`MapAccountEvent`: event JSON →
-payload → sObjects → records; `MapPayloadToSObject` and `MapSObjectToRecord` for its two halves) and the type-aware
+The micro benchmarks need no database: header parsing, the
+consumer's typed read of an event (`ReadAndValidateEvent`), and the type-aware
 diff.
 
 Both drain benchmarks run P **pods** (independent service providers: own connection pool, rate limiter and
@@ -1732,7 +1581,7 @@ Contacts are read and matched by `ExternalId__c`, and their Account is checked b
 both must be marked **External ID**. The user needs **Read** and **Edit** on every Contact field the sync sends.
 
 **`Profile__c`** (custom object). Label `Profile`, Object Name `Profile`, Record Name `Profile Name` of type Text.
-If Salesforce refuses the name, pick another and change it on `ProfileSObject` (see [field mappings](#field-mappings)).
+If Salesforce refuses the name, pick another and change it in `AccountSync` (see [field mappings](#field-mappings)).
 
 | Field Name → API name | Type |
 |---|---|
@@ -1765,7 +1614,7 @@ relationships and contacts before writing them.
 While creating each field, Salesforce asks for field-level security: make it visible (not read-only) for the
 `Salesforce Sync` permission set, or grant field access in the permission set afterwards.
 
-**Record types.** Every object needs the record type its sObject class names (`RecordType` in `[SObject]`, see
+**Record types.** Every object needs the record type its sync names (the developer name in its `Send` step, see
 [Record types](#record-types)):
 
 | Object | Record type developer name (Record Type Name) |
@@ -1791,13 +1640,13 @@ leave the picklist unrestricted.
 
 ### Field mappings
 
-A mapping is code, in three parts of the object's file (`ToSalesforce/AccountSync.cs`, `ToSalesforce/AccountRelationshipSync.cs`,
-`ToSalesforce/ContactSync.cs`):
+A mapping is code, in two places (the event's class and the object's sync, `ToSalesforce/AccountSync.cs`,
+`ToSalesforce/AccountRelationshipSync.cs`, `ToSalesforce/ContactSync.cs`):
 
-1. **Payload**: the event's JSON fields.
-2. **sObject**: the Salesforce object and field API names and the record type, in the
-   `[SObject]` and `[JsonPropertyName]` attributes. This is the only place Salesforce names appear.
-3. **Mapping** (`ToAccount`, `ToProfile`, `ToRelationship`, `ToContact`): one line per field, from the payload to the sObject.
+1. **Payload** (`Sync/<Object>Event.cs`): the event's JSON fields.
+2. **Mapping** (the `Send` step of the sync, a `Dictionary` per record): one line per field, from the payload to the
+   Salesforce field's API name. The object's name and record type developer name are here too. This is the only place
+   Salesforce names appear.
 
 The mappings as they are:
 
@@ -1818,23 +1667,20 @@ The mappings as they are:
 | `accountRelationship.relatedAccountExternalId` | `Account_Relationship__c.RelatedAccountId__c` (Text; the Account must exist) |
 | `contact.externalId`, `firstName`, `lastName`, `email`, `phone` | `Contact.ExternalId__c`, `FirstName`, `LastName`, `Email`, `Phone` |
 | `contact.accountExternalId` | `Contact.AccountId__c` (Text; the Account must exist, checked by the read) |
-| (none: the sObject class's `RecordType`) | `RecordTypeId` of every object: the Id of `Business` (Account) or `Standard` (`Profile__c`, `Account_Relationship__c`, Contact), from a query on `RecordType` |
+| (none: the record type developer name in the sync) | `RecordTypeId` of every object: the Id of `Business` (Account) or `Standard` (`Profile__c`, `Account_Relationship__c`, Contact), from a query on `RecordType` |
 
 To change a mapping:
 
-- **A field has a different API name in your org** (e.g. `LLC_BI__Active__c`): change the string in its
-  `[JsonPropertyName("...")]` on the sObject class. Same for an object name in `[SObject("...")]`, and for a record
-  type in `[SObject(..., RecordType = "...")]`.
-- **Drop a field**: remove its property from the sObject class and its line from the mapper. A field the sync doesn't
-  know is never touched.
-- **Add a field**: add the property to the payload class (the JSON name in camelCase), the property with its
-  `[JsonPropertyName]` to the sObject class, and one line to the mapper. Add it to `FakeSchema`
-  (`src/SalesforceSync.FakeSalesforce/FakeSchema.cs`) too: a unit test checks every sObject name against the mock org,
-  and the mock org rejects fields it doesn't know.
+- **A field has a different API name in your org** (e.g. `LLC_BI__Active__c`): change the string in the sync's
+  dictionary. Same for an object name and for the record type developer name.
+- **Drop a field**: remove its line from the dictionary. A field the sync doesn't know is never touched.
+- **Add a field**: add the property to the payload class (the JSON name in camelCase) and one line to the dictionary.
+  Add it to `FakeSchema` (`src/SalesforceSync.FakeSalesforce/FakeSchema.cs`) too: the mock org rejects fields it
+  doesn't know, so the tests fail until it is there.
 - **A new object**: see [Adding a Salesforce object](#adding-a-salesforce-object). In `FakeSchema`, give it a
   `RecordTypeId` field and its record type in `RecordTypes`.
 
-Every property on an sObject class is the record's full desired state: an event without a value clears that field in
+Every line of the dictionary is part of the record's full desired state: an event without a value clears that field in
 Salesforce.
 
 ### 5. Run against the sandbox

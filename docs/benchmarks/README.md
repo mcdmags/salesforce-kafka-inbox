@@ -407,6 +407,51 @@ now read by its index (87,641 index scans, 8 sequential), and the queue was empt
 truncate the audit for every iteration, so there it grew only to a few thousand rows, but it still cost them a few percent:
 the numbers of earlier runs in this file are somewhat pessimistic.
 
+## Latest run: plain-crud with the simple send steps, at edafa75
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at edafa75, on 2026-10-19, against the
+[run before it](#latest-run-plain-crud-with-ingest-and-sync-as-separate-classes-at-36bb0e7). Since then the Salesforce half
+of the sync was rewritten: the engine (`SalesforceBatchSyncService` with `Normalizer`, `Reader`, `Differ`, `Sender`,
+`Interpreter`, `PreparedBatch`, the sObject classes and their reflection) became a shared flow plus one send step per
+type (`AccountSync`, `AccountRelationshipSync`, `ContactSync`), each reading, deciding and writing top to bottom over a
+small `SalesforceCalls`. The inbox, the SQL and the calls to Salesforce are the same; the database was recreated.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures, and no iteration timed out.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency), and streaming
+(50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 119.12 ms | 801.99 ms | 19.14 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 1 | 1,000 | 2,113 | 383.58 ms | 2,591.39 ms | 58.94 MB | 69 | 23 | 1.91 | 3,254 | 1141 |
+| 1 | 3 | 100 | 990 | 61.74 ms | 346.94 ms | 19.94 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 257.10 ms | 822.65 ms | 60.61 MB | 68 | 21 | 1.93 | 3,230 | 1117 |
+| 4 | 1 | 100 | 990 | 66.75 ms | 274.95 ms | 20.9 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 4 | 1 | 1,000 | 2,113 | 288.64 ms | 679.25 ms | 62.16 MB | 76 | 26 | 1.86 | 3,348 | 1235 |
+| 4 | 3 | 100 | 990 | 109.57 ms | 263.36 ms | 32.98 MB | 23 | 8 | 6.32 | 1,021 | 31 |
+| 4 | 3 | 1,000 | 2,113 | 306.13 ms | 327.75 ms | 76.69 MB | 65 | 21 | 2.00 | 3,116 | 1003 |
+| 8 | 1 | 100 | 990 | 80.87 ms | 211.92 ms | 24.88 MB | 23 | 8 | 6.32 | 1,021 | 31 |
+| 8 | 1 | 1,000 | 2,113 | 313.42 ms | 491.18 ms | 68.83 MB | 78 | 24 | 1.86 | 3,353 | 1240 |
+| 8 | 3 | 100 | 990 | 159.76 ms | 258.77 ms | 62.24 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 8 | 3 | 1,000 | 2,113 | 475.30 ms | 462.31 ms | 135.5 MB | 69 | 24 | 1.94 | 3,204 | 1091 |
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.963 s | 214.83 MB | 1,283 | 581 | 2.41 | 2,683 | 6 |
+| 4 | 3 | 2.684 s | 402.16 MB | 4,899 | 2,144 | 1.46 | 4,431 | 4 |
+| 8 | 1 | 2.234 s | 299.11 MB | 2,772 | 1,220 | 1.65 | 3,894 | 4 |
+| 8 | 3 | 6.450 s | 1501.33 MB | 16,583 | 7,657 | 1.18 | 5,451 | 3 |
+
+- **The same calls to Salesforce, with less allocated.** One worker on one pod with 100 accounts still takes 22 calls
+  and 8 write requests, with 1,000 accounts 69 and 23; allocation falls by about a fifth (19.1 MB against 24.3 MB, 58.9 MB
+  against 79.7 MB; streaming 4 workers on 1 pod 215 MB against 240 MB), since a batch no longer builds the normalized,
+  planned and prepared copies of its records.
+- **The timings are the same within the noise of the runs** (one worker on one pod with 100 accounts: 119 ms against
+  115 ms at 0 ms latency, 802 ms against 799 ms at 25 ms; streaming 8 workers on 3 pods 6.5 s against 6.3 s, still the
+  outlier for the reason given two runs back: about 1.2 rows per claim). The rewrite was for the reader of the code, not
+  for speed, and it costs none.
+
 ## Latest run: plain-crud with ingest and sync as separate classes, at 36bb0e7
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at 36bb0e7, on 2026-10-19, against the

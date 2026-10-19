@@ -40,9 +40,9 @@ internal static class SalesforceStep
     }
 
     /// <summary>The flow of a batch, with a rate limiter that is never paused unless told to be.</summary>
-    public static SalesforceBatchSyncService Flow(ISalesforceRateLimiter? limiter = null)
+    public static SalesforceBatchSyncService Flow(ISalesforceRateLimiter? limiter = null, SyncOptions? options = null)
     {
-        return new(limiter ?? new NotPaused(), Options.Create(new SyncOptions()), NullLogger<SalesforceBatchSyncService>.Instance);
+        return new(limiter ?? new NotPaused(), Options.Create(options ?? new SyncOptions()), NullLogger<SalesforceBatchSyncService>.Instance);
     }
 
     /// <summary>A record type cache reading through <paramref name="http"/>; with <paramref name="shared"/>, a pod sharing that cache with others.</summary>
