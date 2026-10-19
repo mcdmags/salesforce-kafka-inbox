@@ -359,6 +359,48 @@ median is 9.5 ms (stale statistics, 90% of entities leased) and the slowest sing
 dominates the claim for deep backlogs: 1,500 rows is 20 to 40 ms quiet, about 54 ms under load. With one row per
 entity a deep backlog no longer exists: whatever the number of events, a claim of 75 entities leases 75 rows.
 
+## Latest run: plain-crud with the record type cache on HybridCache, at 69f53f7
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at 69f53f7, on 2026-10-19, against the
+[run before it](#latest-run-plain-crud-without-describe-at-54c47ac). Since then: the record type cache is a `HybridCache`
+(in memory over the shared `IDistributedCache`, the memory one in the benchmarks), the `RecordType` rows are read into a
+typed row, `last_error_code` and `status` are gone from the inbox, and the inbox statements are in the methods that run
+them (`ReleaseAsync` replaces hold, defer and halt). Same workload and environment; the database was recreated.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency), and streaming
+(50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 151.71 ms | 1,576.12 ms | 26.01 MB | 47 | 17 | 6.28 | 1,028 | 38 |
+| 1 | 1 | 1,000 | 2,113 | 542.35 ms | 5,608.60 ms | 80.79 MB | 151 | 47 | 1.90 | 3,279 | 1166 |
+| 1 | 3 | 100 | 990 | 66.87 ms | 546.84 ms | 26.16 MB | 47 | 17 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 348.07 ms | 1,850.47 ms | 82.49 MB | 157 | 49 | 1.90 | 3,279 | 1166 |
+| 4 | 1 | 100 | 990 | 64.41 ms | 442.92 ms | 28.11 MB | 51 | 17 | 5.78 | 1,117 | 127 |
+| 4 | 1 | 1,000 | 2,113 | 312.82 ms | 1,242.22 ms | 82.19 MB | 155 | 49 | 1.90 | 3,268 | 1155 |
+| 4 | 3 | 100 | 990 | 96.70 ms | 264.11 ms | 43.75 MB | 51 | 17 | 5.77 | 1,119 | 129 |
+| 4 | 3 | 1,000 | 2,113 | 316.54 ms | 545.00 ms | 91.73 MB | 166 | 54 | 1.98 | 3,146 | 1033 |
+| 8 | 1 | 100 | 990 | 71.94 ms | 278.73 ms | 27.23 MB | 49 | 17 | 5.88 | 1,097 | 107 |
+| 8 | 1 | 1,000 | 2,113 | 343.00 ms | 746.66 ms | 89.11 MB | 166 | 51 | 1.86 | 3,346 | 1233 |
+| 8 | 3 | 100 | 990 | 168.83 ms | 325.45 ms | 62.87 MB | 58 | 18 | 4.99 | 1,323 | 333 |
+| 8 | 3 | 1,000 | 2,113 | 563.46 ms | 699.58 ms | 117.71 MB | 166 | 52 | 1.90 | 3,275 | 1162 |
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.742 s | 175.48 MB | 1,158 | 526 | 2.54 | 2,543 | 6 |
+| 4 | 3 | 2.436 s | 368.87 MB | 4,482 | 1,950 | 1.50 | 4,298 | 4 |
+| 8 | 1 | 2.064 s | 276.83 MB | 2,626 | 1,153 | 1.69 | 3,801 | 4 |
+| 8 | 3 | 5.369 s | 1250.13 MB | 15,041 | 6,891 | 1.21 | 5,327 | 3 |
+
+- **No change from the cache or the inbox columns.** The API calls and write requests are the same as in the run before
+  (47 and 17 with one worker and one pod, 100 accounts), and the means are within the noise of three iterations each
+  (152 ms against 159 ms, 1.58 s against 1.64 s at 25 ms). Allocations are about 1 MB higher in the smaller drains, which
+  is `HybridCache`'s bookkeeping.
+- **Streaming with 8 workers on 3 pods is still the outlier** (5.4 s, 15,041 API calls, coalescing 1.21), as in the run
+  before; the other three configurations are 1.7 to 2.4 s. See that run for the guess about the per-process limiter.
+
 ## Latest run: plain-crud without Describe, at 54c47ac
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at 54c47ac, on 2026-10-19, against the
