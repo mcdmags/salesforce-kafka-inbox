@@ -1,8 +1,8 @@
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Infrastructure.Salesforce;
-using SalesforceSync.Sync;
-using static SalesforceSync.Sync.Normalizer;
-using static SalesforceSync.Sync.Reader;
+using SalesforceSync.ToSalesforce;
+using static SalesforceSync.ToSalesforce.Normalizer;
+using static SalesforceSync.ToSalesforce.Reader;
 
 namespace SalesforceSync.Tests;
 

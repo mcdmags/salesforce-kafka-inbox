@@ -10,7 +10,9 @@ using SalesforceSync.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.RateLimiting;
+using SalesforceSync.Persistence;
 using SalesforceSync.Sync;
+using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync;
 
@@ -197,8 +199,8 @@ public static class SyncServiceCollectionExtensions
     /// <summary>
     /// Inbox -> Salesforce: the database context, one engine, and per synced object its sync (its strategy and inbox).
     /// Register a new object's sync here (its <see cref="InboxRow"/> type is mapped in <see cref="SyncDbContext"/> and a
-    /// migration creates its table): the consumer stores the events of its type that it takes from the
-    /// aggregates (<see cref="IAggregateProjection"/>), and the worker loops pick it up.
+    /// migration creates its table): the consumer stores the events of its type that its ingest takes from the
+    /// aggregates, and the worker loops pick it up.
     /// </summary>
     public static IServiceCollection AddInboxSync(this IServiceCollection services)
     {
@@ -208,32 +210,23 @@ public static class SyncServiceCollectionExtensions
         services.AddSingleton(typeof(IRepository<>), typeof(InboxRepository<>)); // one per inbox row type
         services.AddTransient<SalesforceBatchSyncService>();
 
-        // The synced objects, parents first. Each has two halves: its projection (singleton, registered as an
-        // IAggregateProjection in this order), which the ingest stores in the inbox, and its sync, which the engine
-        // sends to Salesforce
-        AddEntitySync<AccountProjection, AccountSync, AccountEvent, AccountInboxRow>(services, AccountEvent.Reader, s => s.Strategy);
-        AddEntitySync<AccountRelationshipProjection, AccountRelationshipSync, AccountRelationshipEvent, AccountRelationshipInboxRow>(
-            services, AccountRelationshipEvent.Reader, s => s.Strategy);
-        AddEntitySync<ContactProjection, ContactSync, ContactEvent, ContactInboxRow>(services, ContactEvent.Reader, s => s.Strategy);
+        // The synced objects, parents first. Each has two halves: its ingest, which stores what it takes from an
+        // aggregate in the inbox, and its sync, which the engine sends to Salesforce
+        AddEntitySync<AccountIngest, AccountSync, AccountInboxRow>(services);
+        AddEntitySync<AccountRelationshipIngest, AccountRelationshipSync, AccountRelationshipInboxRow>(services);
+        AddEntitySync<ContactIngest, ContactSync, ContactInboxRow>(services);
         services.AddSingleton<AccountAggregate>();
         return services;
     }
 
-    private static void AddEntitySync<TProjection, TSync, TEvent, TRow>(IServiceCollection services, EventReader<TEvent> reader,
-        Func<TSync, SyncStrategy<TEvent>> strategyOf)
-        where TProjection : class, IAggregateProjection
-        where TSync : class
+    private static void AddEntitySync<TIngest, TSync, TRow>(IServiceCollection services)
+        where TIngest : class, IAggregateIngest
+        where TSync : class, IEntitySync
         where TRow : InboxRow, IInboxRow, new()
     {
         ValidateLimits<TRow>();
-        services.AddSingleton<TProjection>();
-        services.AddSingleton<IAggregateProjection>(sp => sp.GetRequiredService<TProjection>());
-        services.AddTransient<IAggregateIngest>(sp => new EntityIngestService<TEvent, TRow>(
-            sp.GetRequiredService<TProjection>(), reader, sp.GetRequiredService<IRepository<TRow>>()));
-        services.AddSingleton<TSync>();
-        services.AddTransient<IEntitySync>(sp => new EntitySyncService<TEvent, TRow>(
-            sp.GetRequiredService<SalesforceBatchSyncService>(), sp.GetRequiredService<IRepository<TRow>>(),
-            strategyOf(sp.GetRequiredService<TSync>())));
+        services.AddSingleton<IAggregateIngest, TIngest>();
+        services.AddTransient<IEntitySync, TSync>();
     }
 
     /// <summary>A row type's query and write limits are within Salesforce's (<see cref="IInboxRow"/>).</summary>

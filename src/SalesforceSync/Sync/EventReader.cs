@@ -5,7 +5,7 @@ namespace SalesforceSync.Sync;
 
 /// <summary>
 /// How to read an event of one type: whose it is (the entity id) and when and what happened (its meta). Shared by the two
-/// halves of the sync, so they agree on what a valid event is: ingest (<see cref="EntityIngestService{TEvent,TRow}"/>)
+/// halves of the sync, so they agree on what a valid event is: ingest (<see cref="Persistence.IAggregateIngest"/>)
 /// stores only events that read, and the engine reads claimed rows the same way. Knows nothing of Salesforce or aggregates.
 /// </summary>
 /// <typeparam name="TEvent">The inbox payload (the whole event envelope).</typeparam>
@@ -30,7 +30,7 @@ public sealed record EventReader<TEvent>(
         TEvent? e;
         try
         {
-            e = JsonSerializer.Deserialize<TEvent>(json, SalesforceBatchSyncService.EventJson);
+            e = JsonSerializer.Deserialize<TEvent>(json, EventJson.Options);
         }
         catch (JsonException ex)
         {

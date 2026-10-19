@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data.Inbox;
-using SalesforceSync.Sync;
+using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Inbox;
 

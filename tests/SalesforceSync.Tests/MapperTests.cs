@@ -1,4 +1,5 @@
 using SalesforceSync.Sync;
+using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
 

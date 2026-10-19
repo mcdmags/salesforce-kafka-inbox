@@ -1,7 +1,7 @@
 using SalesforceSync.Infrastructure.Salesforce;
-using static SalesforceSync.Sync.Differ;
+using static SalesforceSync.ToSalesforce.Differ;
 
-namespace SalesforceSync.Sync;
+namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
 /// Step 5. Sends the planned changes (one call per object, one for the deletes) and reads the answers into one outcome

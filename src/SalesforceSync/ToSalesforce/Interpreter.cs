@@ -1,7 +1,7 @@
 using SalesforceSync.Infrastructure.Salesforce;
-using static SalesforceSync.Sync.Differ;
+using static SalesforceSync.ToSalesforce.Differ;
 
-namespace SalesforceSync.Sync;
+namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
 /// Step 6. Reads Salesforce's answer for one record: saved, or failed and whether retrying can help.

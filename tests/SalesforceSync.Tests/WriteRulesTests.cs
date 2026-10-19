@@ -1,10 +1,10 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Infrastructure.Salesforce;
-using SalesforceSync.Sync;
-using static SalesforceSync.Sync.Differ;
-using static SalesforceSync.Sync.Normalizer;
-using static SalesforceSync.Sync.Reader;
+using SalesforceSync.ToSalesforce;
+using static SalesforceSync.ToSalesforce.Differ;
+using static SalesforceSync.ToSalesforce.Normalizer;
+using static SalesforceSync.ToSalesforce.Reader;
 
 namespace SalesforceSync.Tests;
 

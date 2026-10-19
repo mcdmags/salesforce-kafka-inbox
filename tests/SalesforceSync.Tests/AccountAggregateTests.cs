@@ -1,10 +1,10 @@
 using System.Text.Json.Nodes;
-using SalesforceSync.Sync;
+using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// The Kafka aggregate split into per-entity events (<see cref="AccountAggregate.TrySplit"/>): only what changed
+/// The Kafka aggregate split into per-entity events (the types' ingests): only what changed
 /// between before and after is stored, a removed child is a delete, and every event is one its type's strategy reads
 /// and maps.
 /// No database, no Kafka.
@@ -72,10 +72,10 @@ public sealed class AccountAggregateTests
         var contactDelete = events.Single(e => Type(e) == "deleted" && e.EntityType == "contact");
         JsonNode.DeepEquals(Payload(contactDelete), new JsonObject { ["externalId"] = "C1" }).Should().BeTrue("a delete needs the key only");
 
-        var unit = Map(Syncs.Contact.Strategy, contactDelete);
+        var unit = Map(Syncs.ContactStrategy, contactDelete);
         unit.Records.Should().ContainSingle().Which.Should().Match<SObjectRecord>(r =>
             r.Delete && r.SObject == "Contact" && r.ExternalIdField == "ExternalId__c" && r.ExternalId == "C1" && r.Fields.Count == 0);
-        Map(Syncs.Relationship.Strategy, events.Single(e => Id(e) == "R1")).Records.Should().ContainSingle()
+        Map(Syncs.RelationshipStrategy, events.Single(e => Id(e) == "R1")).Records.Should().ContainSingle()
             .Which.Should().Match<SObjectRecord>(r => r.Delete && r.SObject == "Account_Relationship__c" && r.ExternalId == "R1");
     }
 
@@ -96,7 +96,7 @@ public sealed class AccountAggregateTests
 
         events.Select(e => (e.EntityType, Type(e), Id(e))).Should().Equal(
             ("account", "deleted", "ACC-1"), ("accountRelationship", "deleted", "R1"), ("contact", "deleted", "C1"));
-        Map(Syncs.Account.Strategy, events[0]).Records.Select(r => (r.SObject, r.ExternalId, r.Delete)).Should().Equal(
+        Map(Syncs.AccountStrategy, events[0]).Records.Select(r => (r.SObject, r.ExternalId, r.Delete)).Should().Equal(
             [("Profile__c", "PRF-1", true), ("Account", "ACC-1", true)], "the Profile, by its own key, before its Account");
     }
 
@@ -108,7 +108,7 @@ public sealed class AccountAggregateTests
 
         var account = Split(Aggregate(before, null)).Single();
 
-        Map(Syncs.Account.Strategy, account).Records.Select(r => (r.SObject, r.ExternalId)).Should().Equal(
+        Map(Syncs.AccountStrategy, account).Records.Select(r => (r.SObject, r.ExternalId)).Should().Equal(
             [("Profile__c", "ACC-1"), ("Account", "ACC-1")], "a profile's key defaults to its account's");
     }
 
@@ -134,7 +134,7 @@ public sealed class AccountAggregateTests
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "before": { "externalId": "ACC-1" }, "after": { "externalId": "ACC-2" } }""", "different")]
     public void A_message_that_is_no_aggregate_is_rejected_with_the_reason(string json, string reason)
     {
-        Syncs.Aggregate.TrySplit(json, out var events, out var problem).Should().BeFalse();
+        Syncs.TrySplit(json, out var events, out var problem).Should().BeFalse();
         events.Should().BeNull();
         problem.Should().ContainEquivalentOf(reason);
     }
@@ -146,20 +146,20 @@ public sealed class AccountAggregateTests
             Snapshot(contacts: [new JsonObject { ["lastName"] = "Nameless" }])));
 
         var stored = events.Should().ContainSingle().Subject;
-        Syncs.Contact.Strategy.TryRead(stored.Json, out _, out var problem).Should().BeFalse();
+        Syncs.ContactStrategy.TryRead(stored.Json, out _, out var problem).Should().BeFalse();
         problem.Should().Contain("non-empty id");
     }
 
     // ---------- Helpers ----------
 
-    private static List<EntityEvent> Split(JsonObject aggregate)
+    private static List<Syncs.EntityEvent> Split(JsonObject aggregate)
     {
-        Syncs.Aggregate.TrySplit(aggregate.ToJsonString(), out var events, out var problem).Should().BeTrue("the aggregate is valid, but: {0}", problem);
+        Syncs.TrySplit(aggregate.ToJsonString(), out var events, out var problem).Should().BeTrue("the aggregate is valid, but: {0}", problem);
         return events!;
     }
 
     /// <summary>The unit the type's strategy maps the stored event to, as the engine does after a claim.</summary>
-    private static SyncUnit Map<TEvent>(SyncStrategy<TEvent> strategy, EntityEvent e)
+    private static SyncUnit Map<TEvent>(SyncStrategy<TEvent> strategy, Syncs.EntityEvent e)
     {
         strategy.TryRead(e.Json, out var read, out var problem).Should().BeTrue("the stored event is valid, but: {0}", problem);
         return strategy.Map(read!.EntityId, read.Event);
@@ -197,17 +197,17 @@ public sealed class AccountAggregateTests
         return new JsonObject { ["externalId"] = id, ["relatedAccountExternalId"] = related, ["type"] = "Partner" };
     }
 
-    private static string Type(EntityEvent e)
+    private static string Type(Syncs.EntityEvent e)
     {
         return JsonNode.Parse(e.Json)!["meta"]!["type"]!.GetValue<string>();
     }
 
-    private static JsonObject Payload(EntityEvent e)
+    private static JsonObject Payload(Syncs.EntityEvent e)
     {
         return JsonNode.Parse(e.Json)![e.EntityType]!.AsObject();
     }
 
-    private static string Id(EntityEvent e)
+    private static string Id(Syncs.EntityEvent e)
     {
         return Payload(e)["externalId"]!.GetValue<string>();
     }

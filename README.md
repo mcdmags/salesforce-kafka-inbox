@@ -170,14 +170,15 @@ in an event is a Salesforce name):
 ```
 
 **The consumer reads an aggregate once** (`AccountAggregate.TryRead`, pure). Then every entity type takes from it the
-events of the entities it changed (`Project` of `AccountProjection`, `AccountRelationshipProjection`, `ContactProjection`) and
+events of the entities it changed (`Project` of `AccountIngest`, `AccountRelationshipIngest`, `ContactIngest`) and
 stores each in its own inbox (`IAggregateIngest.IngestAsync`), all with the aggregate's `meta.time`. The snapshots
 are compared as the typed payloads they are read into (property order doesn't matter, list order does), children
-matched by `externalId`. `AccountAggregate` is a singleton that gets the `IAggregateProjection`s injected: each synced object's projection (`AccountProjection`, `AccountRelationshipProjection`,
-`ContactProjection`) is an instance registered once in `AddInboxSync`, as itself and as an `IAggregateProjection`, in that order.
-Persisting to the inbox and sending to Salesforce are separate: a projection and its `EntityIngestService` know the aggregate
-and the inbox, nothing of Salesforce; the sync (`AccountSync`, ...) and its `EntitySyncService` know the inbox and Salesforce,
-nothing of aggregates. They share only the event and its `EventReader` (entity id, meta, validation).
+matched by `externalId`. Persisting to the inbox and sending to Salesforce are separate, each in its own folder and namespace: `Persistence/`
+(`AccountIngest`, `AccountRelationshipIngest`, `ContactIngest`, each an `IAggregateIngest` over `AggregateIngest<TEvent, TRow>`)
+knows the aggregate and the inbox, nothing of Salesforce; `ToSalesforce/` (`AccountSync`, ... each an `IEntitySync` over
+`EntitySync<TEvent, TRow>`, and the engine) knows the inbox and Salesforce, nothing of aggregates. They share only
+`Sync/`: the events, `EventMeta` and `EventReader` (entity id, meta, validation). `AddInboxSync` registers each ingest as an
+`IAggregateIngest` and each sync as an `IEntitySync`, parents first.
 `AccountAggregate.TrySplit` runs all the projections and returns their events (tests, benchmarks):
 
 | In the aggregate | Stored |
@@ -259,13 +260,13 @@ Other rules (in the strategies, `AccountSync`, `AccountRelationshipSync` and `Co
 ## The three typed layers
 
 An event passes through three kinds of types on its way to the generic engine. Each knows one thing; all three of an
-object live in its one file (`Sync/AccountSync.cs`, `Sync/AccountRelationshipSync.cs`, `Sync/ContactSync.cs`):
+object live in three files (`Sync/<Object>Event.cs`, `ToSalesforce/<Object>SObjects.cs`, `ToSalesforce/<Object>Sync.cs`):
 
 | Layer | Where | Knows |
 |---|---|---|
-| **Inbox payload** (`AccountPayload`, `ProfilePayload`, `AccountRelationshipPayload`, `ContactPayload`, in the `AccountEvent` / `AccountRelationshipEvent` / `ContactEvent` envelopes) | `Sync/<Object>Sync.cs` | The event as the source system sends it. PascalCase CLR properties, bound from camelCase JSON; no attributes, no Salesforce names. |
-| **Salesforce sObject** (`AccountSObject`, `ProfileSObject`, `AccountRelationshipSObject`, `ContactSObject`) | `Sync/<Object>Sync.cs` | The org. One flat class per object; `[SObject]` names the object, its external id field and its record type (developer name), `[JsonPropertyName]` names each field, `[SObjectForeignKey]` marks a Text field holding a parent's external id (`[SObjectLookup]` a real Lookup field, which none of the examples has). |
-| **Mapping** (`AccountSync.ToAccount`, `AccountSync.ToProfile`, `AccountRelationshipSync.ToRelationship`, `ContactSync.ToContact`) | `Sync/<Object>Sync.cs` | How one becomes the other: hand-written static methods, one line per field, converting only where the types differ (the `tags` list becomes a `;`-separated multi-select value). |
+| **Inbox payload** (`AccountPayload`, `ProfilePayload`, `AccountRelationshipPayload`, `ContactPayload`, in the `AccountEvent` / `AccountRelationshipEvent` / `ContactEvent` envelopes) | `Sync/<Object>Event.cs` | The event as the source system sends it. PascalCase CLR properties, bound from camelCase JSON; no attributes, no Salesforce names. |
+| **Salesforce sObject** (`AccountSObject`, `ProfileSObject`, `AccountRelationshipSObject`, `ContactSObject`) | `ToSalesforce/<Object>SObjects.cs` | The org. One flat class per object; `[SObject]` names the object, its external id field and its record type (developer name), `[JsonPropertyName]` names each field, `[SObjectForeignKey]` marks a Text field holding a parent's external id (`[SObjectLookup]` a real Lookup field, which none of the examples has). |
+| **Mapping** (`AccountSync.ToAccount`, `AccountSync.ToProfile`, `AccountRelationshipSync.ToRelationship`, `ContactSync.ToContact`) | `ToSalesforce/<Object>Sync.cs` | How one becomes the other: hand-written static methods, one line per field, converting only where the types differ (the `tags` list becomes a `;`-separated multi-select value). |
 
 ```
 raw event JSON ─► AccountEvent { AccountPayload { …, ProfilePayload } }     System.Text.Json (Web defaults)
@@ -1067,7 +1068,7 @@ The engine (`SalesforceBatchSyncService.SyncBatchAsync<TEvent, TRow>`) owns clai
 limits, batching, normalization, diffing, parents first, retries and dead-lettering. Nothing in the engine, the consumer or
 the worker loops names an object. An object supplies, in one file: a payload class, an sObject class and a static class with the mapping and the strategy,
 which says how an event becomes records, upserts or deletes; and an inbox row class (which selects the object's inbox
-table) in `SalesforceSync.Data/Inbox/`. `AddInboxSync` registers it as an `EntitySyncService<TEvent, TRow>`, which does
+table) in `SalesforceSync.Data/Inbox/`. `AddInboxSync` registers its sync as an `IEntitySync` and its ingest as an `IAggregateIngest`, which do
 `IEntitySync` through the shared `IRepository<TRow>`, and its projection as an `EntityIngestService<TEvent, TRow>`
 (`IAggregateIngest`). Its events come from the account aggregate
 (its projection's `Project` takes them from the aggregate: a child type reads its own list of the snapshot); an object that
@@ -1232,7 +1233,7 @@ src/
     Hosting/                      The options validators
     RateLimiting/                 The process's rate limiter, in memory: SalesforceRateLimiter (pause, from
                                   Sforce-Limit-Info and limit errors); it serves Infrastructure's port
-    Sync/                         The engine (SalesforceBatchSyncService.cs: the flow), PreparedBatch and one file per step of the write path (Normalizer, Reader, Differ, Sender, Interpreter), EntitySyncService, the
+    ToSalesforce/                 The engine (SalesforceBatchSyncService.cs: the flow), PreparedBatch and one file per step of the write path (Normalizer, Reader, Differ, Sender, Interpreter), EntitySyncService, the
                                   strategy and event meta, the engine's model types, AccountAggregate (a Kafka
                                   aggregate → AggregateChange; each type projects its events), AggregateChange, and one file per synced object
                                   (AccountSync, AccountRelationshipSync, ContactSync: payload, sObjects, mapping, strategy)
@@ -1791,8 +1792,8 @@ leave the picklist unrestricted.
 
 ### Field mappings
 
-A mapping is code, in three parts of the object's file (`Sync/AccountSync.cs`, `Sync/AccountRelationshipSync.cs`,
-`Sync/ContactSync.cs`):
+A mapping is code, in three parts of the object's file (`ToSalesforce/AccountSync.cs`, `ToSalesforce/AccountRelationshipSync.cs`,
+`ToSalesforce/ContactSync.cs`):
 
 1. **Payload**: the event's JSON fields.
 2. **sObject**: the Salesforce object and field API names and the record type, in the

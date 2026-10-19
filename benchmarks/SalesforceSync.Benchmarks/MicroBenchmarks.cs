@@ -5,6 +5,7 @@ using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
+using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Benchmarks;
 
@@ -17,8 +18,8 @@ public class MicroBenchmarks
 {
     private const string LimitHeader = "api-usage=10018/100000; api-bursts=1/750; per-app-api-usage=17/250(appName=sync)";
 
-    private static readonly AccountSync AccountSyncer = new();
-    private static readonly SyncStrategy<AccountEvent> Accounts = AccountSyncer.Strategy;
+    private static readonly AccountSync AccountSyncer = new(null!, null!);
+    private static readonly SyncStrategy<AccountEvent> Accounts = new(AccountEvent.Reader, AccountSyncer.Map, AccountSyncer.Queries);
 
     private List<InboxEvent> _tenEvents = default!;
     private AccountPayload _payload = default!;
@@ -64,7 +65,7 @@ public class MicroBenchmarks
             }.ToJsonString(),
             EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero)))];
 
-        _payload = JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchSyncService.EventJson)!.Account!;
+        _payload = JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, EventJson.Options)!.Account!;
         _sobject = AccountSyncer.ToAccount(_payload);
 
         _number = JsonDocument.Parse("87.50").RootElement.Clone();
@@ -95,7 +96,7 @@ public class MicroBenchmarks
     [Benchmark]
     public SyncUnit MapAccountEvent()
     {
-        return Accounts.Map("ACC-000001", JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, SalesforceBatchSyncService.EventJson)!);
+        return Accounts.Map("ACC-000001", JsonSerializer.Deserialize<AccountEvent>(_tenEvents[0].Payload, EventJson.Options)!);
     }
 
     /// <summary>The hand-written mapping alone: payload -> sObject.</summary>

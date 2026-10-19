@@ -1,9 +1,9 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using SalesforceSync.Infrastructure.Salesforce;
-using static SalesforceSync.Sync.Normalizer;
+using static SalesforceSync.ToSalesforce.Normalizer;
 
-namespace SalesforceSync.Sync;
+namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
 /// Step 3. Reads what Salesforce has now for the batch's records: the queries (chunked to fit a URL), one call per

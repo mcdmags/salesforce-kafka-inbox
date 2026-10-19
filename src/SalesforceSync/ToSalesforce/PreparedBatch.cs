@@ -1,7 +1,7 @@
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.Salesforce;
 
-namespace SalesforceSync.Sync;
+namespace SalesforceSync.ToSalesforce;
 
 /// <summary>An entity to write: the unit mapped from its claimed event.</summary>
 /// <param name="EntityId">The entity: the Kafka message key.</param>

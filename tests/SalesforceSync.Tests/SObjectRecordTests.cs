@@ -2,7 +2,7 @@ using System.Reflection;
 using System.Text.Json.Serialization;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Infrastructure.Salesforce;
-using SalesforceSync.Sync;
+using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
 

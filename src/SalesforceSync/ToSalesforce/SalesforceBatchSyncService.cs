@@ -1,11 +1,10 @@
-using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 
-namespace SalesforceSync.Sync;
+namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
 /// The one sync engine for every Salesforce object. <see cref="SyncBatchAsync{TEvent, TRow}"/>
@@ -55,12 +54,6 @@ public sealed class SalesforceBatchSyncService(
     IOptions<SyncOptions> options,
     ILogger<SalesforceBatchSyncService> log)
 {
-    /// <summary>
-    /// How inbox payloads (whole event envelopes) are deserialized into a strategy's event type: camelCase JSON,
-    /// matched to the PascalCase CLR properties without regard to case.
-    /// </summary>
-    public static readonly JsonSerializerOptions EventJson = new(JsonSerializerDefaults.Web);
-
     /// <summary>
     /// Share of the lease a batch may spend before its Salesforce call is cancelled. The rest is margin for recording
     /// the outcome. A write cancelled this way has an unknown outcome and puts its entities on hold.

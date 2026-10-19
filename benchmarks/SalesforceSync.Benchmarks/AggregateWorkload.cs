@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Sync;
+using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Benchmarks;
 
@@ -10,7 +11,7 @@ namespace SalesforceSync.Benchmarks;
 /// <see cref="AccountAggregate"/>), and the state the org must end in. Every aggregate changes its Account (Description
 /// "vN" and Profile score N, N the account's version). Now and then it also adds, changes or removes a relationship or
 /// contact (a removed one may return later as a new record). A few accounts are deleted with all their children.
-/// The benchmark stores what <see cref="AccountAggregate.TrySplit"/> makes of each aggregate, as the Kafka consumer
+/// The benchmark stores what the types' ingests makes of each aggregate, as the Kafka consumer
 /// does. Seeded, no I/O, so every iteration gets the same workload.
 /// </summary>
 public sealed class AggregateWorkload

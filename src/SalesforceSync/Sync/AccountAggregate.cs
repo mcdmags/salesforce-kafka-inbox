@@ -12,15 +12,12 @@ namespace SalesforceSync.Sync;
 ///               "contacts": [ { "externalId": "CON-1", "lastName": "Lovelace", ... } ] },
 ///   "after": { ... } }</code>
 /// <see cref="TryRead"/> checks it into an <see cref="AggregateChange"/>; each entity type then projects the events it needs
-/// (<see cref="IAggregateProjection"/>) and stores them in its inbox. Only what changed is stored: an unchanged child costs
+/// (its <see cref="Persistence.IAggregateIngest"/>) and stores them in its inbox. Only what changed is stored: an unchanged child costs
 /// no inbox row, no claim, no Salesforce read. No I/O.
 /// </summary>
-public sealed class AccountAggregate(IEnumerable<IAggregateProjection> projections)
+public sealed class AccountAggregate
 {
     public const string DefaultTopic = "account-changes";
-
-    /// <summary>The types that take events from an aggregate, in the order they were registered (parents first).</summary>
-    private readonly IAggregateProjection[] _projections = [.. projections];
 
     /// <summary>
     /// Reads an aggregate message: valid JSON, a meta with a time (with an offset) and a type, before or after, one account.
@@ -32,7 +29,7 @@ public sealed class AccountAggregate(IEnumerable<IAggregateProjection> projectio
         AccountAggregateEvent? aggregate;
         try
         {
-            aggregate = JsonSerializer.Deserialize<AccountAggregateEvent>(json, SalesforceBatchSyncService.EventJson);
+            aggregate = JsonSerializer.Deserialize<AccountAggregateEvent>(json, EventJson.Options);
         }
         catch (JsonException ex)
         {
@@ -53,23 +50,6 @@ public sealed class AccountAggregate(IEnumerable<IAggregateProjection> projectio
         }
 
         change = new AggregateChange(aggregate.Meta!, aggregate.Before, aggregate.After);
-        return true;
-    }
-
-    /// <summary>
-    /// The per-entity events of an aggregate, in the order of the types (the Account, its relationships, its contacts),
-    /// as every type's projection makes them. Each is <c>{ "meta": { "time", "type" }, "&lt;entityType&gt;": { ... } }</c>.
-    /// </summary>
-    /// <returns>False with <paramref name="problem"/> when the message is no aggregate the sync can read.</returns>
-    public bool TrySplit(string json, [NotNullWhen(true)] out List<EntityEvent>? events, [NotNullWhen(false)] out string? problem)
-    {
-        events = null;
-        if (!TryRead(json, out var change, out problem))
-        {
-            return false;
-        }
-
-        events = [.. _projections.SelectMany(p => p.ProjectJson(change).Select(j => new EntityEvent(p.EntityType, j)))];
         return true;
     }
 
@@ -108,6 +88,3 @@ public sealed class AccountSnapshot : AccountPayload
     public List<AccountRelationshipPayload?>? AccountRelationships { get; set; }
     public List<ContactPayload?>? Contacts { get; set; }
 }
-
-/// <summary>One entity's event out of an aggregate: its type (which inbox stores it) and the event as stored.</summary>
-public sealed record EntityEvent(string EntityType, string Json);

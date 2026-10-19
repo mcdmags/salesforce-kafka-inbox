@@ -1,6 +1,6 @@
 using SalesforceSync.Infrastructure.Salesforce;
 
-namespace SalesforceSync.Sync;
+namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
 /// The records of one entity, upserted or deleted in the same request. Each record is saved or rejected on its own

@@ -7,6 +7,7 @@ using SalesforceSync.Data.Inbox;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
+using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
 
@@ -18,11 +19,11 @@ namespace SalesforceSync.Tests;
 /// </summary>
 public sealed class SalesforceBatchSyncServiceTests
 {
-    private static readonly SyncStrategy<AccountEvent> AccountStrategy = Syncs.Account.Strategy;
+    private static readonly SyncStrategy<AccountEvent> AccountStrategy = Syncs.AccountStrategy;
 
-    private static readonly SyncStrategy<AccountRelationshipEvent> RelationshipStrategy = Syncs.Relationship.Strategy;
+    private static readonly SyncStrategy<AccountRelationshipEvent> RelationshipStrategy = Syncs.RelationshipStrategy;
 
-    private static readonly SyncStrategy<ContactEvent> ContactStrategy = Syncs.Contact.Strategy;
+    private static readonly SyncStrategy<ContactEvent> ContactStrategy = Syncs.ContactStrategy;
 
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly Fixture _any = new();
@@ -1154,7 +1155,7 @@ public sealed class SalesforceBatchSyncServiceTests
     /// <summary>The event as the engine reads it from the inbox.</summary>
     private static TEvent Read<TEvent>(JsonObject json)
     {
-        return json.Deserialize<TEvent>(SalesforceBatchSyncService.EventJson)!;
+        return json.Deserialize<TEvent>(EventJson.Options)!;
     }
 
     private string? IdOf(string sobject, string externalId)

@@ -12,13 +12,15 @@ using SalesforceSync.Data.Inbox;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.Inbox;
 using SalesforceSync.Infrastructure.Salesforce;
+using SalesforceSync.Persistence;
 using SalesforceSync.Sync;
+using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
 /// End-to-end: put N account aggregates (<see cref="AggregateWorkload"/>: Account changes, relationships and contacts
-/// added, changed, removed and re-added, a few whole accounts deleted), split by <see cref="AccountAggregate.TrySplit"/>
+/// added, changed, removed and re-added, a few whole accounts deleted), split by the types' ingests
 /// into the per-entity events the consumer stores, into the real Postgres inboxes, and drain them with P "pods" x W
 /// parallel worker loops. A pod is wired exactly like the worker
 /// (<see cref="SyncServiceCollectionExtensions"/>, rate limiter included); its loops run the worker's own pass
@@ -304,7 +306,7 @@ public abstract class DrainBenchmarkBase
 
     /// <summary>
     /// The workload's aggregates, as the consumer reads them, and as the entity events they make, in publish order:
-    /// split by <see cref="AccountAggregate.TrySplit"/>, each read by its type's reader (entity id, time). A
+    /// split by the types' ingests, each read by its type's reader (entity id, time). A
     /// relationship or contact may be claimed before its Account is in the org (DEPENDENCY_NOT_SYNCED, retried).
     /// </summary>
     private static (AggregateWorkload Workload, List<IngestRow> Events, List<(AggregateChange, int)> Aggregates) Generate(
@@ -315,12 +317,12 @@ public abstract class DrainBenchmarkBase
         var changes = new List<(AggregateChange, int)>();
         foreach (var aggregate in workload.Aggregates)
         {
-            if (!accountAggregate.TryRead(aggregate, out var change, out var problem)
-                || !accountAggregate.TrySplit(aggregate, out var split, out problem))
+            if (!accountAggregate.TryRead(aggregate, out var change, out var problem))
             {
                 throw new InvalidOperationException($"The workload made an invalid aggregate: {problem}");
             }
 
+            var split = Split(change);
             changes.Add((change, split.Count));
             foreach (var e in split)
             {
@@ -334,6 +336,24 @@ public abstract class DrainBenchmarkBase
         }
 
         return (workload, events, changes);
+    }
+
+    private sealed record EntityEvent(string EntityType, string Json);
+
+    // Neither projection needs an inbox
+    private static readonly AccountIngest AccountIngest = new(null!);
+    private static readonly AccountRelationshipIngest RelationshipIngest = new(null!);
+    private static readonly ContactIngest ContactIngest = new(null!);
+
+    /// <summary>The entity events of an aggregate, in the order of the types (the Account, its relationships, its contacts).</summary>
+    private static List<EntityEvent> Split(AggregateChange change)
+    {
+        return
+        [
+            .. AccountIngest.Project(change).Select(e => new EntityEvent(AccountSync.Type, AggregateProjection.Serialize(e))),
+            .. RelationshipIngest.Project(change).Select(e => new EntityEvent(AccountRelationshipSync.Type, AggregateProjection.Serialize(e))),
+            .. ContactIngest.Project(change).Select(e => new EntityEvent(ContactSync.Type, AggregateProjection.Serialize(e)))
+        ];
     }
 
     private static bool TryReadEntity(EntityEvent e, [NotNullWhen(true)] out string? entityId, out DateTimeOffset time,

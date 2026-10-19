@@ -1,23 +1,20 @@
-namespace SalesforceSync.Sync;
+using SalesforceSync.Data.Inbox;
+using SalesforceSync.Sync;
+
+namespace SalesforceSync.Persistence;
 
 /// <summary>
-/// The account events an Account aggregate calls for (see <see cref="IAggregateProjection"/>). The ingest half of this type: it
-/// knows the aggregate and the event, nothing of Salesforce (that is <see cref="AccountSync"/>).
+/// The account events an Account aggregate calls for Knows the aggregate and the event, nothing of Salesforce (that is <see cref="ToSalesforce.AccountSync"/>).
 /// </summary>
-public sealed class AccountProjection : IAggregateProjection
+public sealed class AccountIngest(IRepository<AccountInboxRow> inbox) : AggregateIngest<AccountEvent, AccountInboxRow>(inbox)
 {
-    public string EntityType => AccountEvent.Type;
-
-    public IEnumerable<string> ProjectJson(AggregateChange change)
-    {
-        return Project(change).Select(AggregateProjection.Serialize);
-    }
+    protected override EventReader<AccountEvent> Reader => AccountEvent.Reader;
 
     /// <summary>
     /// The Account's event: the Account (with its Profile) when it changed or Before is missing; its delete, with its
     /// Profile if that has a key of its own, when it is gone.
     /// </summary>
-    public IEnumerable<AccountEvent> Project(AggregateChange change)
+    internal override IEnumerable<AccountEvent> Project(AggregateChange change)
     {
         if (change.IsDelete)
         {

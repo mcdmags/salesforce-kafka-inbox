@@ -1,6 +1,6 @@
 using SalesforceSync.Infrastructure.Salesforce;
 
-namespace SalesforceSync.Sync;
+namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
 /// Step 1. Before any call that writes, puts each unit's values in canonical form (<see cref="FieldValues.Normalize"/>)

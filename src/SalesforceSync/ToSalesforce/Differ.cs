@@ -1,8 +1,8 @@
 using SalesforceSync.Infrastructure.Salesforce;
-using static SalesforceSync.Sync.Normalizer;
-using static SalesforceSync.Sync.Reader;
+using static SalesforceSync.ToSalesforce.Normalizer;
+using static SalesforceSync.ToSalesforce.Reader;
 
-namespace SalesforceSync.Sync;
+namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
 /// Step 4. Compares each record with what Salesforce has and decides what it needs: a create, an update of the fields
