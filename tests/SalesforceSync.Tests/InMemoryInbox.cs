@@ -21,7 +21,7 @@ internal sealed class InMemoryInbox<TRow> : IRepository<TRow> where TRow : Inbox
     public Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct)
     {
         _pending.RemoveAll(e => e.EntityId == entityId);
-        _pending.Add(new InboxEvent(entityId, payload, eventTime));
+        _pending.Add(new InboxEvent(entityId, payload, eventTime, DateTimeOffset.MaxValue));
         return Task.CompletedTask;
     }
 

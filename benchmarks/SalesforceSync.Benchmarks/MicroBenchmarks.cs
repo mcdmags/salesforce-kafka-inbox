@@ -56,7 +56,8 @@ public class MicroBenchmarks
                     }
                 }
             }.ToJsonString(),
-            EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero)))];
+            EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero),
+            LeaseEnd: DateTimeOffset.MaxValue))];
 
         _number = JsonDocument.Parse("87.50").RootElement.Clone();
         _datetime = JsonDocument.Parse("\"2026-10-12T01:02:03.000+0000\"").RootElement.Clone();

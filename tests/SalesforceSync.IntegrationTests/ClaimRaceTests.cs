@@ -148,9 +148,14 @@ public sealed class ClaimRaceTests(SyncFixture app)
         // The worker records v1 done and ends the lease, as the repository does; consumer 2 stores v3 meanwhile
         await using (var record = await race.WorkerA.BeginTransactionAsync())
         {
-            var args = new { entityIds = claimed.Select(e => e.EntityId).ToArray(), times = claimed.Select(e => e.EventTime).ToArray() };
+            var args = new
+            {
+                entityIds = claimed.Select(e => e.EntityId).ToArray(),
+                times = claimed.Select(e => e.EventTime).ToArray(),
+                leaseEnds = claimed.Select(e => e.LeaseEnd).ToArray()
+            };
             (await race.WorkerA.ExecuteAsync(Sql.Done, args, record)).Should().Be(overwrittenDuringTheLease ? 0 : 1);
-            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.entityIds, delay = TimeSpan.Zero }, record))
+            (await race.WorkerA.ExecuteAsync(Sql.EndLease, new { args.entityIds, args.leaseEnds, delay = TimeSpan.Zero }, record))
                 .Should().Be(overwrittenDuringTheLease ? 1 : 0, "only an overwritten row is left under the lease");
             var lateStore = race.StoreAsync(race.Consumer2, 3);
             await race.WaitUntilBlockedByAsync(race.WorkerA, lateStore);
@@ -183,13 +188,64 @@ public sealed class ClaimRaceTests(SyncFixture app)
         await using (var tx = await race.Consumer1.BeginTransactionAsync())
         {
             await race.StoreAsync(race.Consumer1, 2, tx);
-            var ended = await race.Consumer1.ExecuteAsync(Sql.EndLease,
-                new { entityIds = claimed.Select(e => e.EntityId).ToArray(), delay = TimeSpan.Zero }, tx);
+            var ended = await race.Consumer1.ExecuteAsync(Sql.EndLease, EndLeaseArgs(claimed), tx);
             ended.Should().Be(1, "the row is pending under a lease whatever its last_updated is");
             await tx.CommitAsync();
         }
 
         (await race.DueAsync()).Should().BeTrue("v2 is due now, not when v1's lease would have ended");
+    }
+
+    /// <summary>
+    /// No transactions, so an outcome unit retried after a lost reply runs its statements again. The lease end match
+    /// keeps a late end-of-lease from ending the lease of a worker that claimed the row since.
+    /// </summary>
+    [Fact]
+    public async Task A_late_end_of_lease_leaves_the_lease_of_the_worker_that_claimed_the_row_since_alone()
+    {
+        await using var race = await StartAsync();
+        await race.StoreAsync(race.Consumer1, 1);
+        var claimedByA = await race.ClaimAsync(race.WorkerA);
+        (await race.WorkerA.ExecuteAsync(Sql.EndLease, EndLeaseArgs(claimedByA))).Should().Be(1);
+        var claimedByB = await race.ClaimAsync(race.WorkerB);
+        claimedByB.Should().ContainSingle();
+
+        (await race.WorkerA.ExecuteAsync(Sql.EndLease, EndLeaseArgs(claimedByA))).Should().Be(0, "the row is B's now");
+
+        (await race.DueAsync()).Should().BeFalse("B's lease runs on, so nobody else can claim the entity");
+    }
+
+    [Fact]
+    public async Task A_failure_recorded_again_after_a_lost_reply_counts_one_attempt()
+    {
+        await using var race = await StartAsync();
+        await race.StoreAsync(race.Consumer1, 1);
+        var claimed = await race.ClaimAsync(race.WorkerA);
+        var fail = new
+        {
+            entityIds = claimed.Select(e => e.EntityId).ToArray(),
+            times = claimed.Select(e => e.EventTime).ToArray(),
+            leaseEnds = claimed.Select(e => e.LeaseEnd).ToArray(),
+            errors = $$"""{ "{{claimed[0].EntityId}}": "UNABLE_TO_LOCK_ROW" }""",
+            maxRetries = 8,
+            baseDelaySecs = 60d,
+            maxDelaySecs = 60d
+        };
+
+        (await race.WorkerA.ExecuteAsync(Sql.Fail, fail)).Should().Be(1);
+        (await race.WorkerA.ExecuteAsync(Sql.Fail, fail)).Should().Be(0, "the backoff replaced the lease end");
+
+        (await race.RowAsync()).AttemptCount.Should().Be(1);
+    }
+
+    private static object EndLeaseArgs(List<InboxEvent> claimed)
+    {
+        return new
+        {
+            entityIds = claimed.Select(e => e.EntityId).ToArray(),
+            leaseEnds = claimed.Select(e => e.LeaseEnd).ToArray(),
+            delay = TimeSpan.Zero
+        };
     }
 
     private async Task<Race> StartAsync()
@@ -229,7 +285,7 @@ public sealed class ClaimRaceTests(SyncFixture app)
             return (new DateTimeOffset(time), status, attempts, error);
         }
 
-        public Task<List<InboxEvent>> ClaimAsync(NpgsqlConnection worker, NpgsqlTransaction tx)
+        public Task<List<InboxEvent>> ClaimAsync(NpgsqlConnection worker, NpgsqlTransaction? tx = null)
         {
             return worker.QueryAsync<InboxEvent>(Sql.Claim, new { lease = TimeSpan.FromMinutes(1), batchSize = 75 }, tx);
         }

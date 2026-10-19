@@ -6,9 +6,10 @@ namespace SalesforceSync.Data.Inbox;
 
 /// <summary>
 /// <see cref="IRepository{TRow}"/> on Postgres, raw SQL through EF. No transactions: each statement commits alone.
-/// Units retry (<see cref="PostgresRetryStrategy"/>), so every statement safe to repeat: store again harmless, lost
-/// claim waits lease expiry, done again finds row idle. Failure run again counts one extra attempt (rare, accepted).
-/// Crash between outcome statements: rest of claim waits lease expiry.
+/// Units retry (<see cref="PostgresRetryStrategy"/>), so every statement is safe to repeat: store again is harmless, a
+/// lost claim's rows wait for lease expiry, and an outcome or lease end run again finds the row no longer under the
+/// claim's lease (<see cref="InboxEvent.LeaseEnd"/>), so it does nothing. Crash between outcome statements: rest of
+/// claim waits lease expiry.
 /// <para>
 /// Lookups by key only, never join back to table: big backlog stats turned that into hash join over all rows.
 /// </para>
@@ -19,16 +20,19 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
     private static readonly string Table = TableOfRow();
 
     /// <summary>
-    /// WHERE of every outcome: claimed rows still pending and still holding claimed event (@entityIds + @times).
-    /// Row overwritten by newer event gets no outcome (else marked done unsent); <see cref="EndLeasesAsync"/> makes it due.
+    /// WHERE of every outcome: claimed rows still under this claim's lease (@leaseEnds) and still holding the claimed
+    /// event (@times). Row overwritten by newer event gets no outcome (else marked done unsent);
+    /// <see cref="EndLeasesAsync"/> makes it due. Lease match: an outcome retried after its commit was lost, or run after
+    /// the lease expired and another worker claimed the row, changes nothing (no double attempt count, no ended lease).
     /// <para>
     /// No race with store: same row, row lock orders them. Store first: event_time differs, no match (READ COMMITTED
     /// re-checks). Store second: overwrites finished row, pending again.
     /// </para>
     /// </summary>
     private const string StillClaimed = """
-        i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL
-          AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times) AS c(entity_id, event_time) WHERE c.entity_id = i.entity_id AND c.event_time = i.event_time)
+        i.entity_id = ANY(@entityIds)
+          AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times, @leaseEnds) AS c(entity_id, event_time, lease_end)
+                      WHERE c.entity_id = i.entity_id AND c.event_time = i.event_time AND c.lease_end = i.next_attempt_at)
         """;
 
     private readonly SyncOptions _opt = options.Value;
@@ -82,7 +86,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
                   ORDER BY d.next_attempt_at
                   LIMIT @batchSize
                   FOR UPDATE SKIP LOCKED))
-                RETURNING i.entity_id AS EntityId, i.payload::text AS Payload, i.event_time AS EventTime
+                RETURNING i.entity_id AS EntityId, i.payload::text AS Payload, i.event_time AS EventTime, i.next_attempt_at AS LeaseEnd
                 """;
             var events = await db.Database.QueryAsync<InboxEvent>(sql, t, new
             {
@@ -123,7 +127,13 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
             WHERE {StillClaimed}
             RETURNING i.entity_id
             """;
-        return db.Database.QueryAsync<string>(sql, ct, new { entityIds = entityIds.ToArray(), times = claim.TimesOf(entityIds) });
+        var rows = claim.Of(entityIds);
+        return db.Database.QueryAsync<string>(sql, ct, new
+        {
+            entityIds = entityIds.ToArray(),
+            times = rows.Select(r => r.EventTime).ToArray(),
+            leaseEnds = rows.Select(r => r.LeaseEnd).ToArray()
+        });
     }
 
     /// <summary>
@@ -141,11 +151,12 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
             WHERE {StillClaimed}
             RETURNING i.entity_id
             """;
-        string[] ids = [.. rows.Select(r => r.EntityId)];
+        var claimed = claim.Of(rows.Select(r => r.EntityId));
         return db.Database.QueryAsync<string>(sql, ct, new
         {
-            entityIds = ids,
-            times = claim.TimesOf(ids),
+            entityIds = claimed.Select(r => r.EntityId).ToArray(),
+            times = claimed.Select(r => r.EventTime).ToArray(),
+            leaseEnds = claimed.Select(r => r.LeaseEnd).ToArray(),
             errors = ErrorsJson(rows),
             maxRetries,
             baseDelaySecs = _opt.RetryBaseDelay.TotalSeconds,
@@ -175,6 +186,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
             {
                 entityIds = claim.EntityIds,
                 times = claim.EventTimes,
+                leaseEnds = claim.LeaseEnds,
                 errors = ErrorsJson(release.OwnErrors ?? []),
                 error = release.Error,
                 delay = release.Delay
@@ -206,23 +218,31 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
             var recorded = (await record(db, t)).ToHashSet(StringComparer.Ordinal);
             if (recorded.Count < claim.Events.Count)
             {
-                await EndLeasesAsync(db, t, [.. claim.EntityIds.Where(id => !recorded.Contains(id))], delay);
+                await EndLeasesAsync(db, t, claim.Of(claim.EntityIds.Where(id => !recorded.Contains(id))), delay);
             }
         }, ct);
     }
 
     /// <summary>
-    /// Caller passes ids outcomes did not return. Not last_updated = now(): store in same microsecond would look
-    /// recorded, stay leased till expiry.
+    /// Caller passes the rows outcomes did not return. Not last_updated = now(): store in same microsecond would look
+    /// recorded, stay leased till expiry. No event_time match: an overwritten row must end its lease too (a store keeps
+    /// the lease end); the lease end match leaves a row another worker claimed since alone.
     /// </summary>
-    private static Task<int> EndLeasesAsync(SyncDbContext db, CancellationToken ct, IReadOnlyList<string> entityIds, TimeSpan delay)
+    private static Task<int> EndLeasesAsync(SyncDbContext db, CancellationToken ct, IReadOnlyList<InboxEvent> rows, TimeSpan delay)
     {
         var sql = $"""
             UPDATE {Table} i
             SET next_attempt_at = now() + @delay, last_updated = now()
-            WHERE i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL
+            WHERE i.entity_id = ANY(@entityIds)
+              AND EXISTS (SELECT 1 FROM unnest(@entityIds, @leaseEnds) AS c(entity_id, lease_end)
+                          WHERE c.entity_id = i.entity_id AND c.lease_end = i.next_attempt_at)
             """;
-        return db.Database.ExecuteAsync(sql, ct, new { entityIds = entityIds.ToArray(), delay });
+        return db.Database.ExecuteAsync(sql, ct, new
+        {
+            entityIds = rows.Select(r => r.EntityId).ToArray(),
+            leaseEnds = rows.Select(r => r.LeaseEnd).ToArray(),
+            delay
+        });
     }
 
     private static string ErrorsJson(IReadOnlyList<FailedEvent> rows)

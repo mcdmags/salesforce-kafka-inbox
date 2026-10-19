@@ -2,7 +2,8 @@ namespace SalesforceSync.Data.Inbox;
 
 /// <summary>
 /// An inbox table: store events, claim a batch, record outcomes. The row type picks the table. Every outcome needs the
-/// row still pending with the event the claim read, so a worker whose entity another worker finished records nothing.
+/// row still under the claim's lease with the event the claim read, so a worker whose lease ran out, or whose entity
+/// another worker took over, records nothing.
 /// </summary>
 public interface IRepository<TRow> where TRow : InboxRow
 {
@@ -12,7 +13,7 @@ public interface IRepository<TRow> where TRow : InboxRow
     /// <summary>Leases up to <see cref="SyncOptions.BatchSize"/> due entities.</summary>
     Task<InboxClaim> ClaimAsync(CancellationToken ct);
 
-    /// <summary>Records every entity's outcome in one transaction.</summary>
+    /// <summary>Records every entity's outcome, one statement per kind of outcome.</summary>
     Task RecordAsync(InboxClaim claim, BatchOutcomes outcomes, CancellationToken ct);
 
     /// <summary>Hands the claim back without spending an attempt: rate limited, unknown write outcome, or mapping error.</summary>
@@ -33,11 +34,13 @@ public sealed record InboxClaim(IReadOnlyList<InboxEvent> Events)
 
     public DateTimeOffset[] EventTimes => [.. Events.Select(e => e.EventTime)];
 
-    /// <summary>The event_time the claim read for each of <paramref name="entityIds"/>, in their order.</summary>
-    public DateTimeOffset[] TimesOf(IEnumerable<string> entityIds)
+    public DateTimeOffset[] LeaseEnds => [.. Events.Select(e => e.LeaseEnd)];
+
+    /// <summary>The claimed rows of <paramref name="entityIds"/>, in their order.</summary>
+    public InboxEvent[] Of(IEnumerable<string> entityIds)
     {
-        var times = Events.ToDictionary(e => e.EntityId, e => e.EventTime);
-        return [.. entityIds.Select(id => times[id])];
+        var rows = Events.ToDictionary(e => e.EntityId);
+        return [.. entityIds.Select(id => rows[id])];
     }
 }
 
@@ -47,7 +50,11 @@ public sealed record InboxClaim(IReadOnlyList<InboxEvent> Events)
 /// As the claim read it. Outcomes apply only while the row still has it: a newer event stored meanwhile must not be
 /// marked done (<c>InboxRepository.StillClaimed</c>).
 /// </param>
-public sealed record InboxEvent(string EntityId, string Payload, DateTimeOffset EventTime);
+/// <param name="LeaseEnd">
+/// next_attempt_at as the claim set it. Only another claim changes it while the lease runs (a store keeps it), so a
+/// row that still has it is still this claim's: a retried or late statement can't end another worker's lease.
+/// </param>
+public sealed record InboxEvent(string EntityId, string Payload, DateTimeOffset EventTime, DateTimeOffset LeaseEnd);
 
 public sealed record FailedEvent(string EntityId, string Error);
 

@@ -10,8 +10,9 @@ public sealed class InboxStatements
     // An outcome lands only while the row still holds the claimed event: if a newer event overwrote it meanwhile,
     // the outcome is for an event that is gone and must not touch the newer one
     private const string StillClaimed = """
-        i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL
-          AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times) AS c(entity_id, event_time) WHERE c.entity_id = i.entity_id AND c.event_time = i.event_time)
+        i.entity_id = ANY(@entityIds)
+          AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times, @leaseEnds) AS c(entity_id, event_time, lease_end)
+                      WHERE c.entity_id = i.entity_id AND c.event_time = i.event_time AND c.lease_end = i.next_attempt_at)
         """;
 
     private InboxStatements(string table)
@@ -39,7 +40,7 @@ public sealed class InboxStatements
               ORDER BY d.next_attempt_at
               LIMIT @batchSize
               FOR UPDATE SKIP LOCKED))
-            RETURNING i.entity_id AS EntityId, i.payload::text AS Payload, i.event_time AS EventTime
+            RETURNING i.entity_id AS EntityId, i.payload::text AS Payload, i.event_time AS EventTime, i.next_attempt_at AS LeaseEnd
             """;
         Done = $"""
             UPDATE {table} i
@@ -57,7 +58,9 @@ public sealed class InboxStatements
         EndLease = $"""
             UPDATE {table} i
             SET next_attempt_at = now() + @delay, last_updated = now()
-            WHERE i.entity_id = ANY(@entityIds) AND i.next_attempt_at IS NOT NULL
+            WHERE i.entity_id = ANY(@entityIds)
+              AND EXISTS (SELECT 1 FROM unnest(@entityIds, @leaseEnds) AS c(entity_id, lease_end)
+                          WHERE c.entity_id = i.entity_id AND c.lease_end = i.next_attempt_at)
             """;
     }
 
