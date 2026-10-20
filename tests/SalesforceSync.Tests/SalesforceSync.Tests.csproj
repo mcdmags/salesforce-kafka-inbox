@@ -27,7 +27,8 @@
   <ItemGroup>
     <!-- The drain benchmarks' workload, so its expected end state is checked without running the benchmarks -->
     <Compile Include="..\..\benchmarks\SalesforceSync.Benchmarks\AggregateWorkload.cs" Link="Benchmarks\AggregateWorkload.cs" />
-    <Compile Include="..\..\benchmarks\SalesforceSync.Benchmarks\AggregateTemplate.cs" Link="Benchmarks\AggregateTemplate.cs" />
+    <Compile Include="..\..\src\SalesforceSync.LoadGenerator\AggregateTemplate.cs" Link="Benchmarks\AggregateTemplate.cs" />
+    <Compile Include="..\..\src\SalesforceSync.LoadGenerator\AutoFixtureShape.cs" Link="LoadGenerator\AutoFixtureShape.cs" />
     <None Include="..\..\benchmarks\SalesforceSync.Benchmarks\example-aggregate.json" Link="example-aggregate.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

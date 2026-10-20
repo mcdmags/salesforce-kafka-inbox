@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
 using SalesforceSync.FakeSalesforce;
+using SalesforceSync.LoadGenerator;
 using SalesforceSync.Sync;
 using SalesforceSync.ToSalesforce;
 

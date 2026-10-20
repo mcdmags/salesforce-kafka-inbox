@@ -5,11 +5,24 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>12</LangVersion>
     <RootNamespace>SalesforceSync.LoadGenerator</RootNamespace>
+    <!-- The SalesforceSync reference brings its appsettings.json too; publish keeps this project's own instead of failing (NETSDK1152) -->
+    <ErrorOnDuplicatePublishOutputFiles>false</ErrorOnDuplicatePublishOutputFiles>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Aspire.Confluent.Kafka" Version="13.6.1" />
+    <PackageReference Include="AutoFixture" Version="4.18.1" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.13" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- AggregateTemplate checks a template against the sync's event classes -->
+    <ProjectReference Include="..\SalesforceSync\SalesforceSync.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Global, as in the unit tests that compile AutoFixtureShape.cs in too -->
+    <Using Include="AutoFixture" />
   </ItemGroup>
 
 </Project>

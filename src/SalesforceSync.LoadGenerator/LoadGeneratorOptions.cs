@@ -7,6 +7,18 @@ public sealed class LoadGeneratorOptions
     /// <summary>The one topic: account aggregates, the Account with its relationships and contacts.</summary>
     public string Topic { get; set; } = "account-changes";
 
+    /// <summary>
+    /// Path of an example aggregate JSON whose shape every event copies (<see cref="AggregateTemplate"/>): your own
+    /// <c>AccountEvent</c> fields. Empty: the built-in shape. A file that doesn't conform stops startup, problems listed.
+    /// </summary>
+    public string? Template { get; set; }
+
+    /// <summary>
+    /// Build every record with AutoFixture from the sync's event classes, random values on every event
+    /// (<see cref="AutoFixtureShape"/>). Can't be combined with <see cref="Template"/>.
+    /// </summary>
+    public bool UseAutoFixture { get; set; }
+
     /// <summary>Chance that an account event also touches one of its relationships (Account_Relationship__c) to another account.</summary>
     public double RelationshipProbability { get; set; } = 0.15;
 

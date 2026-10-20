@@ -1,6 +1,7 @@
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Running;
 using SalesforceSync.Benchmarks;
+using SalesforceSync.LoadGenerator;
 
 // Run: dotnet run -c Release -- --run quick|drain|full, or no args to choose in console. Other args pass to
 // BenchmarkDotNet as is (e.g. --filter '*Micro*').

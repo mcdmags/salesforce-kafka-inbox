@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using SalesforceSync.Benchmarks;
+using SalesforceSync.LoadGenerator;
 
 namespace SalesforceSync.Tests;
 

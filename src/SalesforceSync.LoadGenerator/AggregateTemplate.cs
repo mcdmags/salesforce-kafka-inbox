@@ -3,12 +3,13 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using SalesforceSync.Sync;
 
-namespace SalesforceSync.Benchmarks;
+namespace SalesforceSync.LoadGenerator;
 
 /// <summary>
-/// Shape of published aggregates: example JSON <see cref="AggregateWorkload"/> copies and modifies. Built-in example by
-/// default; <c>--template my.json</c> (or env var <see cref="Variable"/>) swaps in yours, so events get your
-/// <c>AccountEvent</c> fields.
+/// Shape of published aggregates: example JSON that the load generator (<c>AccountEventProducer</c>) and the
+/// benchmark workload copy and modify. Built-in example by default; a file of yours (load generator:
+/// <c>LoadGenerator:Template</c>; benchmarks: <c>--template my.json</c> or env var <see cref="Variable"/>) swaps it in,
+/// so events get your <c>AccountEvent</c> fields.
 /// <para>
 /// File = account aggregate message <c>{ "meta": ..., "before": ..., "after": { the account, "profile",
 /// "accountRelationships": [ one example ], "contacts": [ one example ] } }</c> (only <c>after</c> read; bare snapshot

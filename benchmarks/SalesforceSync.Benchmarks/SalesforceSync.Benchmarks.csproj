@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SalesforceSync\SalesforceSync.csproj" />
+    <Compile Include="..\..\src\SalesforceSync.LoadGenerator\AggregateTemplate.cs" Link="AggregateTemplate.cs" />
     <ProjectReference Include="..\..\src\SalesforceSync.FakeSalesforce\SalesforceSync.FakeSalesforce.csproj" />
   </ItemGroup>
 

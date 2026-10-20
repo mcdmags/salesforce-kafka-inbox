@@ -1155,7 +1155,15 @@ The dashboard shows:
   and syncs to `fake-salesforce` through the real OAuth + REST client
 - **load-generator**: 20k account aggregates (before and after, full records) over 500 accounts at 200/s, including
   bursts to the same account; each keeps its account's relationships to other accounts and contacts, adding,
-  changing and sometimes removing one (`LoadGenerator:ChildRemovalProbability`, 0.2), which the sync deletes
+  changing and sometimes removing one (`LoadGenerator:ChildRemovalProbability`, 0.2), which the sync deletes.
+  Account and Profile external ids are GUIDs (the same on every run). The records' fields come from one of three
+  sources:
+  - built-in (default): the fields above, with a few random values;
+  - your own aggregate JSON (`LoadGenerator:Template`, a file path): every event is a copy of its `after` with the ids
+    and version markers set, checked against the event classes at startup (same file format as the benchmarks'
+    `--template`, see [Using your own aggregate](docs/benchmarks/README.md#using-your-own-aggregate));
+  - AutoFixture (`LoadGenerator:UseAutoFixture`, true): every property of the event classes gets a random value of
+    its type on every event, texts 8 characters; the ids and a contact's email are set.
 - **benchmarks**: explicit start, against `benchdb`: **Run benchmarks...** asks which run (quick, about 2 minutes;
   drain, about 20; full, about 30) and starts it; ▶ repeats the last run chosen (quick at first)
 
