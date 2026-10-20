@@ -1139,6 +1139,12 @@ Requires Docker (or OrbStack/Colima) and the .NET 10 SDK.
 dotnet run --project src/SalesforceSync.AppHost
 ```
 
+This uses the `http` launch profile (dashboard at http://localhost:15180). Both profiles set
+`ASPIRE_DCP_USE_DEVELOPER_CERTIFICATE=false`: otherwise Aspire's orchestrator exports the ASP.NET Core development
+certificate's private key for its own TLS on every start, which on macOS asks for keychain access each time.
+`--launch-profile https` serves the dashboard over HTTPS with that certificate, read from its copy on disk
+(`dotnet dev-certs https --trust` once; recreate it with `--clean` first if it predates .NET 7).
+
 The dashboard shows:
 
 - **postgres / inboxdb / benchdb** (+ pgAdmin)

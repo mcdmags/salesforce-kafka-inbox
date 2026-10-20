@@ -9,7 +9,9 @@ var builder = DistributedApplication.CreateBuilder(args);
 // (The integration tests don't use Aspire; they run on Testcontainers.)
 var testMode = bool.TryParse(builder.Configuration["AppHost:TestMode"], out var t) && t;
 
-var postgres = builder.AddPostgres("postgres");
+// Pinned: Aspire's default is 18, whose image refuses a data volume written by 17 (different folder layout, needs
+// pg_upgrade). 17 is also what the integration tests run on.
+var postgres = builder.AddPostgres("postgres").WithImageTag("17");
 if (!testMode)
 {
     postgres.WithDataVolume().WithPgAdmin();
