@@ -7,6 +7,16 @@ namespace SalesforceSync.Data.Inbox;
 /// <summary>
 /// <see cref="IRepository{TRow}"/> on Postgres, raw SQL through EF.
 /// <para>
+/// <b>What keeps other workers off a claimed row: the lease, not a lock.</b> next_attempt_at is the row's state: null
+/// means done (or dead-lettered), a time at or before now means due, and a later time means claimed or waiting for a
+/// retry. A claim only picks rows that are due, and sets next_attempt_at to now + <see cref="SyncOptions.Lease"/> (the
+/// lease end). From then on the row is in the future, so no other worker's claim finds it, and nothing has to stay open
+/// while the Salesforce calls run: no transaction, no row lock, no connection. Postgres row locks exist only inside a
+/// single statement. The claim takes them with FOR UPDATE SKIP LOCKED, so two workers claiming at the same moment skip
+/// each other's rows instead of waiting. A store and an outcome on the same row wait for each other only for the
+/// length of one statement.
+/// </para>
+/// <para>
 /// <b>The claim is a receipt.</b> <see cref="ClaimAsync"/> leases due rows by setting next_attempt_at to the lease end.
 /// For each row it returns the entity id, the event_time it read and the lease end it set (<see cref="InboxEvent"/>).
 /// Every later statement for the batch (<see cref="MarkDoneAsync"/>, <see cref="MarkFailedAsync"/>,
@@ -22,10 +32,20 @@ namespace SalesforceSync.Data.Inbox;
 /// <item><b>A newer event is stored.</b> The store replaces event_time and resets the attempts, but keeps
 /// next_attempt_at (the lease end); moving it to now would let a second worker claim the entity while we are still
 /// writing it. Our outcome then skips the row because event_time differs, so the newer event is never marked done
-/// without being sent, and the old event's failure is not counted against it. The skipped row's lease is ended (its
-/// lease end still matches), so the newer event is due at once instead of at lease expiry. After a
-/// <see cref="ReleaseAsync"/> it waits for the release delay instead, so it can't race a write Salesforce may still
-/// apply.</item>
+/// without being sent, and the old event's failure is not counted against it. In the same unit, the outcome ends the
+/// lease of every row it skipped (<see cref="EndLeasesAsync"/>): next_attempt_at becomes now, so the newer event is due
+/// at once and the next claim, by any worker, sends it. Without that it would wait for the lease to expire. Ending the
+/// lease matches the lease end but not event_time, because the event changed and the lease is still ours. After a
+/// <see cref="ReleaseAsync"/> the newer event waits for the release delay instead, so it can't race a write Salesforce
+/// may still apply.
+/// <para>
+/// How often: only while a batch is out, from its claim to its outcome, which is the Salesforce round trip (0.3 to 1 s
+/// on a real org). A row waiting in the inbox isn't claimed. For an entity whose events arrive on average every T
+/// seconds, the chance that one arrives during a round trip of W seconds is about 1 - e^(-W/T): 5% for a save every
+/// 10 s and a 0.5 s round trip, 39% for a save every second. So with a user saving in quick succession it is common,
+/// and handled as above at the cost of one more write, which the newer event needs anyway.
+/// </para>
+/// </item>
 /// <item><b>Our lease ran out and another worker claimed the row.</b> The row now has their lease end, so none of our
 /// late statements match: we can't record an outcome on their lease or end it. This is rare, because the Salesforce
 /// call is cancelled at 80% of the lease.</item>
@@ -42,6 +62,33 @@ namespace SalesforceSync.Data.Inbox;
 /// The receipt makes this safe, because every statement can run twice or late. The accepted cost: if a claim's commit
 /// is lost, or the process crashes between outcome statements, those rows stay leased until the lease expires. They
 /// are delayed, never lost.
+/// </para>
+/// <para>
+/// <b>Why the Salesforce calls are not inside a transaction that holds the row.</b> It would hold the row lock, but at
+/// a cost, and it would make nothing safer:
+/// <list type="bullet">
+/// <item>The Kafka consumer would wait. A store waits for the row lock, so a newer event for an entity being sent would
+/// block the consumer until Salesforce answers (up to the HTTP timeout when Salesforce is slow or down). The consumer
+/// reads a partition in order, so every other account behind that message would wait too. Today the store never
+/// waits.</item>
+/// <item>The Salesforce write is not part of the transaction anyway. If Salesforce applies it and the commit is then
+/// lost, the row rolls back to pending and is sent again. So we would still need idempotent upserts and resends; the
+/// lock would only make the newer event wait instead of being detected by event_time.</item>
+/// <item>Every batch in flight would keep a connection idle in a transaction for the whole round trip (24 with 8
+/// workers on 3 pods), so the pool would be sized by Salesforce's slowest reply instead of by the queries.</item>
+/// <item>An open transaction stops vacuum from removing old row versions, and the inbox is updated all the time, so the
+/// table and its index would bloat.</item>
+/// </list>
+/// Lock while claiming, never while doing the slow work: the lease and the receipt give the same guarantees (no older
+/// version wins, a newer event is always sent) without any of that.
+/// </para>
+/// <para>
+/// <b>Known gap: two events with the same event_time.</b> Everything above relies on a newer event having a later
+/// event_time. A store with the same time still overwrites a pending or claimed row (meant for Kafka redelivering the
+/// same message), so if two different edits carry the same time while the first is being sent, the outcome matches,
+/// marks the row done, and the second edit is never sent. Times are kept to the microsecond, so this needs a source
+/// whose timestamps are coarser (whole seconds, say) and two saves within one tick. Holding a lock would not help: the
+/// second store would wait, then find the row done and, as a same-time event, leave it alone.
 /// </para>
 /// <para>
 /// <b>Why the lease end instead of a lock_token column.</b> An alternative is a lock_token column: each claim writes a
