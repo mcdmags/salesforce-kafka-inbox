@@ -10,10 +10,10 @@ public sealed record BenchmarkRun(string Name, string Description, string[] Filt
 
     public static readonly BenchmarkRun[] All =
     [
-        new("quick", "drain 1 and 4 workers x 1 and 3 pods, 100 accounts, no latency, plus one streaming case; 3 iterations (about 2 minutes)",
+        new("quick", "drain 1 and 4 workers x 1 and 3 pods, 100 accounts, no latency, plus one streaming case; 3 iterations (about 1-2 minutes)",
             ["*InboxDrain*", "*StreamingIngest*"]),
-        new("drain", "every drain and streaming case (about 20 minutes)", ["*InboxDrain*", "*StreamingIngest*"]),
-        new("full", "drain, streaming and micro benchmarks (about 30 minutes)", ["*"])
+        new("drain", "every drain and streaming case (about 5 minutes)", ["*InboxDrain*", "*StreamingIngest*"]),
+        new("full", "drain, streaming and micro benchmarks (about 6 minutes)", ["*"])
     ];
 
     public static bool IsQuick => Environment.GetEnvironmentVariable(Variable) == "quick";

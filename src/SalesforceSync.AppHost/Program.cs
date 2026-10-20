@@ -82,15 +82,33 @@ if (!testMode)
     }
 
     // Benchmarks on the same Postgres (separate DB, never touches the live inbox). Start from the dashboard with
-    // "Run benchmarks...", which asks which run (quick, drain or full); ▶ repeats the last one.
+    // "Run benchmarks...", which asks which run (quick or full); ▶ repeats the last one.
     var benchDb = postgres.AddDatabase("benchdb");
     var benchmarkRun = "quick";
-    builder.AddProject<Projects.SalesforceSync_Benchmarks>("benchmarks")
+
+    // HTML reports: BenchmarkDotNet writes them to results/ under one fixed folder (not the process's working
+    // directory), and nginx serves that folder, so the dashboard links the latest run's index.html
+    var benchmarkArtifacts = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "..", "benchmarks",
+        "SalesforceSync.Benchmarks", "BenchmarkDotNet.Artifacts"));
+    var benchmarkResults = Directory.CreateDirectory(Path.Combine(benchmarkArtifacts, "results")).FullName;
+    var reports = builder.AddContainer("benchmark-reports", "nginx", "1.27-alpine")
+        .WithBindMount(benchmarkResults, "/usr/share/nginx/html", isReadOnly: true)
+        .WithHttpEndpoint(targetPort: 80, name: "http")
+        .WithUrlForEndpoint("http", u =>
+        {
+            u.Url += "/index.html";
+            u.DisplayText = "Benchmark report";
+        });
+
+    var benchmarks = builder.AddProject<Projects.SalesforceSync_Benchmarks>("benchmarks")
         .WithReference(benchDb).WaitFor(benchDb)
+        .WithEnvironment("BENCHMARK_REPORT_URL", ReferenceExpression.Create($"{reports.GetEndpoint("http")}/index.html"))
         .WithArgs(c =>
         {
             c.Args.Add("--run");
             c.Args.Add(benchmarkRun);
+            c.Args.Add("--artifacts");
+            c.Args.Add(benchmarkArtifacts);
         })
         .WithExplicitStart()
         .WithCommand("run-benchmarks", "Run benchmarks...", async c =>
@@ -106,8 +124,7 @@ if (!testMode)
                     Value = benchmarkRun,
                     Options = [
                         new("quick", "Quick: 5 drain cases, 3 iterations (about 2 minutes)"),
-                        new("drain", "Drain: every drain and streaming case (about 20 minutes)"),
-                        new("full", "Full: drain, streaming and micro benchmarks (about 30 minutes)")
+                        new("full", "Full: drain, streaming and micro benchmarks (about 6 minutes)")
                     ]
                 },
                 cancellationToken: c.CancellationToken);
@@ -127,6 +144,7 @@ if (!testMode)
                 ? ResourceCommandState.Disabled
                 : ResourceCommandState.Enabled
         });
+    reports.WithParentRelationship(benchmarks);
 }
 
 builder.Build().Run();
