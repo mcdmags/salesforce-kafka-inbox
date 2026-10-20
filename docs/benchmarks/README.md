@@ -432,6 +432,46 @@ now read by its index (87,641 index scans, 8 sequential), and the queue was empt
 truncate the audit for every iteration, so there it grew only to a few thousand rows, but it still cost them a few percent:
 the numbers of earlier runs in this file are somewhat pessimistic.
 
+## Latest run: plain-crud with an external-id field per object, at 5135c6c
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at 5135c6c, on 2026-10-20, against the
+[run before it](#latest-run-plain-crud-with-outcomes-matched-by-lease-end-at-a831e32). Since then the outcome statements
+take the claim and the failures (permanent ones dead-lettered at once), and each Salesforce object names its own
+external-id field (`SalesforceObject(Name, ExternalIdField)`) instead of one shared constant. The requests sent are the
+same: every object of the sample still uses `ExternalId__c`.
+
+**Correctness**: 196 iterations (warm-up included), 0 failures, and no iteration timed out.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency), and streaming
+(50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 105.14 ms | 778.61 ms | 19.41 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 1 | 1,000 | 2,113 | 302.83 ms | 2,575.15 ms | 58.08 MB | 69 | 23 | 1.91 | 3,267 | 1154 |
+| 1 | 3 | 100 | 990 | 58.73 ms | 360.86 ms | 19.75 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 291.71 ms | 823.00 ms | 62.27 MB | 68 | 21 | 1.93 | 3,230 | 1117 |
+| 4 | 1 | 100 | 990 | 63.24 ms | 268.89 ms | 21.25 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 4 | 1 | 1,000 | 2,113 | 295.73 ms | 667.01 ms | 59.99 MB | 78 | 26 | 1.80 | 3,460 | 1347 |
+| 4 | 3 | 100 | 990 | 93.95 ms | 249.97 ms | 31.11 MB | 23 | 8 | 6.32 | 1,021 | 31 |
+| 4 | 3 | 1,000 | 2,113 | 376.01 ms | 418.66 ms | 84.51 MB | 65 | 21 | 2.00 | 3,118 | 1005 |
+| 8 | 1 | 100 | 990 | 77.82 ms | 207.95 ms | 25.89 MB | 23 | 8 | 6.32 | 1,021 | 31 |
+| 8 | 1 | 1,000 | 2,113 | 315.55 ms | 455.33 ms | 66.66 MB | 77 | 24 | 1.87 | 3,336 | 1223 |
+| 8 | 3 | 100 | 990 | 141.37 ms | 270.12 ms | 40.69 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 8 | 3 | 1,000 | 2,113 | 432.86 ms | 475.40 ms | 91.96 MB | 69 | 22 | 1.94 | 3,216 | 1103 |
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.897 s | 216.38 MB | 1,272 | 579 | 2.43 | 2,655 | 8 |
+| 4 | 3 | 2.407 s | 391.38 MB | 4,544 | 1,989 | 1.49 | 4,323 | 4 |
+| 8 | 1 | 2.137 s | 301.35 MB | 2,797 | 1,233 | 1.65 | 3,905 | 5 |
+| 8 | 3 | 4.721 s | 1203.35 MB | 14,356 | 6,563 | 1.23 | 5,242 | 3 |
+
+- **The same calls and timings within the noise of the runs** (streaming 8 workers on 3 pods 4.72 s against 4.60 s,
+  14,356 calls against 14,169; one worker on one pod with 100 accounts 105 ms against 107 ms; every 25 ms drain within
+  a few percent). The 0 ms drains of 1,000 accounts move both ways (one pod 303 ms against 422 ms, three pods 292 ms
+  against 187 ms), as they have from run to run: with no latency they are decided by which worker's claim wins.
+
 ## Latest run: plain-crud with outcomes matched by lease end, at a831e32
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at a831e32, on 2026-10-20, against the
