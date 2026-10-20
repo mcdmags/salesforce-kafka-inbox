@@ -1,6 +1,3 @@
-// The dashboard prompt of the benchmarks' "Run benchmarks..." command (IInteractionService) is still experimental
-#pragma warning disable ASPIREINTERACTION001
-
 using Microsoft.Extensions.DependencyInjection;
 
 var builder = DistributedApplication.CreateBuilder(args);
@@ -84,7 +81,8 @@ if (!testMode)
     }
 
     // Benchmarks on the same Postgres (separate DB, never touches the live inbox). Start from the dashboard with
-    // "Run benchmarks...", which asks which run (quick or full); ▶ repeats the last one.
+    // "Run quick benchmarks" or "Run full benchmarks"; ▶ repeats the last one. Two commands, not one that asks: the
+    // dashboard's prompt dialog (IInteractionService, still experimental) crashed the dashboard page on Windows.
     var benchDb = postgres.AddDatabase("benchdb");
     var benchmarkRun = "quick";
 
@@ -112,40 +110,30 @@ if (!testMode)
             c.Args.Add("--artifacts");
             c.Args.Add(benchmarkArtifacts);
         })
-        .WithExplicitStart()
-        .WithCommand("run-benchmarks", "Run benchmarks...", async c =>
+        .WithExplicitStart();
+
+    foreach (var (run, name, icon) in new[]
+             {
+                 ("quick", "Run quick benchmarks (about 2 minutes)", "Play"),
+                 ("full", "Run full benchmarks (about 6 minutes)", "FastForward")
+             })
+    {
+        benchmarks.WithCommand($"run-{run}-benchmarks", name, c =>
         {
-            var choice = await c.Services.GetRequiredService<IInteractionService>().PromptInputAsync(
-                "Run benchmarks", "Which run? Times are for an idle machine.",
-                new InteractionInput
-                {
-                    Name = "run",
-                    Label = "Run",
-                    InputType = InputType.Choice,
-                    Required = true,
-                    Value = benchmarkRun,
-                    Options = [
-                        new("quick", "Quick: 5 drain cases, 3 iterations (about 2 minutes)"),
-                        new("full", "Full: drain, streaming and micro benchmarks (about 6 minutes)")
-                    ]
-                },
-                cancellationToken: c.CancellationToken);
-            if (choice.Canceled)
-            {
-                return CommandResults.Canceled();
-            }
-            benchmarkRun = choice.Data.Value!;
-            return await c.Services.GetRequiredService<ResourceCommandService>()
+            benchmarkRun = run;
+            return c.Services.GetRequiredService<ResourceCommandService>()
                 .ExecuteCommandAsync(c.ResourceName, KnownResourceCommands.StartCommand, c.CancellationToken);
         }, new CommandOptions
         {
-            IconName = "Play",
+            IconName = icon,
             IsHighlighted = true,
             // Not while a run is in progress: stop it first
             UpdateState = c => c.ResourceSnapshot.State?.Text == KnownResourceStates.Running
                 ? ResourceCommandState.Disabled
                 : ResourceCommandState.Enabled
         });
+    }
+
     reports.WithParentRelationship(benchmarks);
 }
 

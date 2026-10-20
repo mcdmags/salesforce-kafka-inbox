@@ -1173,8 +1173,8 @@ The dashboard shows:
     `--template`, see [Using your own aggregate](docs/benchmarks/README.md#using-your-own-aggregate));
   - AutoFixture (`LoadGenerator:UseAutoFixture`, true): every property of the event classes gets a random value of
     its type on every event, texts 8 characters; the ids and a contact's email are set.
-- **benchmarks**: explicit start, against `benchdb`: **Run benchmarks...** asks which run (quick, about 2 minutes;
-  full, about 6) and starts it; ▶ repeats the last run chosen (quick at first). When a run ends, its console log
+- **benchmarks**: explicit start, against `benchdb`: **Run quick benchmarks** (about 2 minutes) or **Run full
+  benchmarks** (about 6) starts that run; ▶ repeats the last run chosen (quick at first). When a run ends, its console log
   prints the HTML report's link, and **benchmark-reports** (nginx, under benchmarks) serves it: its **Benchmark report**
   link opens `index.html`, the last run's reports first, then earlier ones (`drain` stays available from the command
   line: `--run drain`)
