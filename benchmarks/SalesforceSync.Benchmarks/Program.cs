@@ -51,7 +51,7 @@ var started = DateTime.UtcNow;
 // typeof(Program) ambiguous with worker's top-level Program (CS0436): name a benchmark type
 var summaries = BenchmarkSwitcher.FromAssembly(typeof(InboxDrainBenchmarks).Assembly)
     .Run(run?.Filter.Prepend("--filter").Concat(args).ToArray() ?? args, config).ToList();
-if (ReportIndex.Write(summaries, run?.Name ?? string.Join(' ', args), started) is { } report)
+if (HtmlReports.Finish(summaries, run?.Name ?? string.Join(' ', args), started) is { } report)
 {
     Console.WriteLine($"// HTML report: {report}");
 }

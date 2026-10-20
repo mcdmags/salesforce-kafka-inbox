@@ -1176,8 +1176,9 @@ The dashboard shows:
 - **benchmarks**: explicit start, against `benchdb`: **Run quick benchmarks** (about 2 minutes) or **Run full
   benchmarks** (about 6) starts that run; ▶ repeats the last run chosen (quick at first). When a run ends, its console log
   prints the HTML report's link, and **benchmark-reports** (nginx, under benchmarks) serves it: its **Benchmark report**
-  link opens `index.html`, the last run's reports first, then earlier ones (`drain` stays available from the command
-  line: `--run drain`)
+  link opens `index.html`, the last run's reports first, then earlier ones. Each report says what its benchmark
+  measures, what every column means and, for a benchmark that failed (NA in the table), the exception and where the
+  whole log is (`drain` stays available from the command line: `--run drain`)
 
 To sync to a Salesforce sandbox instead of the mock org, see [Run against the sandbox](#5-run-against-the-sandbox).
 
