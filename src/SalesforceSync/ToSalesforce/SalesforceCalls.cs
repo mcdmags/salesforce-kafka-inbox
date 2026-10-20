@@ -4,18 +4,24 @@ using SalesforceSync.Infrastructure.Salesforce;
 namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
+/// A Salesforce object and the external-id field its records are matched by. Each object has its own: Salesforce sets
+/// no common name, so an org may use e.g. <c>Legacy_Id__c</c> on Account and <c>Source_Id__c</c> on Contact. Each sync
+/// declares the objects it writes (<see cref="AccountSync.AccountObject"/>, ...).
+/// </summary>
+/// <param name="Name">Object API name, e.g. <c>Account</c>.</param>
+/// <param name="ExternalIdField">API name of its external-id field, e.g. <c>ExternalId__c</c>.</param>
+public sealed record SalesforceObject(string Name, string ExternalIdField);
+
+/// <summary>
 /// Salesforce calls the types' send steps are made of: each one API call (a few for big batches), no decisions about
 /// what to write (type's job). Record failures go in its entity's <c>failures</c> as <see cref="Failure"/>s.
 /// </summary>
 public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordTypeCache recordTypes, SalesforceErrors errors)
 {
-    /// <summary>Field every object is matched by.</summary>
-    public const string ExternalIdField = "ExternalId__c";
-
     /// <summary>Id of an object's active record type by developer name (Salesforce takes an Id). Null if org has none.</summary>
-    public Task<string?> RecordTypeIdAsync(string sobject, string developerName, CancellationToken ct)
+    public Task<string?> RecordTypeIdAsync(SalesforceObject sobject, string developerName, CancellationToken ct)
     {
-        return recordTypes.IdOfAsync(sobject, developerName, ct);
+        return recordTypes.IdOfAsync(sobject.Name, developerName, ct);
     }
 
     /// <summary>
@@ -23,10 +29,10 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// absent from result.
     /// </summary>
     /// <exception cref="MappingErrorException">Org lacks such a field on the object.</exception>
-    public async Task<Dictionary<string, JsonElement>> ReadAsync(string sobject, IEnumerable<string> fields, IEnumerable<string> externalIds,
+    public async Task<Dictionary<string, JsonElement>> ReadAsync(SalesforceObject sobject, IEnumerable<string> fields, IEnumerable<string> externalIds,
         CancellationToken ct)
     {
-        var columns = fields.Append(ExternalIdField).Append("Id").Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var columns = fields.Append(sobject.ExternalIdField).Append("Id").Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var found = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         foreach (var (soql, ids) in Queries(sobject, columns, externalIds))
         {
@@ -34,7 +40,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
             {
                 foreach (var row in await salesforce.SelectAsync(soql, ct))
                 {
-                    found[row.GetProperty(ExternalIdField).GetString()!] = row;
+                    found[row.GetProperty(sobject.ExternalIdField).GetString()!] = row;
                 }
             }
             catch (SalesforceResponseException ex) when (ex.ErrorCode == "INVALID_FIELD")
@@ -51,12 +57,12 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// 200 ids per query, halved while the query's URL is over Salesforce's limit: the query is a GET, so long external
     /// ids can overflow its URL long before 200 of them.
     /// </summary>
-    private IEnumerable<(string Soql, string[] Ids)> Queries(string sobject, List<string> columns, IEnumerable<string> externalIds)
+    private IEnumerable<(string Soql, string[] Ids)> Queries(SalesforceObject sobject, List<string> columns, IEnumerable<string> externalIds)
     {
         var pending = new Stack<string[]>(externalIds.Distinct(StringComparer.Ordinal).Chunk(SalesforceRestClient.MaxCollectionRecords).Reverse());
         while (pending.TryPop(out var ids))
         {
-            var soql = SalesforceRestClient.Soql(sobject, columns, ExternalIdField, ids);
+            var soql = SalesforceRestClient.Soql(sobject.Name, columns, sobject.ExternalIdField, ids);
             if (ids.Length > 1 && !SalesforceRestClient.FitsUrlLimit(SalesforceRestClient.QueryUrl(salesforce.DataPath, soql)))
             {
                 pending.Push(ids[(ids.Length / 2)..]);
@@ -94,20 +100,20 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// One call creates/updates all records (≤ 200 per call), matched by external id. Each record saves or fails on its
     /// own; failure → its entity's failures.
     /// </summary>
-    /// <param name="sobject">Object API name.</param>
+    /// <param name="sobject">Object, and the external-id field the records are matched by.</param>
     /// <param name="items">Owning entity, record's external id, fields to send (<see cref="Changes"/>).</param>
     /// <param name="failures">Where record failures go, by entity.</param>
     /// <param name="ct">Cancels calls; shutdown or lease deadline, not a failure.</param>
     /// <exception cref="UnknownOutcomeException">Call failed without proof Salesforce didn't apply it.</exception>
     /// <exception cref="MappingErrorException">Salesforce refused a field: not in org, or not settable.</exception>
-    public async Task UpsertAsync(string sobject, IEnumerable<(string Key, string ExternalId, Dictionary<string, object?> Fields)> items,
+    public async Task UpsertAsync(SalesforceObject sobject, IEnumerable<(string Key, string ExternalId, Dictionary<string, object?> Fields)> items,
         Dictionary<string, List<Failure>> failures, CancellationToken ct)
     {
         foreach (var chunk in items.Chunk(SalesforceRestClient.MaxCollectionRecords))
         {
             var bodies = chunk.Select(i =>
             {
-                var body = new SObjectBody(sobject) { [ExternalIdField] = i.ExternalId };
+                var body = new SObjectBody(sobject.Name) { [sobject.ExternalIdField] = i.ExternalId };
                 foreach (var (field, value) in i.Fields)
                 {
                     body[field] = value;
@@ -116,7 +122,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
                 return body;
             }).ToList();
 
-            var results = await GuardedAsync(() => salesforce.UpsertAsync(sobject, ExternalIdField, bodies, ct));
+            var results = await GuardedAsync(() => salesforce.UpsertAsync(sobject.Name, sobject.ExternalIdField, bodies, ct));
             for (var i = 0; i < chunk.Length; i++)
             {
                 AddFailures(failures, chunk[i].Key, results[i], isDelete: false);
@@ -126,7 +132,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
         // Rejected record type may since be created/activated/assigned: re-read next time
         if (failures.Values.Any(list => list.Any(f => f.Error.StartsWith(SalesforceErrors.InvalidRecordType, StringComparison.Ordinal))))
         {
-            await recordTypes.InvalidateAsync(sobject, ct);
+            await recordTypes.InvalidateAsync(sobject.Name, ct);
         }
 
         ThrowIfMappingErrors(failures);

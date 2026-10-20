@@ -12,7 +12,7 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
 {
     public const string Type = ContactEvent.Type;
 
-    private const string ContactObject = "Contact";
+    private static readonly SalesforceObject ContactObject = new("Contact", "ExternalId__c");
 
     public string EntityType => Type;
 
@@ -60,7 +60,7 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
 
         // READ: contacts (to compare; Ids for deletes) + target Accounts (must exist)
         var now = await salesforce.ReadAsync(ContactObject, wanted.SelectMany(w => w.Fields.Keys), events.Select(e => e.EntityId), ct);
-        var accounts = await salesforce.ReadAsync("Account", [], wanted.Select(w => w.AccountExternalId!), ct);
+        var accounts = await salesforce.ReadAsync(AccountSync.AccountObject, [], wanted.Select(w => w.AccountExternalId!), ct);
 
         // DECIDE: Account not in Salesforce yet → wait; else create, update or skip
         var sends = new List<(string Key, string ExternalId, Dictionary<string, object?> Fields)>();

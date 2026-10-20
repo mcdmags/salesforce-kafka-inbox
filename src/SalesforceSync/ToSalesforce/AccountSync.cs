@@ -14,8 +14,9 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
 {
     public const string Type = AccountEvent.Type;
 
-    private const string AccountObject = "Account";
-    private const string ProfileObject = "Profile__c";
+    /// <summary>Also the parent the relationship and contact syncs read.</summary>
+    public static readonly SalesforceObject AccountObject = new("Account", "ExternalId__c");
+    private static readonly SalesforceObject ProfileObject = new("Profile__c", "ExternalId__c");
 
     public string EntityType => Type;
 

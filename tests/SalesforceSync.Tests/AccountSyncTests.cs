@@ -157,7 +157,7 @@ public sealed class AccountSyncTests
         await SyncAsync(Events.Account(Acme, 1, "inserted"));
 
         org.GetStats().RecordTypeQueries.Should().BeGreaterThan(0, "the type's record types are read from the org");
-        Account!["RecordTypeId"]!.GetValue<string>().Should().Be(await _sync.Calls.RecordTypeIdAsync("Account", "Business", CancellationToken.None));
+        Account!["RecordTypeId"]!.GetValue<string>().Should().Be(await _sync.Calls.RecordTypeIdAsync(AccountSync.AccountObject, "Business", CancellationToken.None));
     }
 
     [Fact]

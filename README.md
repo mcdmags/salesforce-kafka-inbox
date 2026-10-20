@@ -713,7 +713,10 @@ reads like this, top to bottom; the calls are in `SalesforceCalls`):
 `PATCH /composite/sobjects/{SObject}/{ExternalIdField}` the last part is the **name** of the field the records are matched
 by (e.g. `ExternalId__c`), the same for the whole call, so one call holds records of one object matched by one field. Each
 record carries its own **value** of that field in its body (`{"attributes":{"type":"Account"},"ExternalId__c":"A1","Name":"Acme"}`),
-and Salesforce updates the record with that value or creates it.
+and Salesforce updates the record with that value or creates it. Each object can have its own external-id field, so each
+sync declares its objects with theirs (`SalesforceObject(Name, ExternalIdField)`, e.g. `AccountSync.AccountObject`); the
+sample uses `ExternalId__c` on every object, and the relationship and contact syncs read their parent Accounts with
+`AccountSync.AccountObject`.
 
 ### Foreign keys: Text fields holding the parent's external id
 

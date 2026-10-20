@@ -67,7 +67,7 @@ public sealed class WriteOutcomeTests
         var (engine, org, failing) = Engine();
         failing.FailReads = true;
 
-        var read = () => engine.ReadAsync("Account", ["Name"], ["A1"], CancellationToken.None);
+        var read = () => engine.ReadAsync(AccountSync.AccountObject, ["Name"], ["A1"], CancellationToken.None);
 
         (await read.Should().ThrowAsync<HttpRequestException>()).Which.Should().NotBeOfType<UnknownOutcomeException>();
         org.FindByExternalId("Account", "A1").Should().BeNull();
@@ -111,7 +111,7 @@ public sealed class WriteOutcomeTests
 
     private static Task Upsert(SalesforceCalls calls, string key)
     {
-        return calls.UpsertAsync("Account", [(key, key, new Dictionary<string, object?> { ["Name"] = "Acme" })], [], CancellationToken.None);
+        return calls.UpsertAsync(AccountSync.AccountObject, [(key, key, new Dictionary<string, object?> { ["Name"] = "Acme" })], [], CancellationToken.None);
     }
 
     private static (SalesforceCalls, FakeSalesforceStore, FailingHandler) Engine()

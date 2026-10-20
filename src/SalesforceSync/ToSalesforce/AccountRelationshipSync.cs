@@ -13,7 +13,7 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
 {
     public const string Type = AccountRelationshipEvent.Type;
 
-    private const string RelationshipObject = "Account_Relationship__c";
+    private static readonly SalesforceObject RelationshipObject = new("Account_Relationship__c", "ExternalId__c");
 
     public string EntityType => Type;
 
@@ -63,7 +63,7 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
 
         // READ: relationships (to compare; Ids for deletes) + target Accounts (must exist)
         var now = await salesforce.ReadAsync(RelationshipObject, wanted.SelectMany(w => w.Fields.Keys), events.Select(e => e.EntityId), ct);
-        var accounts = await salesforce.ReadAsync("Account", [], wanted.SelectMany(w => new[] { w.AccountExternalId!, w.RelatedAccountExternalId! }), ct);
+        var accounts = await salesforce.ReadAsync(AccountSync.AccountObject, [], wanted.SelectMany(w => new[] { w.AccountExternalId!, w.RelatedAccountExternalId! }), ct);
 
         // DECIDE: Account not in Salesforce yet → wait; else create, update or skip
         var sends = new List<(string Key, string ExternalId, Dictionary<string, object?> Fields)>();
