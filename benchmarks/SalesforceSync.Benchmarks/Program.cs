@@ -9,6 +9,7 @@ using SalesforceSync.LoadGenerator;
 // Optimizations validator disabled so project also launches from Aspire dashboard (Debug host); BenchmarkDotNet
 // still builds and runs measured code in Release.
 // Run: dotnet run -c Release -- --load [...]: sustained-load simulation (see SustainedLoad), not a BenchmarkDotNet run
+// Run: dotnet run -c Release -- --claims: our inbox repository against the simple claim one (ClaimComparison)
 // Aggregates are built on an event template (AggregateTemplate): templates/account-event.json, copied next to the
 // program, or --template my.json. Child benchmark processes get its path via environment.
 var templatePath = Environment.GetEnvironmentVariable(AggregateTemplate.Variable) is { Length: > 0 } fromEnvironment
@@ -39,6 +40,12 @@ catch (Exception ex) when (ex is InvalidDataException or IOException)
 }
 
 Console.WriteLine($"// aggregates are built on the template {Path.GetFullPath(templatePath)}");
+
+if (args.Contains("--claims"))
+{
+    await SalesforceSync.Benchmarks.ClaimComparison.ClaimScenarios.RunAsync();
+    return 0;
+}
 
 if (args.Contains("--load"))
 {
