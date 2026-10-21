@@ -26,64 +26,50 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
     {
         var failures = new Dictionary<string, List<Failure>>();
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
-        var upserts = events.Except(deletes).ToList();
+        var upserts = SalesforceCalls.KeepValid(events.Except(deletes), HasBothAccounts, "accountExternalId and relatedAccountExternalId are required", failures);
 
-        foreach (var e in upserts.Where(e => string.IsNullOrWhiteSpace(e.Event.AccountRelationship?.AccountExternalId)
-                                             || string.IsNullOrWhiteSpace(e.Event.AccountRelationship.RelatedAccountExternalId)))
-        {
-            SalesforceCalls.Fail(failures, e.EntityId, SalesforceErrors.InvalidEvent, "accountExternalId and relatedAccountExternalId are required", permanent: true);
-        }
-
-        upserts = [.. upserts.Where(e => !failures.ContainsKey(e.EntityId))];
         var recordType = await salesforce.RecordTypeIdAsync(RelationshipObject, "Standard", ct);
         if (recordType is null)
         {
-            foreach (var e in upserts)
-            {
-                SalesforceCalls.Fail(failures, e.EntityId, SalesforceErrors.InvalidRecordType, "the record type is not in the org");
-            }
-
+            SalesforceCalls.FailAll(upserts, failures, SalesforceErrors.InvalidRecordType, "the record type is not in the org");
             upserts = [];
         }
 
-        var wanted = upserts.Select(e =>
-        {
-            var r = e.Event.AccountRelationship!;
-            return (e.EntityId, r.AccountExternalId, r.RelatedAccountExternalId, Fields: SalesforceFields.Of(new AccountRelationshipRecord
-            {
-                Name = r.Name,
-                AccountId = r.AccountExternalId,
-                RelatedAccountId = r.RelatedAccountExternalId,
-                Type = r.Type,
-                StartDate = r.StartDate,
-                Active = r.IsActive,
-                RecordTypeId = recordType
-            }));
-        }).ToList();
+        var accounts = await salesforce.ReadAsync(AccountSync.AccountObject, [], upserts.SelectMany(AccountsOf), ct);
+        upserts = SalesforceCalls.WithParentsInSalesforce(upserts, AccountsOf, accounts, failures);
 
-        // READ: relationships (to compare; Ids for deletes) + target Accounts (must exist)
-        var now = await salesforce.ReadAsync(RelationshipObject, wanted.SelectMany(w => w.Fields.Keys), events.Select(e => e.EntityId), ct);
-        var accounts = await salesforce.ReadAsync(AccountSync.AccountObject, [], wanted.SelectMany(w => new[] { w.AccountExternalId!, w.RelatedAccountExternalId! }), ct);
+        var wanted = upserts.Select(e => Wanted(e, recordType)).ToList();
+        var now = await salesforce.ReadCurrentAsync(RelationshipObject, wanted, events.Select(e => e.EntityId), ct);
 
-        // DECIDE: Account not in Salesforce yet → wait; else create, update or skip
-        var sends = new List<(string Key, string ExternalId, Dictionary<string, object?> Fields)>();
-        foreach (var (key, account, related, fields) in wanted)
-        {
-            if (!accounts.ContainsKey(account!) || !accounts.ContainsKey(related!))
-            {
-                SalesforceCalls.Fail(failures, key, SalesforceErrors.DependencyNotSynced, $"Account {account} or {related} is not in Salesforce yet");
-            }
-            else if (SalesforceCalls.Changes(fields, now.TryGetValue(key, out var row) ? row : null) is { Count: > 0 } changes)
-            {
-                sends.Add((key, key, changes));
-            }
-        }
-
-        // WRITE. Delete of a record Salesforce lacks = already deleted
-        await salesforce.UpsertAsync(RelationshipObject, sends, failures, ct);
-        await salesforce.DeleteAsync(deletes.Where(e => now.ContainsKey(e.EntityId))
-            .Select(e => (e.EntityId, now[e.EntityId].GetProperty("Id").GetString()!)), failures, ct);
+        await salesforce.UpsertAsync(RelationshipObject, SalesforceCalls.Changed(wanted, now), failures, ct);
+        await salesforce.DeleteAsync(SalesforceCalls.Existing(deletes, now), failures, ct);
 
         return failures;
+    }
+
+    private static bool HasBothAccounts(ReadEvent<AccountRelationshipEvent> e)
+    {
+        return !string.IsNullOrWhiteSpace(e.Event.AccountRelationship?.AccountExternalId)
+               && !string.IsNullOrWhiteSpace(e.Event.AccountRelationship.RelatedAccountExternalId);
+    }
+
+    private static string[] AccountsOf(ReadEvent<AccountRelationshipEvent> e)
+    {
+        return [e.Event.AccountRelationship!.AccountExternalId!, e.Event.AccountRelationship.RelatedAccountExternalId!];
+    }
+
+    private static WantedRecord Wanted(ReadEvent<AccountRelationshipEvent> e, string? recordTypeId)
+    {
+        var r = e.Event.AccountRelationship!;
+        return new WantedRecord(e.EntityId, e.EntityId, SalesforceFields.Of(new AccountRelationshipRecord
+        {
+            Name = r.Name,
+            AccountId = r.AccountExternalId,
+            RelatedAccountId = r.RelatedAccountExternalId,
+            Type = r.Type,
+            StartDate = r.StartDate,
+            Active = r.IsActive,
+            RecordTypeId = recordTypeId
+        }));
     }
 }

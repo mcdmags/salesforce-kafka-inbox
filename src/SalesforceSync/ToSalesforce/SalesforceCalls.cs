@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text.Json;
 using SalesforceSync.Infrastructure.Salesforce;
+using SalesforceSync.Sync;
 
 namespace SalesforceSync.ToSalesforce;
 
@@ -21,6 +22,9 @@ public sealed record SalesforceObject(string Name, string ExternalIdField)
         return new SalesforceObject(sobject.Name, sobject.ExternalIdField);
     }
 }
+
+/// <summary>A record an event wants in Salesforce: its entity, the external id it is matched by, every field it sends.</summary>
+public sealed record WantedRecord(string EntityId, string ExternalId, Dictionary<string, object?> Fields);
 
 /// <summary>
 /// Salesforce calls the types' send steps are made of: each one API call (a few for big batches), no decisions about
@@ -104,6 +108,80 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
         }
 
         return changes;
+    }
+
+    /// <summary>The events <paramref name="isValid"/> accepts; any other is a bad event, dead-lettered at once with <paramref name="problem"/>.</summary>
+    public static List<ReadEvent<TEvent>> KeepValid<TEvent>(IEnumerable<ReadEvent<TEvent>> events, Func<ReadEvent<TEvent>, bool> isValid, string problem,
+        Dictionary<string, List<Failure>> failures)
+    {
+        var all = events.ToList();
+        foreach (var e in all.Where(e => !isValid(e)))
+        {
+            Fail(failures, e.EntityId, SalesforceErrors.InvalidEvent, problem, permanent: true);
+        }
+
+        return [.. all.Where(isValid)];
+    }
+
+    public static void FailAll<TEvent>(IEnumerable<ReadEvent<TEvent>> events, Dictionary<string, List<Failure>> failures, string code, string message)
+    {
+        foreach (var e in events)
+        {
+            Fail(failures, e.EntityId, code, message);
+        }
+    }
+
+    /// <summary>
+    /// The events whose parent Accounts (<paramref name="parents"/>: external ids) are all in <paramref name="accounts"/>.
+    /// Any other waits: retried until the account sync has created them.
+    /// </summary>
+    public static List<ReadEvent<TEvent>> WithParentsInSalesforce<TEvent>(IEnumerable<ReadEvent<TEvent>> events, Func<ReadEvent<TEvent>, string[]> parents,
+        Dictionary<string, JsonElement> accounts, Dictionary<string, List<Failure>> failures)
+    {
+        var ready = new List<ReadEvent<TEvent>>();
+        foreach (var e in events)
+        {
+            if (parents(e).Where(p => !accounts.ContainsKey(p)).ToList() is { Count: > 0 } missing)
+            {
+                Fail(failures, e.EntityId, SalesforceErrors.DependencyNotSynced, $"Account {string.Join(", ", missing)} is not in Salesforce yet");
+            }
+            else
+            {
+                ready.Add(e);
+            }
+        }
+
+        return ready;
+    }
+
+    /// <summary>
+    /// What Salesforce has for these external ids: the values to compare, and the Ids deletes need. Reads every field
+    /// the wanted records send, so a field the org lacks shows here, before anything is written.
+    /// </summary>
+    public Task<Dictionary<string, JsonElement>> ReadCurrentAsync(SalesforceObject sobject, IEnumerable<WantedRecord> wanted, IEnumerable<string> externalIds,
+        CancellationToken ct)
+    {
+        return ReadAsync(sobject, wanted.SelectMany(w => w.Fields.Keys), externalIds, ct);
+    }
+
+    /// <summary>What to write (<see cref="Changes"/>): records missing or differing; one already as wanted is left out.</summary>
+    public static List<(string Key, string ExternalId, Dictionary<string, object?> Fields)> Changed(IEnumerable<WantedRecord> wanted,
+        Dictionary<string, JsonElement> current)
+    {
+        return [.. wanted
+            .Select(w => (w.EntityId, w.ExternalId, Fields: Changes(w.Fields, current.TryGetValue(w.ExternalId, out var row) ? row : null)))
+            .Where(w => w.Fields.Count > 0)];
+    }
+
+    /// <summary>
+    /// The deletes whose record Salesforce has, by its Id (found by <paramref name="externalId"/>, default the entity
+    /// id). One Salesforce lacks is already deleted.
+    /// </summary>
+    public static IEnumerable<(string Key, string Id)> Existing<TEvent>(IEnumerable<ReadEvent<TEvent>> deletes, Dictionary<string, JsonElement> current,
+        Func<ReadEvent<TEvent>, string>? externalId = null)
+    {
+        externalId ??= e => e.EntityId;
+        return deletes.Where(e => current.ContainsKey(externalId(e))).Select(e => (e.EntityId, current[externalId(e)].GetProperty("Id").GetString()!));
     }
 
     /// <summary>

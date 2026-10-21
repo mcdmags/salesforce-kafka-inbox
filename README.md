@@ -700,13 +700,13 @@ reads like this, top to bottom; the calls are in `SalesforceCalls`):
 1. **Record types** (`RecordTypeIdAsync`, via `RecordTypeCache`): the object's record type developer name becomes its
    `RecordTypeId`. An entity whose record type the org doesn't have fails here, alone (`INVALID_RECORD_TYPE`, retried);
    everything else Salesforce rejects, it rejects at the write.
-2. **Read** (`ReadAsync`): one query per object, by external id (up to 200 ids a query), for the fields the type
+2. **Read** (`ReadAsync`; `ReadCurrentAsync` for the records a type writes): one query per object, by external id (up to 200 ids a query), for the fields the type
    sends, the external id and the Id (a delete needs it).
-3. **Decide** (`Changes`, and the type's own rules): each record becomes a create (all its non-empty fields), an update
+3. **Decide** (`Changes`/`Changed`, `WithParentsInSalesforce`, and the type's own rules): each record becomes a create (all its non-empty fields), an update
    (only the fields that differ, values compared in their .NET type's canonical form, `FieldValues`), a delete (by the Id
    the read found) or nothing. An entity with nothing to send is done; one whose parent is in neither Salesforce nor
    the entity waits (`DEPENDENCY_NOT_SYNCED`).
-4. **Write** (`UpsertAsync`, `DeleteAsync`): one upsert per object, each after the objects its records point at (an
+4. **Write** (`UpsertAsync`, `DeleteAsync` of the records `Existing` finds): one upsert per object, each after the objects its records point at (an
    entity's record is not sent once an earlier record of the entity failed), then the deletes (200 records a call at
    most). Each record's answer says saved, retry or dead-letter (`SalesforceErrors`); an entity's outcome is its worst
    record's.
@@ -1070,7 +1070,7 @@ consumer or the worker loops names an object. An object supplies:
 AddEntitySync<AccountRelationshipIngest, AccountRelationshipSync, AccountRelationshipInboxRow>(services);
 ```
 
-`ToSalesforce/ContactSync.cs` is the smallest complete example (86 lines): it parses nothing itself (the flow did), maps a
+`ToSalesforce/ContactSync.cs` is the smallest complete example (72 lines): it parses nothing itself (the flow did), maps a
 contact to its fields, reads the contacts and the Accounts they point at, waits for a missing Account, and upserts or
 deletes. A step may do all of this differently (another write order, another API): the flow only needs the entities that
 failed, and why.
