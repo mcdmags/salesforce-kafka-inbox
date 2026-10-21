@@ -5,11 +5,12 @@ using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.LoadGenerator;
 using SalesforceSync.Sync;
+using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Benchmarks;
 
 /// <summary>
-/// CPU-only hot paths: header parsing, event reading, type-aware normalize + compare.
+/// CPU-only hot paths: header parsing, event reading, a record's fields, type-aware normalize + compare.
 /// </summary>
 [MemoryDiagnoser]
 public class MicroBenchmarks
@@ -17,6 +18,7 @@ public class MicroBenchmarks
     private const string LimitHeader = "api-usage=10018/100000; api-bursts=1/750; per-app-api-usage=17/250(appName=sync)";
 
     private List<InboxEvent> _tenEvents = default!;
+    private AccountRecord _accountRecord = default!;
     private JsonElement _number;
     private JsonElement _datetime;
 
@@ -37,6 +39,25 @@ public class MicroBenchmarks
                 LeaseEnd: DateTimeOffset.MaxValue);
         })];
 
+        // Every field filled, as the account sync fills it from an event
+        var a = factory.Account("ACC-000099", "ACC-000099", 1, [], []);
+        _accountRecord = new AccountRecord
+        {
+            Name = a.Name,
+            Rating = a.Rating,
+            Industry = a.Industry,
+            Description = a.Description,
+            AnnualRevenue = a.AnnualRevenue,
+            NumberOfEmployees = a.NumberOfEmployees,
+            Phone = a.Phone,
+            Website = a.Website,
+            Active = a.IsActive,
+            Tags = a.Tags is null ? null : string.Join(';', a.Tags),
+            CustomerSince = a.CustomerSince,
+            LastContacted = a.LastContactedAt,
+            RecordTypeId = "012000000000000AAA"
+        };
+
         _number = JsonDocument.Parse("87.50").RootElement.Clone();
         _datetime = JsonDocument.Parse("\"2026-10-12T01:02:03.000+0000\"").RootElement.Clone();
     }
@@ -52,6 +73,16 @@ public class MicroBenchmarks
     public bool ReadAndValidateEvent()
     {
         return AccountEvent.Reader.TryRead(_tenEvents[0].Payload, out _, out _);
+    }
+
+    /// <summary>
+    /// Send step per record: a record class as the fields dictionary (<see cref="SalesforceFields.Of{T}"/>: property list
+    /// read once per class, compiled getters). A hand-written dictionary of the same 13 fields took about the same.
+    /// </summary>
+    [Benchmark]
+    public Dictionary<string, object?> AccountFields()
+    {
+        return SalesforceFields.Of(_accountRecord);
     }
 
     [Benchmark]

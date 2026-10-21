@@ -182,8 +182,9 @@ public static class HtmlReports
             nameof(MicroBenchmarks) =>
                 """
                 <p>Small pieces of the sync's hot path, in memory, without a database or network: parsing Salesforce's
-                Sforce-Limit-Info header, reading and validating one event, and comparing a number and a date-time with
-                the value Salesforce returned. One operation, the Mean, is one call.</p>
+                Sforce-Limit-Info header, reading and validating one event, turning an account's record class into the
+                fields it sends (AccountFields), and comparing a number and a date-time with the value Salesforce
+                returned. One operation, the Mean, is one call.</p>
                 """,
             _ => "<p>See the benchmark class of this name.</p>"
         };

@@ -482,6 +482,19 @@ Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` 
   instead of the few that changed, and the values are new texts every time. These numbers are the baseline for later
   runs, not comparable byte for byte with the runs below.
 
+Micro benchmarks, run on their own after the record classes (95bba17) with the new `AccountFields`: an account's record
+class as the fields dictionary the sync sends (`SalesforceFields.Of`), 13 fields. Its property list is read once per
+class and each field read through a compiled getter, so it costs what the hand-written dictionary it replaced did
+(measured side by side: 150 ns against 139 ns, 952 B against 1,096 B).
+
+| Method | Mean | Allocated |
+|---|--:|--:|
+| ParseLimitHeader | 613.49 ns | 2832 B |
+| ReadAndValidateEvent | 1,103.17 ns | 1632 B |
+| AccountFields | 132.59 ns | 800 B |
+| DiffNumber | 19.35 ns | 32 B |
+| DiffDateTime | 144.21 ns | 224 B |
+
 ## Latest run: plain-crud with an external-id field per object, at 5135c6c
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at 5135c6c, on 2026-10-20, against the
