@@ -1,5 +1,4 @@
 using SalesforceSync.Data.Inbox;
-using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.ToSalesforce;
@@ -28,17 +27,10 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = SalesforceCalls.KeepValid(events.Except(deletes), HasBothAccounts, "accountExternalId and relatedAccountExternalId are required", failures);
 
-        var recordType = await salesforce.RecordTypeIdAsync(RelationshipObject, "Standard", ct);
-        if (recordType is null)
-        {
-            SalesforceCalls.FailAll(upserts, failures, SalesforceErrors.InvalidRecordType, "the record type is not in the org");
-            upserts = [];
-        }
-
         var accounts = await salesforce.ReadAsync(AccountSync.AccountObject, [], upserts.SelectMany(AccountsOf), ct);
         upserts = SalesforceCalls.WithParentsInSalesforce(upserts, AccountsOf, accounts, failures);
 
-        var wanted = upserts.Select(e => Wanted(e, recordType)).ToList();
+        var wanted = upserts.Select(Wanted).ToList();
         var now = await salesforce.ReadCurrentAsync(RelationshipObject, wanted, events.Select(e => e.EntityId), ct);
 
         await salesforce.UpsertAsync(RelationshipObject, SalesforceCalls.Changed(wanted, now), failures, ct);
@@ -58,7 +50,7 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
         return [e.Event.AccountRelationship!.AccountExternalId!, e.Event.AccountRelationship.RelatedAccountExternalId!];
     }
 
-    private static WantedRecord Wanted(ReadEvent<AccountRelationshipEvent> e, string? recordTypeId)
+    private static WantedRecord Wanted(ReadEvent<AccountRelationshipEvent> e)
     {
         var r = e.Event.AccountRelationship!;
         return new WantedRecord(e.EntityId, e.EntityId, SalesforceFields.Of(new AccountRelationshipRecord
@@ -68,8 +60,7 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
             RelatedAccountId = r.RelatedAccountExternalId,
             Type = r.Type,
             StartDate = r.StartDate,
-            Active = r.IsActive,
-            RecordTypeId = recordTypeId
+            Active = r.IsActive
         }));
     }
 }

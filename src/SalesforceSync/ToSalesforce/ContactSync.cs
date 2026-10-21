@@ -1,5 +1,4 @@
 using SalesforceSync.Data.Inbox;
-using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.ToSalesforce;
@@ -27,17 +26,10 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = SalesforceCalls.KeepValid(events.Except(deletes), HasAccount, "accountExternalId is required", failures);
 
-        var recordType = await salesforce.RecordTypeIdAsync(ContactObject, "Standard", ct);
-        if (recordType is null)
-        {
-            SalesforceCalls.FailAll(upserts, failures, SalesforceErrors.InvalidRecordType, "the record type is not in the org");
-            upserts = [];
-        }
-
         var accounts = await salesforce.ReadAsync(AccountSync.AccountObject, [], upserts.SelectMany(AccountOf), ct);
         upserts = SalesforceCalls.WithParentsInSalesforce(upserts, AccountOf, accounts, failures);
 
-        var wanted = upserts.Select(e => Wanted(e, recordType)).ToList();
+        var wanted = upserts.Select(Wanted).ToList();
         var now = await salesforce.ReadCurrentAsync(ContactObject, wanted, events.Select(e => e.EntityId), ct);
 
         await salesforce.UpsertAsync(ContactObject, SalesforceCalls.Changed(wanted, now), failures, ct);
@@ -56,7 +48,7 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
         return [e.Event.Contact!.AccountExternalId!];
     }
 
-    private static WantedRecord Wanted(ReadEvent<ContactEvent> e, string? recordTypeId)
+    private static WantedRecord Wanted(ReadEvent<ContactEvent> e)
     {
         var c = e.Event.Contact!;
         return new WantedRecord(e.EntityId, e.EntityId, SalesforceFields.Of(new ContactRecord
@@ -65,8 +57,7 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
             FirstName = c.FirstName,
             LastName = c.LastName,
             Email = c.Email,
-            Phone = c.Phone,
-            RecordTypeId = recordTypeId
+            Phone = c.Phone
         }));
     }
 }

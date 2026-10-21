@@ -11,11 +11,24 @@ namespace SalesforceSync.ToSalesforce;
 /// </summary>
 public static class SalesforceFields
 {
-    /// <summary>Every property of the record by its API name, null values included: null clears the field.</summary>
+    /// <summary>
+    /// Every property of the record by its API name, null values included: null clears the field. A null
+    /// <see cref="CreateOnlyAttribute"/> property is left out.
+    /// </summary>
     public static Dictionary<string, object?> Of<T>(T record)
         where T : class
     {
-        return Properties<T>.All.ToDictionary(p => p.Name, p => p.Get(record));
+        var fields = new Dictionary<string, object?>(Properties<T>.All.Length);
+        foreach (var (name, createOnly, get) in Properties<T>.All)
+        {
+            var value = get(record);
+            if (value is not null || !createOnly)
+            {
+                fields[name] = value;
+            }
+        }
+
+        return fields;
     }
 
     /// <summary>One property's API name: <c>Name&lt;ContactRecord&gt;(c => c.AccountId)</c> is <c>AccountId__c</c>.</summary>
@@ -33,8 +46,9 @@ public static class SalesforceFields
     // Per record class, once: its properties with compiled getters (a sync builds one record per event)
     private static class Properties<T>
     {
-        public static readonly (string Name, Func<T, object?> Get)[] All = [.. typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Select(p => (ApiName(p), Getter(p)))];
+        public static readonly (string Name, bool CreateOnly, Func<T, object?> Get)[] All = [.. typeof(T)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Select(p => (ApiName(p), p.IsDefined(typeof(CreateOnlyAttribute)), Getter(p)))];
 
         private static Func<T, object?> Getter(PropertyInfo property)
         {

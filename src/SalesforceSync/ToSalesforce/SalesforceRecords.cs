@@ -32,6 +32,8 @@ public sealed class AccountRecord
     [JsonPropertyName("Last_Contacted__c")]
     public DateTimeOffset? LastContacted { get; init; }
 
+    /// <summary>Set when the Account is created; Salesforce requires it then, and an update never changes it.</summary>
+    [CreateOnly]
     public string? RecordTypeId { get; init; }
 }
 
@@ -61,8 +63,6 @@ public sealed class ProfileRecord
 
     [JsonPropertyName("Start_Date__c")]
     public DateOnly? StartDate { get; init; }
-
-    public string? RecordTypeId { get; init; }
 }
 
 /// <summary>The Account_Relationship__c fields the sync writes. Names both Accounts by external id (Text foreign keys).</summary>
@@ -85,8 +85,6 @@ public sealed class AccountRelationshipRecord
 
     [JsonPropertyName("Active__c")]
     public bool? Active { get; init; }
-
-    public string? RecordTypeId { get; init; }
 }
 
 /// <summary>The Contact fields the sync writes. Names its Account by external id (Text foreign key).</summary>
@@ -100,8 +98,14 @@ public sealed class ContactRecord
     public string? LastName { get; init; }
     public string? Email { get; init; }
     public string? Phone { get; init; }
-    public string? RecordTypeId { get; init; }
 }
+
+/// <summary>
+/// A field sent only when the record is created: <see cref="SalesforceFields.Of{T}"/> leaves it out while it is null,
+/// so it is neither read nor compared, and an update never clears it.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class CreateOnlyAttribute : Attribute;
 
 /// <summary>The Salesforce object a record class is, and the external-id field its records are matched by.</summary>
 /// <param name="name">Object API name, e.g. <c>Account</c>.</param>

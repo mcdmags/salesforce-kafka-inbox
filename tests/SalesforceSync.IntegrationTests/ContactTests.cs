@@ -1,5 +1,4 @@
 using System.Text.Json.Nodes;
-using SalesforceSync.FakeSalesforce;
 
 namespace SalesforceSync.IntegrationTests;
 
@@ -24,7 +23,7 @@ public sealed class ContactTests(SyncFixture app)
         record.Should().NotBeNull();
         ((string?)record!["AccountId__c"]).Should().Be(acct);
         record["AccountId"].Should().BeNull("the standard lookup is left alone");
-        ((string?)record["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Contact", "Standard"));
+        ((string?)record["RecordTypeId"]).Should().BeNull("only a new Account needs a record type");
         var write = (await app.GetWriteRequestsAsync(contact)).Should().ContainSingle().Subject;
         ((string?)write["method"], (string?)write["url"]).Should().Be(("PATCH", "/services/data/v62.0/composite/sobjects/Contact/ExternalId__c"));
         write["body"]!["allOrNone"]!.GetValue<bool>().Should().BeFalse();

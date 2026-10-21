@@ -1,5 +1,4 @@
 using System.Text.Json.Nodes;
-using SalesforceSync.FakeSalesforce;
 
 namespace SalesforceSync.IntegrationTests;
 
@@ -27,7 +26,7 @@ public sealed class RelationshipTests(SyncFixture app)
         record.Should().NotBeNull();
         ((string?)record!["AccountId__c"], (string?)record["RelatedAccountId__c"]).Should().Be((parent, child));
         ((string?)record["Type__c"]).Should().Be("Parent");
-        ((string?)record["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Account_Relationship__c", "Standard"));
+        ((string?)record["RecordTypeId"]).Should().BeNull("only a new Account needs a record type");
 
         await app.PublishRelationshipAsync(rel, 2, parent, child, new JsonObject { ["type"] = "Partner", ["isActive"] = true });
         await app.WaitForInboxSettledAsync(rel, 2, SyncFixture.Relationships);

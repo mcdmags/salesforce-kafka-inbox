@@ -33,7 +33,6 @@ public sealed class SharedRecordTypeCacheTests(MultiPodFixture app)
             services.GetRequiredService<ISalesforceRestClient>(), services.GetRequiredService<IOptions<SalesforceOptions>>());
 
         (await newPod.IdOfAsync("Account", "Business", CancellationToken.None)).Should().NotBeNull();
-        (await newPod.IdOfAsync("Profile__c", "Standard", CancellationToken.None)).Should().NotBeNull();
 
         (await app.GetStatsAsync()).GetProperty("recordTypeQueries").GetInt64().Should().Be(queriesBefore);
     }

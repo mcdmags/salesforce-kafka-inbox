@@ -1,3 +1,4 @@
+using System.Text.Json;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
@@ -17,6 +18,11 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
     public static readonly SalesforceObject AccountObject = SalesforceObject.Of<AccountRecord>();
     private static readonly SalesforceObject ProfileObject = SalesforceObject.Of<ProfileRecord>();
 
+    /// <summary>Developer name of the record type new Accounts get.</summary>
+    private const string AccountRecordType = "Business";
+
+    private static readonly string RecordTypeIdField = SalesforceFields.Name<AccountRecord>(r => r.RecordTypeId);
+
     public string EntityType => Type;
 
     public Task<int> SyncBatchAsync(CancellationToken ct)
@@ -30,18 +36,12 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = SalesforceCalls.KeepValid(events.Except(deletes), e => e.Event.Account is not null, "account is required", failures);
 
-        var (accountType, profileType) = await RecordTypeIdsAsync(ct);
-        if (accountType is null || profileType is null)
-        {
-            SalesforceCalls.FailAll(upserts, failures, SalesforceErrors.InvalidRecordType, "the Account or Profile record type is not in the org");
-            upserts = [];
-        }
-
-        var wantedAccounts = upserts.Select(e => WantedAccount(e, accountType)).ToList();
-        var wantedProfiles = upserts.Where(HasProfile).Select(e => WantedProfile(e, profileType)).ToList();
+        var wantedAccounts = upserts.Select(WantedAccount).ToList();
+        var wantedProfiles = upserts.Where(HasProfile).Select(WantedProfile).ToList();
 
         var accountsNow = await salesforce.ReadCurrentAsync(AccountObject, wantedAccounts, events.Select(e => e.EntityId), ct);
         var profilesNow = await salesforce.ReadCurrentAsync(ProfileObject, wantedProfiles, events.Select(ProfileKey), ct);
+        wantedAccounts = await WithRecordTypeIfNewAsync(wantedAccounts, accountsNow, failures, ct);
 
         await salesforce.UpsertAsync(AccountObject, SalesforceCalls.Changed(wantedAccounts, accountsNow), failures, ct);
         await salesforce.UpsertAsync(ProfileObject, ProfilesOfSavedAccounts(SalesforceCalls.Changed(wantedProfiles, profilesNow), failures), failures, ct);
@@ -52,14 +52,36 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         return failures;
     }
 
-    private async Task<(string? Account, string? Profile)> RecordTypeIdsAsync(CancellationToken ct)
+    private static WantedRecord WantedAccount(ReadEvent<AccountEvent> e)
     {
-        return (await salesforce.RecordTypeIdAsync(AccountObject, "Business", ct), await salesforce.RecordTypeIdAsync(ProfileObject, "Standard", ct));
+        return new WantedRecord(e.EntityId, e.EntityId, AccountFields(e.Event.Account!));
     }
 
-    private static WantedRecord WantedAccount(ReadEvent<AccountEvent> e, string? recordTypeId)
+    /// <summary>
+    /// Accounts Salesforce doesn't have yet get the record type (needed only to create one). If the org lacks it, they
+    /// fail (retried) and are left out; their profiles then wait for them.
+    /// </summary>
+    private async Task<List<WantedRecord>> WithRecordTypeIfNewAsync(List<WantedRecord> accounts, Dictionary<string, JsonElement> accountsNow,
+        Dictionary<string, List<Failure>> failures, CancellationToken ct)
     {
-        return new WantedRecord(e.EntityId, e.EntityId, AccountFields(e.Event.Account!, recordTypeId));
+        var created = accounts.Where(a => !accountsNow.ContainsKey(a.ExternalId)).ToList();
+        if (created.Count == 0)
+        {
+            return accounts;
+        }
+
+        var recordTypeId = await salesforce.RecordTypeIdAsync(AccountObject, AccountRecordType, ct);
+        if (recordTypeId is null)
+        {
+            foreach (var a in created)
+            {
+                SalesforceCalls.Fail(failures, a.EntityId, SalesforceErrors.InvalidRecordType, $"the Account record type {AccountRecordType} is not in the org");
+            }
+
+            return [.. accounts.Except(created)];
+        }
+
+        return [.. accounts.Select(a => accountsNow.ContainsKey(a.ExternalId) ? a : a with { Fields = new(a.Fields) { [RecordTypeIdField] = recordTypeId } })];
     }
 
     /// <summary>An event without a profile leaves Salesforce's profile as it is.</summary>
@@ -68,9 +90,9 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         return e.Event.Account!.Profile is not null;
     }
 
-    private static WantedRecord WantedProfile(ReadEvent<AccountEvent> e, string? recordTypeId)
+    private static WantedRecord WantedProfile(ReadEvent<AccountEvent> e)
     {
-        return new WantedRecord(e.EntityId, ProfileKey(e), ProfileFields(e, recordTypeId));
+        return new WantedRecord(e.EntityId, ProfileKey(e), ProfileFields(e));
     }
 
     /// <summary>A profile names its account, so it is written only if the account was saved.</summary>
@@ -91,7 +113,7 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         return e.Event.Account?.Profile?.ExternalId ?? e.EntityId;
     }
 
-    private static Dictionary<string, object?> AccountFields(AccountPayload a, string? recordTypeId)
+    private static Dictionary<string, object?> AccountFields(AccountPayload a)
     {
         return SalesforceFields.Of(new AccountRecord
         {
@@ -107,12 +129,11 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
             // list in event, ';'-separated multi-select picklist in Salesforce
             Tags = a.Tags is null ? null : string.Join(';', a.Tags),
             CustomerSince = a.CustomerSince,
-            LastContacted = a.LastContactedAt,
-            RecordTypeId = recordTypeId
+            LastContacted = a.LastContactedAt
         });
     }
 
-    private static Dictionary<string, object?> ProfileFields(ReadEvent<AccountEvent> e, string? recordTypeId)
+    private static Dictionary<string, object?> ProfileFields(ReadEvent<AccountEvent> e)
     {
         var p = e.Event.Account!.Profile!;
         return SalesforceFields.Of(new ProfileRecord
@@ -124,8 +145,7 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
             Discount = p.DiscountPercent,
             Notes = p.Notes,
             OptIn = p.OptIn,
-            StartDate = p.StartDate,
-            RecordTypeId = recordTypeId
+            StartDate = p.StartDate
         });
     }
 }

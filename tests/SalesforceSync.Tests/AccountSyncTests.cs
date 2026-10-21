@@ -32,7 +32,8 @@ public sealed class AccountSyncTests
         Account!["Name"]!.GetValue<string>().Should().Be("Acme");
         Account["Tags__c"]!.GetValue<string>().Should().Be("B2B;Retail", "a list in the event, a multi-select value in Salesforce");
         Account["RecordTypeId"]!.GetValue<string>().Should().NotBeNullOrEmpty();
-        Profile!["Tier__c"]!.GetValue<string>().Should().Be("Gold");
+        Profile!["RecordTypeId"].Should().BeNull("only a new Account needs a record type");
+        Profile["Tier__c"]!.GetValue<string>().Should().Be("Gold");
         Profile["AccountId__c"]!.GetValue<string>().Should().Be(Acme, "the Account's key, as text");
         _sync.Accounts.Synced.Should().Equal(Acme);
     }
@@ -150,14 +151,28 @@ public sealed class AccountSyncTests
     }
 
     [Fact]
-    public async Task Without_the_record_type_in_the_org_the_account_waits_for_it()
+    public async Task A_new_account_gets_the_record_type_from_the_org()
     {
-        // Mock org has no record type of this name: org decides, not event
         var org = _sync.Org;
         await SyncAsync(Events.Account(Acme, 1, "inserted"));
 
         org.GetStats().RecordTypeQueries.Should().BeGreaterThan(0, "the type's record types are read from the org");
         Account!["RecordTypeId"]!.GetValue<string>().Should().Be(await _sync.Calls.RecordTypeIdAsync(AccountSync.AccountObject, "Business", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task An_update_neither_sends_nor_changes_the_record_type()
+    {
+        await SyncAsync(Events.Account(Acme, 1, "inserted"));
+        _sync.Org.Edit("Account", Acme, new JsonObject { ["RecordTypeId"] = null });
+        var reads = _sync.Org.GetStats().Queries;
+
+        await SyncAsync(Events.Account(Acme, 2, account: a => a["name"] = "Renamed"));
+
+        Account!["Name"]!.GetValue<string>().Should().Be("Renamed");
+        Account["RecordTypeId"].Should().BeNull("set by Salesforce users after the create; the sync leaves it alone");
+        _sync.Org.WriteRequests[^1]["body"]!["records"]!.AsArray().Single()!.AsObject().Should().NotContainKey("RecordTypeId");
+        (_sync.Org.GetStats().Queries - reads).Should().Be(2, "the Accounts and the Profiles; no record type lookup without a new Account");
     }
 
     [Fact]

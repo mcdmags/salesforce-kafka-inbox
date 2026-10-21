@@ -46,8 +46,8 @@ account, is deleted in Salesforce. Several things make this harder than "consume
 | Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. `inserted` and `updated` are the same to the sync. |
 | Deletes | A child gone from an aggregate's `after` (or the whole Account, when `after` is missing) is a `deleted` event in its inbox, ordered by `meta.time` like any other: an older insert can't bring it back, a newer one recreates it. The batch's read finds the record's Id by its external id, and every record to delete goes into one **sObject Collections delete** by Id (`DELETE /composite/sobjects?ids=...&allOrNone=false`), after the batch's upserts. A record the read doesn't find (never synced, or deleted already) costs nothing and is done. Already deleted is success, a refusal is permanent or transient by its code, a lost answer is held (`UNKNOWN_OUTCOME`). See [Deletes](#deletes). |
 | Change-only updates | **Diff against Salesforce by the value's .NET type**: the current records are read by external id with every field of their sObject class (an event is the full record; an empty field is cleared if Salesforce has a value). Values are put in a canonical form by their type (`""` = `null`, numbers as decimals, date/time to the second, time to the millisecond; a checkbox `null` equals Salesforce's `false`) and only fields that differ are sent. The org's field metadata is not read, so a value Salesforce stores differently (a number with more decimals than the field's scale, multi-select values in another order than the picklist's) looks changed and is written again: the mapping should send values as Salesforce stores them. A new record's `null` checkbox is not sent (Salesforce defaults it to `false`). The comparison is with what is in Salesforce *now*, so edits made directly in Salesforce are corrected. |
-| Batching and API calls | Every call is one operation on many records (`SelectAsync`, `UpsertAsync`, `DeleteAsync`); there is no Composite request. **One read call per object** per batch of up to `Sync:BatchSize` entities (180, max 200): a query of up to 200 external ids, whose URL fits Salesforce's 16,384-byte limit on a call's URI and headers (long ids split a query further). Then, after the diff, the writes: **one `UpsertAsync` per object** (≤200 records, Salesforce's limit; a batch is at most 200 entities), parents first, with exactly the planned fields, matched by external id; then **one `DeleteAsync`** of the Ids to delete (≤180). So a batch of new Accounts with their Profiles costs 4 calls (two reads, two upserts), an Account-only change 3 (two reads, one upsert: the Profile is read too), and relationships and contacts 3 (their own object and the Account they point at, read; one upsert). A batch of deletes only is its reads plus one delete, and a delete Salesforce has nothing for costs the reads only. See [One call per object](#one-call-per-object) for the cost against Composite requests. The first batch of a pod, and then every 15 minutes (`Salesforce:RecordTypeRefreshInterval`), adds one query on `RecordType` per object that has a record type. Request bodies are gzipped, responses accepted compressed. |
-| Record types | Every synced object has a record type, named by developer name in its sync (`Business` for Account, `Standard` for the others). Its Id comes from one SOQL query on `RecordType` per object, cached in the process for `Salesforce:RecordTypeRefreshInterval` (15 minutes), and every record is written with that `RecordTypeId` (diffed like any other field). A record type the org doesn't have (or not active) fails that entity alone before any write (`INVALID_RECORD_TYPE`, retried) and makes the next batch read the record types again. See [Record types](#record-types). |
+| Batching and API calls | Every call is one operation on many records (`SelectAsync`, `UpsertAsync`, `DeleteAsync`); there is no Composite request. **One read call per object** per batch of up to `Sync:BatchSize` entities (180, max 200): a query of up to 200 external ids, whose URL fits Salesforce's 16,384-byte limit on a call's URI and headers (long ids split a query further). Then, after the diff, the writes: **one `UpsertAsync` per object** (≤200 records, Salesforce's limit; a batch is at most 200 entities), parents first, with exactly the planned fields, matched by external id; then **one `DeleteAsync`** of the Ids to delete (≤180). So a batch of new Accounts with their Profiles costs 4 calls (two reads, two upserts), an Account-only change 3 (two reads, one upsert: the Profile is read too), and relationships and contacts 3 (their own object and the Account they point at, read; one upsert). A batch of deletes only is its reads plus one delete, and a delete Salesforce has nothing for costs the reads only. See [One call per object](#one-call-per-object) for the cost against Composite requests. A batch with a new Account adds one query on `RecordType` the first time in a pod, then every 15 minutes (`Salesforce:RecordTypeRefreshInterval`). Request bodies are gzipped, responses accepted compressed. |
+| Record types | Only a new Account gets a record type: `Business`, named by developer name in `AccountSync`. Its Id comes from one SOQL query on `RecordType`, cached for `Salesforce:RecordTypeRefreshInterval` (15 minutes), and is sent only when the Account is created; an update never sends or compares it. Profiles, relationships and contacts send none. A record type the org doesn't have (or not active) fails that new Account alone before any write (`INVALID_RECORD_TYPE`, retried) and makes the next batch read the record types again. See [Record types](#record-types). |
 | Bad records | A value Salesforce rejects (too long, wrong type, required field emptied, a validation rule) fails only its own unit, by Salesforce's answer for that record (permanent or transient by its code; a required field emptied on an *update* is retried until `MaxRetries`, since the code can also mean the record was deleted meanwhile); an unknown or read-only field is a mapping error and stops the inbox; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a parent not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](docs/inbox/README.md#retries-and-dead-letters). |
 | Postgres failures | Every unit of work (claim, outcomes, ingest, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)`; the inbox's statements commit one by one, with no explicit transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; rows leased by a claim whose commit was lost wait for the lease to expire. A batch's outcomes are recorded with two statements, not one per entity: `MarkDoneAsync` for the synced rows and `MarkFailedAsync` for the failed ones (a permanent failure is dead-lettered at once by the same statement). |
@@ -106,7 +106,7 @@ no LINQ form. The rate limiter's `RateLimitSql` only locks its row (`FOR UPDATE`
 ### The record type cache
 
 The only metadata of the org the sync reads is its record types' Ids (Salesforce takes `RecordTypeId` as an Id, which
-differs between orgs). `RecordTypeCache` reads them with one SOQL query per object that has a record type
+differs between orgs). `RecordTypeCache` reads them with one SOQL query per object that needs a record type (only Account)
 (`SELECT Id, DeveloperName, IsActive FROM RecordType WHERE SobjectType IN ('Account')`, rows read into a typed
 `RecordTypeRow` by `SelectAsync<TRow>`) and keeps the active ones in a `HybridCache`
 (`Microsoft.Extensions.Caching.Hybrid`), which is two layers:
@@ -275,7 +275,7 @@ raw event JSON ─► AccountEvent { AccountPayload { …, ProfilePayload } }   
 **Salesforce API names live only in the record classes** (`ToSalesforce/SalesforceRecords.cs`): one class per object
 (`AccountRecord`, ...), one property per field the sync writes, the API name as `[JsonPropertyName]` where it differs
 from the property's name, the object and its external-id field as `[SObject]`. The syncs fill a record from the event
-and send `SalesforceFields.Of(record)`; the record type developer name is in the sync. Pointing the sync at an org
+and send `SalesforceFields.Of(record)`; the Account record type developer name is in `AccountSync`. Pointing the sync at an org
 whose fields are named differently (`LLC_BI__Active__c` instead of `Active__c`) means editing those attributes and
 nothing else. A typo is found by the integration and unit tests, which run every sync against the mock org (whose
 schema, `FakeSchema`, rejects an unknown field or `RecordTypeId` like Salesforce).
@@ -308,16 +308,15 @@ Id for the records to delete (`DELETE /composite/sobjects?ids=...`, [Deletes](#d
 to 200 records; there is no Composite request. The steps, in the order a type's send step runs them (`ToSalesforce/AccountSync.cs`
 reads like this, top to bottom; the calls are in `SalesforceCalls`):
 
-1. **Record types** (`RecordTypeIdAsync`, via `RecordTypeCache`): the object's record type developer name becomes its
-   `RecordTypeId`. An entity whose record type the org doesn't have fails here, alone (`INVALID_RECORD_TYPE`, retried);
-   everything else Salesforce rejects, it rejects at the write.
-2. **Read** (`ReadAsync`; `ReadCurrentAsync` for the records a type writes): one query per object, by external id (up to 200 ids a query), for the fields the type
+1. **Read** (`ReadAsync`; `ReadCurrentAsync` for the records a type writes): one query per object, by external id (up to 200 ids a query), for the fields the type
    sends, the external id and the Id (a delete needs it).
 3. **Decide** (`Changes`/`Changed`, `WithParentsInSalesforce`, and the type's own rules): each record becomes a create (all its non-empty fields), an update
    (only the fields that differ, values compared in their .NET type's canonical form, `FieldValues`), a delete (by the Id
    the read found) or nothing. An entity with nothing to send is done; one whose parent is in neither Salesforce nor
-   the entity waits (`DEPENDENCY_NOT_SYNCED`).
-4. **Write** (`UpsertAsync`, `DeleteAsync` of the records `Existing` finds): one upsert per object, each after the objects its records point at (an
+   the entity waits (`DEPENDENCY_NOT_SYNCED`). Accounts the read didn't find get the record type
+   (`RecordTypeIdAsync`, via `RecordTypeCache`); a new Account whose record type the org doesn't have fails here, alone
+   (`INVALID_RECORD_TYPE`, retried). Everything else Salesforce rejects, it rejects at the write.
+3. **Write** (`UpsertAsync`, `DeleteAsync` of the records `Existing` finds): one upsert per object, each after the objects its records point at (an
    entity's record is not sent once an earlier record of the entity failed), then the deletes (200 records a call at
    most). Each record's answer says saved, retry or dead-letter (`SalesforceErrors`); an entity's outcome is its worst
    record's.
@@ -438,25 +437,26 @@ an object, so a batch's upsert of one object fits one call (Salesforce's 200 rec
 
 ### Record types
 
-Every synced object must have a record type, and each sync names it by **developer name**:
+Only a new Account needs a record type. `AccountSync` names it by **developer name**:
 
 ```csharp
-new Dictionary<string, object?> { ["Name"] = a.Name, ... }, RecordType: "Business"   // AccountSync
+private const string AccountRecordType = "Business";   // AccountSync
 ```
 
-These are defaults; they must match record types in the org (see
-[step 4](#4-create-the-objects-and-fields)). The engine turns the name into an Id with one SOQL query per object on Salesforce's `RecordType`
+It must match a record type in the org (see [step 4](#4-create-the-objects-and-fields)). The engine turns the name
+into an Id with one SOQL query on Salesforce's `RecordType`
 (`SELECT Id, DeveloperName, IsActive FROM RecordType WHERE SobjectType IN ('Account')`), cached in the process for
 `Salesforce:RecordTypeRefreshInterval` (15 minutes; see [The record type cache](#the-record-type-cache)). That is one
-extra call per object per interval per pod.
+extra call per interval per pod, and none while every Account is already in Salesforce.
 
-`RecordTypeId` is then an ordinary field of the record's desired state: set on create, read back by the batch's read,
-compared as text, and written on update only when Salesforce has another one
-(for example after a user changed it). A parent needs no record type to be found: it is found by its external id only.
+`AccountRecord.RecordTypeId` is `[CreateOnly]`: `SalesforceFields.Of` leaves it out while it is null, so it is not
+read, not compared and not sent on update. After the read, each Account Salesforce doesn't have gets it added before
+the diff. A record type changed later in Salesforce (by a user) stays as it is. Profiles, relationships and contacts
+send none; Salesforce gives them the default record type of the run-as user, if the object has any.
 
 | Problem | Result |
 |---|---|
-| The developer name isn't among the object's active record types | The entity fails alone, before any write, with `INVALID_RECORD_TYPE` (the message names the object and developer name). The object's cached record types are dropped, so the next batch reads them again. |
+| The developer name isn't among Account's active record types | Each new Account fails alone, before any write (its Profile waits for it), with `INVALID_RECORD_TYPE` (the message names the object and developer name). The object's cached record types are dropped, so the next batch reads them again. |
 | Salesforce rejects the `RecordTypeId` at write time (`INVALID_CROSS_REFERENCE_KEY` on `RecordTypeId`: unassigned to the run-as user, or deactivated after its Id was read) | Recorded as the same `INVALID_RECORD_TYPE`, record types dropped. |
 
 **Why a query on `RecordType`.** It is the one piece of metadata the sync needs, and it is a plain SOQL query: no
@@ -688,9 +688,9 @@ failed, and why.
 
 Once its migration exists, the object's inbox table is created at startup, the consumer stores the events the aggregate
 gives its type there, and the worker loops sync it. A record whose parent isn't in Salesforce yet
-(`DEPENDENCY_NOT_SYNCED`) is retried with backoff, so related objects can arrive in any order. A new object needs the
-record type its sync names (`Standard` for the built-in ones, see [step 4](#4-create-the-objects-and-fields)), or change it
-in the sync.
+(`DEPENDENCY_NOT_SYNCED`) is retried with backoff, so related objects can arrive in any order. A new object sends no record
+type; give its record class a `[CreateOnly]` `RecordTypeId` and set it in the sync, as `AccountSync` does, if creating
+one needs it.
 
 **Why `SemaphoreSlim` isn't used for parallel batches:** it limits concurrency within one process, while
 Salesforce's limits are org-wide. Parallelism comes from competing worker loops in every pod pulling from the
@@ -869,8 +869,8 @@ publish version N as `meta.time` = a fixed base time + N ms, and read it back fr
 relationship event is dead-lettered alone. Contacts (`ContactTests`): upserted with their Account's key in `AccountId__c` once the read
 has found the Account, an unchanged contact not written and a changed one sent with only what differs; a contact that arrives
 before its Account waits (`DEPENDENCY_NOT_SYNCED`, found by the read) and syncs once it exists; a contact without `lastName` or its
-Account refused by Salesforce and dead-lettered alone; a lost upsert answer held, then ending at the newest event. Every record
-ends with its class's `RecordTypeId`. Pods share their
+Account refused by Salesforce and dead-lettered alone; a lost upsert answer held, then ending at the newest event. A new Account
+gets its `RecordTypeId`; the other objects send none. Pods share their
 record type Ids through Redis, so a pod that has read none finds them there (`SharedRecordTypeCacheTests`). Writes are checked with the mock's per-record write history
 (`/__fake/history/{sobject}/{externalId}`) and with the requests it received (`/__fake/requests`).
 
@@ -916,7 +916,7 @@ Unit tests (`dotnet test tests/SalesforceSync.Tests`, no Docker):
   name it. A failed write is "not applied" only when the failure proves it, else an unknown outcome
   (`WriteOutcomeTests`).
 - **The three syncs** (`AccountSyncTests`, `AccountRelationshipSyncTests`, `ContactSyncTests`, a mock org and in-memory
-  inboxes): an Account created with its Profile (the Account's key as text, record type, tags as a multi-select value),
+  inboxes): an Account created with its Profile (the Account's key as text, record type on the Account only, tags as a multi-select value), an update that neither sends nor changes the record type,
   a Profile with a key of its own, an event without a profile leaving Salesforce's alone, only the fields that differ sent
   and nothing for an event that changes nothing, a missing field clearing it, deletes (Profile first, an absent record
   already deleted), a failed Account dead and its Profile not sent, a retried failure, an event without its account dead,
@@ -1298,24 +1298,17 @@ relationships and contacts before writing them.
 While creating each field, Salesforce asks for field-level security: make it visible (not read-only) for the
 `Salesforce Sync` permission set, or grant field access in the permission set afterwards.
 
-**Record types.** Every object needs the record type its sync names (the developer name in its `Send` step, see
-[Record types](#record-types)):
+**Record types.** Account needs the record type `AccountSync` names, `Business` (developer name; see
+[Record types](#record-types)). The other objects need none.
 
-| Object | Record type developer name (Record Type Name) |
-|---|---|
-| Account | `Business` |
-| `Profile__c` | `Standard` |
-| `Account_Relationship__c` | `Standard` |
-| Contact | `Standard` |
-
-1. **Object Manager → (object) → Record Types → New**. Record Type Label e.g. `Business`; the **Record Type Name**
-   (the developer name) must be exactly the name above. Tick **Active**. Use names that already exist in your org by
-   changing `RecordType` on the sObject class instead.
-2. Assign it to the user the sync runs as: **Permission Sets → Salesforce Sync → Object Settings → (object) → Edit**,
+1. **Object Manager → Account → Record Types → New**. Record Type Label e.g. `Business`; the **Record Type Name**
+   (the developer name) must be exactly `Business`. Tick **Active**. Use a name that already exists in your org by
+   changing `AccountRecordType` in `AccountSync` instead.
+2. Assign it to the user the sync runs as: **Permission Sets → Salesforce Sync → Object Settings → Account → Edit**,
    and under **Record Type Assignments** tick the record type. (A user on a standard profile can have it assigned on
    the profile's **Record Type Settings** instead.)
 
-A record type that is missing, inactive or not assigned fails the object's events with `INVALID_RECORD_TYPE`, retried
+A record type that is missing, inactive or not assigned fails new Accounts with `INVALID_RECORD_TYPE`, retried
 with backoff; they go through once the record type is fixed.
 
 A picklist with **Restrict picklist to the values defined in the value set** ticked rejects any other value. That
@@ -1331,7 +1324,7 @@ A mapping is code, in three places:
    field) and the fields the sync writes, each a property whose API name is its own or its `[JsonPropertyName]`. This
    is the only place Salesforce object and field names appear.
 3. **Mapping** (the sync's `Send` step, `ToSalesforce/AccountSync.cs` and the others): one line per field, from the
-   payload property to the record property, typed. The record type developer name is here too.
+   payload property to the record property, typed. The Account record type developer name is in `AccountSync`.
 
 The mappings as they are:
 
@@ -1352,13 +1345,13 @@ The mappings as they are:
 | `accountRelationship.relatedAccountExternalId` | `Account_Relationship__c.RelatedAccountId__c` (Text; the Account must exist) |
 | `contact.externalId`, `firstName`, `lastName`, `email`, `phone` | `Contact.ExternalId__c`, `FirstName`, `LastName`, `Email`, `Phone` |
 | `contact.accountExternalId` | `Contact.AccountId__c` (Text; the Account must exist, checked by the read) |
-| (none: the record type developer name in the sync) | `RecordTypeId` of every object: the Id of `Business` (Account) or `Standard` (`Profile__c`, `Account_Relationship__c`, Contact), from a query on `RecordType` |
+| (none: the record type developer name in `AccountSync`) | `Account.RecordTypeId`, on create only: the Id of `Business`, from a query on `RecordType` |
 
 To change a mapping:
 
 - **A field has a different API name in your org** (e.g. `LLC_BI__Active__c`): change its `[JsonPropertyName]` in the
-  record class. Same for an object name or its external-id field (`[SObject]`); the record type developer name is in
-  the sync.
+  record class. Same for an object name or its external-id field (`[SObject]`); the Account record type developer name is in
+  `AccountSync`.
 - **Drop a field**: remove its property from the record class, and the build shows the mapping line to remove. A field
   the sync doesn't know is never touched.
 - **Add a field**: add the property to the payload class (the JSON name in camelCase), to the record class (its API
@@ -1366,7 +1359,7 @@ To change a mapping:
   Add it to `FakeSchema` (`src/SalesforceSync.FakeSalesforce/FakeSchema.cs`) too: the mock org rejects fields it
   doesn't know, so the tests fail until it is there.
 - **A new object**: see [Adding a Salesforce object](#adding-a-salesforce-object). In `FakeSchema`, give it a
-  `RecordTypeId` field and its record type in `RecordTypes`.
+  `RecordTypeId` field and its record types in `RecordTypes` if the sync sets one.
 
 Every property of the record class is part of the record's full desired state: an event without a value clears that field in
 Salesforce.

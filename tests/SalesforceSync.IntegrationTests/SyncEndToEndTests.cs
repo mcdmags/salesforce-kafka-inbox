@@ -37,8 +37,8 @@ public sealed class SyncEndToEndTests(SyncFixture app)
         ((decimal?)profile["Score__c"]).Should().Be(score);
         ((string?)profile["AccountId__c"]).Should().Be(acct, "the Account's external id, as text");
 
-        ((string?)account["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Account", "Business"), "every record gets its class's record type");
-        ((string?)profile["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Profile__c", "Standard"));
+        ((string?)account["RecordTypeId"]).Should().Be(FakeSchema.RecordTypeIdOf("Account", "Business"), "a new Account gets its record type");
+        ((string?)profile["RecordTypeId"]).Should().BeNull("only a new Account needs a record type");
     }
 
     [Fact]
