@@ -30,11 +30,11 @@ public sealed class AccountIngest(IRepository<AccountInboxRow> inbox) : IAggrega
                 account.Profile = new ProfilePayload { ExternalId = profileKey };
             }
 
-            yield return new AccountEvent(change.MetaOf("deleted"), account);
+            yield return new AccountEvent(change.MetaOf(EventType.Deleted), account);
         }
         else if (change.Before is null || AggregateProjection.Serialize<AccountPayload>(change.Before) != AggregateProjection.Serialize<AccountPayload>(change.After!))
         {
-            yield return new AccountEvent(change.MetaOf(change.Before is null ? "inserted" : "updated"), change.After);
+            yield return new AccountEvent(change.MetaOf(change.Before is null ? EventType.Inserted : EventType.Updated), change.After);
         }
     }
 }

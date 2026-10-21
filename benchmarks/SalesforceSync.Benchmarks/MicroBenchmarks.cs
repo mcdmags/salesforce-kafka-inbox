@@ -31,7 +31,7 @@ public class MicroBenchmarks
         {
             var key = $"ACC-{v:D6}";
             AccountPayload account = factory.Account(key, key, v, [], []);
-            var meta = new EventMeta { Time = $"2026-10-14T01:02:03.{v:D3}Z", Type = v == 1 ? "inserted" : "updated" };
+            var meta = EventMeta.Of(v == 1 ? EventType.Inserted : EventType.Updated, $"2026-10-14T01:02:03.{v:D3}Z");
             return new InboxEvent(
                 EntityId: key,
                 Payload: JsonSerializer.Serialize(new AccountEvent(meta, account), EventJson.Options),

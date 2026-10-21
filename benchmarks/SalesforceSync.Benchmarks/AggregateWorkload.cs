@@ -95,23 +95,23 @@ public sealed class AggregateWorkload
                 {
                     _deleted[account] = true;
                     _snapshots[account] = null;
-                    Publish("deleted", before, null);
+                    Publish(EventType.Deleted, before, null);
                     continue;
                 }
 
                 var after = Next(account, ++_versions[account], before);
                 _snapshots[account] = after;
-                Publish(before is null ? "inserted" : "updated", before, after);
+                Publish(before is null ? EventType.Inserted : EventType.Updated, before, after);
             }
         }
 
         Expect();
     }
 
-    private void Publish(string type, AccountSnapshot? before, AccountSnapshot? after)
+    private void Publish(EventType kind, AccountSnapshot? before, AccountSnapshot? after)
     {
         var time = BaseTime.AddMilliseconds(Aggregates.Count + 1);
-        var meta = new EventMeta { Time = time.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture), Type = type };
+        var meta = EventMeta.Of(kind, time.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture));
         Aggregates.Add(JsonSerializer.Serialize(new AccountAggregateEvent(meta, before, after), EventJson.Options));
     }
 

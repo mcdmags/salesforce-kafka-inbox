@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace SalesforceSync.Sync;
@@ -31,22 +32,33 @@ public sealed partial class EventMeta
     private static partial Regex IsoTimeWithOffset();
 
     /// <summary>
-    /// "inserted", "updated" or "deleted", any case. Text, so anything else is rejected by name, not as bad JSON.
+    /// As sent: "inserted", "updated" or "deleted", any case. Text on the wire, so anything else is rejected by name,
+    /// not as bad JSON; read it through <see cref="Kind"/>.
     /// </summary>
     public string? Type { get; set; }
+
+    /// <summary><see cref="Type"/> as an enum; null when it isn't one of the three (any case).</summary>
+    [JsonIgnore]
+    public EventType? Kind => Enum.GetValues<EventType>().Cast<EventType?>()
+        .FirstOrDefault(k => k.ToString()!.Equals(Type, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>A meta of this kind at this time, its type written as the source writes it ("deleted").</summary>
+    public static EventMeta Of(EventType kind, string time)
+    {
+        return new EventMeta { Type = kind.ToString().ToLowerInvariant(), Time = time };
+    }
 
     /// <summary>
     /// <see cref="Type"/> is inserted or updated. Which one decides nothing: Salesforce state decides create/update.
     /// </summary>
     public bool IsInsertOrUpdate()
     {
-        return "inserted".Equals(Type, StringComparison.OrdinalIgnoreCase)
-               || "updated".Equals(Type, StringComparison.OrdinalIgnoreCase);
+        return Kind is EventType.Inserted or EventType.Updated;
     }
 
     public bool IsDelete()
     {
-        return "deleted".Equals(Type, StringComparison.OrdinalIgnoreCase);
+        return Kind == EventType.Deleted;
     }
 
     /// <summary><see cref="Time"/> as instant; null if missing or not ISO-8601 with offset.</summary>
@@ -57,4 +69,12 @@ public sealed partial class EventMeta
                 ? time
                 : null;
     }
+}
+
+/// <summary>What happened to the entity: <see cref="EventMeta.Type"/> as an enum.</summary>
+public enum EventType
+{
+    Inserted,
+    Updated,
+    Deleted
 }

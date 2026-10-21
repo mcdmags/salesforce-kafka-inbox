@@ -18,8 +18,8 @@ public sealed class AggregateChange(EventMeta meta, AccountSnapshot? before, Acc
     /// <summary>Delete's source: last state the sync saw.</summary>
     public AccountSnapshot DeletedFrom => (Before ?? After)!;
 
-    public EventMeta MetaOf(string type)
+    public EventMeta MetaOf(EventType kind)
     {
-        return new EventMeta { Time = Meta.Time, Type = type };
+        return EventMeta.Of(kind, Meta.Time!);
     }
 }

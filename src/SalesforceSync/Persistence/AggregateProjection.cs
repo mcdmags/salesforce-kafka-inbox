@@ -31,7 +31,7 @@ internal static class AggregateProjection
         {
             foreach (var id in KeyedById(list(change.DeletedFrom), idOf).Keys)
             {
-                yield return toEvent(change.MetaOf("deleted"), keyOnly(id));
+                yield return toEvent(change.MetaOf(EventType.Deleted), keyOnly(id));
             }
 
             yield break;
@@ -45,14 +45,14 @@ internal static class AggregateProjection
             if (old is null || Serialize(old) != Serialize(child))
             {
                 setAccountKey(child, change.AccountKey);
-                yield return toEvent(change.MetaOf(old is null ? "inserted" : "updated"), child);
+                yield return toEvent(change.MetaOf(old is null ? EventType.Inserted : EventType.Updated), child);
             }
         }
 
         var kept = now.Select(idOf).ToHashSet(StringComparer.Ordinal);
         foreach (var id in was.Keys.Where(id => !kept.Contains(id)))
         {
-            yield return toEvent(change.MetaOf("deleted"), keyOnly(id));
+            yield return toEvent(change.MetaOf(EventType.Deleted), keyOnly(id));
         }
     }
 

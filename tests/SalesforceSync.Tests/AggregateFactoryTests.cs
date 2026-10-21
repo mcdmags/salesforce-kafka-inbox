@@ -22,7 +22,7 @@ public sealed class AggregateFactoryTests
 
     private static string Aggregate(AccountSnapshot account)
     {
-        return JsonSerializer.Serialize(new AccountAggregateEvent(new EventMeta { Time = "2026-10-20T01:02:03Z", Type = "updated" }, null, account), EventJson.Options);
+        return JsonSerializer.Serialize(new AccountAggregateEvent(EventMeta.Of(EventType.Updated, "2026-10-20T01:02:03Z"), null, account), EventJson.Options);
     }
 
     [Fact]

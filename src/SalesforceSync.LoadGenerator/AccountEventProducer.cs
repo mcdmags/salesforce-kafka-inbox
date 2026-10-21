@@ -55,7 +55,7 @@ public sealed class AccountEventProducer(
                 var after = Next(account, ++versions[account], before, childVersions, o, random);
                 snapshots[account] = after;
 
-                var aggregate = new AccountAggregateEvent(Meta(before is null ? "inserted" : "updated"), before, after);
+                var aggregate = new AccountAggregateEvent(Meta(before is null ? EventType.Inserted : EventType.Updated), before, after);
                 Produce(o.Topic, _accountIds[account], JsonSerializer.Serialize(aggregate, EventJson.Options));
                 sent++;
             }
@@ -153,16 +153,12 @@ public sealed class AccountEventProducer(
     /// meta.time: now, but always later than the previous event's (to the microsecond Postgres keeps), so events
     /// produced within the same clock tick still have a distinct order.
     /// </summary>
-    private EventMeta Meta(string type)
+    private EventMeta Meta(EventType kind)
     {
         var ticks = Math.Max(DateTimeOffset.UtcNow.Ticks, _lastTimeTicks + TimeSpan.TicksPerMicrosecond);
         ticks -= ticks % TimeSpan.TicksPerMicrosecond;
         _lastTimeTicks = ticks;
-        return new EventMeta
-        {
-            Time = new DateTimeOffset(ticks, TimeSpan.Zero).ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture),
-            // An account's first event is its insert, every later one an update
-            Type = type
-        };
+        // An account's first event is its insert, every later one an update
+        return EventMeta.Of(kind, new DateTimeOffset(ticks, TimeSpan.Zero).ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture));
     }
 }

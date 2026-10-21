@@ -75,6 +75,7 @@ public sealed class InboxEventTests
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z" }, "account": { "externalId": "ACC-1" } }""", "event type")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": null }, "account": { "externalId": "ACC-1" } }""", "event type")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "upsert" }, "account": { "externalId": "ACC-1" } }""", "event type")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "1" }, "account": { "externalId": "ACC-1" } }""", "event type")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": 1 }, "account": { "externalId": "ACC-1" } }""", "Not a valid account event")]
     public void Invalid_event_is_rejected_with_the_reason(string json, string reason)
     {

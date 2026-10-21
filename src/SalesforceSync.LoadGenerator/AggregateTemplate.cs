@@ -105,7 +105,7 @@ public sealed class AggregateTemplate
         var template = new AggregateTemplate(account!);
         // What the consumer makes of an aggregate built on it: one the sync reads
         var factory = new AggregateFactory(template, seed: 0);
-        var sample = new AccountAggregateEvent(new EventMeta { Time = "2026-01-01T00:00:00Z", Type = "inserted" }, null,
+        var sample = new AccountAggregateEvent(EventMeta.Of(EventType.Inserted, "2026-01-01T00:00:00Z"), null,
             factory.Account("A1", "P1", 1, [factory.Relationship("R1", "A2", 1)], [factory.Contact("C1", 1)]));
         return new AccountAggregate().TryRead(JsonSerializer.Serialize(sample, EventJson.Options), out _, out var problem)
             ? template
