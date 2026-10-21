@@ -5,15 +5,22 @@ using Microsoft.Extensions.Options;
 namespace SalesforceSync.Data.Inbox;
 
 /// <summary>
-/// <see cref="IRepository{TRow}"/> on Postgres: a claim leases rows, and every later statement applies only to rows
-/// still under that lease. How and why: README.md, "How a lease works".
+/// The inbox table: one row per entity (an account, a contact, ...) holding the newest event still to be sent to
+/// Salesforce. A worker first claims a batch of rows: it marks them as taken until a time in the future (the lease),
+/// so other workers leave them alone while it calls Salesforce. Afterwards it records the result (done, retry later,
+/// failed for good). A result is only written to a row that is still the worker's and still holds the event it sent:
+/// if a newer event arrived meanwhile, the row stays pending and the newer event is sent next.
+/// More detail: README.md, "How a lease works".
 /// </summary>
 public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TRow>
     where TRow : InboxRow
 {
     private static readonly string Table = TableOfRow();
 
-    /// <summary>WHERE of every outcome: the claimed rows still under this lease and still holding the claimed event.</summary>
+    /// <summary>
+    /// The condition every result statement adds: the row is still claimed by this worker and still holds the event
+    /// it sent (same event time, same lease end as the claim returned).
+    /// </summary>
     private const string StillClaimed = """
         i.entity_id = ANY(@entityIds)
           AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times, @leaseEnds) AS c(entity_id, event_time, lease_end)
@@ -28,7 +35,10 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         return db.TableOf<TRow>();
     }
 
-    /// <summary>Stores the event if it is newer than the row's; a leased row keeps its lease.</summary>
+    /// <summary>
+    /// Saves an incoming event, replacing the entity's older one. If a worker is sending the entity right now, the row
+    /// stays claimed by it; the new event is sent once that worker is finished.
+    /// </summary>
     public Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct)
     {
         var time = InboxRow.ToWholeMicroseconds(eventTime);
@@ -48,7 +58,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }, ct);
     }
 
-    /// <summary>Leases the longest-waiting due rows.</summary>
+    /// <summary>Takes a batch of rows to send, the longest waiting first, so no other worker takes them meanwhile.</summary>
     public Task<InboxClaim> ClaimAsync(CancellationToken ct)
     {
         return contexts.RunAsync(async (db, t) =>
@@ -95,7 +105,10 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }), ct);
     }
 
-    /// <summary>Retries after a backoff, or dead-letters (at MaxRetries, or at once if permanent).</summary>
+    /// <summary>
+    /// Records failures: each row is tried again later (waiting longer after every failure), or given up on after
+    /// MaxRetries, or at once when retrying can't help.
+    /// </summary>
     public Task MarkFailedAsync(InboxClaim claim, IReadOnlyList<FailedEvent> failures, CancellationToken ct)
     {
         if (failures.Count == 0)
@@ -126,7 +139,11 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }), ct);
     }
 
-    /// <summary>Due again after <see cref="Release.Delay"/>, no attempt spent; <see cref="Release.StopInbox"/> delays the whole inbox.</summary>
+    /// <summary>
+    /// Gives the batch back to be tried again after <see cref="Release.Delay"/>, without counting it as a failed try
+    /// (for example when Salesforce asked us to slow down). <see cref="Release.StopInbox"/> also holds back every other
+    /// row of this table.
+    /// </summary>
     public Task ReleaseAsync(InboxClaim claim, Release release, CancellationToken ct)
     {
         return WithLeasesEndedAsync([.. claim.Events], release.Delay, async (db, t) =>
@@ -163,7 +180,10 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }, ct);
     }
 
-    /// <summary>Runs <paramref name="record"/>, then ends the lease of the rows it skipped.</summary>
+    /// <summary>
+    /// Records the results, then frees the claimed rows they skipped (a newer event arrived), so those are sent again
+    /// right away instead of when the claim would have run out.
+    /// </summary>
     private Task WithLeasesEndedAsync(IReadOnlyList<InboxEvent> rows, TimeSpan delay,
         Func<SyncDbContext, CancellationToken, Task<List<string>>> record, CancellationToken ct)
     {
@@ -177,7 +197,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }, ct);
     }
 
-    /// <summary>Makes rows due after <paramref name="delay"/> if they are still under this lease.</summary>
+    /// <summary>Frees claimed rows, ready to send after <paramref name="delay"/>, if this worker still holds them.</summary>
     private static Task<int> EndLeasesAsync(SyncDbContext db, CancellationToken ct, IReadOnlyList<InboxEvent> rows, TimeSpan delay)
     {
         var sql = $"""
