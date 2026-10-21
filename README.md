@@ -264,7 +264,7 @@ reference each other).
 |---|---|---|
 | **Event** (`AccountEvent` with `AccountPayload` and `ProfilePayload`, `AccountRelationshipEvent`, `ContactEvent`) and its `EventReader` | `Sync/<Object>Event.cs` | The event as the source system sends it: PascalCase CLR properties bound from camelCase JSON, no attributes, no Salesforce names. The reader says whose an event is and when it happened (`meta`). |
 | **Ingest** (`AccountIngest`, `AccountRelationshipIngest`, `ContactIngest`, each an `IAggregateIngest`) | `Persistence/<Object>Ingest.cs` | What an Account aggregate calls for of this type (`Project`) and storing it in the type's inbox. No Salesforce. |
-| **Sync** (`AccountSync`, `AccountRelationshipSync`, `ContactSync`, each an `IEntitySync`) | `ToSalesforce/<Object>Sync.cs` | Salesforce's names (object, fields, record type developer name) and what to send for an event. No aggregates. |
+| **Sync** (`AccountSync`, `AccountRelationshipSync`, `ContactSync`, each an `IEntitySync`) | `ToSalesforce/<Object>Sync.cs`, `ToSalesforce/SalesforceRecords.cs` | Salesforce's names (object and fields in the record classes, record type developer name in the sync) and what to send for an event. No aggregates. |
 
 ```
 raw event JSON ─► AccountEvent { AccountPayload { …, ProfilePayload } }     System.Text.Json (Web defaults)
@@ -272,9 +272,11 @@ raw event JSON ─► AccountEvent { AccountPayload { …, ProfilePayload } }   
                ─► SalesforceCalls.Changes (against what the read found) ─► UpsertAsync / DeleteAsync
 ```
 
-**Salesforce API names live only in the sync classes** (`AccountSync` and the others): the object name, the field names
-and the record type developer name are written there, next to the line that maps each field. Pointing the sync at an org
-whose fields are named differently (`LLC_BI__Active__c` instead of `Active__c`) means editing those strings and
+**Salesforce API names live only in the record classes** (`ToSalesforce/SalesforceRecords.cs`): one class per object
+(`AccountRecord`, ...), one property per field the sync writes, the API name as `[JsonPropertyName]` where it differs
+from the property's name, the object and its external-id field as `[SObject]`. The syncs fill a record from the event
+and send `SalesforceFields.Of(record)`; the record type developer name is in the sync. Pointing the sync at an org
+whose fields are named differently (`LLC_BI__Active__c` instead of `Active__c`) means editing those attributes and
 nothing else. A typo is found by the integration and unit tests, which run every sync against the mock org (whose
 schema, `FakeSchema`, rejects an unknown field or `RecordTypeId` like Salesforce).
 
@@ -714,7 +716,8 @@ reads like this, top to bottom; the calls are in `SalesforceCalls`):
 by (e.g. `ExternalId__c`), the same for the whole call, so one call holds records of one object matched by one field. Each
 record carries its own **value** of that field in its body (`{"attributes":{"type":"Account"},"ExternalId__c":"A1","Name":"Acme"}`),
 and Salesforce updates the record with that value or creates it. Each object can have its own external-id field, so each
-sync declares its objects with theirs (`SalesforceObject(Name, ExternalIdField)`, e.g. `AccountSync.AccountObject`); the
+record class declares its object with its own (`[SObject("Account", "ExternalId__c")]`, read as
+`SalesforceObject.Of<AccountRecord>()`, e.g. `AccountSync.AccountObject`); the
 sample uses `ExternalId__c` on every object, and the relationship and contact syncs read their parent Accounts with
 `AccountSync.AccountObject`.
 
@@ -1054,8 +1057,10 @@ consumer or the worker loops names an object. An object supplies:
   is the meta);
 - its **ingest** (`Persistence/<Object>Ingest.cs`, an `IAggregateIngest`): `Project`, the events of this type an aggregate
   calls for (a child type reads its own list of the snapshot), stored in its inbox;
-- its **sync** (`ToSalesforce/<Object>Sync.cs`, an `IEntitySync`): a `Send` step, which maps the events to Salesforce's
-  fields and does the read, the decision and the write with `SalesforceCalls`; the flow runs it
+- its **record class** (`ToSalesforce/SalesforceRecords.cs`): `[SObject(name, external-id field)]` and one property per
+  field the sync writes, named by its API name (`[JsonPropertyName]` where it differs);
+- its **sync** (`ToSalesforce/<Object>Sync.cs`, an `IEntitySync`): a `Send` step, which maps the events to the record
+  class (`SalesforceFields.Of(record)` gives the fields) and does the read, the decision and the write with `SalesforceCalls`; the flow runs it
   (`batch.SyncBatchAsync(Event.Reader, inbox, Send, ct)`);
 - an **inbox row class** (which selects the object's inbox table) in `SalesforceSync.Data/Inbox/`, and its EF migration.
 
@@ -1065,7 +1070,7 @@ consumer or the worker loops names an object. An object supplies:
 AddEntitySync<AccountRelationshipIngest, AccountRelationshipSync, AccountRelationshipInboxRow>(services);
 ```
 
-`ToSalesforce/ContactSync.cs` is the smallest complete example (88 lines): it parses nothing itself (the flow did), maps a
+`ToSalesforce/ContactSync.cs` is the smallest complete example (86 lines): it parses nothing itself (the flow did), maps a
 contact to its fields, reads the contacts and the Accounts they point at, waits for a missing Account, and upserts or
 deletes. A step may do all of this differently (another write order, another API): the flow only needs the entities that
 failed, and why.
@@ -1097,7 +1102,8 @@ src/
                                   (AccountIngest, AccountRelationshipIngest, ContactIngest)
     ToSalesforce/                 The inbox to Salesforce: SalesforceBatchSyncService (the flow), SalesforceCalls (the calls
                                   a send step is made of), IEntitySync and one sync per object (AccountSync,
-                                  AccountRelationshipSync, ContactSync: its mapping and send step)
+                                  AccountRelationshipSync, ContactSync: its mapping and send step), the record classes
+                                  (SalesforceRecords: each object's API names) and SalesforceFields
   SalesforceSync.Infrastructure/  The Salesforce API calls (references no other project of ours):
     Salesforce/                   The REST client and its request/result types, RecordTypeCache, FieldValues, errors
     RateLimiting/                 The HTTP side of rate limiting: SalesforceRateLimitHandler, the limits header, options,
@@ -1667,13 +1673,14 @@ leave the picklist unrestricted.
 
 ### Field mappings
 
-A mapping is code, in two places (the event's class and the object's sync, `ToSalesforce/AccountSync.cs`,
-`ToSalesforce/AccountRelationshipSync.cs`, `ToSalesforce/ContactSync.cs`):
+A mapping is code, in three places:
 
 1. **Payload** (`Sync/<Object>Event.cs`): the event's JSON fields.
-2. **Mapping** (the `Send` step of the sync, a `Dictionary` per record): one line per field, from the payload to the
-   Salesforce field's API name. The object's name and record type developer name are here too. This is the only place
-   Salesforce names appear.
+2. **Record** (`ToSalesforce/SalesforceRecords.cs`): the Salesforce object (`[SObject]`: its name and external-id
+   field) and the fields the sync writes, each a property whose API name is its own or its `[JsonPropertyName]`. This
+   is the only place Salesforce object and field names appear.
+3. **Mapping** (the sync's `Send` step, `ToSalesforce/AccountSync.cs` and the others): one line per field, from the
+   payload property to the record property, typed. The record type developer name is here too.
 
 The mappings as they are:
 
@@ -1698,16 +1705,19 @@ The mappings as they are:
 
 To change a mapping:
 
-- **A field has a different API name in your org** (e.g. `LLC_BI__Active__c`): change the string in the sync's
-  dictionary. Same for an object name and for the record type developer name.
-- **Drop a field**: remove its line from the dictionary. A field the sync doesn't know is never touched.
-- **Add a field**: add the property to the payload class (the JSON name in camelCase) and one line to the dictionary.
+- **A field has a different API name in your org** (e.g. `LLC_BI__Active__c`): change its `[JsonPropertyName]` in the
+  record class. Same for an object name or its external-id field (`[SObject]`); the record type developer name is in
+  the sync.
+- **Drop a field**: remove its property from the record class, and the build shows the mapping line to remove. A field
+  the sync doesn't know is never touched.
+- **Add a field**: add the property to the payload class (the JSON name in camelCase), to the record class (its API
+  name), and one line to the sync's mapping.
   Add it to `FakeSchema` (`src/SalesforceSync.FakeSalesforce/FakeSchema.cs`) too: the mock org rejects fields it
   doesn't know, so the tests fail until it is there.
 - **A new object**: see [Adding a Salesforce object](#adding-a-salesforce-object). In `FakeSchema`, give it a
   `RecordTypeId` field and its record type in `RecordTypes`.
 
-Every line of the dictionary is part of the record's full desired state: an event without a value clears that field in
+Every property of the record class is part of the record's full desired state: an event without a value clears that field in
 Salesforce.
 
 ### 5. Run against the sandbox

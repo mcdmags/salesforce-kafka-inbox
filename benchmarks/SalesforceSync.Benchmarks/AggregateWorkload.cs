@@ -218,11 +218,17 @@ public sealed class AggregateWorkload
 
     private sealed class OrgCheck(FakeSalesforceStore org)
     {
-        // Where the sync writes AggregateShape's markers and links in Salesforce: its mapping (AccountSync,
-        // AccountRelationshipSync, ContactSync) says so, and these follow it. A mismatch fails the first iteration's check.
-        private const string AccountObject = "Account", ProfileObject = "Profile__c", RelationshipObject = "Account_Relationship__c", ContactObject = "Contact";
-        private const string AccountVersion = "Description", ProfileVersion = "Score__c", RelationshipVersion = "Name", ContactVersion = "LastName";
-        private const string AccountLink = "AccountId__c", RelatedLink = "RelatedAccountId__c";
+        // Where the sync writes AggregateShape's markers and links in Salesforce: the record classes' fields the syncs
+        // fill from them (AccountSync: Description = the account's description, ...). A mismatch fails the first check.
+        private static readonly string AccountObject = SalesforceObject.Of<AccountRecord>().Name, ProfileObject = SalesforceObject.Of<ProfileRecord>().Name,
+            RelationshipObject = SalesforceObject.Of<AccountRelationshipRecord>().Name, ContactObject = SalesforceObject.Of<ContactRecord>().Name;
+        private static readonly string AccountVersion = SalesforceFields.Name<AccountRecord>(r => r.Description),
+            ProfileVersion = SalesforceFields.Name<ProfileRecord>(r => r.Score),
+            RelationshipVersion = SalesforceFields.Name<AccountRelationshipRecord>(r => r.Name),
+            ContactVersion = SalesforceFields.Name<ContactRecord>(r => r.LastName);
+        private static readonly string RelationshipAccount = SalesforceFields.Name<AccountRelationshipRecord>(r => r.AccountId),
+            RelatedAccount = SalesforceFields.Name<AccountRelationshipRecord>(r => r.RelatedAccountId),
+            ContactAccount = SalesforceFields.Name<ContactRecord>(r => r.AccountId);
 
         /// <summary>Object of an entity type's record (the account's profile goes with it).</summary>
         private static readonly Dictionary<string, string> ObjectOf = new()
@@ -268,10 +274,10 @@ public sealed class AggregateWorkload
             var record = org.FindByExternalId(RelationshipObject, key);
             return versions.LastOrDefault() == expected.Version && record is not null &&
                    org.FindByExternalId(AccountObject, expected.Account!) is not null && org.FindByExternalId(AccountObject, expected.Related!) is not null &&
-                   (string?)record[AccountLink] == expected.Account && (string?)record[RelatedLink] == expected.Related
+                   (string?)record[RelationshipAccount] == expected.Account && (string?)record[RelatedAccount] == expected.Related
                 ? null
                 : $"{key}: expected v{expected.Version} linking {expected.Account}->{expected.Related}, got v{versions.LastOrDefault()} " +
-                  $"linking {record?[AccountLink]}->{record?[RelatedLink]}";
+                  $"linking {record?[RelationshipAccount]}->{record?[RelatedAccount]}";
         }
 
         /// <summary>Newest version, naming its Account.</summary>
@@ -279,9 +285,9 @@ public sealed class AggregateWorkload
         {
             var versions = Versions(ContactObject, key, ContactVersion);
             var record = org.FindByExternalId(ContactObject, key);
-            return versions.LastOrDefault() == expected.Version && (string?)record?[AccountLink] == expected.Account
+            return versions.LastOrDefault() == expected.Version && (string?)record?[ContactAccount] == expected.Account
                 ? null
-                : $"{key}: expected v{expected.Version} of {expected.Account}, got v{versions.LastOrDefault()} of {record?[AccountLink]}";
+                : $"{key}: expected v{expected.Version} of {expected.Account}, got v{versions.LastOrDefault()} of {record?[ContactAccount]}";
         }
 
         /// <summary>

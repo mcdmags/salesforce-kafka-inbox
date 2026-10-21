@@ -12,7 +12,7 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
 {
     public const string Type = ContactEvent.Type;
 
-    private static readonly SalesforceObject ContactObject = new("Contact", "ExternalId__c");
+    private static readonly SalesforceObject ContactObject = SalesforceObject.Of<ContactRecord>();
 
     public string EntityType => Type;
 
@@ -47,15 +47,15 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
         var wanted = upserts.Select(e =>
         {
             var c = e.Event.Contact!;
-            return (e.EntityId, c.AccountExternalId, Fields: new Dictionary<string, object?>
+            return (e.EntityId, c.AccountExternalId, Fields: SalesforceFields.Of(new ContactRecord
             {
-                ["AccountId__c"] = c.AccountExternalId,
-                ["FirstName"] = c.FirstName,
-                ["LastName"] = c.LastName,
-                ["Email"] = c.Email,
-                ["Phone"] = c.Phone,
-                ["RecordTypeId"] = recordType
-            });
+                AccountId = c.AccountExternalId,
+                FirstName = c.FirstName,
+                LastName = c.LastName,
+                Email = c.Email,
+                Phone = c.Phone,
+                RecordTypeId = recordType
+            }));
         }).ToList();
 
         // READ: contacts (to compare; Ids for deletes) + target Accounts (must exist)

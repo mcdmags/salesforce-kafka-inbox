@@ -15,8 +15,8 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
     public const string Type = AccountEvent.Type;
 
     /// <summary>Also the parent the relationship and contact syncs read.</summary>
-    public static readonly SalesforceObject AccountObject = new("Account", "ExternalId__c");
-    private static readonly SalesforceObject ProfileObject = new("Profile__c", "ExternalId__c");
+    public static readonly SalesforceObject AccountObject = SalesforceObject.Of<AccountRecord>();
+    private static readonly SalesforceObject ProfileObject = SalesforceObject.Of<ProfileRecord>();
 
     public string EntityType => Type;
 
@@ -90,39 +90,39 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
 
     private static Dictionary<string, object?> AccountFields(AccountPayload a, string? recordTypeId)
     {
-        return new Dictionary<string, object?>
+        return SalesforceFields.Of(new AccountRecord
         {
-            ["Name"] = a.Name,
-            ["Rating"] = a.Rating,
-            ["Industry"] = a.Industry,
-            ["Description"] = a.Description,
-            ["AnnualRevenue"] = a.AnnualRevenue,
-            ["NumberOfEmployees"] = a.NumberOfEmployees,
-            ["Phone"] = a.Phone,
-            ["Website"] = a.Website,
-            ["Active__c"] = a.IsActive,
+            Name = a.Name,
+            Rating = a.Rating,
+            Industry = a.Industry,
+            Description = a.Description,
+            AnnualRevenue = a.AnnualRevenue,
+            NumberOfEmployees = a.NumberOfEmployees,
+            Phone = a.Phone,
+            Website = a.Website,
+            Active = a.IsActive,
             // list in event, ';'-separated multi-select picklist in Salesforce
-            ["Tags__c"] = a.Tags is null ? null : string.Join(';', a.Tags),
-            ["Customer_Since__c"] = a.CustomerSince,
-            ["Last_Contacted__c"] = a.LastContactedAt,
-            ["RecordTypeId"] = recordTypeId
-        };
+            Tags = a.Tags is null ? null : string.Join(';', a.Tags),
+            CustomerSince = a.CustomerSince,
+            LastContacted = a.LastContactedAt,
+            RecordTypeId = recordTypeId
+        });
     }
 
     private static Dictionary<string, object?> ProfileFields(ReadEvent<AccountEvent> e, string? recordTypeId)
     {
         var p = e.Event.Account!.Profile!;
-        return new Dictionary<string, object?>
+        return SalesforceFields.Of(new ProfileRecord
         {
-            ["Name"] = p.Name,
-            ["AccountId__c"] = e.EntityId,
-            ["Tier__c"] = p.Tier,
-            ["Score__c"] = p.Score,
-            ["Discount__c"] = p.DiscountPercent,
-            ["Notes__c"] = p.Notes,
-            ["Opt_In__c"] = p.OptIn,
-            ["Start_Date__c"] = p.StartDate,
-            ["RecordTypeId"] = recordTypeId
-        };
+            Name = p.Name,
+            AccountId = e.EntityId,
+            Tier = p.Tier,
+            Score = p.Score,
+            Discount = p.DiscountPercent,
+            Notes = p.Notes,
+            OptIn = p.OptIn,
+            StartDate = p.StartDate,
+            RecordTypeId = recordTypeId
+        });
     }
 }

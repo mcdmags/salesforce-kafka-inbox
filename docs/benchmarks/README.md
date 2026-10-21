@@ -95,9 +95,9 @@ AutoFixture). Every record published is a copy of it (`AggregateFactory`) with:
 Which property is each entity's id, foreign key, child list and version marker is declared once, as typed properties
 of the sync's event classes, in `AggregateShape` (`src/SalesforceSync.LoadGenerator/AggregateShape.cs`). Nothing in the
 load generator or the benchmarks spells a JSON field name: rename, remove or retype a property in the event classes
-and the build breaks where it is used, so you fix it there. Where the sync writes the markers and links in Salesforce
-(`Description`, `Score__c`, `AccountId__c`, ...) is listed once at the top of `AggregateWorkload.OrgCheck`, following
-the sync's mapping.
+and the build breaks where it is used, so you fix it there. The end-state check reads the markers and links back
+from the org through the sync's record classes (`AccountRecord.Description`, `ProfileRecord.Score`, ...,
+`ToSalesforce/SalesforceRecords.cs`), so it follows a renamed Salesforce field too.
 
 The file must fit the event classes. Checked before the run; refused with every problem listed: a property the
 classes lack (typo, or a field your classes don't have yet), a wrong-type value (`"annualRevenue": "lots"`), no

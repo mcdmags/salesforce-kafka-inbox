@@ -13,7 +13,7 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
 {
     public const string Type = AccountRelationshipEvent.Type;
 
-    private static readonly SalesforceObject RelationshipObject = new("Account_Relationship__c", "ExternalId__c");
+    private static readonly SalesforceObject RelationshipObject = SalesforceObject.Of<AccountRelationshipRecord>();
 
     public string EntityType => Type;
 
@@ -49,16 +49,16 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
         var wanted = upserts.Select(e =>
         {
             var r = e.Event.AccountRelationship!;
-            return (e.EntityId, r.AccountExternalId, r.RelatedAccountExternalId, Fields: new Dictionary<string, object?>
+            return (e.EntityId, r.AccountExternalId, r.RelatedAccountExternalId, Fields: SalesforceFields.Of(new AccountRelationshipRecord
             {
-                ["Name"] = r.Name,
-                ["AccountId__c"] = r.AccountExternalId,
-                ["RelatedAccountId__c"] = r.RelatedAccountExternalId,
-                ["Type__c"] = r.Type,
-                ["Start_Date__c"] = r.StartDate,
-                ["Active__c"] = r.IsActive,
-                ["RecordTypeId"] = recordType
-            });
+                Name = r.Name,
+                AccountId = r.AccountExternalId,
+                RelatedAccountId = r.RelatedAccountExternalId,
+                Type = r.Type,
+                StartDate = r.StartDate,
+                Active = r.IsActive,
+                RecordTypeId = recordType
+            }));
         }).ToList();
 
         // READ: relationships (to compare; Ids for deletes) + target Accounts (must exist)
