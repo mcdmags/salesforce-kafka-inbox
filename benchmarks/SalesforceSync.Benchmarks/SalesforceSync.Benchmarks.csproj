@@ -14,19 +14,28 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="AutoFixture" Version="4.18.1" />
     <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- Test/benchmark-only claim audit used by the correctness check -->
     <None Include="..\..\sql\claim-audit.sql" Link="claim-audit.sql" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="example-aggregate.json" />
+    <!-- The event template every aggregate is built on (AggregateTemplate.DefaultPath) -->
+    <None Include="..\..\templates\account-event.json" Link="account-event.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SalesforceSync\SalesforceSync.csproj" />
     <Compile Include="..\..\src\SalesforceSync.LoadGenerator\AggregateTemplate.cs" Link="AggregateTemplate.cs" />
+    <Compile Include="..\..\src\SalesforceSync.LoadGenerator\AggregateFactory.cs" Link="AggregateFactory.cs" />
+    <Compile Include="..\..\src\SalesforceSync.LoadGenerator\AggregateShape.cs" Link="AggregateShape.cs" />
     <ProjectReference Include="..\..\src\SalesforceSync.FakeSalesforce\SalesforceSync.FakeSalesforce.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Global, as in the unit tests, which compile AggregateFactory.cs in too -->
+    <Using Include="AutoFixture" />
   </ItemGroup>
 
 </Project>

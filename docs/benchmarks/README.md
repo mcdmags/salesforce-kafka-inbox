@@ -73,31 +73,36 @@ fails a stale record and a missed delete.
 
 ### Using your own aggregate
 
-Aggregates are copies of an example JSON, so they can have your own `AccountEvent` fields. Pass your file with
-`--template` (`--run` and `--load` both take it; child benchmark processes inherit it via the `SFSYNC_BENCH_TEMPLATE`
-environment variable):
+Every aggregate is built on an event template: `templates/account-event.json`, copied next to the benchmarks (and the
+load generator) by the build. Replace it with a real event of yours, or pass another file with `--template` (`--run`
+and `--load` both take it; child benchmark processes inherit it via the `SFSYNC_BENCH_TEMPLATE` environment variable):
 
 ```
 dotnet run -c Release --project benchmarks/SalesforceSync.Benchmarks -- --template my-aggregate.json --run full
 ```
 
-`benchmarks/SalesforceSync.Benchmarks/example-aggregate.json` has every field of the current events: start from it. File =
-aggregate message (`{ meta, before, after }`); only `after` is read: the account, one example relationship in
-`accountRelationships`, one contact in `contacts` (bare account snapshot works too; missing child example = built-in).
-Every published aggregate is a copy of it with:
+The file is a whole aggregate message (`{ meta, before, after }`); its `after` (or `before`) is the base: the account
+with its profile, the first relationship and the first contact (a list without one gets children built by
+AutoFixture). Every record published is a copy of it (`AggregateFactory`) with:
 
-- **the ids set**: the account's `externalId`, each child's, a relationship's `relatedAccountExternalId`;
-- **the version markers set**, because the end-state check reads them back from the org: the account's `description`
-  ("vN") and `profile.score` (N), a relationship's `name`, a contact's `lastName`. They are named in
-  `AggregateTemplate.Markers`: if you rename a synced field, change the name there;
-- **`{key}` in any other text replaced** by the entity's key (`"email": "{key}@example.com"`, to make values unique);
-- **everything else as in your file**: the same properties and values, in every event.
+- **new values**: AutoFixture gives every filled-in field a new value of its type, seeded, so every iteration gets the
+  same workload; texts are 8 characters;
+- **as in the file**: fields it leaves null, lists, and the fields in `AggregateShape.Kept` (picklists, which a real
+  org restricts, and the contact's email, `{key}` replaced by the entity's id);
+- **the structure set**: the ids, the links (a relationship's related account) and the version markers the end-state
+  check reads back from the org.
 
-The file must conform to the event. Checked before the run; refused with every problem listed: a property the payload
-class lacks (typo, or field removed from the event class), a wrong-type value (`"annualRevenue": "lots"`), a missing
-`profile`, anything the sync can't read as an aggregate. Without `--template` the workload is unchanged (same
-aggregates, byte for byte). Fields your sync maps to Salesforce are written there, checked only via the markers; add
-checks to `AggregateWorkload.OrgCheck` for more.
+Which property is each entity's id, foreign key, child list and version marker is declared once, as typed properties
+of the sync's event classes, in `AggregateShape` (`src/SalesforceSync.LoadGenerator/AggregateShape.cs`). Nothing in the
+load generator or the benchmarks spells a JSON field name: rename, remove or retype a property in the event classes
+and the build breaks where it is used, so you fix it there. Where the sync writes the markers and links in Salesforce
+(`Description`, `Score__c`, `AccountId__c`, ...) is listed once at the top of `AggregateWorkload.OrgCheck`, following
+the sync's mapping.
+
+The file must fit the event classes. Checked before the run; refused with every problem listed: a property the
+classes lack (typo, or a field your classes don't have yet), a wrong-type value (`"annualRevenue": "lots"`), no
+profile, anything the sync can't read as an aggregate. Fields your sync maps to Salesforce are written there, checked
+only via the markers; add checks to `AggregateWorkload.OrgCheck` for more.
 
 ## Environment
 

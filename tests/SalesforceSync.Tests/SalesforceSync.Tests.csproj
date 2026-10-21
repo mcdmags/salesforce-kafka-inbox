@@ -28,8 +28,9 @@
     <!-- The drain benchmarks' workload, so its expected end state is checked without running the benchmarks -->
     <Compile Include="..\..\benchmarks\SalesforceSync.Benchmarks\AggregateWorkload.cs" Link="Benchmarks\AggregateWorkload.cs" />
     <Compile Include="..\..\src\SalesforceSync.LoadGenerator\AggregateTemplate.cs" Link="Benchmarks\AggregateTemplate.cs" />
-    <Compile Include="..\..\src\SalesforceSync.LoadGenerator\AutoFixtureShape.cs" Link="LoadGenerator\AutoFixtureShape.cs" />
-    <None Include="..\..\benchmarks\SalesforceSync.Benchmarks\example-aggregate.json" Link="example-aggregate.json" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="..\..\src\SalesforceSync.LoadGenerator\AggregateFactory.cs" Link="LoadGenerator\AggregateFactory.cs" />
+    <Compile Include="..\..\src\SalesforceSync.LoadGenerator\AggregateShape.cs" Link="LoadGenerator\AggregateShape.cs" />
+    <None Include="..\..\templates\account-event.json" Link="account-event.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

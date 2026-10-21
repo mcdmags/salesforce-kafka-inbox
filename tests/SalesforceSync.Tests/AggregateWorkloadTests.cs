@@ -1,7 +1,9 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using SalesforceSync.Benchmarks;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.LoadGenerator;
+using SalesforceSync.Sync;
 using SalesforceSync.ToSalesforce;
 
 namespace SalesforceSync.Tests;
@@ -53,9 +55,9 @@ public sealed class AggregateWorkloadTests
     }
 
     [Fact]
-    public async Task The_check_passes_an_org_that_got_the_events_of_the_example_template_with_all_its_fields()
+    public async Task The_check_passes_an_org_that_got_the_events_of_the_template_with_all_its_fields()
     {
-        var workload = AggregateWorkload.Generate(300, 20, template: AggregateTemplate.Load(Path.Combine(AppContext.BaseDirectory, "example-aggregate.json")));
+        var workload = AggregateWorkload.Generate(300, 20, template: AggregateTemplate.Load(AggregateTemplate.DefaultPath));
         var org = new FakeSalesforceStore(new FakeSalesforceOptions { EnforceDailyLimit = false });
         var syncs = new SyncHarness(org);
         foreach (var (key, e) in Split(workload))
@@ -68,7 +70,7 @@ public sealed class AggregateWorkloadTests
         wrong.Should().BeEmpty();
         regressions.Should().Be(0);
         org.FindByExternalId("Account", "ACC-000001")!["Industry"]!.GetValue<string>().Should().Be("Technology");
-        org.All("Contact").Should().OnlyContain(c => c["FirstName"]!.GetValue<string>() == "Ada" && c["Email"]!.GetValue<string>().EndsWith("@example.com"));
+        org.All("Contact").Should().OnlyContain(c => c["Email"]!.GetValue<string>().EndsWith("@example.com"));
     }
 
     [Fact]
@@ -114,7 +116,8 @@ public sealed class AggregateWorkloadTests
 
     private static bool IsDelete(JsonObject e)
     {
-        return (string?)e["meta"]!["type"] == "deleted";
+        // Only meta is read: any entity's event reads as one
+        return e.Deserialize<AccountEvent>(EventJson.Options)!.Meta!.IsDelete();
     }
 
     private static IEnumerable<((string Type, string Key) Key, JsonObject Event)> Split(AggregateWorkload workload)
@@ -124,10 +127,35 @@ public sealed class AggregateWorkloadTests
             Syncs.TrySplit(aggregate, out var events, out var problem).Should().BeTrue(problem);
             foreach (var e in events!)
             {
-                var json = JsonNode.Parse(e.Json)!.AsObject();
-                yield return ((e.EntityType, (string)json[e.EntityType]!["externalId"]!), json);
+                yield return ((e.EntityType, Read(e.EntityType, e.Json).Key), JsonNode.Parse(e.Json)!.AsObject());
             }
         }
+    }
+
+    /// <summary>An entity event's key, version and the Accounts it names, through <see cref="AggregateShape"/>.</summary>
+    private static (string Key, long? Version, string? Account, string? Related) Read(string type, string json)
+    {
+        if (type == AccountSync.Type)
+        {
+            var account = JsonSerializer.Deserialize<AccountEvent>(json, EventJson.Options)!.Account!;
+            var profile = AggregateShape.Profile.Get(account);
+            if (profile is not null)
+            {
+                AggregateShape.ProfileVersion.Version(profile).Should().Be(AggregateShape.AccountVersion.Version(account), "the profile carries the account's version too");
+            }
+
+            return (AggregateShape.AccountId.Get(account)!, AggregateShape.AccountVersion.Version(account), null, null);
+        }
+
+        if (type == AccountRelationshipSync.Type)
+        {
+            var r = JsonSerializer.Deserialize<AccountRelationshipEvent>(json, EventJson.Options)!.AccountRelationship!;
+            return (AggregateShape.RelationshipId.Get(r)!, AggregateShape.RelationshipVersion.Version(r), AggregateShape.RelationshipAccount.Get(r),
+                AggregateShape.RelatedAccount.Get(r));
+        }
+
+        var c = JsonSerializer.Deserialize<ContactEvent>(json, EventJson.Options)!.Contact!;
+        return (AggregateShape.ContactId.Get(c)!, AggregateShape.ContactVersion.Version(c), AggregateShape.ContactAccount.Get(c), null);
     }
 
     private static Dictionary<(string Type, string Key), JsonObject> Newest(AggregateWorkload workload)
@@ -149,17 +177,7 @@ public sealed class AggregateWorkloadTests
             return new AggregateWorkload.Expected(false, 0);
         }
 
-        var payload = e[type]!;
-        if (type == AccountSync.Type)
-        {
-            var version = long.Parse(((string)payload["description"]!)[1..]);
-            ((long)payload["profile"]!["score"]!).Should().Be(version, "the Profile carries the account's version too");
-            return new AggregateWorkload.Expected(true, version);
-        }
-
-        return type == AccountRelationshipSync.Type
-            ? new AggregateWorkload.Expected(true, long.Parse(((string)payload["name"]!)[1..]),
-                (string?)payload["accountExternalId"], (string?)payload["relatedAccountExternalId"])
-            : new AggregateWorkload.Expected(true, long.Parse(((string)payload["lastName"]!)[1..]), (string?)payload["accountExternalId"]);
+        var (_, version, account, related) = Read(type, e.ToJsonString());
+        return new AggregateWorkload.Expected(true, version!.Value, account, related);
     }
 }

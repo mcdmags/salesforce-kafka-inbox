@@ -121,7 +121,7 @@ public static class HtmlReports
             <p><a href="index.html">All benchmark reports</a></p>
             {Failures(summary)}
             <h2>What this benchmark measures</h2>
-            <p>{Measures(type!.Name)}</p>
+            {Measures(type!.Name)}
             <p>The lines below: BenchmarkDotNet's version, the machine and the .NET runtime, then the job's settings.
             WarmupCount is the unmeasured first run, IterationCount the measured runs that make the Mean. A Host line
             ending in [AttachedDebugger] means a debugger was attached to the process that started the run (started
@@ -141,25 +141,51 @@ public static class HtmlReports
         return Path.GetFileName(file);
     }
 
+    /// <summary>What the benchmark's one operation (the Mean) covers, as HTML.</summary>
     private static string Measures(string benchmark)
     {
+        const string Flow = """
+            <ol>
+            <li><b>Kafka message read.</b> An account change message, built on the event template
+              (templates/account-event.json): the account with its profile, relationships and contacts, before and after
+              the change. Kafka itself is not in the benchmark: the messages are handed to the consumer's code directly.</li>
+            <li><b>Split and stored.</b> The consumer's code reads the message, splits it into one event per account,
+              relationship and contact that changed, and stores each in its inbox table in Postgres: one row per entity, a
+              newer event overwriting an older one not yet sent.</li>
+            <li><b>Claimed.</b> Each worker loop claims a batch of due rows (a lease: other workers skip them).</li>
+            <li><b>Sent to Salesforce.</b> Through the real Salesforce client (rate limiter, HTTP client): read the
+              records' current values, then create, update or delete what changed. Only the org at the end of the HTTP
+              call is a mock, which waits LatencyMs per request.</li>
+            <li><b>Outcome recorded.</b> Rows sent are marked done; failures are retried later (a relationship or
+              contact whose account isn't in Salesforce yet waits for it).</li>
+            </ol>
+            """;
         return benchmark switch
         {
             nameof(InboxDrainBenchmarks) =>
-                "Each row is one setup. The inbox is first filled with every event (not measured), then Pods × Workers " +
-                "worker loops send it all to a mock Salesforce org and the inbox is empty. One operation, the Mean, is " +
-                "that drain. After each drain the result is checked: every record in the org at its newest version, " +
-                "deleted ones gone, no record ever overwritten by an older version, no two workers on one entity at " +
-                "once. A failed check fails the benchmark.",
+                $"""
+                <p>Each row is one setup. Steps 1 and 2 run first, for every message (not measured). The Mean is steps 3
+                to 5: Pods × Workers worker loops sending everything until the inbox is empty.</p>
+                {Flow}
+                <p>After each run the result is checked: every record in the org at its newest version, deleted ones
+                gone, no record ever overwritten by an older version, no two workers on one entity at once. A failed
+                check fails the benchmark.</p>
+                """,
             nameof(StreamingIngestBenchmarks) =>
-                "Like production: events keep arriving while the pods drain, stored as the Kafka consumer stores them, " +
-                "so the same account is changed again while a worker is sending it. One operation, the Mean, is from " +
-                "the first event stored until every event is sent, with the same correctness check as the drain.",
+                $"""
+                <p>Like production: all five steps at once. Messages keep arriving (steps 1 and 2) while the worker loops
+                claim and send (steps 3 to 5), so an account is often changed again while a worker is sending it. The
+                Mean is from the first message stored until every event is sent.</p>
+                {Flow}
+                <p>The result is checked as in the drain benchmark.</p>
+                """,
             nameof(MicroBenchmarks) =>
-                "Small pieces of the sync's hot path, in memory, without a database or network: parsing Salesforce's " +
-                "Sforce-Limit-Info header, reading and validating one event, and comparing a number and a date-time " +
-                "with the value Salesforce returned. One operation, the Mean, is one call.",
-            _ => "See the benchmark class of this name."
+                """
+                <p>Small pieces of the sync's hot path, in memory, without a database or network: parsing Salesforce's
+                Sforce-Limit-Info header, reading and validating one event, and comparing a number and a date-time with
+                the value Salesforce returned. One operation, the Mean, is one call.</p>
+                """,
+            _ => "<p>See the benchmark class of this name.</p>"
         };
     }
 

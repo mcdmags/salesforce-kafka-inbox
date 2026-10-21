@@ -9,8 +9,11 @@ using SalesforceSync.LoadGenerator;
 // Optimizations validator disabled so project also launches from Aspire dashboard (Debug host); BenchmarkDotNet
 // still builds and runs measured code in Release.
 // Run: dotnet run -c Release -- --load [...]: sustained-load simulation (see SustainedLoad), not a BenchmarkDotNet run
-// Either run takes --template my.json: your own aggregate example (see AggregateTemplate, example-aggregate.json);
-// child benchmark processes get it via environment.
+// Aggregates are built on an event template (AggregateTemplate): templates/account-event.json, copied next to the
+// program, or --template my.json. Child benchmark processes get its path via environment.
+var templatePath = Environment.GetEnvironmentVariable(AggregateTemplate.Variable) is { Length: > 0 } fromEnvironment
+    ? fromEnvironment
+    : AggregateTemplate.DefaultPath;
 var templateAt = Array.IndexOf(args, "--template");
 if (templateAt >= 0)
 {
@@ -20,24 +23,22 @@ if (templateAt >= 0)
         return 1;
     }
 
-    Environment.SetEnvironmentVariable(AggregateTemplate.Variable, Path.GetFullPath(args[templateAt + 1]));
+    templatePath = args[templateAt + 1];
     args = [.. args.Take(templateAt), .. args.Skip(templateAt + 2)];
 }
 
-if (Environment.GetEnvironmentVariable(AggregateTemplate.Variable) is { Length: > 0 } templatePath)
+Environment.SetEnvironmentVariable(AggregateTemplate.Variable, Path.GetFullPath(templatePath));
+try
 {
-    try
-    {
-        _ = AggregateTemplate.Current; // refuse now, with problems, not in every benchmark process
-    }
-    catch (Exception ex) when (ex is InvalidDataException or IOException)
-    {
-        Console.Error.WriteLine(ex.Message);
-        return 1;
-    }
-
-    Console.WriteLine($"// aggregates follow the template {templatePath}");
+    _ = AggregateTemplate.Current; // refuse now, with problems, not in every benchmark process
 }
+catch (Exception ex) when (ex is InvalidDataException or IOException)
+{
+    Console.Error.WriteLine(ex.Message);
+    return 1;
+}
+
+Console.WriteLine($"// aggregates are built on the template {Path.GetFullPath(templatePath)}");
 
 if (args.Contains("--load"))
 {

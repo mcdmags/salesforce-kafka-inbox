@@ -1165,14 +1165,10 @@ The dashboard shows:
 - **load-generator**: 20k account aggregates (before and after, full records) over 500 accounts at 200/s, including
   bursts to the same account; each keeps its account's relationships to other accounts and contacts, adding,
   changing and sometimes removing one (`LoadGenerator:ChildRemovalProbability`, 0.2), which the sync deletes.
-  Account and Profile external ids are GUIDs (the same on every run). The records' fields come from one of three
-  sources:
-  - built-in (default): the fields above, with a few random values;
-  - your own aggregate JSON (`LoadGenerator:Template`, a file path): every event is a copy of its `after` with the ids
-    and version markers set, checked against the event classes at startup (same file format as the benchmarks'
-    `--template`, see [Using your own aggregate](docs/benchmarks/README.md#using-your-own-aggregate));
-  - AutoFixture (`LoadGenerator:UseAutoFixture`, true): every property of the event classes gets a random value of
-    its type on every event, texts 8 characters; the ids and a contact's email are set.
+  Account and Profile external ids are GUIDs (the same on every run). Every record is built on the event template,
+  `templates/account-event.json` (or the file `LoadGenerator:Template` names): a copy of its account, first
+  relationship and first contact, where AutoFixture gives every filled-in field a new value on every event (texts 8
+  characters), with the ids, links and version markers set (see [Event template](#event-template)).
 - **benchmarks**: explicit start, against `benchdb`: **Run quick benchmarks** (about 2 minutes) or **Run full
   benchmarks** (about 6) starts that run; ▶ repeats the last run chosen (quick at first). When a run ends, its console log
   prints the HTML report's link, and **benchmark-reports** (nginx, under benchmarks) serves it: its **Benchmark report**
@@ -1407,10 +1403,15 @@ entity claim), claims, retries, overlaps, stale rows and regressions.
 The workload's expected end state and the check are unit-tested (`AggregateWorkloadTests`) without running the
 benchmarks. [docs/benchmarks/README.md](docs/benchmarks/README.md#the-drain-workload) has the workload's counts and the results.
 
-**Your own aggregate.** The aggregates are copies of an example JSON. `--template my.json` (with `--run` or `--load`) swaps
-it for yours, so events carry the fields of your `AccountEvent`; ids and the version markers the check reads are set, the
-rest stays as written, and a file that doesn't fit the event classes is refused with what is wrong. Start from
-`benchmarks/SalesforceSync.Benchmarks/example-aggregate.json`; details in
+<a id="event-template"></a>**Event template.** The load generator and the benchmarks build every aggregate on one
+required file, `templates/account-event.json`: a whole aggregate message as your source sends it. Replace it with a
+real event of yours (or pass another file: `LoadGenerator:Template`, benchmarks `--template my.json`). It is read into
+the sync's event classes and refused at startup if it doesn't fit them, every problem listed. Each record is a copy
+of the template's, where AutoFixture gives every filled-in field a new value; fields the template leaves null stay
+null, lists and the fields in `AggregateShape.Kept` (picklists, the contact's email) stay as written, `{key}` replaced
+by the entity's id. The structure, which property is each entity's id, foreign key, child list and version marker,
+is declared once, as typed properties, in `AggregateShape` (`src/SalesforceSync.LoadGenerator`): change the event
+classes and the build breaks there, never a JSON field name typed as text. Details in
 [docs/benchmarks/README.md](docs/benchmarks/README.md#using-your-own-aggregate).
 
 ```bash

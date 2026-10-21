@@ -1,9 +1,9 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using BenchmarkDotNet.Attributes;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
+using SalesforceSync.LoadGenerator;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.Benchmarks;
@@ -23,41 +23,19 @@ public class MicroBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        // Full records as source sends them: a claim's rows, one per entity
-        _tenEvents = [.. Enumerable.Range(1, 10).Select(v => new InboxEvent(
-            EntityId: $"ACC-{v:D6}",
-            Payload: new JsonObject
-            {
-                ["meta"] = new JsonObject { ["time"] = $"2026-10-14T01:02:03.{v:D3}Z", ["type"] = v == 1 ? "inserted" : "updated" },
-                ["account"] = new JsonObject
-                {
-                    ["externalId"] = $"ACC-{v:D6}",
-                    ["name"] = "Acme",
-                    ["rating"] = "Hot",
-                    ["industry"] = "Technology",
-                    ["description"] = $"v{v}",
-                    ["annualRevenue"] = 1250000.5,
-                    ["numberOfEmployees"] = 250,
-                    ["phone"] = "+1 555 0100",
-                    ["website"] = "https://example.com",
-                    ["isActive"] = true,
-                    ["tags"] = new JsonArray("B2B", "Retail"),
-                    ["customerSince"] = "2020-01-15",
-                    ["lastContactedAt"] = "2026-10-12T01:02:03Z",
-                    ["profile"] = new JsonObject
-                    {
-                        ["name"] = "Acme profile",
-                        ["tier"] = "Gold",
-                        ["score"] = v,
-                        ["discountPercent"] = 12.5,
-                        ["notes"] = null,
-                        ["optIn"] = true,
-                        ["startDate"] = "2020-02-01"
-                    }
-                }
-            }.ToJsonString(),
-            EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero),
-            LeaseEnd: DateTimeOffset.MaxValue))];
+        // Full records as source sends them, built on the event template: a claim's rows, one per entity
+        var factory = new AggregateFactory(AggregateTemplate.Current, seed: 1);
+        _tenEvents = [.. Enumerable.Range(1, 10).Select(v =>
+        {
+            var key = $"ACC-{v:D6}";
+            AccountPayload account = factory.Account(key, key, v, [], []);
+            var meta = new EventMeta { Time = $"2026-10-14T01:02:03.{v:D3}Z", Type = v == 1 ? "inserted" : "updated" };
+            return new InboxEvent(
+                EntityId: key,
+                Payload: JsonSerializer.Serialize(new AccountEvent(meta, account), EventJson.Options),
+                EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero),
+                LeaseEnd: DateTimeOffset.MaxValue);
+        })];
 
         _number = JsonDocument.Parse("87.50").RootElement.Clone();
         _datetime = JsonDocument.Parse("\"2026-10-12T01:02:03.000+0000\"").RootElement.Clone();

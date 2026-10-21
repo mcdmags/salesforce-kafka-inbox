@@ -16,12 +16,17 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- AggregateTemplate checks a template against the sync's event classes -->
+    <!-- The aggregate is built from the sync's own event classes (AggregateShape) -->
     <ProjectReference Include="..\SalesforceSync\SalesforceSync.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Global, as in the unit tests that compile AutoFixtureShape.cs in too -->
+    <!-- The event template every aggregate is built on (AggregateTemplate.DefaultPath) -->
+    <None Include="..\..\templates\account-event.json" Link="account-event.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Global, as in the unit tests, which compile AggregateFactory.cs in too -->
     <Using Include="AutoFixture" />
   </ItemGroup>
 

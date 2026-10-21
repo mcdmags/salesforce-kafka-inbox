@@ -1,208 +1,158 @@
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using SalesforceSync.Sync;
 
 namespace SalesforceSync.LoadGenerator;
 
 /// <summary>
-/// Shape of published aggregates: example JSON that the load generator (<c>AccountEventProducer</c>) and the
-/// benchmark workload copy and modify. Built-in example by default; a file of yours (load generator:
-/// <c>LoadGenerator:Template</c>; benchmarks: <c>--template my.json</c> or env var <see cref="Variable"/>) swaps it in,
-/// so events get your <c>AccountEvent</c> fields.
+/// A real event of yours, as the base of every aggregate the load generator and the benchmarks publish
+/// (<see cref="AggregateFactory"/>). Required: templates/account-event.json, copied next to each program
+/// (<see cref="DefaultPath"/>); the load generator's <c>LoadGenerator:Template</c> or the benchmarks'
+/// <c>--template my.json</c> (env var <see cref="Variable"/>) names another file.
 /// <para>
-/// File = account aggregate message <c>{ "meta": ..., "before": ..., "after": { the account, "profile",
-/// "accountRelationships": [ one example ], "contacts": [ one example ] } }</c> (only <c>after</c> read; bare snapshot
-/// ok). Every published event is a copy with:
+/// The file is a whole aggregate message, <c>{ "meta", "before", "after" }</c>; its <c>after</c> (or <c>before</c>) is
+/// the base. Its first relationship and first contact are the base of every child; a list without one gets children
+/// built by AutoFixture. It is read into the sync's event classes, so a file that doesn't fit them is refused at
+/// startup, every problem listed: a property the classes lack (a typo, or a field your classes don't have yet), a
+/// value of the wrong type, no profile.
 /// </para>
-/// <list type="bullet">
-/// <item>ids set (account <c>externalId</c>, each child's, relationship <c>relatedAccountExternalId</c>);</item>
-/// <item>version markers set (<see cref="Markers"/>): account <c>description</c> "vN" and <c>profile.score</c> N,
-/// relationship <c>name</c> "vN", contact <c>lastName</c> "vN";</item>
-/// <item>other text: <c>{key}</c> → entity key (unique emails, names);</item>
-/// <item>everything else as in file.</item>
-/// </list>
-/// Nonconforming file refused, problems listed: property payload class lacks (typo, field removed from
-/// <c>AccountEvent</c>), wrong value type, missing marker.
 /// </summary>
 public sealed class AggregateTemplate
 {
-    /// <summary>Env var naming template file (child benchmark processes inherit it).</summary>
+    /// <summary>Env var naming the template file (child benchmark processes inherit it).</summary>
     public const string Variable = "SFSYNC_BENCH_TEMPLATE";
 
-    /// <summary>Properties workload sets itself; end-state check reads them back from org.</summary>
-    public static class Markers
-    {
-        public const string Account = "description", ProfileScore = "score", Relationship = "name", Contact = "lastName";
-    }
+    public const string FileName = "account-event.json";
 
-    private const string BuiltInSource = "the built-in example";
-
-    private const string DefaultJson = /*lang=json,strict*/ """
-        {
-          "after": {
-            "externalId": "",
-            "name": "Account {key}",
-            "description": "",
-            "profile": { "score": 0 },
-            "accountRelationships": [
-              { "externalId": "", "relatedAccountExternalId": "", "name": "", "type": "Partner", "isActive": true }
-            ],
-            "contacts": [
-              { "externalId": "", "firstName": "Contact", "lastName": "" }
-            ]
-          }
-        }
-        """;
-
-    /// <summary>Built-in example, used when no template file is given.</summary>
-    public static AggregateTemplate Default { get; } = Parse(DefaultJson, BuiltInSource);
+    /// <summary>templates/account-event.json as the build copies it next to the program.</summary>
+    public static string DefaultPath => Path.Combine(AppContext.BaseDirectory, FileName);
 
     private static readonly Lazy<AggregateTemplate> FromEnvironment = new(() =>
-        Environment.GetEnvironmentVariable(Variable) is { Length: > 0 } path ? Load(path) : Default);
+        Load(Environment.GetEnvironmentVariable(Variable) is { Length: > 0 } path ? path : DefaultPath));
 
-    private readonly JsonObject _account;
-    private readonly JsonObject _relationship;
-    private readonly JsonObject _contact;
+    // Kept as JSON: every use deserializes its own copy
+    private readonly string _account;
+    private readonly string? _relationship;
+    private readonly string? _contact;
 
-    private AggregateTemplate(JsonObject account, JsonObject relationship, JsonObject contact)
+    private AggregateTemplate(AccountSnapshot account)
     {
-        _account = account;
-        _relationship = relationship;
-        _contact = contact;
+        _relationship = Child(AggregateShape.Relationships.Get(account));
+        _contact = Child(AggregateShape.Contacts.Get(account));
+        AggregateShape.Relationships.Set(account, []);
+        AggregateShape.Contacts.Set(account, []);
+        _account = JsonSerializer.Serialize(account, EventJson.Options);
     }
 
-    /// <summary>Run's template: file named by <see cref="Variable"/>, else <see cref="Default"/>.</summary>
+    /// <summary>The run's template: the file named by <see cref="Variable"/>, else <see cref="DefaultPath"/>.</summary>
     public static AggregateTemplate Current => FromEnvironment.Value;
 
-    /// <exception cref="InvalidDataException">File doesn't conform.</exception>
+    /// <exception cref="InvalidDataException">The file is missing or doesn't fit the event classes.</exception>
     public static AggregateTemplate Load(string path)
     {
-        return Parse(File.ReadAllText(path), path);
+        return File.Exists(path)
+            ? Parse(File.ReadAllText(path), path)
+            : throw new InvalidDataException($"The aggregate template {path} doesn't exist: start from templates/{FileName}, a real event of yours");
     }
 
-    /// <exception cref="InvalidDataException">JSON doesn't conform; one problem per line.</exception>
+    /// <exception cref="InvalidDataException">The JSON doesn't fit the event classes; one problem per line.</exception>
     public static AggregateTemplate Parse(string json, string source)
     {
-        var problems = new List<string>();
-        JsonObject? root = null;
+        JsonObject? root;
         try
         {
             root = JsonNode.Parse(json) as JsonObject;
-            if (root is null)
-            {
-                problems.Add("the JSON is not an object");
-            }
         }
         catch (JsonException ex)
         {
-            problems.Add($"not valid JSON: {ex.Message}");
+            throw Refused(source, [$"not valid JSON: {ex.Message}"]);
         }
 
         if (root is null)
         {
+            throw Refused(source, ["the JSON is not an object"]);
+        }
+
+        var problems = new List<string>();
+        CheckShape(root, typeof(AccountAggregateEvent), "", problems);
+        AccountAggregateEvent? aggregate = null;
+        try
+        {
+            aggregate = root.Deserialize<AccountAggregateEvent>(EventJson.Options);
+        }
+        catch (JsonException ex)
+        {
+            problems.Add($"it is not an aggregate the sync can read: {ex.Message}");
+        }
+
+        var account = aggregate?.After ?? aggregate?.Before;
+        if (aggregate is not null && account is null)
+        {
+            problems.Add($"there is no account: the message needs an \"{JsonName(Property<AccountAggregateEvent>(nameof(AccountAggregateEvent.After)))}\" object");
+        }
+        else if (account is not null && AggregateShape.Profile.Get(account) is null)
+        {
+            problems.Add($"{JsonName(AggregateShape.Profile.Property)}: needs an object: its {JsonName(AggregateShape.ProfileVersion.Property)} carries the account's version");
+        }
+
+        if (problems.Count > 0)
+        {
             throw Refused(source, problems);
         }
 
-        // Aggregate message (account = "after", else "before"), or the snapshot itself
-        if ((root["after"] ?? root["before"] ?? (root.ContainsKey("meta") ? null : root)) is not JsonObject snapshot)
-        {
-            throw Refused(source, ["there is no account: the message needs an \"after\" (or \"before\") object"]);
-        }
-
-        // Example without a child → built-in child
-        var builtIn = source == BuiltInSource ? null : Default;
-        var relationship = FirstOf(snapshot, "accountRelationships") ?? builtIn?._relationship ?? [];
-        var contact = FirstOf(snapshot, "contacts") ?? builtIn?._contact ?? [];
-        var account = (JsonObject)snapshot.DeepClone();
-        account.Remove("accountRelationships");
-        account.Remove("contacts");
-
-        CheckShape(account, typeof(AccountPayload), "after", problems);
-        CheckShape(relationship, typeof(AccountRelationshipPayload), "after.accountRelationships[0]", problems);
-        CheckShape(contact, typeof(ContactPayload), "after.contacts[0]", problems);
-        CheckMarker(typeof(AccountPayload), Markers.Account, problems);
-        CheckMarker(typeof(ProfilePayload), Markers.ProfileScore, problems);
-        CheckMarker(typeof(AccountRelationshipPayload), Markers.Relationship, problems);
-        CheckMarker(typeof(ContactPayload), Markers.Contact, problems);
-        if (account["profile"] is not JsonObject)
-        {
-            problems.Add("after.profile: needs a \"profile\" object: its \"score\" carries the account's version for the check");
-        }
-
-        var template = new AggregateTemplate(account, (JsonObject)relationship.DeepClone(), (JsonObject)contact.DeepClone());
-        if (problems.Count == 0)
-        {
-            // What consumer would make of it: valid aggregate, values of payload classes' types
-            var sample = new JsonObject
-            {
-                ["meta"] = new JsonObject { ["time"] = "2026-01-01T00:00:00Z", ["type"] = "inserted" },
-                ["after"] = template.Account("ACC-000001", 1, [template.Relationship("REL-000001-000002", "ACC-000002", 1)], [template.Contact("CON-000001-0", 1)])
-            };
-            if (!new AccountAggregate().TryRead(sample.ToJsonString(), out _, out var problem))
-            {
-                problems.Add($"it is not an aggregate the sync can read: {problem}");
-            }
-        }
-
-        return problems.Count == 0 ? template : throw Refused(source, problems);
+        var template = new AggregateTemplate(account!);
+        // What the consumer makes of an aggregate built on it: one the sync reads
+        var factory = new AggregateFactory(template, seed: 0);
+        var sample = new AccountAggregateEvent(new EventMeta { Time = "2026-01-01T00:00:00Z", Type = "inserted" }, null,
+            factory.Account("A1", "P1", 1, [factory.Relationship("R1", "A2", 1)], [factory.Contact("C1", 1)]));
+        return new AccountAggregate().TryRead(JsonSerializer.Serialize(sample, EventJson.Options), out _, out var problem)
+            ? template
+            : throw Refused(source, [$"it is not an aggregate the sync can read: {problem}"]);
     }
 
-    /// <summary>Account snapshot at <paramref name="version"/>, with these children.</summary>
-    public JsonObject Account(string key, long version, JsonArray relationships, JsonArray contacts)
+    /// <summary>A new copy of the account (with its profile), without children.</summary>
+    public AccountSnapshot Account()
     {
-        var account = Expand((JsonObject)_account.DeepClone(), key);
-        account["externalId"] = key;
-        account[Markers.Account] = $"v{version}";
-        account["profile"]![Markers.ProfileScore] = version;
-        account["accountRelationships"] = relationships;
-        account["contacts"] = contacts;
-        return account;
+        return JsonSerializer.Deserialize<AccountSnapshot>(_account, EventJson.Options)!;
     }
 
-    /// <summary>Relationship at next <paramref name="version"/>, naming <paramref name="related"/>.</summary>
-    public JsonObject Relationship(string id, string related, long version)
+    /// <summary>A new copy of the first relationship; null if the template has none.</summary>
+    public AccountRelationshipPayload? Relationship()
     {
-        var relationship = Expand((JsonObject)_relationship.DeepClone(), id);
-        relationship["externalId"] = id;
-        relationship["relatedAccountExternalId"] = related;
-        relationship[Markers.Relationship] = $"v{version}";
-        return relationship;
+        return _relationship is null ? null : JsonSerializer.Deserialize<AccountRelationshipPayload>(_relationship, EventJson.Options);
     }
 
-    /// <summary>Contact at next <paramref name="version"/>.</summary>
-    public JsonObject Contact(string id, long version)
+    /// <summary>A new copy of the first contact; null if the template has none.</summary>
+    public ContactPayload? Contact()
     {
-        var contact = Expand((JsonObject)_contact.DeepClone(), id);
-        contact["externalId"] = id;
-        contact[Markers.Contact] = $"v{version}";
-        return contact;
+        return _contact is null ? null : JsonSerializer.Deserialize<ContactPayload>(_contact, EventJson.Options);
     }
 
-    private static JsonObject? FirstOf(JsonObject snapshot, string list)
+    /// <summary>The property's name in the event JSON.</summary>
+    public static string JsonName(PropertyInfo property)
     {
-        return snapshot[list] is JsonArray { Count: > 0 } items ? items[0] as JsonObject : null;
+        return property.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name
+               ?? EventJson.Options.PropertyNamingPolicy?.ConvertName(property.Name)
+               ?? property.Name;
     }
 
-    /// <summary>Replaces <c>{key}</c> in every text of copy.</summary>
-    private static JsonObject Expand(JsonObject copy, string key)
+    private static string? Child<T>(List<T?>? children)
+        where T : class
     {
-        foreach (var (name, value) in copy.ToList())
-        {
-            copy[name] = value switch
-            {
-                JsonObject o => Expand(o, key),
-                JsonValue v when v.TryGetValue<string>(out var text) => text.Replace("{key}", key, StringComparison.Ordinal),
-                _ => value?.DeepClone()
-            };
-        }
-
-        return copy;
+        return children?.FirstOrDefault() is { } first ? JsonSerializer.Serialize(first, EventJson.Options) : null;
     }
 
-    /// <summary>Every example property exists on payload class (case-insensitive), at every level.</summary>
+    private static PropertyInfo Property<T>(string name)
+    {
+        return typeof(T).GetProperty(name)!;
+    }
+
+    /// <summary>Every property of the file exists on the event class (case-insensitive, as the reader matches), at every level.</summary>
     private static void CheckShape(JsonNode? node, Type type, string path, List<string> problems)
     {
+        type = Nullable.GetUnderlyingType(type) ?? type;
         if (node is JsonArray items)
         {
             var element = type.IsGenericType ? type.GetGenericArguments()[0] : type;
@@ -215,26 +165,18 @@ public sealed class AggregateTemplate
         {
             foreach (var (name, value) in obj)
             {
+                var at = path.Length == 0 ? name : $"{path}.{name}";
                 var property = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                    .FirstOrDefault(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                    .FirstOrDefault(p => JsonName(p).Equals(name, StringComparison.OrdinalIgnoreCase));
                 if (property is null)
                 {
-                    problems.Add($"{path}.{name}: {type.Name} has no such property");
+                    problems.Add($"{at}: {type.Name} has no such property");
                 }
                 else
                 {
-                    CheckShape(value, property.PropertyType, $"{path}.{name}", problems);
+                    CheckShape(value, property.PropertyType, at, problems);
                 }
             }
-        }
-    }
-
-    private static void CheckMarker(Type type, string property, List<string> problems)
-    {
-        if (type.GetProperties().All(p => !p.Name.Equals(property, StringComparison.OrdinalIgnoreCase)))
-        {
-            problems.Add($"{type.Name} has no \"{property}\" property, which the check reads back as the version: " +
-                         $"change {nameof(AggregateTemplate)}.{nameof(Markers)} to a property that is synced to Salesforce");
         }
     }
 

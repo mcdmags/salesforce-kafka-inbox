@@ -2,11 +2,11 @@
   "meta": { "time": "2026-10-14T01:02:03.456Z", "type": "updated" },
   "before": null,
   "after": {
-    "externalId": "ACC-000001",
-    "name": "Account {key}",
+    "externalId": "6f1c2a9e-3b7d-4c55-9a0e-1d2f3a4b5c6d",
+    "name": "Acme Corporation",
     "rating": "Hot",
     "industry": "Technology",
-    "description": "set by the workload",
+    "description": "Key account",
     "annualRevenue": 1250000.5,
     "numberOfEmployees": 250,
     "phone": "+1 555 0100",
@@ -16,9 +16,10 @@
     "customerSince": "2020-01-15",
     "lastContactedAt": null,
     "profile": {
-      "name": "Profile {key}",
+      "externalId": "0b9e8d7c-6a5f-4e3d-8c2b-1a0f9e8d7c6b",
+      "name": "Acme profile",
       "tier": "Gold",
-      "score": 0,
+      "score": 87.5,
       "discountPercent": 12.5,
       "notes": null,
       "optIn": true,
@@ -27,8 +28,8 @@
     "accountRelationships": [
       {
         "externalId": "REL-000001-000002",
-        "relatedAccountExternalId": "ACC-000002",
-        "name": "set by the workload",
+        "relatedAccountExternalId": "2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d",
+        "name": "Acme and Globex",
         "type": "Partner",
         "startDate": "2020-03-01",
         "isActive": true
@@ -38,7 +39,7 @@
       {
         "externalId": "CON-000001-0",
         "firstName": "Ada",
-        "lastName": "set by the workload",
+        "lastName": "Lovelace",
         "email": "{key}@example.com",
         "phone": "+1 555 0101"
       }

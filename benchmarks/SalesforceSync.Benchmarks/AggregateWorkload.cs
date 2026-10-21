@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using SalesforceSync.FakeSalesforce;
 using SalesforceSync.LoadGenerator;
@@ -9,10 +10,10 @@ namespace SalesforceSync.Benchmarks;
 
 /// <summary>
 /// Drain benchmark input: account aggregates as upstream publishes them (<c>{ meta, before, after }</c>, see
-/// <see cref="AccountAggregate"/>), plus the state the org must end in. Every aggregate changes its Account (Description
-/// "vN", Profile score N; N = account version). Now and then also adds/changes/removes a relationship or contact
-/// (removed one may return as new record). A few accounts deleted with all children.
-/// Aggregates are copies of an example (<see cref="AggregateTemplate"/>), so they have your event's fields.
+/// <see cref="AccountAggregate"/>), plus the state the org must end in. Every aggregate changes its account (its
+/// version marker and the profile's: N = account version, <see cref="AggregateShape"/>). Now and then also
+/// adds/changes/removes a relationship or contact (removed one may return as new record). A few accounts deleted with
+/// all children. Records are built on your event template (<see cref="AggregateFactory"/>), so they have your fields.
 /// Benchmark stores what the types' ingests make of each aggregate, like the Kafka consumer. Seeded, no I/O: same
 /// workload every iteration.
 /// </summary>
@@ -39,24 +40,24 @@ public sealed class AggregateWorkload
     /// <param name="Account">Account a relationship or contact names (Text foreign key).</param>
     /// <param name="Related">Relationship's other Account.</param>
     /// <param name="Present">Record must exist.</param>
-    /// <param name="Version">Newest version: Account Description "vN" and Profile score, child "vN".</param>
+    /// <param name="Version">Newest version, as the entity's version marker carries it.</param>
     public sealed record Expected(bool Present, long Version, string? Account = null, string? Related = null);
 
     private readonly Random _random;
     private readonly long[] _versions;
-    private readonly JsonObject?[] _snapshots; // each account's last "after", the next aggregate's "before"
+    private readonly AccountSnapshot?[] _snapshots; // each account's last "after", the next aggregate's "before"
     private readonly bool[] _deleted;
     private readonly Dictionary<string, long> _childVersions = new(StringComparer.Ordinal);
     private readonly HashSet<(string Type, string Key)> _children = [];
 
-    private readonly AggregateTemplate _template;
+    private readonly AggregateFactory _factory;
 
     private AggregateWorkload(int accounts, int seed, AggregateTemplate template)
     {
-        _template = template;
+        _factory = new AggregateFactory(template, seed);
         _random = new Random(seed);
         _versions = new long[accounts];
-        _snapshots = new JsonObject?[accounts];
+        _snapshots = new AccountSnapshot?[accounts];
         _deleted = new bool[accounts];
     }
 
@@ -73,7 +74,7 @@ public sealed class AggregateWorkload
     /// <param name="aggregates">Aggregate count (Kafka messages).</param>
     /// <param name="accounts">Distinct account count.</param>
     /// <param name="seed">Random seed: same seed + template = same workload.</param>
-    /// <param name="template">Aggregate shape; null = run's (<see cref="AggregateTemplate.Current"/>).</param>
+    /// <param name="template">The event template; null = the run's (<see cref="AggregateTemplate.Current"/>).</param>
     public static AggregateWorkload Generate(int aggregates, int accounts, int seed = 42, AggregateTemplate? template = null)
     {
         var workload = new AggregateWorkload(accounts, seed, template ?? AggregateTemplate.Current);
@@ -107,49 +108,44 @@ public sealed class AggregateWorkload
         Expect();
     }
 
-    private void Publish(string type, JsonObject? before, JsonObject? after)
+    private void Publish(string type, AccountSnapshot? before, AccountSnapshot? after)
     {
         var time = BaseTime.AddMilliseconds(Aggregates.Count + 1);
-        Aggregates.Add(new JsonObject
-        {
-            ["meta"] = new JsonObject
-            {
-                ["time"] = time.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
-                ["type"] = type
-            },
-            ["before"] = before?.DeepClone(),
-            ["after"] = after?.DeepClone()
-        }.ToJsonString());
+        var meta = new EventMeta { Time = time.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture), Type = type };
+        Aggregates.Add(JsonSerializer.Serialize(new AccountAggregateEvent(meta, before, after), EventJson.Options));
     }
 
-    /// <summary>Account's next snapshot: Account changed, children as before, maybe one touched.</summary>
-    private JsonObject Next(int account, long version, JsonObject? before)
+    /// <summary>Account's next snapshot: account changed, children as before, maybe one touched.</summary>
+    private AccountSnapshot Next(int account, long version, AccountSnapshot? before)
     {
-        var relationships = before?["accountRelationships"]?.DeepClone().AsArray() ?? [];
-        var contacts = before?["contacts"]?.DeepClone().AsArray() ?? [];
+        var relationships = new List<AccountRelationshipPayload?>(before is null ? [] : AggregateShape.Relationships.Get(before) ?? []);
+        var contacts = new List<ContactPayload?>(before is null ? [] : AggregateShape.Contacts.Get(before) ?? []);
 
         // Relationship names a second Account: already published, never deleted
         var other = _random.Next(_versions.Length);
         if (_random.NextDouble() < RelationshipShare && other != account && _versions[other] > 0 && !IsDeletable(other))
         {
-            Touch(relationships, AccountRelationshipSync.Type, $"REL-{account:D6}-{other:D6}", (id, v) => _template.Relationship(id, Key(other), v));
+            Touch(relationships, AggregateShape.RelationshipId, AccountRelationshipSync.Type, $"REL-{account:D6}-{other:D6}",
+                (id, v) => _factory.Relationship(id, Key(other), v));
         }
 
         if (_random.NextDouble() < ContactShare)
         {
-            Touch(contacts, ContactSync.Type, $"CON-{account:D6}-{_random.Next(ContactsPerAccount)}", _template.Contact);
+            Touch(contacts, AggregateShape.ContactId, ContactSync.Type, $"CON-{account:D6}-{_random.Next(ContactsPerAccount)}", _factory.Contact);
         }
 
-        return _template.Account(Key(account), version, relationships, contacts);
+        // The profile's id is the account's, so the check finds both by one key
+        return _factory.Account(Key(account), Key(account), version, relationships, contacts);
     }
 
     /// <summary>Removes child if listed (<see cref="RemovalShare"/>), else adds it at next version.</summary>
-    private void Touch(JsonArray children, string type, string id, Func<string, long, JsonObject> build)
+    private void Touch<T>(List<T?> children, Field<T, string?> idOf, string type, string id, Func<string, long, T> build)
+        where T : class
     {
-        var existing = children.FirstOrDefault(c => (string?)c?["externalId"] == id);
-        if (existing is not null)
+        var existing = children.FindIndex(c => c is not null && idOf.Get(c) == id);
+        if (existing >= 0)
         {
-            children.Remove(existing);
+            children.RemoveAt(existing);
             if (_random.NextDouble() < RemovalShare)
             {
                 return;
@@ -188,19 +184,18 @@ public sealed class AggregateWorkload
             Final[child] = new Expected(false, _childVersions[child.Key]);
         }
 
-        foreach (var snapshot in _snapshots.OfType<JsonObject>())
+        foreach (var snapshot in _snapshots.OfType<AccountSnapshot>())
         {
-            var account = (string)snapshot["externalId"]!;
-            foreach (var r in snapshot["accountRelationships"]!.AsArray())
+            var account = AggregateShape.AccountId.Get(snapshot)!;
+            foreach (var r in AggregateShape.Relationships.Get(snapshot)!.OfType<AccountRelationshipPayload>())
             {
-                var key = (string)r!["externalId"]!;
-                Final[(AccountRelationshipSync.Type, key)] =
-                    new Expected(true, _childVersions[key], account, (string?)r["relatedAccountExternalId"]);
+                var key = AggregateShape.RelationshipId.Get(r)!;
+                Final[(AccountRelationshipSync.Type, key)] = new Expected(true, _childVersions[key], account, AggregateShape.RelatedAccount.Get(r));
             }
 
-            foreach (var c in snapshot["contacts"]!.AsArray())
+            foreach (var c in AggregateShape.Contacts.Get(snapshot)!.OfType<ContactPayload>())
             {
-                var key = (string)c!["externalId"]!;
+                var key = AggregateShape.ContactId.Get(c)!;
                 Final[(ContactSync.Type, key)] = new Expected(true, _childVersions[key], account);
             }
         }
@@ -223,14 +218,18 @@ public sealed class AggregateWorkload
 
     private sealed class OrgCheck(FakeSalesforceStore org)
     {
-        private const string RelationshipObject = "Account_Relationship__c";
+        // Where the sync writes AggregateShape's markers and links in Salesforce: its mapping (AccountSync,
+        // AccountRelationshipSync, ContactSync) says so, and these follow it. A mismatch fails the first iteration's check.
+        private const string AccountObject = "Account", ProfileObject = "Profile__c", RelationshipObject = "Account_Relationship__c", ContactObject = "Contact";
+        private const string AccountVersion = "Description", ProfileVersion = "Score__c", RelationshipVersion = "Name", ContactVersion = "LastName";
+        private const string AccountLink = "AccountId__c", RelatedLink = "RelatedAccountId__c";
 
-        /// <summary>Object of an entity type's record (Account's Profile__c goes with it).</summary>
+        /// <summary>Object of an entity type's record (the account's profile goes with it).</summary>
         private static readonly Dictionary<string, string> ObjectOf = new()
         {
-            [AccountSync.Type] = "Account",
+            [AccountSync.Type] = AccountObject,
             [AccountRelationshipSync.Type] = RelationshipObject,
-            [ContactSync.Type] = "Contact"
+            [ContactSync.Type] = ContactObject
         };
 
         public int Regressions { get; private set; }
@@ -244,69 +243,67 @@ public sealed class AggregateWorkload
                 : Contact(key, expected);
         }
 
-        /// <summary>Removed child, or deleted account with Profile: no record left.</summary>
+        /// <summary>Removed child, or deleted account with its profile: no record left.</summary>
         private string? Absent(string type, string key)
         {
-            return org.FindByExternalId(ObjectOf[type], key) is null && (type != AccountSync.Type || org.FindByExternalId("Profile__c", key) is null)
+            return org.FindByExternalId(ObjectOf[type], key) is null && (type != AccountSync.Type || org.FindByExternalId(ProfileObject, key) is null)
                 ? null
                 : $"{key}: expected deleted, still in the org";
         }
 
-        /// <summary>Newest version on both records (Account Description "vN", Profile Score__c = N).</summary>
+        /// <summary>Newest version on both records, account and profile.</summary>
         private string? Account(string key, long expected)
         {
-            var accountVersions = Versions("Account", key, "Description");
-            var profileVersions = Forward([.. (org.History("Profile__c", key) ?? [])
-                .Where(w => w.ContainsKey("Score__c"))
-                .Select(w => (long)decimal.Parse(w["Score__c"]!.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture))]);
+            var accountVersions = Versions(AccountObject, key, AccountVersion);
+            var profileVersions = Versions(ProfileObject, key, ProfileVersion);
             return accountVersions.LastOrDefault() == expected && profileVersions.LastOrDefault() == expected
                 ? null
                 : $"{key}: expected v{expected}, account v{accountVersions.LastOrDefault()}, profile v{profileVersions.LastOrDefault()}";
         }
 
-        /// <summary>Newest version (Name "vN"), linked to right two Accounts (Text foreign keys), both existing.</summary>
+        /// <summary>Newest version, linked to the right two Accounts (Text foreign keys), both existing.</summary>
         private string? Relationship(string key, Expected expected)
         {
-            var versions = Versions(RelationshipObject, key, "Name");
+            var versions = Versions(RelationshipObject, key, RelationshipVersion);
             var record = org.FindByExternalId(RelationshipObject, key);
             return versions.LastOrDefault() == expected.Version && record is not null &&
-                   org.FindByExternalId("Account", expected.Account!) is not null && org.FindByExternalId("Account", expected.Related!) is not null &&
-                   (string?)record["AccountId__c"] == expected.Account && (string?)record["RelatedAccountId__c"] == expected.Related
+                   org.FindByExternalId(AccountObject, expected.Account!) is not null && org.FindByExternalId(AccountObject, expected.Related!) is not null &&
+                   (string?)record[AccountLink] == expected.Account && (string?)record[RelatedLink] == expected.Related
                 ? null
                 : $"{key}: expected v{expected.Version} linking {expected.Account}->{expected.Related}, got v{versions.LastOrDefault()} " +
-                  $"linking {record?["AccountId__c"]}->{record?["RelatedAccountId__c"]}";
+                  $"linking {record?[AccountLink]}->{record?[RelatedLink]}";
         }
 
-        /// <summary>Newest version (LastName "vN"), naming its Account.</summary>
+        /// <summary>Newest version, naming its Account.</summary>
         private string? Contact(string key, Expected expected)
         {
-            var versions = Versions("Contact", key, "LastName");
-            var record = org.FindByExternalId("Contact", key);
-            return versions.LastOrDefault() == expected.Version && (string?)record?["AccountId__c"] == expected.Account
+            var versions = Versions(ContactObject, key, ContactVersion);
+            var record = org.FindByExternalId(ContactObject, key);
+            return versions.LastOrDefault() == expected.Version && (string?)record?[AccountLink] == expected.Account
                 ? null
-                : $"{key}: expected v{expected.Version} of {expected.Account}, got v{versions.LastOrDefault()} of {record?["AccountId__c"]}";
+                : $"{key}: expected v{expected.Version} of {expected.Account}, got v{versions.LastOrDefault()} of {record?[AccountLink]}";
         }
 
         /// <summary>
-        /// Versions ("vN" in <paramref name="field"/>) in org receive order, of the record with the key now (re-added
-        /// child = new record, own history).
+        /// Versions in <paramref name="field"/> ("vN" as text, N as a number) in org receive order, of the record with
+        /// the key now (re-added child = new record, own history). Counts a regression unless they only move forward.
         /// </summary>
         private List<long> Versions(string sobject, string key, string field)
         {
-            return Forward([.. (org.History(sobject, key) ?? [])
-                .Where(w => w.ContainsKey(field))
-                .Select(w => long.Parse(((string)w[field]!)[1..], CultureInfo.InvariantCulture))]);
-        }
-
-        /// <summary>Counts a regression unless versions only move forward.</summary>
-        private List<long> Forward(List<long> versions)
-        {
+            List<long> versions = [.. (org.History(sobject, key) ?? []).Where(w => w.ContainsKey(field)).Select(w => VersionOf(w[field]!))];
             if (!versions.Zip(versions.Skip(1)).All(p => p.First < p.Second))
             {
                 Regressions++;
             }
 
             return versions;
+        }
+
+        private static long VersionOf(JsonNode value)
+        {
+            return value.GetValueKind() == JsonValueKind.String
+                ? long.Parse(value.GetValue<string>()[1..], CultureInfo.InvariantCulture)
+                : (long)decimal.Parse(value.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
         }
     }
 
