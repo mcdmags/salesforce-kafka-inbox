@@ -13,8 +13,11 @@ public sealed class RateLimitOptions
     /// </summary>
     public TimeSpan ConcurrentLimitPause { get; set; } = TimeSpan.FromSeconds(30);
 
-    /// <summary>Daily usage ratio at which to stop completely.</summary>
-    public double DailyHardRatio { get; set; } = 0.95;
+    /// <summary>
+    /// Share of the org's daily allocation at which this process stops calling (1.0: at the allocation itself). Lower
+    /// it when other integrations share the org, to leave them a reserve. README.md, "Choosing DailyHardRatio".
+    /// </summary>
+    public double DailyHardRatio { get; set; } = 1.0;
 
     /// <summary>
     /// Pause at <see cref="DailyHardRatio"/>, and after REQUEST_LIMIT_EXCEEDED for the org's total requests

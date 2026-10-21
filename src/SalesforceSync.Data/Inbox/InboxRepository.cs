@@ -5,121 +5,15 @@ using Microsoft.Extensions.Options;
 namespace SalesforceSync.Data.Inbox;
 
 /// <summary>
-/// <see cref="IRepository{TRow}"/> on Postgres, raw SQL through EF.
-/// <para>
-/// <b>What keeps other workers off a claimed row: the lease, not a lock.</b> next_attempt_at is the row's state: null
-/// means done (or dead-lettered), a time at or before now means due, and a later time means claimed or waiting for a
-/// retry. A claim only picks rows that are due, and sets next_attempt_at to now + <see cref="SyncOptions.Lease"/> (the
-/// lease end). From then on the row is in the future, so no other worker's claim finds it, and nothing has to stay open
-/// while the Salesforce calls run: no transaction, no row lock, no connection. Postgres row locks exist only inside a
-/// single statement. The claim takes them with FOR UPDATE SKIP LOCKED, so two workers claiming at the same moment skip
-/// each other's rows instead of waiting. A store and an outcome on the same row wait for each other only for the
-/// length of one statement.
-/// </para>
-/// <para>
-/// <b>The claim is a receipt.</b> <see cref="ClaimAsync"/> leases due rows by setting next_attempt_at to the lease end.
-/// For each row it returns the entity id, the event_time it read and the lease end it set (<see cref="InboxEvent"/>).
-/// Every later statement for the batch (<see cref="MarkDoneAsync"/>, <see cref="MarkFailedAsync"/>,
-/// <see cref="ReleaseAsync"/>, <see cref="EndLeasesAsync"/>) sends that receipt back for the ids it is about. The values
-/// come from the claim (<see cref="InboxClaim.Of"/>), never from the table, and only claimed ids are accepted. Postgres
-/// applies the statement only to rows that still match the receipt (<see cref="StillClaimed"/>).
-/// Why: the Salesforce calls run between the claim and the outcome, outside any transaction, so nothing holds the row
-/// in the meantime. The receipt is how we tell a row that is still ours from one that has changed.
-/// </para>
-/// <para>
-/// <b>What can change a leased row, and what happens then:</b>
-/// <list type="bullet">
-/// <item><b>A newer event is stored.</b> The store replaces event_time and resets the attempts, but keeps
-/// next_attempt_at (the lease end); moving it to now would let a second worker claim the entity while we are still
-/// writing it. Our outcome then skips the row because event_time differs, so the newer event is never marked done
-/// without being sent, and the old event's failure is not counted against it. In the same unit, the outcome ends the
-/// lease of every row it skipped (<see cref="EndLeasesAsync"/>): next_attempt_at becomes now, so the newer event is due
-/// at once and the next claim, by any worker, sends it. Without that it would wait for the lease to expire. Ending the
-/// lease matches the lease end but not event_time, because the event changed and the lease is still ours. After a
-/// <see cref="ReleaseAsync"/> the newer event waits for the release delay instead, so it can't race a write Salesforce
-/// may still apply.
-/// <para>
-/// How often: only while a batch is out, from its claim to its outcome, which is the Salesforce round trip (0.3 to 1 s
-/// on a real org). A row waiting in the inbox isn't claimed. For an entity whose events arrive on average every T
-/// seconds, the chance that one arrives during a round trip of W seconds is about 1 - e^(-W/T): 5% for a save every
-/// 10 s and a 0.5 s round trip, 39% for a save every second. So with a user saving in quick succession it is common,
-/// and handled as above at the cost of one more write, which the newer event needs anyway.
-/// </para>
-/// </item>
-/// <item><b>Our lease ran out and another worker claimed the row.</b> The row now has their lease end, so none of our
-/// late statements match: we can't record an outcome on their lease or end it. This is rare, because the Salesforce
-/// call is cancelled at 80% of the lease.</item>
-/// <item><b>The same statement runs twice</b> (its reply was lost and the unit was retried). The first run already
-/// replaced the lease end (done: null; failed: the backoff time), so the second run matches nothing and a failure is
-/// counted only once.</item>
-/// </list>
-/// If a store and an outcome hit the same row at the same moment, the row lock orders them, and READ COMMITTED
-/// re-checks the outcome's WHERE against the row the store left.
-/// </para>
-/// <para>
-/// <b>Why no transactions.</b> Each statement commits on its own. A claim is one round trip instead of three (BEGIN,
-/// statement, COMMIT), and rows stay leased for less time: streaming with 8 workers on 3 pods went from 6.4 s to 4.6 s.
-/// The receipt makes this safe, because every statement can run twice or late. The accepted cost: if a claim's commit
-/// is lost, or the process crashes between outcome statements, those rows stay leased until the lease expires. They
-/// are delayed, never lost.
-/// </para>
-/// <para>
-/// <b>Why the Salesforce calls are not inside a transaction that holds the row.</b> It would hold the row lock, but at
-/// a cost, and it would make nothing safer:
-/// <list type="bullet">
-/// <item>The Kafka consumer would wait. A store waits for the row lock, so a newer event for an entity being sent would
-/// block the consumer until Salesforce answers (up to the HTTP timeout when Salesforce is slow or down). The consumer
-/// reads a partition in order, so every other account behind that message would wait too. Today the store never
-/// waits.</item>
-/// <item>The Salesforce write is not part of the transaction anyway. If Salesforce applies it and the commit is then
-/// lost, the row rolls back to pending and is sent again. So we would still need idempotent upserts and resends; the
-/// lock would only make the newer event wait instead of being detected by event_time.</item>
-/// <item>Every batch in flight would keep a connection idle in a transaction for the whole round trip (24 with 8
-/// workers on 3 pods), so the pool would be sized by Salesforce's slowest reply instead of by the queries.</item>
-/// <item>An open transaction stops vacuum from removing old row versions, and the inbox is updated all the time, so the
-/// table and its index would bloat.</item>
-/// </list>
-/// Lock while claiming, never while doing the slow work: the lease and the receipt give the same guarantees (no older
-/// version wins, a newer event is always sent) without any of that.
-/// </para>
-/// <para>
-/// <b>Known gap: two events with the same event_time.</b> Everything above relies on a newer event having a later
-/// event_time. A store with the same time still overwrites a pending or claimed row (meant for Kafka redelivering the
-/// same message), so if two different edits carry the same time while the first is being sent, the outcome matches,
-/// marks the row done, and the second edit is never sent. Times are kept to the microsecond, so this needs a source
-/// whose timestamps are coarser (whole seconds, say) and two saves within one tick. Holding a lock would not help: the
-/// second store would wait, then find the row done and, as a same-time event, leave it alone.
-/// </para>
-/// <para>
-/// <b>Why the lease end instead of a lock_token column.</b> An alternative is a lock_token column: each claim writes a
-/// new random token on its rows, every outcome matches lock_token = @token, and finishing a row clears it. We chose
-/// not to: it is one more column to write, clear and keep consistent on every statement, and the lease end already
-/// does the same job. While a lease runs, only a claim changes next_attempt_at, and two claims never set the same
-/// microsecond, so the lease end identifies the lease.
-/// </para>
-/// <para>
-/// <b>Why rows are found by primary key only.</b> Every statement finds its rows with entity_id = ANY(@entityIds): one
-/// index lookup per id, so the cost depends on the batch size, not the table size. Joining a list of ids back to the
-/// table means the same thing, but leaves the planner free to choose how. With a big backlog its estimates were off,
-/// and it read the whole table to update a few hundred rows. The unnest only checks the rows already found against
-/// the receipt.
-/// </para>
+/// <see cref="IRepository{TRow}"/> on Postgres: a claim leases rows, and every later statement applies only to rows
+/// still under that lease. How and why: README.md, "How a lease works".
 /// </summary>
 public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TRow>
     where TRow : InboxRow
 {
     private static readonly string Table = TableOfRow();
 
-    /// <summary>
-    /// WHERE of every outcome: claimed rows still under this claim's lease (@leaseEnds) and still holding the claimed
-    /// event (@times). Row overwritten by newer event gets no outcome (else marked done unsent);
-    /// <see cref="EndLeasesAsync"/> makes it due. Lease match: an outcome retried after its commit was lost, or run after
-    /// the lease expired and another worker claimed the row, changes nothing (no double attempt count, no ended lease).
-    /// <para>
-    /// No race with store: same row, row lock orders them. Store first: event_time differs, no match (READ COMMITTED
-    /// re-checks). Store second: overwrites finished row, pending again.
-    /// </para>
-    /// </summary>
+    /// <summary>WHERE of every outcome: the claimed rows still under this lease and still holding the claimed event.</summary>
     private const string StillClaimed = """
         i.entity_id = ANY(@entityIds)
           AND EXISTS (SELECT 1 FROM unnest(@entityIds, @times, @leaseEnds) AS c(entity_id, event_time, lease_end)
@@ -134,11 +28,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         return db.TableOf<TRow>();
     }
 
-    /// <summary>
-    /// Overwrite if event newer. Same time (Kafka redelivery) overwrites too, except done row (already in Salesforce).
-    /// Pending row keeps next_attempt_at: if leased that is lease end, moving to now lets second worker claim.
-    /// Lease holder's outcome makes it due (<see cref="StillClaimed"/>).
-    /// </summary>
+    /// <summary>Stores the event if it is newer than the row's; a leased row keeps its lease.</summary>
     public Task AddAsync(string entityId, DateTimeOffset eventTime, string payload, CancellationToken ct)
     {
         var time = InboxRow.ToWholeMicroseconds(eventTime);
@@ -158,14 +48,9 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }, ct);
     }
 
-    /// <summary>
-    /// Lease longest-waiting due rows: next_attempt_at = lease end. SKIP LOCKED: workers claim side by side. READ
-    /// COMMITTED re-checks row leased after our snapshot, drops it: no double lease (ClaimRaceTests). Ids into array,
-    /// not CTE joined back.
-    /// </summary>
+    /// <summary>Leases the longest-waiting due rows.</summary>
     public Task<InboxClaim> ClaimAsync(CancellationToken ct)
     {
-        // One statement, atomic alone. Lost commit: its rows wait lease expiry
         return contexts.RunAsync(async (db, t) =>
         {
             var sql = $"""
@@ -210,11 +95,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }), ct);
     }
 
-    /// <summary>
-    /// Exponential backoff, or dead letter (idle with error) at the MaxRetries-th failure, or at once if permanent
-    /// (@deadIds). @errors: one JSON id -> error, so a whole batch is one statement. Scalar subquery parses it once; as
-    /// a CTE it was re-read per row (230 ms / 5,000).
-    /// </summary>
+    /// <summary>Retries after a backoff, or dead-letters (at MaxRetries, or at once if permanent).</summary>
     public Task MarkFailedAsync(InboxClaim claim, IReadOnlyList<FailedEvent> failures, CancellationToken ct)
     {
         if (failures.Count == 0)
@@ -245,12 +126,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }), ct);
     }
 
-    /// <summary>
-    /// Due again after <see cref="Release.Delay"/>, no attempt spent. Unknown write outcome holds entities till
-    /// Salesforce surely applied or dropped it; new events wait too (store keeps pending due time).
-    /// <see cref="Release.StopInbox"/> also delays all other due rows: mapping error fails them all, waiting loses
-    /// nothing, retrying dead-letters.
-    /// </summary>
+    /// <summary>Due again after <see cref="Release.Delay"/>, no attempt spent; <see cref="Release.StopInbox"/> delays the whole inbox.</summary>
     public Task ReleaseAsync(InboxClaim claim, Release release, CancellationToken ct)
     {
         return WithLeasesEndedAsync([.. claim.Events], release.Delay, async (db, t) =>
@@ -287,10 +163,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }, ct);
     }
 
-    /// <summary>
-    /// Run <paramref name="record"/> on <paramref name="rows"/>, then end the lease of those it skipped (a newer event
-    /// overwrote them): due after <paramref name="delay"/>, not at lease expiry.
-    /// </summary>
+    /// <summary>Runs <paramref name="record"/>, then ends the lease of the rows it skipped.</summary>
     private Task WithLeasesEndedAsync(IReadOnlyList<InboxEvent> rows, TimeSpan delay,
         Func<SyncDbContext, CancellationToken, Task<List<string>>> record, CancellationToken ct)
     {
@@ -304,11 +177,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
         }, ct);
     }
 
-    /// <summary>
-    /// Caller passes the rows outcomes did not return. Not last_updated = now(): store in same microsecond would look
-    /// recorded, stay leased till expiry. No event_time match: an overwritten row must end its lease too (a store keeps
-    /// the lease end); the lease end match leaves a row another worker claimed since alone.
-    /// </summary>
+    /// <summary>Makes rows due after <paramref name="delay"/> if they are still under this lease.</summary>
     private static Task<int> EndLeasesAsync(SyncDbContext db, CancellationToken ct, IReadOnlyList<InboxEvent> rows, TimeSpan delay)
     {
         var sql = $"""

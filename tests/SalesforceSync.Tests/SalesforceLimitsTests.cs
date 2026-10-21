@@ -102,13 +102,22 @@ public sealed class SalesforceLimitsTests
     }
 
     [Fact]
-    public void Org_usage_pauses_near_the_daily_limit()
+    public void Org_usage_pauses_at_the_daily_allocation_by_default()
     {
         var limiter = Limiter(new RateLimitOptions());
 
         limiter.Decide(new SalesforceLimitInfo(new LimitCounter(10_000, 100_000), null, null, null)).Should().Be(SalesforceRateLimiter.ThrottleDecision.Normal);
-        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(85_000, 100_000), null, null, null)).Should().Be(SalesforceRateLimiter.ThrottleDecision.Normal);
-        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(96_000, 100_000), null, null, null)).Pause.Should().Be(TimeSpan.FromMinutes(15), "the org is past DailyHardRatio");
+        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(99_999, 100_000), null, null, null)).Should().Be(SalesforceRateLimiter.ThrottleDecision.Normal);
+        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(100_000, 100_000), null, null, null)).Pause.Should().Be(TimeSpan.FromMinutes(15), "the allocation is used");
+    }
+
+    [Fact]
+    public void A_lower_DailyHardRatio_leaves_a_reserve_for_other_integrations()
+    {
+        var limiter = Limiter(new RateLimitOptions { DailyHardRatio = 0.95 });
+
+        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(94_000, 100_000), null, null, null)).Should().Be(SalesforceRateLimiter.ThrottleDecision.Normal);
+        limiter.Decide(new SalesforceLimitInfo(new LimitCounter(95_000, 100_000), null, null, null)).Pause.Should().Be(TimeSpan.FromMinutes(15), "the org is at DailyHardRatio");
     }
 
     [Fact]

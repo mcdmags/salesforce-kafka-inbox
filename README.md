@@ -51,7 +51,7 @@ account, is deleted in Salesforce. Several things make this harder than "consume
 | Bad records | A value Salesforce rejects (too long, wrong type, required field emptied, a validation rule) fails only its own unit, by Salesforce's answer for that record (permanent or transient by its code; a required field emptied on an *update* is retried until `MaxRetries`, since the code can also mean the record was deleted meanwhile); an unknown or read-only field is a mapping error and stops the inbox; a malformed event is dead-lettered on its own (`INVALID_EVENT`). |
 | Failures | Each record's result decides per entity: **permanent** (validation rules, invalid fields, ...; configurable) → dead-lettered immediately, alone; **transient** (`UNABLE_TO_LOCK_ROW`, a parent not synced yet, a create that lost a race, unknown codes) → exponential backoff, dead-lettered after `MaxRetries`; The code is stored in the inbox row's `last_error_code`. See [Retries and dead letters](#retries-and-dead-letters). |
 | Postgres failures | Every unit of work (claim, outcomes, ingest, schema) runs through EF Core's execution strategy (**`PostgresRetryStrategy`**, a `NpgsqlRetryingExecutionStrategy` configured from `Postgres:Retry`, used as `db.Database.CreateExecutionStrategy().ExecuteAsync(...)`; the inbox's statements commit one by one, with no explicit transaction): a dropped connection, failover, timeout, deadlock or serialization failure re-runs the whole unit (change tracker cleared) with exponential backoff and jitter. After a lost connection the Npgsql pool is cleared, since its idle connections are usually dead too. Every unit is safe to run twice; rows leased by a claim whose commit was lost wait for the lease to expire. A batch's outcomes are recorded with two statements, not one per entity: `MarkDoneAsync` for the synced rows and `MarkFailedAsync` for the failed ones (a permanent failure is dead-lettered at once by the same statement). |
-| Rate limits | Salesforce publishes a daily total (a soft limit, rolling 24 hours) and a cap on concurrent long-running requests, and no per-second limit (see [Salesforce API limits](#salesforce-api-limits)). Each process keeps an in-memory **pause**: the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) pauses it at 95%; 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause the process that gets them. `Sync:Workers` x pods is kept under the org's concurrent limit by configuration. Rate-limited batches are handed back without spending an attempt. |
+| Rate limits | Salesforce publishes a daily total (a soft limit, rolling 24 hours) and a cap on concurrent long-running requests, and no per-second limit (see [Salesforce API limits](#salesforce-api-limits)). Each process keeps an in-memory **pause**: the `Sforce-Limit-Info` header (`api-usage`, and `per-app-api-usage` when sent) pauses it at `RateLimit:DailyHardRatio` of the daily allocation (1.0 by default: the allocation itself, see [Choosing `DailyHardRatio`](#choosing-dailyhardratio)); 503 (and 429 from anything in front of Salesforce) and both kinds of `REQUEST_LIMIT_EXCEEDED` pause the process that gets them. `Sync:Workers` x pods is kept under the org's concurrent limit by configuration. Rate-limited batches are handed back without spending an attempt. |
 
 ```
 Kafka (any key, any order) ─► KafkaInboxConsumer ─► one inbox table per object type (Postgres), one row per
@@ -444,6 +444,13 @@ result and then replaces the row with "B", `pending` and due. Either way "B" is 
 `ClaimRaceTests.An_outcome_that_waits_for_a_store_of_a_newer_event_is_not_recorded_on_it` (every kind of result) and `LeaseTests.A_newer_event_stored_while_the_claimed_one_is_written_is_written_next_whatever_the_claimed_ones_outcome`
 (end to end, Salesforce ends at "B").
 
+**How often.** Only while a batch is out, from its claim to its outcome: the Salesforce round trip (0.3 to 1 s on a
+real org). A row waiting in the inbox isn't claimed. For an entity whose events arrive on average every T seconds, the
+chance that one arrives during a round trip of W seconds is about 1 - e^(-W/T): 5% for a save every 10 s and a 0.5 s
+round trip, 39% for a save every second. With a user saving in quick succession it is common, and costs one more
+write, which the newer event needs anyway: the outcome ends the skipped row's lease (`EndLeasesAsync`), so "B" is due at
+once instead of when the lease expires.
+
 ### How a lease works
 
 A lease is one column of the entity's inbox row, `next_attempt_at` (until when), as a queue's visibility timeout: a leased row is simply not due until its lease ends. It is what keeps
@@ -469,6 +476,23 @@ that time.
 4. **Crash.** Nothing to clean up. The lease expires, which makes the entity due, and the next claim takes it. Its read
    of Salesforce shows what the crashed worker did or didn't save. (A write whose outcome is unknown is held instead;
    see [Unknown outcomes](#unknown-outcomes).)
+
+**The claim is a receipt.** The claim returns, for each row it leased, the entity id, the `event_time` it read and
+the lease end it set (`InboxEvent`). Every later statement of the batch sends that receipt back for the ids it is
+about, with the values from the claim (`InboxClaim.Of`), never from the table, and Postgres applies it only to rows
+that still match (`StillClaimed`). Nothing holds a row while Salesforce is called (no transaction, no row lock, no
+connection), so the receipt is how a statement tells a row that is still its own from one that changed.
+
+**The statements, one by one** (`InboxRepository`):
+
+| Statement | What it does | Why this way |
+|---|---|---|
+| **Store** (`AddAsync`) | Overwrites the row if the event is newer; one of the same time (a Kafka redelivery) only if the row isn't done yet. A pending row keeps its `next_attempt_at`. | A leased row's `next_attempt_at` is the lease end: setting it to now would let a second worker claim the entity while the first is still writing it. The lease holder's outcome makes the newer event due (below). |
+| **Claim** (`ClaimAsync`) | Leases the longest-waiting due rows: `next_attempt_at = now() + Sync:Lease`, one statement. | `FOR UPDATE SKIP LOCKED` lets workers claim side by side without waiting for each other; under READ COMMITTED a row another claim leased after this one's snapshot is re-checked and dropped, so no row gets two leases (`ClaimRaceTests`). The ids are collected into an array, not a CTE joined back, so the planner can't turn it into a scan. A lost commit leaves its rows leased until the lease expires. |
+| **Done** (`MarkDoneAsync`) | `next_attempt_at` null, error cleared. | Only on rows matching the receipt: a row a newer event overwrote is not marked done unsent. |
+| **Failed** (`MarkFailedAsync`) | One more attempt: due again after an exponential backoff, or dead-lettered (idle, with the error) at the `MaxRetries`-th failure, or at once if the failure is permanent. | One statement for the whole batch: the errors go as one JSON object of id → error, read by a scalar subquery so it is parsed once (as a CTE it was re-read for every row: 230 ms for 5,000). |
+| **Release** (`ReleaseAsync`) | Due again after a delay, no attempt spent: a rate limit, a write whose outcome is unknown (held until Salesforce has surely applied or dropped it; a newer event waits too, since the store keeps the due time), or a mapping error. A mapping error (`StopInbox`) also delays every other due row of that inbox. | A mapping error fails every event of the type: waiting loses nothing, retrying would dead-letter them all. |
+| **End leases** (`EndLeasesAsync`) | After each outcome, the claimed rows it did not touch are made due (now, or after the release delay). | These are rows a newer event overwrote, whose lease would otherwise run to its end. Matched by lease end only, not `event_time`, because the event changed but the lease is still this claim's; a row another worker has claimed since has another lease end and is left alone. The rows left are told apart by what the outcome returned, not by `last_updated`: a store in the same microsecond would look recorded, and its row would stay leased until expiry. |
 
 ### Why there is no `processing_timeout` column
 
@@ -539,8 +563,14 @@ transaction. One transaction around everything would be worse:
 | only look atomic | Salesforce can't take part in a Postgres transaction. A rollback can't undo a write Salesforce saved. |
 | send the HTTP calls again | The execution strategy re-runs the whole delegate on a transient Postgres error (dropped connection, failover). |
 | hold row locks for seconds, up to the request timeout (90 s) | Other workers and the consumer wait on them. |
+| stall the Kafka consumer | Storing a newer event of an entity being sent waits for its row lock until Salesforce answers, and the consumer reads a partition in order, so every account behind that message waits too. Today a store never waits. |
 | pin a pooled connection per worker | Workers × pods connections busy doing nothing. |
 | block autovacuum | An open transaction holds back the horizon, and the inbox tables churn: bloat builds up. |
+
+Not even the statements get a transaction of their own: each commits alone. A claim is one round trip instead of three
+(BEGIN, statement, COMMIT), and rows stay leased for less time (streaming with 8 workers on 3 pods went from 6.4 s to
+4.6 s). The claim's receipt makes that safe, because every statement may run twice or late ([Why there is no lock
+token](#why-there-is-no-lock-token)); if a claim's commit is lost, its rows wait for the lease to expire.
 
 The lease protects the entities between the two units. The trade-off: a crash after Salesforce saved but before
 the outcomes committed leaves the events pending. That is safe, because every attempt reads Salesforce first and writes
@@ -1443,7 +1473,7 @@ The daily allocation is not configured either: the header carries it, with the u
   "RequestTimeout": "00:01:30"
 },
 "RateLimit": {
-  "DailyHardRatio": 0.95, "DailyHardPause": "00:15:00",
+  "DailyHardRatio": 1.0, "DailyHardPause": "00:15:00",
   "ConcurrentLimitPause": "00:00:30",
   "MaxWait": "00:00:20"
 }
@@ -1452,7 +1482,15 @@ The daily allocation is not configured either: the header carries it, with the u
 | Setting (`RateLimit:`) | Default | Meaning |
 |---|---|---|
 | `MaxWait` | `00:00:20` | Longest wait for a pause to end before the batch is handed back as rate limited |
-| `DailyHardRatio` / `DailyHardPause`, `ConcurrentLimitPause` | 0.95 / 15 min, 30 s | Pause (see [Pausing](#pausing)) |
+| `DailyHardRatio` | 1.0 | Share of the org's daily allocation at which a process stops calling: 1.0 is the allocation itself (see [Choosing `DailyHardRatio`](#choosing-dailyhardratio)) |
+| `DailyHardPause` | 15 min | How long it stops then, and after `REQUEST_LIMIT_EXCEEDED` for total requests; it checks again on the next response after that |
+| `ConcurrentLimitPause` | 30 s | Pause after `REQUEST_LIMIT_EXCEEDED` for too many concurrent long-running requests (clears as soon as one finishes) |
+
+| Setting (`SalesforceLimits:`) | Default | Meaning |
+|---|---|---|
+| `ConcurrentLongRunningLimit` | 25 | The org's limit of concurrent requests lasting `LongRunningThreshold` or longer: 25 for production and sandboxes, 5 for Developer Edition and trials. Startup fails when one pod's `Sync:Workers` exceeds it |
+| `LongRunningThreshold` | 20 s | Calls this long or longer count toward that limit; each one is logged as a warning (a smaller `Sync:BatchSize` helps) |
+| `RequestTimeout` | 90 s | HTTP client timeout per call, the wait for a pause included; at most 10 minutes, Salesforce's own REST timeout |
 
 | Salesforce limit | How it's applied |
 |---|---|
@@ -1478,7 +1516,8 @@ claims nothing while its process is paused.
 
 Every Salesforce response carries `Sforce-Limit-Info: api-usage=used/limit` and, when the connected app has a quota of
 its own, `per-app-api-usage=...`. `SalesforceRateLimiter.ReportLimits` takes the higher of the two ratios; at
-`DailyHardRatio` (95%) or more the process is paused for `DailyHardPause` (15 minutes).
+`DailyHardRatio` (by default 1.0, the allocation itself) or more the process is paused for `DailyHardPause` (15
+minutes).
 
 The ratio is the org's, so every pod sees the same number from its own responses and they pause together, with
 nothing shared between them. Responses that pause the process that gets them:
@@ -1491,6 +1530,34 @@ nothing shared between them. Responses that pause the process that gets them:
 
 Other pods learn the same from their own responses: at most a call or two each is wasted per episode, and none is
 applied, so nothing is lost. A restart forgets the pause; the first response corrects it.
+
+### Choosing `DailyHardRatio`
+
+The daily allocation is the **org's**, shared by every integration that calls its API (REST, SOAP, Bulk and Connect,
+installed managed packages included): this sync, other middleware, Data Loader, reporting tools, scripts. Salesforce
+calls it a **soft limit**: calls over the allocation are not refused at once, but if usage keeps rising a system
+protection limit refuses every API call of the org (403 `REQUEST_LIMIT_EXCEEDED`) until the rolling 24-hour count is
+back under the allocation. The overage is meant for occasional use, not to be planned on. Salesforce sets no
+threshold for integrations; it recommends making fewer calls, watching `Sforce-Limit-Info`, alerting before the limit
+and backing off when refused.
+
+`DailyHardRatio` is how much of that allocation this sync may use before it stops:
+
+- **The sync is the only API consumer (the default, 1.0).** It stops at the allocation itself. A reserve would only go
+  unused. The pods read usage from their own last responses, so together they may go a few calls past the allocation;
+  that is the occasional overage Salesforce allows, and the 403 handling is the backstop if the protection limit is
+  ever reached.
+- **Other integrations share the org: lower it** (0.95, say, or the share agreed for this sync). Otherwise the sync
+  can use the allocation up, and then every integration is refused, not only the sync. The sync stops at the ratio,
+  checks again after `DailyHardPause`, and resumes as soon as calls older than 24 hours have dropped out of the count.
+  Nothing is lost meanwhile: events wait in the inbox, and newer events of an entity replace older ones.
+- **Above 1.0** stops the sync only when Salesforce refuses (the protection limit), so it counts on the overage
+  every time. Not recommended.
+
+Whatever the ratio, set up an **API Usage Notification** in Setup (Quick Find: "API Usage Notifications") at about 80%,
+and look at **System Overview** for the last 24 hours. If the notification comes regularly, the allocation is being
+used, not occasionally exceeded: make fewer calls (a bigger `Sync:BatchSize`, the Bulk API for one-off backfills) or
+ask Salesforce for a bigger allocation. A lower ratio only stops the sync sooner.
 
 ## Using a real Salesforce org
 
