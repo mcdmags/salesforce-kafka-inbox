@@ -27,17 +27,18 @@ internal static class ClaimScenarios
         await SyncSchema.MigrateAsync(contexts);
 
         ISide ours = new OurSide(contexts);
-        ISide simple = new SimpleSide(contexts, withIndex: false);
-        ISide indexed = new SimpleSide(contexts, withIndex: true);
+        ISide simple = new SimpleSide(contexts, SimpleKind.PrimaryKeyOnly);
+        ISide indexed = new SimpleSide(contexts, SimpleKind.PartialIndex);
+        ISide improved = new SimpleSide(contexts, SimpleKind.Improved);
 
         Console.WriteLine($"# Claim comparison, {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC");
-        await ClaimCostAsync([ours, simple, indexed]);
-        await DrainAsync([ours, simple, indexed]);
-        await PoisonRowsAsync([ours, indexed]);
-        await OutageAsync([ours, indexed]);
-        await NewerEventWhileSendingAsync([ours, indexed]);
-        await ClockSkewAsync([ours, indexed]);
-        await LateResultAsync([ours, indexed]);
+        await ClaimCostAsync([ours, simple, indexed, improved]);
+        await DrainAsync([ours, simple, indexed, improved]);
+        await PoisonRowsAsync([ours, indexed, improved]);
+        await OutageAsync([ours, indexed, improved]);
+        await NewerEventWhileSendingAsync([ours, indexed, improved]);
+        await ClockSkewAsync([ours, indexed, improved]);
+        await LateResultAsync([ours, indexed, improved]);
     }
 
     // ---------- Scenarios ----------
@@ -83,10 +84,9 @@ internal static class ClaimScenarios
             await side.ResetAsync();
             await side.LoadAsync("D-", 20_000, synced: false, DateTimeOffset.UtcNow.AddDays(-1));
             await side.AnalyzeAsync();
-            var repo = side.Create(new Settings(BatchSize: 180));
             var run = new Run();
             var watch = Stopwatch.StartNew();
-            await RunWorkersAsync([repo, repo, repo, repo], run, TimeSpan.Zero, _ => true,
+            await RunWorkersAsync(Workers(side, new Settings(BatchSize: 180), 4), run, TimeSpan.Zero, _ => true,
                 async () => (await side.StateAsync("D-")).Synced == 20_000, TimeSpan.FromMinutes(5));
             var seconds = watch.Elapsed.TotalSeconds;
             Row(side.Name, $"{seconds:F1}", $"{20_000 / seconds:N0}", side is OurSide ? $"{run.Batches:N0} (one per batch)" : $"{run.Sends:N0} (one per entity)");
@@ -97,7 +97,7 @@ internal static class ClaimScenarios
     private static async Task PoisonRowsAsync(ISide[] sides)
     {
         Header("3. Rows that always fail",
-            "100 rows that always fail (oldest events) and 5,000 good rows. 4 workers, batch 180, 20 ms per Salesforce call, 8 attempts. Ours backs off 30 s after the first failure (production default).",
+            "100 rows that always fail (oldest events) and 5,000 good rows. 4 workers, batch 180, 20 ms per Salesforce call, 8 attempts. Ours and the improved one back off 30 s after the first failure (our production default).",
             "| Repository | Good rows synced (s) | Sends of failing rows | Failing rows given up | Failing rows show their error |", "|---|---:|---:|---:|---|");
         foreach (var side in sides)
         {
@@ -105,10 +105,9 @@ internal static class ClaimScenarios
             await side.LoadAsync("P-", 100, synced: false, DateTimeOffset.UtcNow.AddDays(-2));
             await side.LoadAsync("G-", 5_000, synced: false, DateTimeOffset.UtcNow.AddDays(-1));
             await side.AnalyzeAsync();
-            var repo = side.Create(new Settings(BatchSize: 180, MaxAttempts: 8, RetryBaseDelay: TimeSpan.FromSeconds(30)));
             var run = new Run();
             var watch = Stopwatch.StartNew();
-            await RunWorkersAsync([repo, repo, repo, repo], run, TimeSpan.FromMilliseconds(20), e => !e.EntityId.StartsWith("P-", StringComparison.Ordinal),
+            await RunWorkersAsync(Workers(side, new Settings(BatchSize: 180, MaxAttempts: 8, RetryBaseDelay: TimeSpan.FromSeconds(30)), 4), run, TimeSpan.FromMilliseconds(20), e => !e.EntityId.StartsWith("P-", StringComparison.Ordinal),
                 async () => (await side.StateAsync("G-")).Synced == 5_000, TimeSpan.FromMinutes(2));
             var seconds = watch.Elapsed.TotalSeconds;
             var poison = await side.StateAsync("P-");
@@ -120,17 +119,17 @@ internal static class ClaimScenarios
     private static async Task OutageAsync(ISide[] sides)
     {
         Header("4. Salesforce down for 10 seconds",
-            "2,000 due rows, 4 workers, batch 180, 50 ms per call, every send fails for the first 10 s, then succeeds. 8 attempts. Ours backs off 1 s, doubling (scaled down from 30 s).",
+            "2,000 due rows, 4 workers, batch 180, 50 ms per call, every send fails for the first 10 s, then succeeds. 8 attempts. Ours and the improved one back off 1 s, doubling (scaled down from 30 s).",
             "| Repository | Synced | Given up (never claimed again) | Time to settle (s) |", "|---|---:|---:|---:|");
         foreach (var side in sides)
         {
             await side.ResetAsync();
             await side.LoadAsync("D-", 2_000, synced: false, DateTimeOffset.UtcNow.AddDays(-1));
             await side.AnalyzeAsync();
-            var repo = side.Create(new Settings(BatchSize: 180, MaxAttempts: 8, RetryBaseDelay: TimeSpan.FromSeconds(1)));
+            var settings = new Settings(BatchSize: 180, MaxAttempts: 8, RetryBaseDelay: TimeSpan.FromSeconds(1));
             var outageEnds = DateTimeOffset.UtcNow.AddSeconds(10);
             var watch = Stopwatch.StartNew();
-            await RunWorkersAsync([repo, repo, repo, repo], new Run(), TimeSpan.FromMilliseconds(50), _ => DateTimeOffset.UtcNow >= outageEnds,
+            await RunWorkersAsync(Workers(side, settings, 4), new Run(), TimeSpan.FromMilliseconds(50), _ => DateTimeOffset.UtcNow >= outageEnds,
                 async () => DateTimeOffset.UtcNow >= outageEnds && (await side.StateAsync("D-")).Waiting == 0, TimeSpan.FromMinutes(2));
             var state = await side.StateAsync("D-");
             Row(side.Name, state.Synced.ToString("N0"), state.GivenUp.ToString("N0"), $"{watch.Elapsed.TotalSeconds:F1}");
@@ -141,7 +140,7 @@ internal static class ClaimScenarios
     private static async Task NewerEventWhileSendingAsync(ISide[] sides)
     {
         Header("5. A newer event arrives while the older one is being sent",
-            "20 entities, 1 worker, batch 20, 500 ms per call, lease 20 s. 200 ms into the first send, a newer event is stored for each entity.",
+            "20 entities, 1 worker, batch 20, 500 ms per call, lease 20 s (the improved one: 1 min, its lease is whole minutes). 200 ms into the first send, a newer event is stored for each entity.",
             "| Repository | Newer event synced after (median, s) | Results that found no matching row |", "|---|---:|---:|");
         foreach (var side in sides)
         {
@@ -186,7 +185,7 @@ internal static class ClaimScenarios
     private static async Task ClockSkewAsync(ISide[] sides)
     {
         Header("6. A pod whose clock runs 30 s ahead",
-            "2,000 due rows, 2 workers, batch 50, lease 20 s. One worker's calls take 2 s; the other's take 500 ms and its clock runs 30 s ahead. Ours has no app clock: both workers are the same.",
+            "2,000 due rows, 2 workers, batch 50, lease 20 s (the improved one: 1 min). One worker's calls take 2 s; the other's take 500 ms and its clock runs 30 s ahead. Ours and the improved one use the database clock: both workers are the same.",
             "| Repository | Entities sent by two workers at once | Sends | Results that found no matching row |", "|---|---:|---:|---:|");
         foreach (var side in sides)
         {
@@ -210,25 +209,33 @@ internal static class ClaimScenarios
     private static async Task LateResultAsync(ISide[] sides)
     {
         Header("7. A late result after the lease ran out",
-            "100 rows, lease 2 s. Worker A claims them and needs 3 s; at 2.2 s worker B claims them again (lease over) and starts a 3 s send. At 3 s A reports a failure. At 3.3 s worker C claims.",
-            "| Repository | Rows B took over | Rows C claimed while B was still sending |", "|---|---:|---:|");
+            "100 rows, lease 2 s (the improved one: 1 min). Worker A claims them; 0.2 s after its lease ran out, worker B claims them again and starts sending. 0.8 s later A reports a failure; 0.3 s after that worker C claims. Each worker is its own repository instance.",
+            "| Repository | Rows B took over | Rows C claimed while B was still sending | A's late results refused |", "|---|---:|---:|---:|");
         foreach (var side in sides)
         {
             await side.ResetAsync();
             await side.LoadAsync("L-", 100, synced: false, DateTimeOffset.UtcNow.AddDays(-1));
-            var repo = side.Create(new Settings(BatchSize: 100, Lease: TimeSpan.FromSeconds(2)));
-            var a = await repo.ClaimAsync(CancellationToken.None);
-            await Task.Delay(2200);
-            var b = await repo.ClaimAsync(CancellationToken.None);
+            var settings = new Settings(BatchSize: 100, Lease: TimeSpan.FromSeconds(2));
+            var (workerA, workerB, workerC) = (side.Create(settings), side.Create(settings), side.Create(settings));
+            var a = await workerA.ClaimAsync(CancellationToken.None);
+            await Task.Delay(side.LeaseOf(settings) + TimeSpan.FromMilliseconds(200));
+            var b = await workerB.ClaimAsync(CancellationToken.None);
             await Task.Delay(800);
-            await repo.MarkFailedAsync(a, [.. a.EntityIds.Select(id => new FailedEvent(id, "timeout"))], CancellationToken.None);
+            await workerA.MarkFailedAsync(a, [.. a.EntityIds.Select(id => new FailedEvent(id, "timeout"))], CancellationToken.None);
             await Task.Delay(300);
-            var c = await repo.ClaimAsync(CancellationToken.None);
-            Row(side.Name, b.Events.Count.ToString("N0"), c.EntityIds.Intersect(b.EntityIds).Count().ToString("N0"));
+            var c = await workerC.ClaimAsync(CancellationToken.None);
+            Row(side.Name, b.Events.Count.ToString("N0"), c.EntityIds.Intersect(b.EntityIds).Count().ToString("N0"),
+                side is OurSide ? "100 (skipped)" : side.NoMatchingJob(workerA).ToString("N0"));
         }
     }
 
     // ---------- Worker loop ----------
+
+    /// <summary><paramref name="count"/> workers, each with its own repository instance (as each worker has its own scope).</summary>
+    private static IRepository<AccountInboxRow>[] Workers(ISide side, Settings settings, int count)
+    {
+        return [.. Enumerable.Range(0, count).Select(_ => side.Create(settings))];
+    }
 
     private sealed record Settings(int BatchSize, TimeSpan? Lease = null, int MaxAttempts = 8, TimeSpan? RetryBaseDelay = null);
 
@@ -353,6 +360,19 @@ internal static class ClaimScenarios
         Task<State> StateAsync(string prefix);
 
         int NoMatchingJob(IRepository<AccountInboxRow> repo);
+
+        /// <summary>The lease a claim gets with these settings.</summary>
+        TimeSpan LeaseOf(Settings settings)
+        {
+            return settings.Lease ?? TimeSpan.FromMinutes(5);
+        }
+    }
+
+    private enum SimpleKind
+    {
+        PrimaryKeyOnly,
+        PartialIndex,
+        Improved
     }
 
     private sealed class OurSide(IDbContextFactory<SyncDbContext> contexts) : ISide
@@ -414,22 +434,41 @@ internal static class ClaimScenarios
         }
     }
 
-    private sealed class SimpleSide(IDbContextFactory<SyncDbContext> contexts, bool withIndex) : ISide
+    private sealed class SimpleSide(IDbContextFactory<SyncDbContext> contexts, SimpleKind kind) : ISide
     {
-        public string Name => withIndex ? "Simple + partial index" : "Simple (primary key only)";
+        public string Name => kind switch
+        {
+            SimpleKind.PrimaryKeyOnly => "Simple (primary key only)",
+            SimpleKind.PartialIndex => "Simple + partial index",
+            _ => "Simple, improved"
+        };
 
         public IRepository<AccountInboxRow> Create(Settings s, Func<DateTimeOffset>? clock = null)
         {
-            return new SimpleClaimRepository(contexts, SimpleTable, s.Lease ?? TimeSpan.FromMinutes(5), s.BatchSize, s.MaxAttempts)
+            var lease = s.Lease ?? TimeSpan.FromMinutes(5);
+            if (kind == SimpleKind.Improved)
+            {
+                // Database clock: an app clock has no say
+                var repository = new ImprovedClaimRepository(contexts, SimpleTable, s.RetryBaseDelay ?? TimeSpan.FromSeconds(30), TimeSpan.FromHours(1));
+                return new ImprovedClaimAdapter(repository, lease, s.BatchSize, s.MaxAttempts);
+            }
+
+            return new SimpleClaimRepository(contexts, SimpleTable, lease, s.BatchSize, s.MaxAttempts)
             {
                 Clock = clock ?? (() => DateTimeOffset.UtcNow)
             };
         }
 
+        public TimeSpan LeaseOf(Settings settings)
+        {
+            var lease = settings.Lease ?? TimeSpan.FromMinutes(5);
+            return kind == SimpleKind.Improved ? TimeSpan.FromMinutes(ImprovedClaimAdapter.Minutes(lease)) : lease;
+        }
+
         public async Task ResetAsync()
         {
             await ExecuteAsync(contexts, SimpleClaimRepository.CreateTableSql(SimpleTable));
-            if (withIndex)
+            if (kind != SimpleKind.PrimaryKeyOnly)
             {
                 await ExecuteAsync(contexts, SimpleClaimRepository.PartialIndexSql(SimpleTable));
             }
@@ -462,7 +501,12 @@ internal static class ClaimScenarios
 
         public int NoMatchingJob(IRepository<AccountInboxRow> repo)
         {
-            return ((SimpleClaimRepository)repo).NoMatchingJob;
+            return repo switch
+            {
+                SimpleClaimRepository simple => simple.NoMatchingJob,
+                ImprovedClaimAdapter improved => improved.NoMatchingJob,
+                _ => 0
+            };
         }
     }
 
