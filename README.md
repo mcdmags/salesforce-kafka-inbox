@@ -704,7 +704,10 @@ src/
   SalesforceSync/                 The entry project, the worker: the only project that references the other two
                                   (Program, DI wiring):
     Inbox/                        Kafka consumer, worker loops
-    Hosting/                      The options validators
+    Hosting/                      The options validators: one FluentValidation validator per settings section
+                                  (Sync, Salesforce, SalesforceLimits, RateLimit, Postgres:Retry), run at startup
+                                  through FluentOptionsValidator, so a wrong setting stops the worker with every
+                                  problem listed
     RateLimiting/                 The process's rate limiter, in memory: SalesforceRateLimiter (pause, from
                                   Sforce-Limit-Info and limit errors); it serves Infrastructure's port
     Sync/                         What both halves share: the events and their payloads (AccountEvent, ...), EventMeta,

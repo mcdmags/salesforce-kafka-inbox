@@ -145,9 +145,9 @@ public sealed class SalesforceLimitsTests
     public void Unknown_outcome_hold_defaults_to_the_Salesforce_api_timeout_and_must_be_positive()
     {
         new SyncOptions().UnknownOutcomeHold.Should().Be(SalesforceLimitsOptions.MaxApiTimeout);
-        new SyncOptionsValidator().Validate(null, new SyncOptions { UnknownOutcomeHold = TimeSpan.Zero })
-            .FailureMessage.Should().Contain("UnknownOutcomeHold");
-        new SyncOptionsValidator().Validate(null, new SyncOptions()).Succeeded.Should().BeTrue();
+        var validator = new FluentOptionsValidator<SyncOptions>(new SyncOptionsValidator());
+        validator.Validate(null, new SyncOptions { UnknownOutcomeHold = TimeSpan.Zero }).FailureMessage.Should().Contain("UnknownOutcomeHold");
+        validator.Validate(null, new SyncOptions()).Succeeded.Should().BeTrue();
     }
 
     /// <summary>The worker's default limits (appsettings.json).</summary>
@@ -159,8 +159,8 @@ public sealed class SalesforceLimitsTests
     private static ValidateOptionsResult Validate(SalesforceLimitsOptions limits, SyncOptions? sync = null,
         RateLimitOptions? rate = null)
     {
-        return new SalesforceLimitsValidator(Options.Create(sync ?? new SyncOptions()), Options.Create(rate ?? new RateLimitOptions()))
-                .Validate(null, limits);
+        var validator = new SalesforceLimitsValidator(Options.Create(sync ?? new SyncOptions()), Options.Create(rate ?? new RateLimitOptions()));
+        return new FluentOptionsValidator<SalesforceLimitsOptions>(validator).Validate(null, limits);
     }
 
     private static SalesforceRateLimiter Limiter(RateLimitOptions rate)

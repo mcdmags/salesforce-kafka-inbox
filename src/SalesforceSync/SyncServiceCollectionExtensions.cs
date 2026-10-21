@@ -1,5 +1,5 @@
 using System.Net;
-using System.Text.RegularExpressions;
+using FluentValidation;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -73,7 +73,7 @@ public static class SyncServiceCollectionExtensions
     {
         var services = builder.Services;
         var config = builder.Configuration;
-        services.Configure<PostgresRetryOptions>(config.GetSection(PostgresRetryOptions.Section));
+        AddValidatedOptions<PostgresRetryOptions, PostgresRetryOptionsValidator>(services, config.GetSection(PostgresRetryOptions.Section));
         AddValidatedOptions<SyncOptions, SyncOptionsValidator>(services, config.GetSection(SyncOptions.Section));
         builder.AddNpgsqlDataSource("inboxdb");
         services.AddInboxSync();
@@ -83,37 +83,28 @@ public static class SyncServiceCollectionExtensions
 
     private static void AddWorkerOptions(IServiceCollection services, IConfiguration config)
     {
-        services.AddOptions<SalesforceOptions>()
-            .Bind(config.GetSection(SalesforceOptions.Section))
+        AddValidatedOptions<SalesforceOptions, SalesforceOptionsValidator>(services, config.GetSection(SalesforceOptions.Section))
             .PostConfigure(o =>
             {
                 if (string.IsNullOrWhiteSpace(o.TokenUrl))
                 {
                     o.TokenUrl = $"{o.InstanceUrl.TrimEnd('/')}/services/oauth2/token";
                 }
-            })
-            .Validate(o => Uri.IsWellFormedUriString(o.InstanceUrl, UriKind.Absolute),
-                $"{SalesforceOptions.Section}:InstanceUrl must be an absolute URL")
-            .Validate(o => Uri.IsWellFormedUriString(o.TokenUrl, UriKind.Absolute),
-                $"{SalesforceOptions.Section}:TokenUrl must be an absolute URL (or empty)")
-            .Validate(o => o.BaseApiPath.StartsWith('/'),
-                $"{SalesforceOptions.Section}:BaseApiPath must be set, starting with '/' (e.g. /services/data)")
-            .Validate(o => Regex.IsMatch(o.ApiVersion, @"^v\d+\.\d$"),
-                $"{SalesforceOptions.Section}:ApiVersion must be set, like v62.0")
-            .ValidateOnStart();
+            });
         AddValidatedOptions<SyncOptions, SyncOptionsValidator>(services, config.GetSection(SyncOptions.Section));
         AddValidatedOptions<SalesforceLimitsOptions, SalesforceLimitsValidator>(services, config.GetSection(SalesforceLimitsOptions.Section));
-        services.Configure<RateLimitOptions>(config.GetSection(RateLimitOptions.Section));
-        services.Configure<PostgresRetryOptions>(config.GetSection(PostgresRetryOptions.Section));
+        AddValidatedOptions<RateLimitOptions, RateLimitOptionsValidator>(services, config.GetSection(RateLimitOptions.Section));
+        AddValidatedOptions<PostgresRetryOptions, PostgresRetryOptionsValidator>(services, config.GetSection(PostgresRetryOptions.Section));
     }
 
-    /// <summary>Options bound to a section, checked by <typeparamref name="TValidator"/> at startup.</summary>
-    private static void AddValidatedOptions<TOptions, TValidator>(IServiceCollection services, IConfigurationSection section)
+    /// <summary>Options bound to a section, checked at startup by the FluentValidation validator <typeparamref name="TValidator"/>.</summary>
+    private static OptionsBuilder<TOptions> AddValidatedOptions<TOptions, TValidator>(IServiceCollection services, IConfigurationSection section)
         where TOptions : class
-        where TValidator : class, IValidateOptions<TOptions>
+        where TValidator : class, IValidator<TOptions>
     {
-        services.AddOptions<TOptions>().Bind(section).ValidateOnStart();
-        services.AddSingleton<IValidateOptions<TOptions>, TValidator>();
+        services.AddSingleton<IValidator<TOptions>, TValidator>();
+        services.AddSingleton<IValidateOptions<TOptions>, FluentOptionsValidator<TOptions>>();
+        return services.AddOptions<TOptions>().Bind(section).ValidateOnStart();
     }
 
     /// <summary>Org at <c>Salesforce:InstanceUrl</c>: OAuth, one long-lived connection pool.</summary>
