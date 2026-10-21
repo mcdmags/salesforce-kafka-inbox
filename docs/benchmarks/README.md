@@ -437,6 +437,51 @@ now read by its index (87,641 index scans, 8 sequential), and the queue was empt
 truncate the audit for every iteration, so there it grew only to a few thousand rows, but it still cost them a few percent:
 the numbers of earlier runs in this file are somewhat pessimistic.
 
+## Latest run: plain-crud with aggregates built on the event template, at caa417c
+
+All 36 benchmarks (`--run full`) on the `plain-crud` branch at caa417c, on 2026-10-21, against the
+[run before it](#latest-run-plain-crud-with-an-external-id-field-per-object-at-5135c6c). The sync is unchanged; the
+**workload changed**. Every aggregate is now built on the event template (`templates/account-event.json`) by
+`AggregateFactory`: AutoFixture gives every filled-in field a new value on every event, where the built-in example
+before kept most fields the same from one event to the next. The accounts, children, versions and order of events are
+the same as before (same seed). The database was recreated. (95bba17, which only moved the syncs' Salesforce names into
+record classes, sends the same requests.)
+
+**Correctness**: 196 iterations (warm-up included), 0 failures, and no iteration timed out.
+
+Preloaded drain, 5,000 events (medians of the iterations without a `RecordType` query, at 0 ms latency), and streaming
+(50 accounts, 5 ms latency, 762 entities):
+
+| W | P | Accounts | Entities | Mean 0 ms | Mean 25 ms | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1 | 100 | 990 | 116.32 ms | 762.56 ms | 22.11 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 1 | 1,000 | 2,113 | 305.17 ms | 2,613.47 ms | 78.04 MB | 69 | 23 | 1.91 | 3,256 | 1143 |
+| 1 | 3 | 100 | 990 | 69.03 ms | 371.43 ms | 22.61 MB | 22 | 8 | 6.52 | 990 | 0 |
+| 1 | 3 | 1,000 | 2,113 | 314.78 ms | 810.33 ms | 76.67 MB | 68 | 21 | 1.93 | 3,230 | 1117 |
+| 4 | 1 | 100 | 990 | 69.65 ms | 268.65 ms | 23.85 MB | 24 | 8 | 5.72 | 1,128 | 138 |
+| 4 | 1 | 1,000 | 2,113 | 174.31 ms | 660.78 ms | 81.51 MB | 81 | 27 | 1.88 | 3,302 | 1189 |
+| 4 | 3 | 100 | 990 | 96.70 ms | 238.48 ms | 33.61 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 4 | 3 | 1,000 | 2,113 | 283.19 ms | 443.35 ms | 90.74 MB | 63 | 19 | 1.99 | 3,123 | 1010 |
+| 8 | 1 | 100 | 990 | 77.57 ms | 214.61 ms | 28.61 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 8 | 1 | 1,000 | 2,113 | 325.71 ms | 513.65 ms | 81.97 MB | 72 | 22 | 1.86 | 3,345 | 1232 |
+| 8 | 3 | 100 | 990 | 160.90 ms | 267.73 ms | 58.39 MB | 24 | 8 | 6.13 | 1,052 | 62 |
+| 8 | 3 | 1,000 | 2,113 | 361.73 ms | 553.75 ms | 134.1 MB | 71 | 21 | 1.85 | 3,358 | 1245 |
+
+| W | P | Mean | Allocated | API calls | Write req | Coalescing | Claims | Retries |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 1 | 1.921 s | 250.43 MB | 1,273 | 576 | 2.43 | 2,655 | 8 |
+| 4 | 3 | 2.490 s | 454.1 MB | 4,674 | 2,042 | 1.49 | 4,338 | 4 |
+| 8 | 1 | 2.129 s | 355.05 MB | 2,807 | 1,242 | 1.64 | 3,935 | 4 |
+| 8 | 3 | 4.855 s | 1367.08 MB | 14,633 | 6,701 | 1.22 | 5,280 | 3 |
+
+- **The same calls and timings within the noise** (streaming 8 workers on 3 pods 4.86 s against 4.72 s, 14,633 calls
+  against 14,356; one worker on one pod with 100 accounts at 25 ms 763 ms against 779 ms). Every changed field is in
+  the same request as before, so the number of requests doesn't move.
+- **10 to 15% more memory** (streaming 8 workers on 3 pods 1,367 MB against 1,203 MB; one worker on one pod with 1,000
+  accounts 78 MB against 58 MB): every field now differs from what Salesforce holds, so each write carries every field
+  instead of the few that changed, and the values are new texts every time. These numbers are the baseline for later
+  runs, not comparable byte for byte with the runs below.
+
 ## Latest run: plain-crud with an external-id field per object, at 5135c6c
 
 All 36 benchmarks (`--run full`) on the `plain-crud` branch at 5135c6c, on 2026-10-20, against the
