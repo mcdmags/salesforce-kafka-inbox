@@ -10,7 +10,7 @@ namespace SalesforceSync.Data.Inbox;
 /// so other workers leave them alone while it calls Salesforce. Afterwards it records the result (done, retry later,
 /// failed for good). A result is only written to a row that is still the worker's and still holds the event it sent:
 /// if a newer event arrived meanwhile, the row stays pending and the newer event is sent next.
-/// More detail: README.md, "How a lease works".
+/// More detail: docs/inbox/README.md.
 /// </summary>
 public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> contexts, IOptions<SyncOptions> options) : IRepository<TRow>
     where TRow : InboxRow

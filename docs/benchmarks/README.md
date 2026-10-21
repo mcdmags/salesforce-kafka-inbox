@@ -22,7 +22,7 @@ the [run before that](#latest-run-main-at-7a145b0-after-the-simplification) meas
 
 - **The claim moved into the inbox row.** Entities were claimed by locking and leasing their row in one
   `sf_sync_state` table; that table is gone (migration `StateInInboxRow`), and an entity is claimed by locking and
-  leasing its own inbox row (see the [main README](../../README.md#the-inbox)). The claim statements measured below
+  leasing its own inbox row (see the [inbox doc](../inbox/README.md)). The claim statements measured below
   (LockHeads, the claim lock, `InboxSql.PinPlans`, the lease and due-time columns of `sf_sync_state` and their
   indexes) no longer exist.
 - **One row per entity, not per event** (migration `InboxOneRowPerRecord`): a newer event overwrites the entity's row
