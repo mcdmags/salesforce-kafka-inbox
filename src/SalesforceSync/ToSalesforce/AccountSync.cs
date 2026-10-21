@@ -29,63 +29,115 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
     {
         var failures = new Dictionary<string, List<Failure>>();
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
-        var upserts = events.Except(deletes).ToList();
+        var upserts = UpsertsWithAccount(events.Except(deletes), failures);
 
-        foreach (var e in upserts.Where(e => e.Event.Account is null))
+        var (accountType, profileType) = await RecordTypeIdsAsync(ct);
+        if (accountType is null || profileType is null)
+        {
+            FailAll(upserts, failures, SalesforceErrors.InvalidRecordType, "the Account or Profile record type is not in the org");
+            upserts = [];
+        }
+
+        var wantedAccounts = upserts.Select(e => WantedAccount(e, accountType)).ToList();
+        var wantedProfiles = upserts.Where(HasProfile).Select(e => WantedProfile(e, profileType)).ToList();
+
+        var accountsNow = await ReadCurrentAsync(AccountObject, wantedAccounts, events.Select(e => e.EntityId), ct);
+        var profilesNow = await ReadCurrentAsync(ProfileObject, wantedProfiles, events.Select(ProfileKey), ct);
+
+        await salesforce.UpsertAsync(AccountObject, Changed(wantedAccounts, accountsNow), failures, ct);
+        await salesforce.UpsertAsync(ProfileObject, ProfilesOfSavedAccounts(Changed(wantedProfiles, profilesNow), failures), failures, ct);
+
+        await salesforce.DeleteAsync(Existing(deletes, profilesNow, ProfileKey), failures, ct);
+        await salesforce.DeleteAsync(Existing(AccountsWithProfileDeleted(deletes, failures), accountsNow, e => e.EntityId), failures, ct);
+
+        return failures;
+    }
+
+    /// <summary>A record the event wants in Salesforce: its entity, the external id it is matched by, every field it sends.</summary>
+    private sealed record Wanted(string EntityId, string ExternalId, Dictionary<string, object?> Fields);
+
+    /// <summary>The upserts that have an account; one without is a bad event, dead-lettered at once.</summary>
+    private static List<ReadEvent<AccountEvent>> UpsertsWithAccount(IEnumerable<ReadEvent<AccountEvent>> upserts, Dictionary<string, List<Failure>> failures)
+    {
+        var all = upserts.ToList();
+        foreach (var e in all.Where(e => e.Event.Account is null))
         {
             SalesforceCalls.Fail(failures, e.EntityId, SalesforceErrors.InvalidEvent, "account is required", permanent: true);
         }
 
-        upserts = [.. upserts.Where(e => e.Event.Account is not null)];
-        var accountType = await salesforce.RecordTypeIdAsync(AccountObject, "Business", ct);
-        var profileType = await salesforce.RecordTypeIdAsync(ProfileObject, "Standard", ct);
-        if (accountType is null || profileType is null)
+        return [.. all.Where(e => e.Event.Account is not null)];
+    }
+
+    private async Task<(string? Account, string? Profile)> RecordTypeIdsAsync(CancellationToken ct)
+    {
+        return (await salesforce.RecordTypeIdAsync(AccountObject, "Business", ct), await salesforce.RecordTypeIdAsync(ProfileObject, "Standard", ct));
+    }
+
+    private static void FailAll(IEnumerable<ReadEvent<AccountEvent>> events, Dictionary<string, List<Failure>> failures, string code, string message)
+    {
+        foreach (var e in events)
         {
-            foreach (var e in upserts)
-            {
-                SalesforceCalls.Fail(failures, e.EntityId, SalesforceErrors.InvalidRecordType, "the Account or Profile record type is not in the org");
-            }
-
-            upserts = [];
+            SalesforceCalls.Fail(failures, e.EntityId, code, message);
         }
+    }
 
-        var wantedAccounts = upserts.Select(e => (e.EntityId, Fields: AccountFields(e.Event.Account!, accountType!))).ToList();
-        var wantedProfiles = upserts.Where(e => e.Event.Account!.Profile is not null) // no profile in event: leave Salesforce's
-            .Select(e => (e.EntityId, ExternalId: ProfileKey(e), Fields: ProfileFields(e, profileType!))).ToList();
+    private static Wanted WantedAccount(ReadEvent<AccountEvent> e, string? recordTypeId)
+    {
+        return new Wanted(e.EntityId, e.EntityId, AccountFields(e.Event.Account!, recordTypeId));
+    }
 
-        // READ Salesforce state: Ids for deletes, values to compare
-        var accountsNow = await salesforce.ReadAsync(AccountObject, wantedAccounts.SelectMany(w => w.Fields.Keys), events.Select(e => e.EntityId), ct);
-        var profilesNow = await salesforce.ReadAsync(ProfileObject, wantedProfiles.SelectMany(w => w.Fields.Keys), events.Select(ProfileKey), ct);
+    /// <summary>An event without a profile leaves Salesforce's profile as it is.</summary>
+    private static bool HasProfile(ReadEvent<AccountEvent> e)
+    {
+        return e.Event.Account!.Profile is not null;
+    }
 
-        // DECIDE: missing → create, differs → update, same → skip
-        var accounts = wantedAccounts
-            .Select(w => (w.EntityId, ExternalId: w.EntityId, Fields: SalesforceCalls.Changes(w.Fields, Now(accountsNow, w.EntityId))))
-            .Where(x => x.Fields.Count > 0).ToList();
-        var profiles = wantedProfiles
-            .Select(w => (w.EntityId, w.ExternalId, Fields: SalesforceCalls.Changes(w.Fields, Now(profilesNow, w.ExternalId))))
-            .Where(x => x.Fields.Count > 0).ToList();
+    private static Wanted WantedProfile(ReadEvent<AccountEvent> e, string? recordTypeId)
+    {
+        return new Wanted(e.EntityId, ProfileKey(e), ProfileFields(e, recordTypeId));
+    }
 
-        // WRITE. Accounts first; profile only if its account saved
-        await salesforce.UpsertAsync(AccountObject, accounts, failures, ct);
-        await salesforce.UpsertAsync(ProfileObject, profiles.Where(p => !failures.ContainsKey(p.EntityId)), failures, ct);
+    /// <summary>
+    /// What Salesforce has for these external ids: the values to compare, and the Ids deletes need. Reads every field
+    /// the wanted records send, so a field the org lacks shows here, before anything is written.
+    /// </summary>
+    private Task<Dictionary<string, JsonElement>> ReadCurrentAsync(SalesforceObject sobject, List<Wanted> wanted, IEnumerable<string> externalIds,
+        CancellationToken ct)
+    {
+        return salesforce.ReadAsync(sobject, wanted.SelectMany(w => w.Fields.Keys), externalIds, ct);
+    }
 
-        // Delete Profile, then Account (children first). Record Salesforce lacks = already deleted
-        await salesforce.DeleteAsync(deletes.Where(e => profilesNow.ContainsKey(ProfileKey(e)))
-            .Select(e => (e.EntityId, profilesNow[ProfileKey(e)].GetProperty("Id").GetString()!)), failures, ct);
-        await salesforce.DeleteAsync(deletes.Where(e => accountsNow.ContainsKey(e.EntityId) && !failures.ContainsKey(e.EntityId))
-            .Select(e => (e.EntityId, accountsNow[e.EntityId].GetProperty("Id").GetString()!)), failures, ct);
+    /// <summary>What to write: a missing record with its fields, an existing one with the fields that differ; nothing when all are the same.</summary>
+    private static List<(string Key, string ExternalId, Dictionary<string, object?> Fields)> Changed(List<Wanted> wanted, Dictionary<string, JsonElement> current)
+    {
+        return [.. wanted
+            .Select(w => (w.EntityId, w.ExternalId, Fields: SalesforceCalls.Changes(w.Fields, current.TryGetValue(w.ExternalId, out var row) ? row : null)))
+            .Where(w => w.Fields.Count > 0)];
+    }
 
-        return failures;
+    /// <summary>A profile names its account, so it is written only if the account was saved.</summary>
+    private static IEnumerable<(string Key, string ExternalId, Dictionary<string, object?> Fields)> ProfilesOfSavedAccounts(
+        IEnumerable<(string Key, string ExternalId, Dictionary<string, object?> Fields)> profiles, Dictionary<string, List<Failure>> failures)
+    {
+        return profiles.Where(p => !failures.ContainsKey(p.Key));
+    }
+
+    /// <summary>Children first: an account is deleted only if deleting its profile didn't fail.</summary>
+    private static IEnumerable<ReadEvent<AccountEvent>> AccountsWithProfileDeleted(IEnumerable<ReadEvent<AccountEvent>> deletes, Dictionary<string, List<Failure>> failures)
+    {
+        return deletes.Where(e => !failures.ContainsKey(e.EntityId));
+    }
+
+    /// <summary>The deletes whose record Salesforce has, by its Id. One Salesforce lacks is already deleted.</summary>
+    private static IEnumerable<(string Key, string Id)> Existing(IEnumerable<ReadEvent<AccountEvent>> deletes, Dictionary<string, JsonElement> current,
+        Func<ReadEvent<AccountEvent>, string> externalId)
+    {
+        return deletes.Where(e => current.ContainsKey(externalId(e))).Select(e => (e.EntityId, current[externalId(e)].GetProperty("Id").GetString()!));
     }
 
     private static string ProfileKey(ReadEvent<AccountEvent> e)
     {
         return e.Event.Account?.Profile?.ExternalId ?? e.EntityId;
-    }
-
-    private static JsonElement? Now(Dictionary<string, JsonElement> found, string key)
-    {
-        return found.TryGetValue(key, out var row) ? row : null;
     }
 
     private static Dictionary<string, object?> AccountFields(AccountPayload a, string? recordTypeId)
