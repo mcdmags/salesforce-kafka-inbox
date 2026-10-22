@@ -132,6 +132,9 @@ so the org is asked about once per interval in total rather than once per pod, a
 
 Two pods that miss at the same moment may both query once; that costs a call, never correctness.
 
+Why a `HybridCache` and not an `IDistributedCache` alone, with the pros and cons of each:
+[docs/caching](docs/caching/README.md).
+
 ### Why the sync does not call Describe
 
 The sync used to read each object's Describe (cached per process and shared through Redis, revalidated with

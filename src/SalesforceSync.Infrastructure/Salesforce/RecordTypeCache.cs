@@ -10,6 +10,7 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// <see cref="Microsoft.Extensions.Caching.Distributed.IDistributedCache"/> (Redis, or memory when none is configured),
 /// so the org is asked once per interval in total and a new pod starts warm. Concurrent callers share one query per
 /// object, and a failing cache backend is logged and treated as empty. Nothing else of the org's metadata is read.
+/// Why HybridCache and not IDistributedCache alone: docs/caching/README.md.
 /// </summary>
 public sealed class RecordTypeCache(HybridCache cache, ISalesforceRestClient salesforce, IOptions<SalesforceOptions> options)
 {
