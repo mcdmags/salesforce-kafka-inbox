@@ -6,35 +6,59 @@ namespace SalesforceSync.ToSalesforce;
 // Salesforce API name is its own name, or [JsonPropertyName] where they differ (custom fields, __c). The syncs fill one
 // from the event and send SalesforceFields.Of(record); no field name is written out anywhere else.
 
-/// <summary>The Account fields the sync writes.</summary>
-[SObject("Account", "ExternalId__c")]
-public sealed class AccountRecord
+/// <summary>
+/// The Account fields the sync writes for a person and a business alike. Its record type, set at create, makes the
+/// Account a person account or a business account, and each takes its own name fields (<see cref="AccountRecord"/>,
+/// <see cref="PersonAccountRecord"/>).
+/// </summary>
+public abstract class AccountFields
 {
-    public string? Name { get; init; }
-    public string? Rating { get; init; }
-    public string? Industry { get; init; }
-    public string? Description { get; init; }
-    public decimal? AnnualRevenue { get; init; }
-    public int? NumberOfEmployees { get; init; }
-    public string? Phone { get; init; }
-    public string? Website { get; init; }
+    public string? Rating { get; set; }
+    public string? Industry { get; set; }
+    public string? Description { get; set; }
+    public decimal? AnnualRevenue { get; set; }
+    public int? NumberOfEmployees { get; set; }
+    public string? Phone { get; set; }
+    public string? Website { get; set; }
 
     [JsonPropertyName("Active__c")]
-    public bool? Active { get; init; }
+    public bool? Active { get; set; }
 
     /// <summary>Multi-select picklist: the values separated by ';'.</summary>
     [JsonPropertyName("Tags__c")]
-    public string? Tags { get; init; }
+    public string? Tags { get; set; }
 
     [JsonPropertyName("Customer_Since__c")]
-    public DateOnly? CustomerSince { get; init; }
+    public DateOnly? CustomerSince { get; set; }
 
     [JsonPropertyName("Last_Contacted__c")]
-    public DateTimeOffset? LastContacted { get; init; }
+    public DateTimeOffset? LastContacted { get; set; }
 
     /// <summary>Set when the Account is created; Salesforce requires it then, and an update never changes it.</summary>
     [CreateOnly]
-    public string? RecordTypeId { get; init; }
+    public string? RecordTypeId { get; set; }
+}
+
+/// <summary>A business Account: its name is <c>Name</c>.</summary>
+[SObject("Account", "ExternalId__c")]
+public sealed class AccountRecord : AccountFields
+{
+    public string? Name { get; set; }
+}
+
+/// <summary>A person Account: first and last name, from which Salesforce sets <c>Name</c> (sending Name is refused).</summary>
+[SObject("Account", "ExternalId__c")]
+public sealed class PersonAccountRecord : AccountFields
+{
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
+}
+
+/// <summary>Account fields the sync reads but never writes.</summary>
+public sealed class AccountReadFields
+{
+    /// <summary>Set by Salesforce from the record type: a person account, or a business account.</summary>
+    public bool? IsPersonAccount { get; init; }
 }
 
 /// <summary>The account's Profile__c fields the sync writes. Names its Account by external id (Text foreign key).</summary>

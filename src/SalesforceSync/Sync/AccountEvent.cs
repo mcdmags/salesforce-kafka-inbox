@@ -22,7 +22,18 @@ public sealed record AccountEvent(EventMeta? Meta, AccountPayload? Account)
 public class AccountPayload
 {
     public string? ExternalId { get; set; }
+
+    /// <summary>
+    /// A person (Salesforce person account: <see cref="FirstName"/> and <see cref="LastName"/>) or, when false or
+    /// absent, a business (<see cref="Name"/>).
+    /// </summary>
+    public bool? IsPerson { get; set; }
+
+    /// <summary>A business's name; a person's comes from <see cref="FirstName"/> and <see cref="LastName"/>.</summary>
     public string? Name { get; set; }
+
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
     public string? Rating { get; set; }
     public string? Industry { get; set; }
     public string? Description { get; set; }

@@ -22,6 +22,12 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     /// <summary>Our own code: the inbox event can't be mapped to records (malformed payload). Permanent.</summary>
     public const string InvalidEvent = "INVALID_EVENT";
 
+    /// <summary>
+    /// Our own code: the event is a person and Salesforce has the Account as a business account, or the other way
+    /// round. An update can't change that (a conversion in Salesforce). Permanent: replay once the Account is fixed.
+    /// </summary>
+    public const string AccountKindMismatch = "ACCOUNT_KIND_MISMATCH";
+
     /// <summary>Errors in the data or the org's configuration: retrying the same data fails the same way.</summary>
     public static readonly IReadOnlyList<string> DefaultPermanentCodes =
     [

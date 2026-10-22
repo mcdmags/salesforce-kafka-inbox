@@ -175,6 +175,62 @@ public sealed class AccountSyncTests
         (_sync.Org.GetStats().Queries - reads).Should().Be(2, "the Accounts and the Profiles; no record type lookup without a new Account");
     }
 
+    private static void AsPerson(JsonObject account)
+    {
+        account.Remove("name");
+        account["isPerson"] = true;
+        account["firstName"] = "Ana";
+        account["lastName"] = "Cruz";
+    }
+
+    [Fact]
+    public async Task A_person_is_created_as_a_person_account_with_first_and_last_name()
+    {
+        await SyncAsync(Events.Account(Acme, 1, "inserted", AsPerson));
+
+        Account!["RecordTypeId"]!.GetValue<string>().Should().Be(await _sync.Calls.RecordTypeIdAsync(AccountSync.AccountObject, "PersonAccount", CancellationToken.None));
+        (Account["IsPersonAccount"]!.GetValue<bool>(), Account["FirstName"]!.GetValue<string>(), Account["LastName"]!.GetValue<string>())
+            .Should().Be((true, "Ana", "Cruz"));
+        Account["Name"]!.GetValue<string>().Should().Be("Ana Cruz", "Salesforce sets a person's Name");
+        _sync.Org.WriteRequests[^1]["body"]!["records"]!.AsArray().Single()!.AsObject().Should().NotContainKey("Name", "a person account refuses Name");
+        _sync.Accounts.Synced.Should().Equal(Acme);
+    }
+
+    [Fact]
+    public async Task A_business_is_created_as_a_business_account_with_its_name()
+    {
+        await SyncAsync(Events.Account(Acme, 1, "inserted"));
+
+        Account!["RecordTypeId"]!.GetValue<string>().Should().Be(await _sync.Calls.RecordTypeIdAsync(AccountSync.AccountObject, "Business", CancellationToken.None));
+        (Account["IsPersonAccount"]!.GetValue<bool>(), Account["Name"]!.GetValue<string>()).Should().Be((false, "Acme"));
+        Account["FirstName"].Should().BeNull("a business account refuses FirstName and LastName");
+    }
+
+    [Fact]
+    public async Task A_person_update_sends_only_what_differs_and_no_record_type()
+    {
+        await SyncAsync(Events.Account(Acme, 1, "inserted", AsPerson));
+
+        await SyncAsync(Events.Account(Acme, 2, account: a => { AsPerson(a); a["lastName"] = "Silva"; }));
+
+        _sync.Org.WriteRequests[^1]["body"]!["records"]!.AsArray().Single()!.AsObject().Select(p => p.Key)
+            .Should().BeEquivalentTo(["attributes", "ExternalId__c", "LastName"]);
+        Account!["Name"]!.GetValue<string>().Should().Be("Ana Silva");
+    }
+
+    [Fact]
+    public async Task An_event_of_the_other_kind_than_Salesforce_has_is_dead_and_nothing_is_written()
+    {
+        await SyncAsync(Events.Account(Acme, 1, "inserted", WithProfile));
+        var writes = _sync.Org.GetStats().WriteRequests;
+
+        await SyncAsync(Events.Account(Acme, 2, account: a => { AsPerson(a); WithProfile(a); }));
+
+        _sync.Accounts.Dead.Should().ContainSingle().Which.Error.Should().StartWith("ACCOUNT_KIND_MISMATCH").And.Contain("business account");
+        _sync.Org.GetStats().WriteRequests.Should().Be(writes, "neither the Account nor its Profile is sent");
+        Account!["Name"]!.GetValue<string>().Should().Be("Acme");
+    }
+
     [Fact]
     public async Task A_batch_is_two_queries_one_upsert_per_object_and_no_more()
     {
