@@ -35,8 +35,8 @@ What it shows:
 ## The improved simple claim
 
 `ImprovedClaimRepository` is the simple claim with the gaps the first run showed fixed. Its four methods keep their
-signatures, and one overload is added for the error (`Upsert`, `ClaimNextJobs(int timeoutMinutes, int batchSize, int maxAttempts, ct)`, `MarkJobComplete`,
-`MarkJobFailed`):
+signatures (`Upsert`, `ClaimNextJobs(int timeoutMinutes, int batchSize, int maxAttempts, ct)`, `MarkJobComplete`,
+`MarkJobFailed`); one `MarkJobFailed` overload is added for the error:
 
 | Gap (scenario) | Fix |
 |---|---|
