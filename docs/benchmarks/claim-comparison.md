@@ -35,7 +35,7 @@ What it shows:
 ## The improved simple claim
 
 `ImprovedClaimRepository` is the simple claim with the gaps the first run showed fixed. Its four methods keep their
-signatures (`Upsert`, `ClaimNextJobs(int timeoutMinutes, int batchSize, int maxAttempts, ct)`, `MarkJobComplete`,
+signatures, and one overload is added for the error (`Upsert`, `ClaimNextJobs(int timeoutMinutes, int batchSize, int maxAttempts, ct)`, `MarkJobComplete`,
 `MarkJobFailed`):
 
 | Gap (scenario) | Fix |
@@ -44,6 +44,7 @@ signatures (`Upsert`, `ClaimNextJobs(int timeoutMinutes, int batchSize, int maxA
 | No backoff: attempts used up in seconds (3, 4) | `MarkJobFailed` sets `processing_timeout` to the next try: base × 2^(attempts − 1), up to a maximum, instead of NULL |
 | App clock: a pod running ahead takes rows still leased (6) | The claim uses the database's `now()` |
 | A result from a worker whose lease ran out frees or finishes the row (7) | The claim keeps each entity's lease end (`processing_timeout`) in the repository instance; `MarkJobComplete`/`MarkJobFailed` update the row only while it still has that value, and throw otherwise, as before |
+| A row that used up its attempts shows no reason (3) | `last_error`: a `MarkJobFailed(entityId, eventTimestamp, error, ct)` overload stores it; the three-argument one is unchanged and stores none. Cleared by success and by a newer event |
 | A newer event stored mid-send waits for the lease (5) | The result no longer needs the same `event_timestamp`. `MarkJobComplete` sets `last_synced_event_timestamp` to the sent event, which is older than the new one, so the row is due at once. `MarkJobFailed` skips the backoff when a newer event is waiting |
 
 One rule comes with keeping the signatures: **a claim and its results must go through the same repository instance,
@@ -56,8 +57,8 @@ The improved version matches ours in scenarios 1 and 3 to 7. Scenario 2 still di
 
 1. **Results for a whole batch in one statement** (`MarkJobsComplete(list)`, `MarkJobsFailed(list)`): the rest of the
    gap in scenario 2, and one round trip per batch instead of per entity.
-2. **The error on the row** (`last_error`): a row that used up its attempts is otherwise invisible and unexplained. It
-   needs an error parameter on `MarkJobFailed`, and a query or alert on the rows given up.
+2. **An alert on the rows given up** (`process_count` at the limit, not synced): their `last_error` says why, but
+   nothing reports them yet.
 3. **Give up at once on errors a retry can't fix** (validation errors, bad data): a `permanent` flag on `MarkJobFailed`.
 4. **The lease end passed to the Mark methods**: removes the one-instance rule above.
 5. **A release that spends no attempt**, for rate limits and lost answers. A call whose answer was lost (timeout) may
@@ -68,7 +69,7 @@ The improved version matches ours in scenarios 1 and 3 to 7. Scenario 2 still di
 7. **Keep given-up rows out of the claim's index**: they stay in it (oldest first) and every claim reads past them. Add
    `process_count < N` to the index predicate (N fixed), or clear them out to another table.
 
-## Run: Claim comparison, 2026-10-21 23:43 UTC
+## Run: Claim comparison, 2026-10-22 03:09 UTC
 
 ### 1. Claim time as synced rows pile up
 
@@ -76,18 +77,18 @@ The improved version matches ours in scenarios 1 and 3 to 7. Scenario 2 still di
 
 | Synced rows | Repository | Claim median (ms) | Claim max (ms) |
 |---:|---|---:|---:|
-| 0 | Ours (InboxRepository) | 2.6 | 97.3 |
-| 0 | Simple (primary key only) | 1.6 | 12.5 |
-| 0 | Simple + partial index | 1.5 | 1.7 |
-| 0 | Simple, improved | 1.3 | 5.8 |
-| 100,000 | Ours (InboxRepository) | 1.3 | 2.4 |
-| 100,000 | Simple (primary key only) | 3.8 | 4.3 |
-| 100,000 | Simple + partial index | 1.2 | 2.1 |
-| 100,000 | Simple, improved | 1.3 | 2.0 |
-| 1,000,000 | Ours (InboxRepository) | 1.1 | 1.9 |
-| 1,000,000 | Simple (primary key only) | 29.5 | 30.7 |
-| 1,000,000 | Simple + partial index | 1.2 | 2.2 |
-| 1,000,000 | Simple, improved | 1.3 | 2.1 |
+| 0 | Ours (InboxRepository) | 1.6 | 95.8 |
+| 0 | Simple (primary key only) | 1.5 | 9.9 |
+| 0 | Simple + partial index | 1.5 | 2.0 |
+| 0 | Simple, improved | 1.3 | 5.6 |
+| 100,000 | Ours (InboxRepository) | 1.3 | 2.9 |
+| 100,000 | Simple (primary key only) | 3.8 | 4.4 |
+| 100,000 | Simple + partial index | 1.3 | 1.8 |
+| 100,000 | Simple, improved | 1.3 | 2.2 |
+| 1,000,000 | Ours (InboxRepository) | 1.2 | 2.1 |
+| 1,000,000 | Simple (primary key only) | 29.6 | 31.1 |
+| 1,000,000 | Simple + partial index | 1.2 | 2.0 |
+| 1,000,000 | Simple, improved | 1.3 | 1.9 |
 
 ### 2. Drain: every send succeeds
 
@@ -95,10 +96,10 @@ The improved version matches ours in scenarios 1 and 3 to 7. Scenario 2 still di
 
 | Repository | Time (s) | Rows/s | Outcome statements |
 |---|---:|---:|---:|
-| Ours (InboxRepository) | 0.2 | 116,322 | 112 (one per batch) |
-| Simple (primary key only) | 2.6 | 7,603 | 20,000 (one per entity) |
-| Simple + partial index | 2.5 | 7,939 | 20,000 (one per entity) |
-| Simple, improved | 2.7 | 7,480 | 20,000 (one per entity) |
+| Ours (InboxRepository) | 0.2 | 116,616 | 112 (one per batch) |
+| Simple (primary key only) | 2.6 | 7,627 | 20,000 (one per entity) |
+| Simple + partial index | 2.6 | 7,676 | 20,000 (one per entity) |
+| Simple, improved | 2.6 | 7,663 | 20,000 (one per entity) |
 
 ### 3. Rows that always fail
 
@@ -106,9 +107,9 @@ The improved version matches ours in scenarios 1 and 3 to 7. Scenario 2 still di
 
 | Repository | Good rows synced (s) | Sends of failing rows | Failing rows given up | Failing rows show their error |
 |---|---:|---:|---:|---|
-| Ours (InboxRepository) | 0.2 | 100 | 0 | yes (last_error; retried after the backoff) |
-| Simple + partial index | 0.9 | 800 | 100 | no (nothing stored) |
-| Simple, improved | 0.9 | 100 | 0 | no (nothing stored) |
+| Ours (InboxRepository) | 0.2 | 100 | 0 | 100 of 100 |
+| Simple + partial index | 0.9 | 800 | 100 | 0 of 100 |
+| Simple, improved | 0.8 | 100 | 0 | 100 of 100 |
 
 ### 4. Salesforce down for 10 seconds
 
@@ -118,7 +119,7 @@ The improved version matches ours in scenarios 1 and 3 to 7. Scenario 2 still di
 |---|---:|---:|---:|
 | Ours (InboxRepository) | 2,000 | 0 | 15.5 |
 | Simple + partial index | 0 | 2,000 | 10.0 |
-| Simple, improved | 2,000 | 0 | 15.8 |
+| Simple, improved | 2,000 | 0 | 15.9 |
 
 ### 5. A newer event arrives while the older one is being sent
 

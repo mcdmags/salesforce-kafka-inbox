@@ -111,7 +111,7 @@ internal static class ClaimScenarios
                 async () => (await side.StateAsync("G-")).Synced == 5_000, TimeSpan.FromMinutes(2));
             var seconds = watch.Elapsed.TotalSeconds;
             var poison = await side.StateAsync("P-");
-            Row(side.Name, $"{seconds:F1}", run.SendsOf("P-").ToString("N0"), poison.GivenUp.ToString("N0"), side is OurSide ? "yes (last_error; retried after the backoff)" : "no (nothing stored)");
+            Row(side.Name, $"{seconds:F1}", run.SendsOf("P-").ToString("N0"), poison.GivenUp.ToString("N0"), $"{await side.WithErrorAsync("P-")} of 100");
         }
     }
 
@@ -359,6 +359,9 @@ internal static class ClaimScenarios
 
         Task<State> StateAsync(string prefix);
 
+        /// <summary>Rows of <paramref name="prefix"/> whose last error is stored on them.</summary>
+        Task<int> WithErrorAsync(string prefix);
+
         int NoMatchingJob(IRepository<AccountInboxRow> repo);
 
         /// <summary>The lease a claim gets with these settings.</summary>
@@ -420,6 +423,12 @@ internal static class ClaimScenarios
                        count(*) FILTER (WHERE next_attempt_at IS NOT NULL)::int AS Waiting
                 FROM {Table} WHERE entity_id LIKE @prefix || '%'
                 """, t, new { prefix })).Single(), CancellationToken.None);
+        }
+
+        public Task<int> WithErrorAsync(string prefix)
+        {
+            return contexts.RunAsync((db, t) => db.Database.QuerySingleAsync<int>(
+                $"SELECT count(*)::int FROM {Table} WHERE entity_id LIKE @prefix || '%' AND last_error IS NOT NULL", t, new { prefix }), CancellationToken.None);
         }
 
         public int NoMatchingJob(IRepository<AccountInboxRow> repo)
@@ -497,6 +506,12 @@ internal static class ClaimScenarios
                        count(*) FILTER (WHERE last_synced_event_timestamp < event_timestamp AND process_count < @max)::int AS Waiting
                 FROM {SimpleTable} WHERE entity_id LIKE @prefix || '%'
                 """, t, new { prefix, max = 8 })).Single(), CancellationToken.None);
+        }
+
+        public Task<int> WithErrorAsync(string prefix)
+        {
+            return contexts.RunAsync((db, t) => db.Database.QuerySingleAsync<int>(
+                $"SELECT count(*)::int FROM {SimpleTable} WHERE entity_id LIKE @prefix || '%' AND last_error IS NOT NULL", t, new { prefix }), CancellationToken.None);
         }
 
         public int NoMatchingJob(IRepository<AccountInboxRow> repo)

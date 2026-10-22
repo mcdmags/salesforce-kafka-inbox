@@ -33,6 +33,7 @@ public sealed class SimpleClaimRepository(IDbContextFactory<SyncDbContext> conte
     /// <summary>
     /// The table as its statements need it. Not shown in the screenshots: <c>last_synced_event_timestamp</c> needs a
     /// value before the first sync (NULL &lt; x is never true, so a new row would never be claimed); '-infinity' here.
+    /// <c>last_error</c> is the improved repository's (<see cref="ImprovedClaimRepository"/>); this one never writes it.
     /// </summary>
     public static string CreateTableSql(string table)
     {
@@ -44,7 +45,8 @@ public sealed class SimpleClaimRepository(IDbContextFactory<SyncDbContext> conte
               event_timestamp timestamptz NOT NULL,
               last_synced_event_timestamp timestamptz NOT NULL DEFAULT '-infinity',
               processing_timeout timestamptz,
-              process_count int NOT NULL DEFAULT 0);
+              process_count int NOT NULL DEFAULT 0,
+              last_error text);
             """;
     }
 
@@ -203,4 +205,7 @@ public sealed class SimpleJob
 
     [Column("process_count")]
     public int ProcessCount { get; set; }
+
+    [Column("last_error")]
+    public string? LastError { get; set; }
 }

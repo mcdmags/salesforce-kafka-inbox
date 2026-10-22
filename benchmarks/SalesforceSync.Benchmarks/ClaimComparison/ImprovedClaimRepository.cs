@@ -17,6 +17,8 @@ namespace SalesforceSync.Benchmarks.ClaimComparison;
 /// ran out can't free or finish a row another worker has taken over.</item>
 /// <item>A newer event stored during the send no longer waits for the lease: the result still applies (the row is
 /// still this claim's), and since last_synced_event_timestamp is older than the new event, the row is due at once.</item>
+/// <item>The error on the row (<c>last_error</c>): a <see cref="MarkJobFailed(string, DateTimeOffset, string?, CancellationToken)"/>
+/// overload stores it, so a row that used up its attempts shows why. Cleared by success and by a newer event.</item>
 /// </list>
 /// The claim and its results must go through the same instance, used by one worker at a time (a scoped repository
 /// in a worker's scope does that). Passing the lease end to the Mark methods would remove that rule, but changes their
@@ -44,7 +46,8 @@ public sealed class ImprovedClaimRepository(IDbContextFactory<SyncDbContext> con
                 ON CONFLICT (entity_id) DO UPDATE
                 SET data = EXCLUDED.data,
                   event_timestamp = EXCLUDED.event_timestamp,
-                  process_count = 0
+                  process_count = 0,
+                  last_error = NULL
                 WHERE {{table}}.event_timestamp < EXCLUDED.event_timestamp
                 """;
             return db.Database.ExecuteSqlRawAsync(sql, [entityId, data, eventTimestamp], t);
@@ -90,7 +93,8 @@ public sealed class ImprovedClaimRepository(IDbContextFactory<SyncDbContext> con
             UPDATE {{table}}
             SET last_synced_event_timestamp = {0},
               processing_timeout = NULL,
-              process_count = 0
+              process_count = 0,
+              last_error = NULL
             WHERE entity_id = {1} AND processing_timeout = {2}
             """;
         return OwnRowAsync(entityId, eventTimestamp, lease => [eventTimestamp, entityId, lease], sql, ct);
@@ -98,16 +102,23 @@ public sealed class ImprovedClaimRepository(IDbContextFactory<SyncDbContext> con
 
     public Task MarkJobFailed(string entityId, DateTimeOffset eventTimestamp, CancellationToken ct)
     {
+        return MarkJobFailed(entityId, eventTimestamp, null, ct);
+    }
+
+    /// <summary>MarkJobFailed with why it failed: kept on the row (last_error) until it is synced or a newer event arrives.</summary>
+    public Task MarkJobFailed(string entityId, DateTimeOffset eventTimestamp, string? error, CancellationToken ct)
+    {
         // The sent event: wait before the next try, longer after each. A newer one stored meanwhile: try it now
         var sql = $$"""
             UPDATE {{table}}
             SET processing_timeout = CASE WHEN event_timestamp = {1}
                 THEN now() + make_interval(secs => least({3}, {4} * power(2, greatest(process_count - 1, 0))))
-              END
+              END,
+              last_error = {5}
             WHERE entity_id = {0} AND processing_timeout = {2}
             """;
         return OwnRowAsync(entityId, eventTimestamp,
-            lease => [entityId, eventTimestamp, lease, maxRetryDelay.TotalSeconds, retryBaseDelay.TotalSeconds], sql, ct);
+            lease => [entityId, eventTimestamp, lease, maxRetryDelay.TotalSeconds, retryBaseDelay.TotalSeconds, error ?? (object)DBNull.Value], sql, ct);
     }
 
     /// <summary>Runs a result statement on the row if this instance's claim still holds it; throws if not, as before.</summary>
@@ -163,9 +174,10 @@ public sealed class ImprovedClaimAdapter(ImprovedClaimRepository repository, Tim
 
     public async Task MarkFailedAsync(InboxClaim claim, IReadOnlyList<FailedEvent> failures, CancellationToken ct)
     {
+        var errors = failures.ToDictionary(f => f.EntityId, f => f.Error);
         foreach (var e in claim.Of(failures.Select(f => f.EntityId)))
         {
-            await NoMatchCountedAsync(() => repository.MarkJobFailed(e.EntityId, e.EventTime, ct));
+            await NoMatchCountedAsync(() => repository.MarkJobFailed(e.EntityId, e.EventTime, errors[e.EntityId], ct));
         }
     }
 
