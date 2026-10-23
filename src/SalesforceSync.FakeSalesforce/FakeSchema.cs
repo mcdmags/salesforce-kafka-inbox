@@ -36,7 +36,8 @@ public sealed record FakeRecordType(
     bool Active = true,
     bool Available = true,
     bool Master = false,
-    bool Default = false);
+    bool Default = false,
+    bool PersonType = false);
 
 /// <summary>
 /// The mock org's metadata and how it stores values, as Salesforce does: unknown and read-only fields are rejected,
@@ -73,7 +74,12 @@ public static class FakeSchema
                 new("Id", "id", 18, Createable: false, Updateable: false, Nillable: false),
                 new(RecordTypeIdField, "reference", 18, ReferenceTo: "RecordType"),
                 new("ExternalId__c", "string", 255),
+                // Business accounts: Name. Person accounts (Person Accounts enabled): FirstName and LastName, and Salesforce
+                // sets Name from them; the record type decides which, and IsPersonAccount says which it is
                 new("Name", "string", 255, Nillable: false),
+                new("FirstName", "string", 40),
+                new("LastName", "string", 80),
+                new("IsPersonAccount", "boolean", Createable: false, Updateable: false, Nillable: false),
                 new("Rating", "picklist", 255),
                 new("Industry", "picklist", 255),
                 new("Description", "textarea", 32000),
@@ -144,7 +150,12 @@ public static class FakeSchema
     public static readonly IReadOnlyDictionary<string, IReadOnlyList<FakeRecordType>> RecordTypes =
         new Dictionary<string, IReadOnlyList<FakeRecordType>>(StringComparer.OrdinalIgnoreCase)
         {
-            ["Account"] = [Master, new("Business", "Business", FakeRecords.Id18("012FAKE00000001"), Default: true)],
+            ["Account"] =
+            [
+                Master,
+                new("Business", "Business", FakeRecords.Id18("012FAKE00000001"), Default: true),
+                new("PersonAccount", "Person Account", FakeRecords.Id18("012FAKE00000005"), PersonType: true)
+            ],
             ["Profile__c"] = [Master, new("Standard", "Standard", FakeRecords.Id18("012FAKE00000002"), Default: true)],
             ["Account_Relationship__c"] = [Master, new("Standard", "Standard", FakeRecords.Id18("012FAKE00000003"), Default: true)],
             ["Contact"] = [Master, new("Standard", "Standard", FakeRecords.Id18("012FAKE00000004"), Default: true)]
@@ -193,6 +204,13 @@ public static class FakeSchema
     public static string RecordTypeIdOf(string sobject, string developerName)
     {
         return RecordTypes[sobject].Single(r => r.DeveloperName == developerName).Id;
+    }
+
+    /// <summary>Whether this (15- or 18-character) Id is one of the object's person account record types.</summary>
+    public static bool IsPersonRecordType(string sobject, string? id)
+    {
+        return id is { Length: >= 15 } && RecordTypes.TryGetValue(sobject, out var recordTypes)
+               && recordTypes.Any(r => r.PersonType && r.Id.StartsWith(id[..15], StringComparison.Ordinal));
     }
 
     /// <summary>Whether records of the object can be given the record type with this (15- or 18-character) Id.</summary>

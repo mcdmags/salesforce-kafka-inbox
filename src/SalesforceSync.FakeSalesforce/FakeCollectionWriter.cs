@@ -237,6 +237,11 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             return (400, error);
         }
 
+        if (PersonOrBusiness(sobject, stored, FakeSchema.IsPersonRecordType(sobject, Str(stored[FakeSchema.RecordTypeIdField])), creating: true) is { } kindError)
+        {
+            return (400, kindError);
+        }
+
         if (MissingParent(sobject, stored) is { } missingTarget)
         {
             return (400, missingTarget);
@@ -254,6 +259,7 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         var now = FakeSchema.FormatDateTime(DateTimeOffset.UtcNow);
         record["CreatedDate"] = now;
         record["LastModifiedDate"] = now;
+        SetPersonName(record);
         records.Insert(sobject, id, record, stored);
         counters.Creates++;
 
@@ -279,6 +285,11 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             return (400, error);
         }
 
+        if (PersonOrBusiness(sobject, stored, existing[PersonAccountField]?.GetValue<bool>() == true, creating: false) is { } kindError)
+        {
+            return (400, kindError);
+        }
+
         if (MissingParent(sobject, stored) is { } missingTarget)
         {
             return (400, missingTarget);
@@ -286,6 +297,7 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
 
         faults.NoteWrite(sobject, extId);
         records.Update(sobject, id, stored);
+        SetPersonName(existing);
         counters.Updates++;
 
         return (204, null);
@@ -331,6 +343,49 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
         return null;
     }
 
+    private const string PersonAccountField = "IsPersonAccount";
+    private static readonly string[] PersonOnlyFields = ["FirstName", "LastName"];
+
+    /// <summary>
+    /// An Account is a person account (its record type is a person one) or a business account, and each takes its own
+    /// name fields: a business one Name, a person one FirstName and LastName (LastName required), from which Salesforce
+    /// sets Name. The other kind's fields are refused as Salesforce refuses them. A create's IsPersonAccount is set on
+    /// <paramref name="stored"/>.
+    /// </summary>
+    private static JsonNode? PersonOrBusiness(string sobject, JsonObject stored, bool person, bool creating)
+    {
+        if (!sobject.Equals("Account", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var wrong = (person ? ["Name"] : PersonOnlyFields).Where(stored.ContainsKey).ToArray();
+        if (wrong.Length > 0)
+        {
+            return Errors("INVALID_FIELD_FOR_INSERT_UPDATE", $"Account: bad field names on insert/update call: {string.Join(", ", wrong)}", wrong);
+        }
+
+        if (person && (creating || stored.ContainsKey("LastName")) && string.IsNullOrEmpty(Str(stored["LastName"])))
+        {
+            return Errors("REQUIRED_FIELD_MISSING", "Required fields are missing: [LastName]", "LastName");
+        }
+
+        if (creating)
+        {
+            stored[PersonAccountField] = person;
+        }
+        return null;
+    }
+
+    /// <summary>A person account's Name, which Salesforce keeps as its first and last name.</summary>
+    private static void SetPersonName(JsonObject record)
+    {
+        if (record[PersonAccountField]?.GetValue<bool>() == true)
+        {
+            record["Name"] = $"{Str(record["FirstName"])} {Str(record["LastName"])}".Trim();
+        }
+    }
+
     /// <summary>The values Salesforce would store for the body, or the error it would return.</summary>
     private static (JsonObject? Stored, JsonNode? Error) StoredValues(string sobject, JsonObject body, bool creating)
     {
@@ -357,8 +412,10 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
             stored[field.Name] = v;
         }
 
-        // A create has to give every required field a value, as a real org insists (a checkbox is never missing: it is false)
-        if (creating && FakeSchema.Objects[sobject].Where(f => f is { Nillable: false, Createable: true, Type: not "boolean" })
+        // A create has to give every required field a value, as a real org insists (a checkbox is never missing: it is
+        // false). A person account has no Name of its own: Salesforce sets it from FirstName and LastName
+        var person = sobject.Equals("Account", StringComparison.OrdinalIgnoreCase) && FakeSchema.IsPersonRecordType(sobject, Str(stored[FakeSchema.RecordTypeIdField]));
+        if (creating && FakeSchema.Objects[sobject].Where(f => f is { Nillable: false, Createable: true, Type: not "boolean" } && !(person && f.Name == "Name"))
                 .Where(f => stored[f.Name] is null).Select(f => f.Name).ToList() is { Count: > 0 } missing)
         {
             return (null, Errors("REQUIRED_FIELD_MISSING", $"Required fields are missing: [{string.Join(", ", missing)}]"));

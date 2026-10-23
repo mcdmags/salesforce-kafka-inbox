@@ -7,7 +7,8 @@ namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
 /// Account + its Profile__c, same batch (Accounts first). Profile names its Account by external id (Text foreign key).
-/// Event without <c>profile</c> → only Account written.
+/// Event without <c>profile</c> → only Account written. An Account is a person account or a business account
+/// (<see cref="AccountPayload.IsPerson"/>): its record type at create decides which, and each kind has its own name fields.
 /// Flow (claim, parse, record, ...) = <see cref="SalesforceBatchSyncService"/>; event handling = <see cref="Send"/>.
 /// </summary>
 public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCalls salesforce, IRepository<AccountInboxRow> inbox) : IEntitySync
@@ -18,10 +19,12 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
     public static readonly SalesforceObject AccountObject = SalesforceObject.Of<AccountRecord>();
     private static readonly SalesforceObject ProfileObject = SalesforceObject.Of<ProfileRecord>();
 
-    /// <summary>Developer name of the record type new Accounts get.</summary>
-    private const string AccountRecordType = "Business";
+    /// <summary>Developer names of the record types new Accounts get: a business's, a person's (a person account one).</summary>
+    private const string BusinessRecordType = "Business";
+    private const string PersonRecordType = "PersonAccount";
 
     private static readonly string RecordTypeIdField = SalesforceFields.Name<AccountRecord>(r => r.RecordTypeId);
+    private static readonly string IsPersonAccountField = SalesforceFields.Name<AccountReadFields>(r => r.IsPersonAccount);
 
     public string EntityType => Type;
 
@@ -36,12 +39,15 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = SalesforceCalls.KeepValid(events.Except(deletes), e => e.Event.Account is not null, "account is required", failures);
 
+        var people = upserts.Where(IsPerson).Select(e => e.EntityId).ToHashSet(StringComparer.Ordinal);
         var wantedAccounts = upserts.Select(WantedAccount).ToList();
         var wantedProfiles = upserts.Where(HasProfile).Select(WantedProfile).ToList();
 
-        var accountsNow = await salesforce.ReadCurrentAsync(AccountObject, wantedAccounts, events.Select(e => e.EntityId), ct);
+        var accountsNow = await salesforce.ReadAsync(AccountObject, wantedAccounts.SelectMany(w => w.Fields.Keys).Append(IsPersonAccountField),
+            events.Select(e => e.EntityId), ct);
         var profilesNow = await salesforce.ReadCurrentAsync(ProfileObject, wantedProfiles, events.Select(ProfileKey), ct);
-        wantedAccounts = await WithRecordTypeIfNewAsync(wantedAccounts, accountsNow, failures, ct);
+        wantedAccounts = SameKindAsInSalesforce(wantedAccounts, people, accountsNow, failures);
+        wantedAccounts = await WithRecordTypeIfNewAsync(wantedAccounts, people, accountsNow, failures, ct);
 
         await salesforce.UpsertAsync(AccountObject, SalesforceCalls.Changed(wantedAccounts, accountsNow), failures, ct);
         await salesforce.UpsertAsync(ProfileObject, ProfilesOfSavedAccounts(SalesforceCalls.Changed(wantedProfiles, profilesNow), failures), failures, ct);
@@ -52,36 +58,83 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         return failures;
     }
 
+    private static bool IsPerson(ReadEvent<AccountEvent> e)
+    {
+        return e.Event.Account!.IsPerson == true;
+    }
+
     private static WantedRecord WantedAccount(ReadEvent<AccountEvent> e)
     {
-        return new WantedRecord(e.EntityId, e.EntityId, AccountFields(e.Event.Account!));
+        return new WantedRecord(e.EntityId, e.EntityId, AccountFieldsOf(e.Event.Account!));
     }
 
     /// <summary>
-    /// Accounts Salesforce doesn't have yet get the record type (needed only to create one). If the org lacks it, they
-    /// fail (retried) and are left out; their profiles then wait for them.
+    /// An Account Salesforce has as the other kind (the event a person, Salesforce a business account, or the other
+    /// way round) can't take the event's name fields, and an update can't change its kind: dead-lettered, to replay
+    /// once the Account is converted or deleted in Salesforce.
     /// </summary>
-    private async Task<List<WantedRecord>> WithRecordTypeIfNewAsync(List<WantedRecord> accounts, Dictionary<string, JsonElement> accountsNow,
-        Dictionary<string, List<Failure>> failures, CancellationToken ct)
+    private static List<WantedRecord> SameKindAsInSalesforce(List<WantedRecord> accounts, HashSet<string> people,
+        Dictionary<string, JsonElement> accountsNow, Dictionary<string, List<Failure>> failures)
     {
-        var created = accounts.Where(a => !accountsNow.ContainsKey(a.ExternalId)).ToList();
-        if (created.Count == 0)
+        var same = new List<WantedRecord>();
+        foreach (var a in accounts)
         {
-            return accounts;
+            var person = people.Contains(a.EntityId);
+            if (accountsNow.TryGetValue(a.ExternalId, out var now) && now.TryGetProperty(IsPersonAccountField, out var isPerson)
+                && isPerson.ValueKind is JsonValueKind.True or JsonValueKind.False && isPerson.GetBoolean() != person)
+            {
+                SalesforceCalls.Fail(failures, a.EntityId, SalesforceErrors.AccountKindMismatch,
+                    $"the event is a {Kind(person)} and Salesforce has the Account as a {Kind(!person)} account: convert or delete it there, then replay",
+                    permanent: true);
+            }
+            else
+            {
+                same.Add(a);
+            }
         }
 
-        var recordTypeId = await salesforce.RecordTypeIdAsync(AccountObject, AccountRecordType, ct);
-        if (recordTypeId is null)
+        return same;
+    }
+
+    private static string Kind(bool person)
+    {
+        return person ? "person" : "business";
+    }
+
+    /// <summary>
+    /// Accounts Salesforce doesn't have yet get their kind's record type (needed only to create one). If the org lacks
+    /// it, they fail (retried) and are left out; their profiles then wait for them.
+    /// </summary>
+    private async Task<List<WantedRecord>> WithRecordTypeIfNewAsync(List<WantedRecord> accounts, HashSet<string> people,
+        Dictionary<string, JsonElement> accountsNow, Dictionary<string, List<Failure>> failures, CancellationToken ct)
+    {
+        var ready = new List<WantedRecord>();
+        var ids = new Dictionary<string, string?>(); // developer name → Id, looked up once a batch
+        foreach (var a in accounts)
         {
-            foreach (var a in created)
+            if (accountsNow.ContainsKey(a.ExternalId))
             {
-                SalesforceCalls.Fail(failures, a.EntityId, SalesforceErrors.InvalidRecordType, $"the Account record type {AccountRecordType} is not in the org");
+                ready.Add(a);
+                continue;
             }
 
-            return [.. accounts.Except(created)];
+            var recordType = people.Contains(a.EntityId) ? PersonRecordType : BusinessRecordType;
+            if (!ids.TryGetValue(recordType, out var id))
+            {
+                ids[recordType] = id = await salesforce.RecordTypeIdAsync(AccountObject, recordType, ct);
+            }
+
+            if (id is null)
+            {
+                SalesforceCalls.Fail(failures, a.EntityId, SalesforceErrors.InvalidRecordType, $"the Account record type {recordType} is not in the org");
+            }
+            else
+            {
+                ready.Add(a with { Fields = new(a.Fields) { [RecordTypeIdField] = id } });
+            }
         }
 
-        return [.. accounts.Select(a => accountsNow.ContainsKey(a.ExternalId) ? a : a with { Fields = new(a.Fields) { [RecordTypeIdField] = recordTypeId } })];
+        return ready;
     }
 
     /// <summary>An event without a profile leaves Salesforce's profile as it is.</summary>
@@ -113,24 +166,30 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         return e.Event.Account?.Profile?.ExternalId ?? e.EntityId;
     }
 
-    private static Dictionary<string, object?> AccountFields(AccountPayload a)
+    /// <summary>A person's fields (first and last name) or a business's (Name), and the fields both have.</summary>
+    private static Dictionary<string, object?> AccountFieldsOf(AccountPayload a)
     {
-        return SalesforceFields.Of(new AccountRecord
-        {
-            Name = a.Name,
-            Rating = a.Rating,
-            Industry = a.Industry,
-            Description = a.Description,
-            AnnualRevenue = a.AnnualRevenue,
-            NumberOfEmployees = a.NumberOfEmployees,
-            Phone = a.Phone,
-            Website = a.Website,
-            Active = a.IsActive,
-            // list in event, ';'-separated multi-select picklist in Salesforce
-            Tags = a.Tags is null ? null : string.Join(';', a.Tags),
-            CustomerSince = a.CustomerSince,
-            LastContacted = a.LastContactedAt
-        });
+        return a.IsPerson == true
+            ? SalesforceFields.Of(Shared(new PersonAccountRecord { FirstName = a.FirstName, LastName = a.LastName }, a))
+            : SalesforceFields.Of(Shared(new AccountRecord { Name = a.Name }, a));
+    }
+
+    private static T Shared<T>(T record, AccountPayload a)
+        where T : AccountFields
+    {
+        record.Rating = a.Rating;
+        record.Industry = a.Industry;
+        record.Description = a.Description;
+        record.AnnualRevenue = a.AnnualRevenue;
+        record.NumberOfEmployees = a.NumberOfEmployees;
+        record.Phone = a.Phone;
+        record.Website = a.Website;
+        record.Active = a.IsActive;
+        // list in event, ';'-separated multi-select picklist in Salesforce
+        record.Tags = a.Tags is null ? null : string.Join(';', a.Tags);
+        record.CustomerSince = a.CustomerSince;
+        record.LastContacted = a.LastContactedAt;
+        return record;
     }
 
     private static Dictionary<string, object?> ProfileFields(ReadEvent<AccountEvent> e)

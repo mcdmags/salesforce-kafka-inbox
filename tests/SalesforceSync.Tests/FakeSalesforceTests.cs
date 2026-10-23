@@ -145,6 +145,34 @@ public sealed class FakeSalesforceTests
     }
 
     [Fact]
+    public async Task A_business_account_refuses_a_person_s_name_fields_and_a_person_account_refuses_Name()
+    {
+        var person = new JsonObject
+        {
+            ["attributes"] = Type("Account"),
+            ["ExternalId__c"] = "P1",
+            ["FirstName"] = "Ana",
+            ["LastName"] = "Cruz",
+            [FakeSchema.RecordTypeIdField] = FakeSchema.RecordTypeIdOf("Account", "PersonAccount")
+        };
+        var business = Account("B1");
+        business["FirstName"] = "Ana";
+        business["LastName"] = "Cruz";
+        var personWithName = (JsonObject)person.DeepClone();
+        personWithName["ExternalId__c"] = "P2";
+        personWithName["Name"] = "Ana Cruz";
+
+        var results = await UpsertAsync("Account", person, business, personWithName);
+
+        results.Select(r => (bool)r!["success"]!).Should().Equal(true, false, false);
+        (Code(results[1]), (string?)results[1]!["errors"]![0]!["message"])
+            .Should().Be(("INVALID_FIELD_FOR_INSERT_UPDATE", "Account: bad field names on insert/update call: FirstName, LastName"), "as a sandbox answers");
+        ((string?)results[2]!["errors"]![0]!["message"]).Should().Be("Account: bad field names on insert/update call: Name");
+        ((string?)_org.FindByExternalId("Account", "P1")!["Name"], (bool?)_org.FindByExternalId("Account", "P1")!["IsPersonAccount"])
+            .Should().Be(("Ana Cruz", true));
+    }
+
+    [Fact]
     public async Task A_failed_update_has_no_id_even_though_the_record_exists()
     {
         await UpsertAccountsAsync("A1");
