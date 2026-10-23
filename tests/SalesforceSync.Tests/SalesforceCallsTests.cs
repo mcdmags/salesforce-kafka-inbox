@@ -95,6 +95,55 @@ public sealed class SalesforceCallsTests
         });
     }
 
+    [Fact]
+    public void A_field_Salesforce_has_no_value_for_and_a_changed_one_are_both_sent()
+    {
+        var now = Row(new JsonObject { ["FirstName"] = "Ana", ["MiddleName"] = null, ["LastName"] = "Cruz" });
+
+        var changes = SalesforceCalls.Changes(new() { ["FirstName"] = "Anna", ["MiddleName"] = "Lee", ["LastName"] = "Cruz" }, now);
+
+        changes.Should().Equal(new Dictionary<string, object?> { ["FirstName"] = "Anna", ["MiddleName"] = "Lee" });
+    }
+
+    [Fact]
+    public void A_field_missing_from_Salesforce_s_row_is_sent()
+    {
+        // A row read before the field was added to the mapping (or one the read didn't select) has no such property
+        var now = Row(new JsonObject { ["FirstName"] = "Ana", ["LastName"] = "Cruz" });
+
+        var changes = SalesforceCalls.Changes(new() { ["FirstName"] = "Ana", ["MiddleName"] = "Lee", ["LastName"] = "Cruz" }, now);
+
+        changes.Should().Equal(new Dictionary<string, object?> { ["MiddleName"] = "Lee" });
+    }
+
+    [Fact]
+    public void A_change_of_letter_case_alone_is_sent()
+    {
+        var now = Row(new JsonObject { ["FirstName"] = "ana" });
+
+        var changes = SalesforceCalls.Changes(new() { ["FirstName"] = "Ana" }, now);
+
+        changes.Should().Equal(new Dictionary<string, object?> { ["FirstName"] = "Ana" });
+    }
+
+    [Fact]
+    public async Task A_new_field_and_a_changed_one_are_read_found_different_and_written()
+    {
+        var failures = new Dictionary<string, List<Failure>>();
+        await _calls.UpsertAsync(ContactObject, [("C1", "C1", new Dictionary<string, object?> { ["FirstName"] = "Ana", ["LastName"] = "Cruz" })], failures, Ct);
+        var wanted = new WantedRecord("C1", "C1", new() { ["FirstName"] = "Anna", ["MiddleName"] = "Lee", ["LastName"] = "Cruz" });
+
+        var now = await _calls.ReadCurrentAsync(ContactObject, [wanted], ["C1"], Ct);
+        var changed = SalesforceCalls.Changed([wanted], now);
+        await _calls.UpsertAsync(ContactObject, changed, failures, Ct);
+
+        now["C1"].GetProperty("MiddleName").ValueKind.Should().Be(JsonValueKind.Null, "the read selects the new field; Salesforce has no value yet");
+        changed.Should().ContainSingle().Which.Fields.Should().Equal(new Dictionary<string, object?> { ["FirstName"] = "Anna", ["MiddleName"] = "Lee" });
+        failures.Should().BeEmpty();
+        var contact = _org.FindByExternalId("Contact", "C1")!;
+        ((string?)contact["FirstName"], (string?)contact["MiddleName"], (string?)contact["LastName"]).Should().Be(("Anna", "Lee", "Cruz"));
+    }
+
     // ---------- Record types ----------
 
     [Fact]

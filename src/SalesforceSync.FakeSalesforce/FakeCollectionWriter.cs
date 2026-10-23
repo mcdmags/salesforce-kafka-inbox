@@ -344,7 +344,7 @@ internal sealed class FakeCollectionWriter(FakeRecords records, FakeFaults fault
     }
 
     private const string PersonAccountField = "IsPersonAccount";
-    private static readonly string[] PersonOnlyFields = ["FirstName", "LastName"];
+    private static readonly string[] PersonOnlyFields = ["FirstName", "MiddleName", "LastName"];
 
     /// <summary>
     /// An Account is a person account (its record type is a person one) or a business account, and each takes its own

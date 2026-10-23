@@ -78,6 +78,8 @@ public static class FakeSchema
                 // sets Name from them; the record type decides which, and IsPersonAccount says which it is
                 new("Name", "string", 255, Nillable: false),
                 new("FirstName", "string", 40),
+                // Person names' MiddleName exists only with Setup → User Interface → "Enable Middle Names for Person Names"
+                new("MiddleName", "string", 40),
                 new("LastName", "string", 80),
                 new("IsPersonAccount", "boolean", Createable: false, Updateable: false, Nillable: false),
                 new("Rating", "picklist", 255),
@@ -135,6 +137,7 @@ public static class FakeSchema
                 new("AccountId", "reference", 18, ReferenceTo: "Account", CascadeDelete: true),
                 new("AccountId__c", "string", 255, KeyOf: "Account"),
                 new("FirstName", "string", 40),
+                new("MiddleName", "string", 40),
                 new("LastName", "string", 80, Nillable: false),
                 new("Email", "email", 80),
                 new("Phone", "phone", 40),
