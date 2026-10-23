@@ -26,6 +26,26 @@ public sealed class FieldValuesTests
     }
 
     [Fact]
+    public void A_number_sent_as_text_equals_the_stored_number()
+    {
+        FieldValues.AreEqual(FieldValues.Normalize("7801234"), J("7801234.0")).Should().BeTrue("Salesforce stores \"7801234\" as 7801234.0");
+        FieldValues.AreEqual(FieldValues.Normalize("7801235"), J("7801234.0")).Should().BeFalse();
+        FieldValues.AreEqual(FieldValues.Normalize("78O1234"), J("7801234.0")).Should().BeFalse("not a number");
+        FieldValues.AreEqual(FieldValues.Normalize("7801234"), J("\"7801234\"")).Should().BeTrue("a Text field");
+    }
+
+    [Fact]
+    public void A_value_passed_through_as_JSON_is_compared_by_its_kind_not_its_text()
+    {
+        FieldValues.AreEqual(FieldValues.Normalize(J("7801234")), J("7801234.0")).Should().BeTrue();
+        FieldValues.AreEqual(FieldValues.Normalize(J("true")), J("true")).Should().BeTrue();
+        FieldValues.AreEqual(FieldValues.Normalize(J("\"Wellington\"")), J("\"Wellington\"")).Should().BeTrue();
+        FieldValues.Normalize(J("null")).Should().BeNull("clears the field");
+        FieldValues.Normalize(J("\"\"")).Should().BeNull("empty text, as Salesforce stores it");
+        FieldValues.ToWire(FieldValues.Normalize(J("7801234"))).Should().Be(7801234m, "sent as a number");
+    }
+
+    [Fact]
     public void Checkbox_null_is_false()
     {
         FieldValues.AreEqual(null, J("false")).Should().BeTrue();

@@ -27,6 +27,17 @@ public static class FieldValues
                 TimeSpan.TicksPerSecond),
             TimeOnly t => new TimeOnly(t.Ticks - (t.Ticks % TimeSpan.TicksPerMillisecond)),
             Enum or Guid => value.ToString(),
+            // A value passed through from the event's JSON: compared by its JSON kind, not as raw text ("7801234" is
+            // Salesforce's 7801234.0)
+            JsonElement e => e.ValueKind switch
+            {
+                JsonValueKind.Null or JsonValueKind.Undefined => null,
+                JsonValueKind.String => Normalize(e.GetString()),
+                JsonValueKind.Number => e.GetDecimal(),
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                _ => value
+            },
             _ => value
         };
     }
@@ -52,7 +63,8 @@ public static class FieldValues
             DateOnly d => currentText is not null && TryDate(currentText, out var cd) && cd == d,
             DateTimeOffset t => currentText is not null && TryDateTime(currentText, out var ct) && ct == t,
             TimeOnly t => currentText is not null && TryTime(currentText, out var ct) && ct == t,
-            string s => currentText == s,
+            // Text, or a number sent as text: Salesforce takes "7801234" for a Number field and stores 7801234
+            string s => currentText == s || (current.ValueKind == JsonValueKind.Number && IsNumber(s, out var n) && current.GetDecimal() == n),
             _ => JsonSerializer.Serialize(normalized) == current.GetRawText()
         };
     }
@@ -67,6 +79,11 @@ public static class FieldValues
             TimeOnly t => t.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + "Z",
             _ => normalized
         };
+    }
+
+    private static bool IsNumber(string text, out decimal number)
+    {
+        return decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out number);
     }
 
     private static DateTimeOffset Truncate(DateTimeOffset utc, long ticks)
