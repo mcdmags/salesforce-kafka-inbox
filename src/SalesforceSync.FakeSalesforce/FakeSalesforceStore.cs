@@ -242,16 +242,20 @@ public sealed partial class FakeSalesforceStore
             {
                 _counters.RecordTypeQueries++;
             }
-            var rows = new List<JsonObject>();
-            foreach (var record in query.SObject.Equals(FakeSchema.RecordTypeObject, StringComparison.OrdinalIgnoreCase)
-                         ? FakeSchema.RecordTypeRows()
-                         : _records.Table(query.SObject).Values)
+            var matches = (query.SObject.Equals(FakeSchema.RecordTypeObject, StringComparison.OrdinalIgnoreCase)
+                    ? FakeSchema.RecordTypeRows()
+                    : _records.Table(query.SObject).Values)
+                .Where(r => Str(r[query.WhereField]) is { } key && query.Values?.Contains(key) != false);
+            if (query.OrderBy is { } orderBy)
             {
-                var key = Str(record[query.WhereField]);
-                if (key is null || query.Values?.Contains(key) == false)
-                {
-                    continue;
-                }
+                matches = query.Descending
+                    ? matches.OrderByDescending(r => Str(r[orderBy]), StringComparer.Ordinal)
+                    : matches.OrderBy(r => Str(r[orderBy]), StringComparer.Ordinal);
+            }
+
+            var rows = new List<JsonObject>();
+            foreach (var record in query.Limit is { } limit ? matches.Take(limit) : matches)
+            {
 
                 var row = new JsonObject
                 {

@@ -81,6 +81,17 @@ public sealed class BulkDeleteTests
     }
 
     [Fact]
+    public async Task The_query_with_a_limit_returns_the_first_records_by_external_id()
+    {
+        await UpsertAsync("Account", "A3", "A1", "A2");
+
+        var rows = await _client.SelectAsync("SELECT Id, ExternalId__c FROM Account WHERE ExternalId__c != null ORDER BY ExternalId__c LIMIT 2",
+            CancellationToken.None);
+
+        rows.Select(r => r.GetProperty("ExternalId__c").GetString()).Should().Equal("A1", "A2");
+    }
+
+    [Fact]
     public void An_Ids_file_written_as_JSON_reads_back_the_same_and_one_without_an_object_is_refused()
     {
         var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.json");

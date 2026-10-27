@@ -4,9 +4,10 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Hosting;
 
 /// <summary>
-/// <c>SalesforceSync bulk-delete-ids &lt;folder&gt;</c>: for each object the sync writes, lists the records that have an
-/// external id (the ones the sync made) and writes them to <c>&lt;folder&gt;/&lt;object&gt;.json</c>
-/// (<see cref="DeleteIdsFile"/>), ready for <see cref="BulkDeleteCommand"/>. Reads only; deletes nothing.
+/// <c>SalesforceSync bulk-delete-ids &lt;folder&gt; [--limit N]</c>: for each object the sync writes, lists the records
+/// that have an external id (the ones the sync made), or with <c>--limit</c> the first N by external id, and writes them
+/// to <c>&lt;folder&gt;/&lt;object&gt;.json</c> (<see cref="DeleteIdsFile"/>), ready for <see cref="BulkDeleteCommand"/>.
+/// Reads only; deletes nothing.
 /// Exit code: 0 written, 1 a query failed, 2 bad arguments.
 /// </summary>
 public static class ListDeleteIdsCommand
@@ -24,9 +25,16 @@ public static class ListDeleteIdsCommand
 
     public static async Task<int> RunAsync(string[] args)
     {
-        if (args is not [var folder])
+        // <folder> [--limit N]: with a limit, the first N records per object by external id
+        var (folder, limit) = args switch
         {
-            Console.Error.WriteLine($"Usage: SalesforceSync {Name} <folder to write the JSON files to>");
+            [var f] => (f, (int?)null),
+            [var f, "--limit", var n] when int.TryParse(n, out var max) && max > 0 => (f, max),
+            _ => (null, null)
+        };
+        if (folder is null)
+        {
+            Console.Error.WriteLine($"Usage: SalesforceSync {Name} <folder to write the JSON files to> [--limit <records per object>]");
             return 2;
         }
 
@@ -37,7 +45,8 @@ public static class ListDeleteIdsCommand
         {
             foreach (var sobject in Objects)
             {
-                var query = $"SELECT Id, {sobject.ExternalIdField} FROM {sobject.Name} WHERE {sobject.ExternalIdField} != null";
+                var query = $"SELECT Id, {sobject.ExternalIdField} FROM {sobject.Name} WHERE {sobject.ExternalIdField} != null"
+                            + (limit is null ? "" : $" ORDER BY {sobject.ExternalIdField} LIMIT {limit}");
                 var rows = await host.Client().SelectAsync(query, cancel.Token);
                 var records = rows
                     .Select(r => new DeleteIdsFile.Row(r.GetProperty("Id").GetString()!, r.GetProperty(sobject.ExternalIdField).GetString()))
