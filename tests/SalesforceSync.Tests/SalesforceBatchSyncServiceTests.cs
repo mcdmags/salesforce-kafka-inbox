@@ -148,7 +148,7 @@ public sealed class SalesforceBatchSyncServiceTests
         release.StopInbox.Should().BeTrue();
         release.Delay.Should().Be(new SyncOptions().MappingErrorHold);
         release.Error.Should().StartWith("MAPPING_ERROR");
-        release.OwnErrors.Should().ContainSingle().Which.Should().Match<FailedEvent>(e => e.EntityId == "ACC-1" && e.Error.Contains("INVALID_FIELD"));
+        release.RowErrors.Should().ContainSingle().Which.Should().Match<FailedEvent>(e => e.EntityId == "ACC-1" && e.Error.Contains("INVALID_FIELD"));
         _inbox.Dead.Should().BeEmpty("a wrong mapping dead-letters nothing");
     }
 

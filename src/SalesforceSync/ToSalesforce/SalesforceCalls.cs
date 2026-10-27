@@ -25,11 +25,11 @@ public sealed record SalesforceObject(string Name, string ExternalIdField)
 }
 
 /// <summary>A record an event wants in Salesforce: its entity, the external id it is matched by, every field it sends.</summary>
-public sealed record WantedRecord(string EntityId, string ExternalId, Dictionary<string, object?> Fields);
+public sealed record DesiredRecord(string EntityId, string ExternalId, Dictionary<string, object?> Fields);
 
 /// <summary>
 /// Reads, diffs and writes records in Salesforce for the syncs: read what Salesforce has, keep only the fields that
-/// differ (<see cref="Changes"/>), upsert or delete those.
+/// differ (<see cref="ChangedFields"/>), upsert or delete those.
 /// </summary>
 /// <remarks>
 /// Each method is one API call (a few for big batches) and decides nothing about what to write: that is each sync's
@@ -53,7 +53,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     {
         var columns = fields.Append(sobject.ExternalIdField).Append("Id").Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var found = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-        foreach (var (soql, ids) in Queries(sobject, columns, externalIds))
+        foreach (var (soql, ids) in QueriesWithinUrlLimit(sobject, columns, externalIds))
         {
             try
             {
@@ -76,7 +76,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// 200 ids per query, halved while the query's URL is over Salesforce's limit: the query is a GET, so long external
     /// ids can overflow its URL long before 200 of them.
     /// </summary>
-    private IEnumerable<(string Soql, string[] Ids)> Queries(SalesforceObject sobject, List<string> columns, IEnumerable<string> externalIds)
+    private IEnumerable<(string Soql, string[] Ids)> QueriesWithinUrlLimit(SalesforceObject sobject, List<string> columns, IEnumerable<string> externalIds)
     {
         var pending = new Stack<string[]>(externalIds.Distinct(StringComparer.Ordinal).Chunk(SalesforceRestClient.MaxCollectionRecords).Reverse());
         while (pending.TryPop(out var ids))
@@ -97,18 +97,18 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// The diff: the fields to send. For a new record, every field with a value; for an existing one, only the fields
     /// that differ. Empty means nothing to send.
     /// </summary>
-    /// <param name="wanted">Fields by API name; null clears the field.</param>
+    /// <param name="desired">Fields by API name; null clears the field.</param>
     /// <param name="current">Record in Salesforce, null if absent.</param>
-    public static Dictionary<string, object?> Changes(Dictionary<string, object?> wanted, JsonElement? current)
+    public static Dictionary<string, object?> ChangedFields(Dictionary<string, object?> desired, JsonElement? current)
     {
         var changes = new Dictionary<string, object?>();
-        foreach (var (field, value) in wanted)
+        foreach (var (field, value) in desired)
         {
             var normalized = FieldValues.Normalize(value);
             var same = current is { } now ? now.TryGetProperty(field, out var stored) && FieldValues.AreEqual(normalized, stored) : normalized is null;
             if (!same)
             {
-                changes[field] = FieldValues.ToWire(normalized);
+                changes[field] = FieldValues.ToSalesforceValue(normalized);
             }
         }
 
@@ -161,20 +161,20 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
 
     /// <summary>
     /// What Salesforce has for these external ids: the values to compare, and the Ids deletes need. Reads every field
-    /// the wanted records send, so a field the org lacks shows here, before anything is written.
+    /// the desired records send, so a field the org lacks shows here, before anything is written.
     /// </summary>
-    public Task<Dictionary<string, JsonElement>> ReadCurrentAsync(SalesforceObject sobject, IEnumerable<WantedRecord> wanted, IEnumerable<string> externalIds,
+    public Task<Dictionary<string, JsonElement>> ReadCurrentAsync(SalesforceObject sobject, IEnumerable<DesiredRecord> desired, IEnumerable<string> externalIds,
         CancellationToken ct)
     {
-        return ReadAsync(sobject, wanted.SelectMany(w => w.Fields.Keys), externalIds, ct);
+        return ReadAsync(sobject, desired.SelectMany(w => w.Fields.Keys), externalIds, ct);
     }
 
-    /// <summary>What to write (<see cref="Changes"/>): records missing or differing; one already as wanted is left out.</summary>
-    public static List<(string Key, string ExternalId, Dictionary<string, object?> Fields)> Changed(IEnumerable<WantedRecord> wanted,
+    /// <summary>What to write (<see cref="ChangedFields"/>): records missing or differing; one already as desired is left out.</summary>
+    public static List<(string Key, string ExternalId, Dictionary<string, object?> Fields)> ChangedRecords(IEnumerable<DesiredRecord> desired,
         Dictionary<string, JsonElement> current)
     {
-        return [.. wanted
-            .Select(w => (w.EntityId, w.ExternalId, Fields: Changes(w.Fields, current.TryGetValue(w.ExternalId, out var row) ? row : null)))
+        return [.. desired
+            .Select(w => (w.EntityId, w.ExternalId, Fields: ChangedFields(w.Fields, current.TryGetValue(w.ExternalId, out var row) ? row : null)))
             .Where(w => w.Fields.Count > 0)];
     }
 
@@ -182,7 +182,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// The deletes whose record Salesforce has, by its Id (found by <paramref name="externalId"/>, default the entity
     /// id). One Salesforce lacks is already deleted.
     /// </summary>
-    public static IEnumerable<(string Key, string Id)> Existing<TEvent>(IEnumerable<ReadEvent<TEvent>> deletes, Dictionary<string, JsonElement> current,
+    public static IEnumerable<(string Key, string Id)> RecordsToDelete<TEvent>(IEnumerable<ReadEvent<TEvent>> deletes, Dictionary<string, JsonElement> current,
         Func<ReadEvent<TEvent>, string>? externalId = null)
     {
         externalId ??= e => e.EntityId;
@@ -194,7 +194,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// own; failure → its entity's failures.
     /// </summary>
     /// <param name="sobject">Object, and the external-id field the records are matched by.</param>
-    /// <param name="items">Owning entity, record's external id, fields to send (<see cref="Changes"/>).</param>
+    /// <param name="items">Owning entity, record's external id, fields to send (<see cref="ChangedFields"/>).</param>
     /// <param name="failures">Where record failures go, by entity.</param>
     /// <param name="ct">Cancels calls; shutdown or lease deadline, not a failure.</param>
     /// <exception cref="UnknownOutcomeException">Call failed without proof Salesforce didn't apply it.</exception>
@@ -216,7 +216,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
                 return body;
             }).ToList();
 
-            var results = await GuardedAsync(() => salesforce.UpsertAsync(sobject.Name, sobject.ExternalIdField, bodies, ct));
+            var results = await SendWriteAsync(() => salesforce.UpsertAsync(sobject.Name, sobject.ExternalIdField, bodies, ct));
             for (var i = 0; i < chunk.Length; i++)
             {
                 AddFailures(failures, chunk[i].Key, results[i], isDelete: false);
@@ -238,7 +238,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     {
         foreach (var chunk in targets.Chunk(SalesforceRestClient.MaxCollectionRecords))
         {
-            var results = await GuardedAsync(() => salesforce.DeleteAsync([.. chunk.Select(t => t.Id)], ct));
+            var results = await SendWriteAsync(() => salesforce.DeleteAsync([.. chunk.Select(t => t.Id)], ct));
             for (var i = 0; i < chunk.Length; i++)
             {
                 AddFailures(failures, chunk[i].Key, results[i], isDelete: true);
@@ -257,7 +257,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     }
 
     /// <summary>Runs a write. Fails without proof Salesforce didn't apply it → outcome unknown.</summary>
-    private static async Task<IReadOnlyList<RecordResult>> GuardedAsync(Func<Task<IReadOnlyList<RecordResult>>> write)
+    private static async Task<IReadOnlyList<RecordResult>> SendWriteAsync(Func<Task<IReadOnlyList<RecordResult>>> write)
     {
         try
         {

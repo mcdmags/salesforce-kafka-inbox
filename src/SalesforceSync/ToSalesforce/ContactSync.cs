@@ -29,11 +29,11 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
         var accounts = await salesforce.ReadAsync(AccountSync.AccountObject, [], upserts.SelectMany(AccountOf), ct);
         upserts = SalesforceCalls.WithParentsInSalesforce(upserts, AccountOf, accounts, failures);
 
-        var wanted = upserts.Select(Wanted).ToList();
-        var now = await salesforce.ReadCurrentAsync(ContactObject, wanted, events.Select(e => e.EntityId), ct);
+        var desired = upserts.Select(Desired).ToList();
+        var current = await salesforce.ReadCurrentAsync(ContactObject, desired, events.Select(e => e.EntityId), ct);
 
-        await salesforce.UpsertAsync(ContactObject, SalesforceCalls.Changed(wanted, now), failures, ct);
-        await salesforce.DeleteAsync(SalesforceCalls.Existing(deletes, now), failures, ct);
+        await salesforce.UpsertAsync(ContactObject, SalesforceCalls.ChangedRecords(desired, current), failures, ct);
+        await salesforce.DeleteAsync(SalesforceCalls.RecordsToDelete(deletes, current), failures, ct);
 
         return failures;
     }
@@ -48,10 +48,10 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
         return [e.Event.Contact!.AccountExternalId!];
     }
 
-    private static WantedRecord Wanted(ReadEvent<ContactEvent> e)
+    private static DesiredRecord Desired(ReadEvent<ContactEvent> e)
     {
         var c = e.Event.Contact!;
-        return new WantedRecord(e.EntityId, e.EntityId, SalesforceFields.Of(new ContactRecord
+        return new DesiredRecord(e.EntityId, e.EntityId, SalesforceFields.Of(new ContactRecord
         {
             AccountId = c.AccountExternalId,
             FirstName = c.FirstName,

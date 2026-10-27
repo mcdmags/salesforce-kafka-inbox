@@ -87,7 +87,7 @@ The sync is three layers, each with one job:
 |---|---|---|
 | **Thin I/O** | `SalesforceRestClient` (the only class that talks to Salesforce: `SelectAsync`, and `UpsertAsync` and `DeleteAsync` for Collections upserts and deletes); `InboxRepository<TRow>` (`IRepository<TRow>`: store, claim, record, hold, defer, fail, over `SyncDbContext` and `PostgresRetryStrategy`) | Sends requests and returns raw results. Decides nothing. |
 | **The flow** | `SalesforceBatchSyncService` | `SyncBatchAsync` is the shared structure of a batch and nothing else: paused? → claim → parse each entity's event → the type's **send step** (a delegate) → record outcomes, with the ways a batch can fail as a whole (unknown outcome → hold, mapping error → stop the inbox, rate limited → defer, anything else → retry all). The lease deadline is here too. |
-| **What a type does** | `AccountSync`, `AccountRelationshipSync`, `ContactSync` (`ToSalesforce/`) | Each is one send step, written top to bottom: map its events to the fields Salesforce names, **read** what Salesforce has (`SalesforceCalls.ReadAsync`), **decide** per entity (`SalesforceCalls.Changes`: create with the non-empty fields, update the fields that differ, or nothing; wait for a missing parent), **write** (`SalesforceCalls.UpsertAsync` / `DeleteAsync`). `SalesforceCalls` is a small toolbox of one-call primitives (record types, read, changes, upsert, delete, and what an answer means); the types call what they need and can do it differently. |
+| **What a type does** | `AccountSync`, `AccountRelationshipSync`, `ContactSync` (`ToSalesforce/`) | Each is one send step, written top to bottom: map its events to the fields Salesforce names, **read** what Salesforce has (`SalesforceCalls.ReadAsync`), **decide** per entity (`SalesforceCalls.ChangedFields`: create with the non-empty fields, update the fields that differ, or nothing; wait for a missing parent), **write** (`SalesforceCalls.UpsertAsync` / `DeleteAsync`). `SalesforceCalls` is a small toolbox of one-call primitives (record types, read, changes, upsert, delete, and what an answer means); the types call what they need and can do it differently. |
 
 **Data access** is Entity Framework Core over Npgsql (`SyncDbContext`, pooled, on the app's `NpgsqlDataSource`). The
 model defines every table in `OnModelCreating` (partial indexes with `HasFilter`, autovacuum settings with
@@ -275,7 +275,7 @@ reference each other).
 ```
 raw event JSON ─► AccountEvent { AccountPayload { …, ProfilePayload } }     System.Text.Json (Web defaults)
                ─► AccountSync: the fields as Salesforce names them (a Dictionary per record, one line per field)
-               ─► SalesforceCalls.Changes (against what the read found) ─► UpsertAsync / DeleteAsync
+               ─► SalesforceCalls.ChangedFields (against what the read found) ─► UpsertAsync / DeleteAsync
 ```
 
 **Salesforce API names live only in the record classes** (`ToSalesforce/SalesforceRecords.cs`): one class per object
@@ -316,7 +316,7 @@ reads like this, top to bottom; the calls are in `SalesforceCalls`):
 
 1. **Read** (`ReadAsync`; `ReadCurrentAsync` for the records a type writes): one query per object, by external id (up to 200 ids a query), for the fields the type
    sends, the external id and the Id (a delete needs it).
-3. **Decide** (`Changes`/`Changed`, `WithParentsInSalesforce`, and the type's own rules): each record becomes a create (all its non-empty fields), an update
+3. **Decide** (`ChangedFields`/`ChangedRecords`, `WithParentsInSalesforce`, and the type's own rules): each record becomes a create (all its non-empty fields), an update
    (only the fields that differ, values compared in their .NET type's canonical form, `FieldValues`), a delete (by the Id
    the read found) or nothing. An entity with nothing to send is done; one whose parent is in neither Salesforce nor
    the entity waits (`DEPENDENCY_NOT_SYNCED`). Accounts the read didn't find get the record type

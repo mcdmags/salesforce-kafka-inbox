@@ -42,7 +42,7 @@ public sealed class FieldValuesTests
         FieldValues.AreEqual(FieldValues.Normalize(J("\"Wellington\"")), J("\"Wellington\"")).Should().BeTrue();
         FieldValues.Normalize(J("null")).Should().BeNull("clears the field");
         FieldValues.Normalize(J("\"\"")).Should().BeNull("empty text, as Salesforce stores it");
-        FieldValues.ToWire(FieldValues.Normalize(J("7801234"))).Should().Be(7801234m, "sent as a number");
+        FieldValues.ToSalesforceValue(FieldValues.Normalize(J("7801234"))).Should().Be(7801234m, "sent as a number");
     }
 
     [Fact]
@@ -74,7 +74,7 @@ public sealed class FieldValuesTests
         // Salesforce keeps date/time fields to the second, so an event's milliseconds must not count as a change
         var stamp = FieldValues.Normalize(new DateTimeOffset(2026, 10, 13, 3, 2, 3, 456, TimeSpan.FromHours(2)));
         FieldValues.AreEqual(stamp, J("\"2026-10-13T01:02:03.000+0000\"")).Should().BeTrue();
-        FieldValues.ToWire(stamp).Should().Be("2026-10-13T01:02:03.000Z");
+        FieldValues.ToSalesforceValue(stamp).Should().Be("2026-10-13T01:02:03.000Z");
     }
 
     [Fact]
@@ -87,14 +87,14 @@ public sealed class FieldValuesTests
     [Fact]
     public void Time_keeps_milliseconds()
     {
-        FieldValues.ToWire(FieldValues.Normalize(new TimeOnly(13, 14, 15, 678))).Should().Be("13:14:15.678Z");
+        FieldValues.ToSalesforceValue(FieldValues.Normalize(new TimeOnly(13, 14, 15, 678))).Should().Be("13:14:15.678Z");
         FieldValues.AreEqual(FieldValues.Normalize(new TimeOnly(13, 14, 15, 678)), J("\"13:14:15.678Z\"")).Should().BeTrue();
     }
 
     [Fact]
     public void Date_is_sent_as_yyyy_MM_dd()
     {
-        FieldValues.ToWire(FieldValues.Normalize(new DateOnly(2026, 10, 13))).Should().Be("2026-10-13");
+        FieldValues.ToSalesforceValue(FieldValues.Normalize(new DateOnly(2026, 10, 13))).Should().Be("2026-10-13");
         FieldValues.AreEqual(FieldValues.Normalize(new DateOnly(2026, 10, 13)), J("\"2026-10-13\"")).Should().BeTrue();
     }
 }

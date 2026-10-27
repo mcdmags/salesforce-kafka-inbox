@@ -6,7 +6,7 @@ namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
 /// A record class (<see cref="AccountRecord"/>, ...) as the fields a sync sends: API name to value. A dictionary, not
-/// JSON, because <see cref="SalesforceCalls.ReadAsync"/> selects its keys and <see cref="SalesforceCalls.Changes"/>
+/// JSON, because <see cref="SalesforceCalls.ReadAsync"/> selects its keys and <see cref="SalesforceCalls.ChangedFields"/>
 /// compares its CLR values (decimal, DateOnly, ...) with what Salesforce returned.
 /// </summary>
 public static class SalesforceFields
