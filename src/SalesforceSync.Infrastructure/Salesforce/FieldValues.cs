@@ -14,7 +14,7 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// </remarks>
 public static class FieldValues
 {
-    /// <summary>The canonical form of <paramref name="value"/>: what <see cref="AreEqual"/> compares and <see cref="ToWire"/> sends.</summary>
+    /// <summary>The canonical form of <paramref name="value"/>: what <see cref="AreEqual"/> compares and <see cref="ToSalesforceValue"/> sends.</summary>
     public static object? Normalize(object? value)
     {
         return value switch
@@ -72,7 +72,7 @@ public static class FieldValues
     }
 
     /// <summary>The JSON value to send for a normalized value.</summary>
-    public static object? ToWire(object? normalized)
+    public static object? ToSalesforceValue(object? normalized)
     {
         return normalized switch
         {

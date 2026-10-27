@@ -26,7 +26,7 @@ public sealed class SalesforceCallsTests
     [Fact]
     public void A_new_record_gets_its_non_empty_fields()
     {
-        var changes = SalesforceCalls.Changes(new() { ["Name"] = "Acme", ["Rating"] = null, ["Phone"] = "" }, null);
+        var changes = SalesforceCalls.ChangedFields(new() { ["Name"] = "Acme", ["Rating"] = null, ["Phone"] = "" }, null);
 
         changes.Should().Equal(new Dictionary<string, object?> { ["Name"] = "Acme" }, "a null would override a field's default");
     }
@@ -36,7 +36,7 @@ public sealed class SalesforceCallsTests
     {
         var now = Row(new JsonObject { ["Name"] = "Acme", ["Rating"] = "Hot", ["NumberOfEmployees"] = 250 });
 
-        var changes = SalesforceCalls.Changes(new() { ["Name"] = "Acme", ["Rating"] = "Cold", ["NumberOfEmployees"] = 250 }, now);
+        var changes = SalesforceCalls.ChangedFields(new() { ["Name"] = "Acme", ["Rating"] = "Cold", ["NumberOfEmployees"] = 250 }, now);
 
         changes.Should().Equal(new Dictionary<string, object?> { ["Rating"] = "Cold" });
     }
@@ -54,7 +54,7 @@ public sealed class SalesforceCallsTests
             ["Description"] = null
         });
 
-        var changes = SalesforceCalls.Changes(new()
+        var changes = SalesforceCalls.ChangedFields(new()
         {
             ["Name"] = "Acme",
             ["AnnualRevenue"] = 1250000.5m,
@@ -72,7 +72,7 @@ public sealed class SalesforceCallsTests
     {
         var now = Row(new JsonObject { ["Name"] = "Acme", ["Rating"] = "Hot" });
 
-        var changes = SalesforceCalls.Changes(new() { ["Name"] = "Acme", ["Rating"] = null }, now);
+        var changes = SalesforceCalls.ChangedFields(new() { ["Name"] = "Acme", ["Rating"] = null }, now);
 
         changes.Should().Equal(new Dictionary<string, object?> { ["Rating"] = null });
     }
@@ -80,7 +80,7 @@ public sealed class SalesforceCallsTests
     [Fact]
     public void Values_are_sent_in_the_form_Salesforce_takes()
     {
-        var changes = SalesforceCalls.Changes(new()
+        var changes = SalesforceCalls.ChangedFields(new()
         {
             ["Customer_Since__c"] = new DateOnly(2020, 1, 15),
             ["Last_Contacted__c"] = new DateTimeOffset(2026, 10, 12, 3, 2, 3, 456, TimeSpan.FromHours(2)),
@@ -100,7 +100,7 @@ public sealed class SalesforceCallsTests
     {
         var now = Row(new JsonObject { ["FirstName"] = "Ana", ["MiddleName"] = null, ["LastName"] = "Cruz" });
 
-        var changes = SalesforceCalls.Changes(new() { ["FirstName"] = "Anna", ["MiddleName"] = "Lee", ["LastName"] = "Cruz" }, now);
+        var changes = SalesforceCalls.ChangedFields(new() { ["FirstName"] = "Anna", ["MiddleName"] = "Lee", ["LastName"] = "Cruz" }, now);
 
         changes.Should().Equal(new Dictionary<string, object?> { ["FirstName"] = "Anna", ["MiddleName"] = "Lee" });
     }
@@ -111,7 +111,7 @@ public sealed class SalesforceCallsTests
         // A row read before the field was added to the mapping (or one the read didn't select) has no such property
         var now = Row(new JsonObject { ["FirstName"] = "Ana", ["LastName"] = "Cruz" });
 
-        var changes = SalesforceCalls.Changes(new() { ["FirstName"] = "Ana", ["MiddleName"] = "Lee", ["LastName"] = "Cruz" }, now);
+        var changes = SalesforceCalls.ChangedFields(new() { ["FirstName"] = "Ana", ["MiddleName"] = "Lee", ["LastName"] = "Cruz" }, now);
 
         changes.Should().Equal(new Dictionary<string, object?> { ["MiddleName"] = "Lee" });
     }
@@ -121,7 +121,7 @@ public sealed class SalesforceCallsTests
     {
         var now = Row(new JsonObject { ["FirstName"] = "ana" });
 
-        var changes = SalesforceCalls.Changes(new() { ["FirstName"] = "Ana" }, now);
+        var changes = SalesforceCalls.ChangedFields(new() { ["FirstName"] = "Ana" }, now);
 
         changes.Should().Equal(new Dictionary<string, object?> { ["FirstName"] = "Ana" });
     }
@@ -131,10 +131,10 @@ public sealed class SalesforceCallsTests
     {
         var failures = new Dictionary<string, List<Failure>>();
         await _calls.UpsertAsync(ContactObject, [("C1", "C1", new Dictionary<string, object?> { ["FirstName"] = "Ana", ["LastName"] = "Cruz" })], failures, Ct);
-        var wanted = new WantedRecord("C1", "C1", new() { ["FirstName"] = "Anna", ["MiddleName"] = "Lee", ["LastName"] = "Cruz" });
+        var desired = new DesiredRecord("C1", "C1", new() { ["FirstName"] = "Anna", ["MiddleName"] = "Lee", ["LastName"] = "Cruz" });
 
-        var now = await _calls.ReadCurrentAsync(ContactObject, [wanted], ["C1"], Ct);
-        var changed = SalesforceCalls.Changed([wanted], now);
+        var now = await _calls.ReadCurrentAsync(ContactObject, [desired], ["C1"], Ct);
+        var changed = SalesforceCalls.ChangedRecords([desired], now);
         await _calls.UpsertAsync(ContactObject, changed, failures, Ct);
 
         now["C1"].GetProperty("MiddleName").ValueKind.Should().Be(JsonValueKind.Null, "the read selects the new field; Salesforce has no value yet");
