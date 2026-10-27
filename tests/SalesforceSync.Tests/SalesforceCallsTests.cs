@@ -129,17 +129,18 @@ public sealed class SalesforceCallsTests
     [Fact]
     public async Task A_new_field_and_a_changed_one_are_read_found_different_and_written()
     {
-        var failures = new Dictionary<string, List<Failure>>();
-        await _calls.UpsertAsync(ContactObject, [("C1", "C1", new Dictionary<string, object?> { ["FirstName"] = "Ana", ["LastName"] = "Cruz" })], failures, Ct);
+        var failures = new Failures();
+        await _calls.UpsertAsync(ContactObject, [new DesiredRecord("C1", "C1", new() { ["FirstName"] = "Ana", ["LastName"] = "Cruz" })], failures, Ct);
         var desired = new DesiredRecord("C1", "C1", new() { ["FirstName"] = "Anna", ["MiddleName"] = "Lee", ["LastName"] = "Cruz" });
 
-        var now = await _calls.ReadCurrentAsync(ContactObject, [desired], ["C1"], Ct);
-        var changed = SalesforceCalls.ChangedRecords([desired], now);
-        await _calls.UpsertAsync(ContactObject, changed, failures, Ct);
+        var current = await _calls.ReadAsync(ContactObject, new[] { desired }.FieldNames(), ["C1"], Ct);
+        var changed = SalesforceCalls.ChangedFields(desired.Fields, current["C1"]);
+        await _calls.UpsertChangedAsync(ContactObject, [desired], current, failures, Ct);
 
-        now["C1"].GetProperty("MiddleName").ValueKind.Should().Be(JsonValueKind.Null, "the read selects the new field; Salesforce has no value yet");
-        changed.Should().ContainSingle().Which.Fields.Should().Equal(new Dictionary<string, object?> { ["FirstName"] = "Anna", ["MiddleName"] = "Lee" });
+        current["C1"].GetProperty("MiddleName").ValueKind.Should().Be(JsonValueKind.Null, "the read selects the new field; Salesforce has no value yet");
+        changed.Should().Equal(new Dictionary<string, object?> { ["FirstName"] = "Anna", ["MiddleName"] = "Lee" });
         failures.Should().BeEmpty();
+        _org.FindByExternalId("Contact", "C1")!["MiddleName"]!.GetValue<string>().Should().Be("Lee");
         var contact = _org.FindByExternalId("Contact", "C1")!;
         ((string?)contact["FirstName"], (string?)contact["MiddleName"], (string?)contact["LastName"]).Should().Be(("Anna", "Lee", "Cruz"));
     }
@@ -220,8 +221,8 @@ public sealed class SalesforceCallsTests
         // Name stands in for an org whose Account is keyed by another field than ExternalId__c
         var byName = new SalesforceObject("Account", "Name");
 
-        await _calls.UpsertAsync(byName, [("E1", "Acme", new Dictionary<string, object?> { ["Description"] = "first" })], [], Ct);
-        await _calls.UpsertAsync(byName, [("E1", "Acme", new Dictionary<string, object?> { ["Description"] = "second" })], [], Ct);
+        await _calls.UpsertAsync(byName, [new DesiredRecord("E1", "Acme", new Dictionary<string, object?> { ["Description"] = "first" })], [], Ct);
+        await _calls.UpsertAsync(byName, [new DesiredRecord("E1", "Acme", new Dictionary<string, object?> { ["Description"] = "second" })], [], Ct);
         var found = await _calls.ReadAsync(byName, ["Description"], ["Acme"], Ct);
 
         _org.All("Account").Should().ContainSingle("the second upsert matched the first record by Name")
@@ -247,11 +248,11 @@ public sealed class SalesforceCallsTests
     public async Task A_record_a_call_failed_is_a_failure_of_its_entity_and_permanent_only_when_the_data_is_wrong(string code, bool permanent)
     {
         _org.InjectFault("Account", "BAD", code, "nope", times: 1);
-        var failures = new Dictionary<string, List<Failure>>();
+        var failures = new Failures();
 
-        await _calls.UpsertAsync(AccountSync.AccountObject, [("E-BAD", "BAD", Fields("x")), ("E-GOOD", "GOOD", Fields("y"))], failures, Ct);
+        await _calls.UpsertAsync(AccountSync.AccountObject, [new DesiredRecord("E-BAD", "BAD", Fields("x")), new DesiredRecord("E-GOOD", "GOOD", Fields("y"))], failures, Ct);
 
-        failures.Keys.Should().Equal(["E-BAD"], "the other record was saved");
+        failures.Select(f => f.Key).Should().Equal(["E-BAD"], "the other record was saved");
         failures["E-BAD"].Should().ContainSingle().Which.Should().Match<Failure>(f => f.Permanent == permanent && f.Error.StartsWith(code));
         _org.FindByExternalId("Account", "GOOD").Should().NotBeNull();
     }
@@ -262,9 +263,9 @@ public sealed class SalesforceCallsTests
         var options = new SalesforceOptions { ParentMissingMessages = ["parent is not synced"] };
         var calls = SalesforceStep.Calls(SalesforceStep.Http(new FakeSalesforceHandler(_org)), Options.Create(options));
         _org.InjectFault("Account", "A1", "FIELD_CUSTOM_VALIDATION_EXCEPTION", "The parent is not synced yet", times: 1);
-        var failures = new Dictionary<string, List<Failure>>();
+        var failures = new Failures();
 
-        await calls.UpsertAsync(AccountSync.AccountObject, [("E1", "A1", Fields("x"))], failures, Ct);
+        await calls.UpsertAsync(AccountSync.AccountObject, [new DesiredRecord("E1", "A1", Fields("x"))], failures, Ct);
 
         failures["E1"].Should().ContainSingle().Which.Should().Match<Failure>(f => !f.Permanent && f.Error.StartsWith("DEPENDENCY_NOT_SYNCED"));
     }
@@ -272,7 +273,7 @@ public sealed class SalesforceCallsTests
     [Fact]
     public async Task A_field_the_org_lacks_is_a_mapping_error()
     {
-        var upsert = () => _calls.UpsertAsync(AccountSync.AccountObject, [("E1", "A1", new Dictionary<string, object?> { ["Bogus__c"] = "x" })], [], Ct);
+        var upsert = () => _calls.UpsertAsync(AccountSync.AccountObject, [new DesiredRecord("E1", "A1", new Dictionary<string, object?> { ["Bogus__c"] = "x" })], [], Ct);
 
         (await upsert.Should().ThrowAsync<StopInboxException>()).Which.Reason.Should().Be(StopReason.MappingError);
     }
@@ -282,7 +283,7 @@ public sealed class SalesforceCallsTests
     {
         _org.InjectFault("Account", "A1", "STORAGE_LIMIT_EXCEEDED", "storage limit exceeded", times: 1);
 
-        var upsert = () => _calls.UpsertAsync(AccountSync.AccountObject, [("E1", "A1", Fields("x")), ("E2", "A2", Fields("y"))], [], Ct);
+        var upsert = () => _calls.UpsertAsync(AccountSync.AccountObject, [new DesiredRecord("E1", "A1", Fields("x")), new DesiredRecord("E2", "A2", Fields("y"))], [], Ct);
 
         var stop = (await upsert.Should().ThrowAsync<StopInboxException>()).Which;
         stop.Reason.Should().Be(StopReason.StorageFull);
@@ -297,9 +298,9 @@ public sealed class SalesforceCallsTests
     {
         await CreateAsync("A1", "A2");
         var id = (await _calls.ReadAsync(AccountSync.AccountObject, [], ["A1"], Ct))["A1"].GetProperty("Id").GetString()!;
-        var failures = new Dictionary<string, List<Failure>>();
+        var failures = new Failures();
 
-        await _calls.DeleteAsync([("E1", id)], failures, Ct);
+        await _calls.DeleteAsync([new RecordToDelete("E1", id)], failures, Ct);
 
         failures.Should().BeEmpty();
         _org.FindByExternalId("Account", "A1").Should().BeNull();
@@ -311,10 +312,10 @@ public sealed class SalesforceCallsTests
     {
         await CreateAsync("A1");
         var id = (await _calls.ReadAsync(AccountSync.AccountObject, [], ["A1"], Ct))["A1"].GetProperty("Id").GetString()!;
-        await _calls.DeleteAsync([("E1", id)], [], Ct);
-        var failures = new Dictionary<string, List<Failure>>();
+        await _calls.DeleteAsync([new RecordToDelete("E1", id)], [], Ct);
+        var failures = new Failures();
 
-        await _calls.DeleteAsync([("E1", id)], failures, Ct);
+        await _calls.DeleteAsync([new RecordToDelete("E1", id)], failures, Ct);
 
         failures.Should().BeEmpty();
     }
@@ -324,12 +325,12 @@ public sealed class SalesforceCallsTests
     {
         var org = new FakeSalesforceStore(new FakeSalesforceOptions { EnforceDailyLimit = false, RefuseDeletingReferencedRecords = true });
         var calls = SalesforceStep.Calls(SalesforceStep.Http(new FakeSalesforceHandler(org)), Options.Create(new SalesforceOptions()));
-        await calls.UpsertAsync(AccountSync.AccountObject, [("E1", "A1", Fields("x"))], [], Ct);
-        await calls.UpsertAsync(ContactObject, [("C1", "C1", new Dictionary<string, object?> { ["LastName"] = "Doe", ["AccountId__c"] = "A1" })], [], Ct);
+        await calls.UpsertAsync(AccountSync.AccountObject, [new DesiredRecord("E1", "A1", Fields("x"))], [], Ct);
+        await calls.UpsertAsync(ContactObject, [new DesiredRecord("C1", "C1", new Dictionary<string, object?> { ["LastName"] = "Doe", ["AccountId__c"] = "A1" })], [], Ct);
         var id = (await calls.ReadAsync(AccountSync.AccountObject, [], ["A1"], Ct))["A1"].GetProperty("Id").GetString()!;
-        var failures = new Dictionary<string, List<Failure>>();
+        var failures = new Failures();
 
-        await calls.DeleteAsync([("E1", id)], failures, Ct);
+        await calls.DeleteAsync([new RecordToDelete("E1", id)], failures, Ct);
 
         failures["E1"].Should().ContainSingle().Which.Should().Match<Failure>(f => !f.Permanent && f.Error.StartsWith("DEPENDENCY_NOT_SYNCED"));
         org.FindByExternalId("Account", "A1").Should().NotBeNull();
@@ -349,8 +350,8 @@ public sealed class SalesforceCallsTests
 
     private async Task UpsertNamedAsync(string[] keys, string name)
     {
-        var failures = new Dictionary<string, List<Failure>>();
-        await _calls.UpsertAsync(AccountSync.AccountObject, keys.Select(k => (k, k, Fields(name))), failures, Ct);
+        var failures = new Failures();
+        await _calls.UpsertAsync(AccountSync.AccountObject, keys.Select(k => new DesiredRecord(k, k, Fields(name))), failures, Ct);
         failures.Should().BeEmpty();
     }
 

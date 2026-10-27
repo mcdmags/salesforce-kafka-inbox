@@ -33,9 +33,9 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         return batch.SyncBatchAsync(AccountEvent.Reader, inbox, Send, ct);
     }
 
-    private async Task<Dictionary<string, List<Failure>>> Send(IReadOnlyList<ReadEvent<AccountEvent>> events, CancellationToken ct)
+    private async Task<Failures> Send(IReadOnlyList<ReadEvent<AccountEvent>> events, CancellationToken ct)
     {
-        var failures = new Dictionary<string, List<Failure>>();
+        var failures = new Failures();
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = SalesforceCalls.KeepValid(events.Except(deletes), e => e.Event.Account is not null, "account is required", failures);
 
@@ -43,17 +43,21 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
         var desiredAccounts = upserts.Select(DesiredAccount).ToList();
         var desiredProfiles = upserts.Where(HasProfile).Select(DesiredProfile).ToList();
 
-        var currentAccounts = await salesforce.ReadAsync(AccountObject, desiredAccounts.SelectMany(w => w.Fields.Keys).Append(IsPersonAccountField),
+        var currentAccounts = await salesforce.ReadAsync(AccountObject, desiredAccounts.FieldNames().Append(IsPersonAccountField),
             events.Select(e => e.EntityId), ct);
-        var currentProfiles = await salesforce.ReadCurrentAsync(ProfileObject, desiredProfiles, events.Select(ProfileKey), ct);
+        var currentProfiles = await salesforce.ReadAsync(ProfileObject, desiredProfiles.FieldNames(), events.Select(ProfileKey), ct);
         desiredAccounts = SameKindAsInSalesforce(desiredAccounts, people, currentAccounts, failures);
         desiredAccounts = await WithRecordTypeIfNewAsync(desiredAccounts, people, currentAccounts, failures, ct);
 
-        await salesforce.UpsertAsync(AccountObject, SalesforceCalls.ChangedRecords(desiredAccounts, currentAccounts), failures, ct);
-        await salesforce.UpsertAsync(ProfileObject, ProfilesOfSavedAccounts(SalesforceCalls.ChangedRecords(desiredProfiles, currentProfiles), failures), failures, ct);
+        await salesforce.UpsertChangedAsync(AccountObject, desiredAccounts, currentAccounts, failures, ct);
+        // A profile names its account, so it is written only if the account was saved
+        var profilesOfSavedAccounts = desiredProfiles.Where(p => !failures.Contains(p.EntityId));
+        await salesforce.UpsertChangedAsync(ProfileObject, profilesOfSavedAccounts, currentProfiles, failures, ct);
 
+        // Children first: an account is deleted only if deleting its profile didn't fail
         await salesforce.DeleteAsync(SalesforceCalls.RecordsToDelete(deletes, currentProfiles, ProfileKey), failures, ct);
-        await salesforce.DeleteAsync(SalesforceCalls.RecordsToDelete(AccountsWithProfileDeleted(deletes, failures), currentAccounts), failures, ct);
+        var accountsWithProfileDeleted = deletes.Where(e => !failures.Contains(e.EntityId)).ToList();
+        await salesforce.DeleteAsync(SalesforceCalls.RecordsToDelete(accountsWithProfileDeleted, currentAccounts), failures, ct);
 
         return failures;
     }
@@ -74,16 +78,16 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
     /// once the Account is converted or deleted in Salesforce.
     /// </summary>
     private static List<DesiredRecord> SameKindAsInSalesforce(List<DesiredRecord> accounts, HashSet<string> people,
-        Dictionary<string, JsonElement> currentAccounts, Dictionary<string, List<Failure>> failures)
+        Dictionary<string, JsonElement> currentAccounts, Failures failures)
     {
         var same = new List<DesiredRecord>();
         foreach (var a in accounts)
         {
             var person = people.Contains(a.EntityId);
-            if (currentAccounts.TryGetValue(a.ExternalId, out var now) && now.TryGetProperty(IsPersonAccountField, out var isPerson)
+            if (currentAccounts.TryGetValue(a.ExternalId, out var current) && current.TryGetProperty(IsPersonAccountField, out var isPerson)
                 && isPerson.ValueKind is JsonValueKind.True or JsonValueKind.False && isPerson.GetBoolean() != person)
             {
-                SalesforceCalls.Fail(failures, a.EntityId, SalesforceErrors.AccountKindMismatch,
+                failures.Add(a.EntityId, SalesforceErrors.AccountKindMismatch,
                     $"the event is a {Kind(person)} and Salesforce has the Account as a {Kind(!person)} account: convert or delete it there, then replay",
                     permanent: true);
             }
@@ -106,7 +110,7 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
     /// it, they fail (retried) and are left out; their profiles then wait for them.
     /// </summary>
     private async Task<List<DesiredRecord>> WithRecordTypeIfNewAsync(List<DesiredRecord> accounts, HashSet<string> people,
-        Dictionary<string, JsonElement> currentAccounts, Dictionary<string, List<Failure>> failures, CancellationToken ct)
+        Dictionary<string, JsonElement> currentAccounts, Failures failures, CancellationToken ct)
     {
         var ready = new List<DesiredRecord>();
         var ids = new Dictionary<string, string?>(); // developer name → Id, looked up once a batch
@@ -126,7 +130,7 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
 
             if (id is null)
             {
-                SalesforceCalls.Fail(failures, a.EntityId, SalesforceErrors.InvalidRecordType, $"the Account record type {recordType} is not in the org");
+                failures.Add(a.EntityId, SalesforceErrors.InvalidRecordType, $"the Account record type {recordType} is not in the org");
             }
             else
             {
@@ -146,19 +150,6 @@ public sealed class AccountSync(SalesforceBatchSyncService batch, SalesforceCall
     private static DesiredRecord DesiredProfile(ReadEvent<AccountEvent> e)
     {
         return new DesiredRecord(e.EntityId, ProfileKey(e), ProfileFields(e));
-    }
-
-    /// <summary>A profile names its account, so it is written only if the account was saved.</summary>
-    private static IEnumerable<(string Key, string ExternalId, Dictionary<string, object?> Fields)> ProfilesOfSavedAccounts(
-        IEnumerable<(string Key, string ExternalId, Dictionary<string, object?> Fields)> profiles, Dictionary<string, List<Failure>> failures)
-    {
-        return profiles.Where(p => !failures.ContainsKey(p.Key));
-    }
-
-    /// <summary>Children first: an account is deleted only if deleting its profile didn't fail.</summary>
-    private static IEnumerable<ReadEvent<AccountEvent>> AccountsWithProfileDeleted(IEnumerable<ReadEvent<AccountEvent>> deletes, Dictionary<string, List<Failure>> failures)
-    {
-        return deletes.Where(e => !failures.ContainsKey(e.EntityId));
     }
 
     private static string ProfileKey(ReadEvent<AccountEvent> e)

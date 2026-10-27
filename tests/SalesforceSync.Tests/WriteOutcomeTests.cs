@@ -111,7 +111,7 @@ public sealed class WriteOutcomeTests
 
     private static Task Upsert(SalesforceCalls calls, string key)
     {
-        return calls.UpsertAsync(AccountSync.AccountObject, [(key, key, new Dictionary<string, object?> { ["Name"] = "Acme" })], [], CancellationToken.None);
+        return calls.UpsertAsync(AccountSync.AccountObject, [new DesiredRecord(key, key, new Dictionary<string, object?> { ["Name"] = "Acme" })], [], CancellationToken.None);
     }
 
     private static (SalesforceCalls, FakeSalesforceStore, FailingHandler) Engine()

@@ -313,9 +313,9 @@ Id for the records to delete (`DELETE /composite/sobjects?ids=...`, [Deletes](#d
 to 200 records; there is no Composite request. The steps, in the order a type's send step runs them (`ToSalesforce/AccountSync.cs`
 reads like this, top to bottom; the calls are in `SalesforceCalls`):
 
-1. **Read** (`ReadAsync`; `ReadCurrentAsync` for the records a type writes): one query per object, by external id (up to 200 ids a query), for the fields the type
+1. **Read** (`ReadAsync`, with `desired.FieldNames()` for the records a type writes): one query per object, by external id (up to 200 ids a query), for the fields the type
    sends, the external id and the Id (a delete needs it).
-3. **Decide** (`ChangedFields`/`ChangedRecords`, `WithParentsInSalesforce`, and the type's own rules): each record becomes a create (all its non-empty fields), an update
+3. **Decide** (`ChangedFields`, applied by `UpsertChangedAsync`; `WithParentsInSalesforce`; and the type's own rules): each record becomes a create (all its non-empty fields), an update
    (only the fields that differ, values compared in their .NET type's canonical form, `FieldValues`), a delete (by the Id
    the read found) or nothing. An entity with nothing to send is done; one whose parent is in neither Salesforce nor
    the entity waits (`DEPENDENCY_NOT_SYNCED`). Accounts the read didn't find get the record type

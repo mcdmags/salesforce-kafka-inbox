@@ -5,21 +5,17 @@ using SalesforceSync.Sync;
 
 namespace SalesforceSync.ToSalesforce;
 
-/// <summary>One record's failure; Permanent = retrying same data can't help.</summary>
-public sealed record Failure(string Error, bool Permanent);
-
 /// <summary>
-/// Type's handling of a batch's valid events: send to Salesforce however it likes (usual calls:
+/// A type's handling of a batch's events: send them to Salesforce however it needs (usually through
 /// <see cref="SalesforceCalls"/>).
 /// </summary>
-/// <returns>Failed entities by entity id, with why. Not in it = done.</returns>
-public delegate Task<Dictionary<string, List<Failure>>> SendStep<TEvent>(IReadOnlyList<ReadEvent<TEvent>> events, CancellationToken ct);
+/// <returns>The entities that failed, and why. Any other entity is done.</returns>
+public delegate Task<Failures> SendStep<TEvent>(IReadOnlyList<ReadEvent<TEvent>> events, CancellationToken ct);
 
 /// <summary>
 /// Flow of one batch of one entity type, inbox → Salesforce → back; same for every type. Only flow here; event handling
 /// (mapping, reads, writes, reading answers) is the type's, passed as <see cref="SendStep{TEvent}"/>.
 /// <list type="number">
-/// <item>Nothing starts while process is paused (Salesforce asked).</item>
 /// <item><b>Claim</b> ≤ <see cref="SyncOptions.BatchSize"/> due entities from inbox table, leased to this worker: no
 /// other worker (any pod) takes them until lease ends. One row per entity = its newest event.</item>
 /// <item><b>Parse</b> each row's event (<see cref="EventReader{TEvent}"/>). Unreadable row = dead.</item>
@@ -59,7 +55,7 @@ public sealed class SalesforceBatchSyncService(IOptions<SyncOptions> options, IL
 
         var (events, dead) = Parse(reader, claim.Events);
 
-        Dictionary<string, List<Failure>> failures;
+        Failures failures;
         try
         {
             failures = await send(events, leaseCts.Token);
@@ -157,7 +153,7 @@ public sealed class SalesforceBatchSyncService(IOptions<SyncOptions> options, IL
 
     /// <summary>Done: no failure. Failed: the rest; permanent (dead now) if any failure is, or the row was unreadable.</summary>
     private (List<string> Done, List<FailedEvent> Failed) Outcomes<TEvent>(string entityType, List<ReadEvent<TEvent>> events, List<FailedEvent> dead,
-        Dictionary<string, List<Failure>> failures)
+        Failures failures)
     {
         foreach (var invalid in dead)
         {
