@@ -56,7 +56,7 @@ public sealed class OneRowPerEntityTests(SyncFixture app)
         var claim = await new InboxRepository<AccountInboxRow>(_contexts!, Options.Create(new SyncOptions { BatchSize = 2 })).ClaimAsync(CancellationToken.None);
         var broken = claim.Events[0].EntityId;
         await inbox.ReleaseAsync(claim, new Release(TimeSpan.FromMinutes(5), "stopped",
-            [new FailedEvent(broken, "INVALID_FIELD: No such column 'Rating'")], StopInbox: true), CancellationToken.None);
+            [new FailedEvent(broken, "INVALID_FIELD: No such column 'Rating'")], PauseInbox: true), CancellationToken.None);
 
         var rows = new List<(string Entity, Row Row, DateTime? NextAttemptAt)>();
         foreach (var entity in entities)

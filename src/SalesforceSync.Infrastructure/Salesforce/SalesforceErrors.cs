@@ -30,7 +30,7 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 
     /// <summary>
     /// Salesforce's code when the org's data storage is full: every create fails until an admin frees space (deleted
-    /// records count until the Recycle Bin is emptied). Stops the inbox for a while instead of failing entities.
+    /// records count until the Recycle Bin is emptied). Pauses the inbox for a while instead of failing entities.
     /// </summary>
     public const string StorageLimitExceeded = "STORAGE_LIMIT_EXCEEDED";
 
@@ -39,7 +39,7 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 
     /// <summary>
     /// Salesforce asks us to back off, for every call alike: over the org's API limits (403
-    /// <see cref="RequestLimitExceeded"/>), 429, or 503 (down for maintenance or overloaded). Stops the inbox for a
+    /// <see cref="RequestLimitExceeded"/>), 429, or 503 (down for maintenance or overloaded). Pauses the inbox for a
     /// while instead of failing entities.
     /// </summary>
     public static bool IsRequestLimit(Exception ex)

@@ -198,9 +198,9 @@ public sealed class SalesforceCallsTests
     {
         var read = () => _calls.ReadAsync(AccountSync.AccountObject, ["Bogus__c"], ["A1"], Ct);
 
-        var stop = (await read.Should().ThrowAsync<StopInboxException>()).Which;
-        stop.Reason.Should().Be(StopReason.MappingError);
-        stop.Errors.Should().ContainSingle().Which.Error.Code.Should().Be("INVALID_FIELD");
+        var pause = (await read.Should().ThrowAsync<PauseInboxException>()).Which;
+        pause.Reason.Should().Be(PauseReason.MappingError);
+        pause.Errors.Should().ContainSingle().Which.Error.Code.Should().Be("INVALID_FIELD");
     }
 
     // ---------- Upsert ----------
@@ -275,7 +275,7 @@ public sealed class SalesforceCallsTests
     {
         var upsert = () => _calls.UpsertAsync(AccountSync.AccountObject, [new DesiredRecord("E1", "A1", new Dictionary<string, object?> { ["Bogus__c"] = "x" })], [], Ct);
 
-        (await upsert.Should().ThrowAsync<StopInboxException>()).Which.Reason.Should().Be(StopReason.MappingError);
+        (await upsert.Should().ThrowAsync<PauseInboxException>()).Which.Reason.Should().Be(PauseReason.MappingError);
     }
 
     [Fact]
@@ -285,9 +285,9 @@ public sealed class SalesforceCallsTests
 
         var upsert = () => _calls.UpsertAsync(AccountSync.AccountObject, [new DesiredRecord("E1", "A1", Fields("x")), new DesiredRecord("E2", "A2", Fields("y"))], [], Ct);
 
-        var stop = (await upsert.Should().ThrowAsync<StopInboxException>()).Which;
-        stop.Reason.Should().Be(StopReason.StorageFull);
-        stop.Errors.Should().ContainSingle().Which.Key.Should().Be("E1", "only the record that failed is named");
+        var pause = (await upsert.Should().ThrowAsync<PauseInboxException>()).Which;
+        pause.Reason.Should().Be(PauseReason.StorageFull);
+        pause.Errors.Should().ContainSingle().Which.Key.Should().Be("E1", "only the record that failed is named");
         _org.FindByExternalId("Account", "A2").Should().NotBeNull("each record of a call saves or fails on its own");
     }
 

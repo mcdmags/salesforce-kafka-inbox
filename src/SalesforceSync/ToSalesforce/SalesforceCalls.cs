@@ -16,12 +16,12 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
 {
     /// <summary>
     /// Errors that are wrong for every entity of the type, not one: only a code change or an org change fixes them, so
-    /// the inbox stops rather than spend each entity's attempts. First match wins.
+    /// the inbox pauses rather than spend each entity's attempts. First match wins.
     /// </summary>
-    private static readonly (string CodePrefix, StopReason Reason)[] InboxStoppers =
+    private static readonly (string CodePrefix, PauseReason Reason)[] InboxPausers =
     [
-        ("INVALID_FIELD", StopReason.MappingError), // also INVALID_FIELD_FOR_INSERT_UPDATE: a field the org lacks or won't let us set
-        (SalesforceErrors.StorageLimitExceeded, StopReason.StorageFull)
+        ("INVALID_FIELD", PauseReason.MappingError), // also INVALID_FIELD_FOR_INSERT_UPDATE: a field the org lacks or won't let us set
+        (SalesforceErrors.StorageLimitExceeded, PauseReason.StorageFull)
     ];
 
     /// <summary>The Id of an object's active record type by developer name (Salesforce takes an Id), or null if the org has none.</summary>
@@ -34,7 +34,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// The records Salesforce has for these external ids, by external id, with the given fields, the Id (deletes need it)
     /// and the external id. A record Salesforce doesn't have is not in the result.
     /// </summary>
-    /// <exception cref="StopInboxException">The org lacks one of the fields on the object (a mapping error).</exception>
+    /// <exception cref="PauseInboxException">The org lacks one of the fields on the object (a mapping error).</exception>
     public async Task<Dictionary<string, JsonElement>> ReadAsync(SalesforceObject sobject, IEnumerable<string> fields, IEnumerable<string> externalIds,
         CancellationToken ct)
     {
@@ -51,7 +51,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
             }
             catch (SalesforceResponseException ex) when (ex.ErrorCode == "INVALID_FIELD")
             {
-                throw new StopInboxException(StopReason.MappingError, [.. ids.Select(id => (id, new SalesforceError(null, "INVALID_FIELD", ex.Message)))]);
+                throw new PauseInboxException(PauseReason.MappingError, [.. ids.Select(id => (id, new SalesforceError(null, "INVALID_FIELD", ex.Message)))]);
             }
         }
 
@@ -101,7 +101,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// its own; a failure is recorded on its entity.
     /// </summary>
     /// <exception cref="UnknownOutcomeException">A call failed without proof that Salesforce didn't apply it.</exception>
-    /// <exception cref="StopInboxException">An error that is wrong for every entity of the type: a field the org lacks or
+    /// <exception cref="PauseInboxException">An error that is wrong for every entity of the type: a field the org lacks or
     /// won't let us set, or full data storage.</exception>
     public async Task UpsertAsync(SalesforceObject sobject, IEnumerable<DesiredRecord> records, Failures failures, CancellationToken ct)
     {
@@ -121,7 +121,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
             await recordTypes.InvalidateAsync(sobject.Name, ct);
         }
 
-        ThrowIfInboxStops(failures);
+        ThrowIfInboxPauses(failures);
     }
 
     /// <summary>
@@ -283,14 +283,14 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
         }
     }
 
-    private static void ThrowIfInboxStops(Failures failures)
+    private static void ThrowIfInboxPauses(Failures failures)
     {
-        foreach (var (codePrefix, reason) in InboxStoppers)
+        foreach (var (codePrefix, reason) in InboxPausers)
         {
             var found = failures.WithCodePrefix(codePrefix).Select(f => (f.EntityId, new SalesforceError(null, codePrefix, f.Failure.Error))).ToList();
             if (found.Count > 0)
             {
-                throw new StopInboxException(reason, found);
+                throw new PauseInboxException(reason, found);
             }
         }
     }
