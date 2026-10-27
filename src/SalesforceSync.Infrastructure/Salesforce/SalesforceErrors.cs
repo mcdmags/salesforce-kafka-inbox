@@ -30,7 +30,7 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
 
     /// <summary>
     /// Salesforce's code when the org's data storage is full: every create fails until an admin frees space (deleted
-    /// records count until the Recycle Bin is emptied). Stops the inbox for a while instead of failing entities.
+    /// records count until the Recycle Bin is emptied). Pauses the inbox for a while instead of failing entities.
     /// </summary>
     public const string StorageLimitExceeded = "STORAGE_LIMIT_EXCEEDED";
 

@@ -30,8 +30,8 @@ public interface IRepository<TRow> where TRow : InboxRow
 /// <param name="Delay">How long the entities wait.</param>
 /// <param name="Error">Error left on every row; null leaves the row's error alone (rate limited is not an error).</param>
 /// <param name="RowErrors">Rows with their own error, which replaces <paramref name="Error"/>.</param>
-/// <param name="StopInbox">Every other due row waits too: a mapping error is wrong for all of them.</param>
-public sealed record Release(TimeSpan Delay, string? Error = null, IReadOnlyList<FailedEvent>? RowErrors = null, bool StopInbox = false);
+/// <param name="PauseInbox">Every other due row waits too: a mapping error is wrong for all of them.</param>
+public sealed record Release(TimeSpan Delay, string? Error = null, IReadOnlyList<FailedEvent>? RowErrors = null, bool PauseInbox = false);
 
 /// <summary>The rows leased to this worker, one per entity.</summary>
 public sealed record InboxClaim(IReadOnlyList<InboxEvent> Events)

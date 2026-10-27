@@ -44,15 +44,15 @@ public sealed class SyncOptions
     public TimeSpan UnknownOutcomeHold { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
-    /// How long an inbox stops after a mapping error (a field the code sends that Salesforce doesn't have or won't
-    /// take): time to deploy the fix or add the field. Due rows wait this long, then a claim tries again and stops the
+    /// How long an inbox pauses after a mapping error (a field the code sends that Salesforce doesn't have or won't
+    /// take): time to deploy the fix or add the field. Due rows wait this long, then a claim tries again and pauses the
     /// inbox again if the error persists. Nothing is dead-lettered meanwhile.
     /// </summary>
     public TimeSpan MappingErrorHold { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// How long an inbox stops when Salesforce's data storage is full (STORAGE_LIMIT_EXCEEDED): time for an admin to
-    /// free space. Due rows wait this long, then a claim tries again and stops the inbox again if storage is still
+    /// How long an inbox pauses when Salesforce's data storage is full (STORAGE_LIMIT_EXCEEDED): time for an admin to
+    /// free space. Due rows wait this long, then a claim tries again and pauses the inbox again if storage is still
     /// full. No attempt is spent and nothing is dead-lettered meanwhile.
     /// </summary>
     public TimeSpan StorageFullHold { get; set; } = TimeSpan.FromMinutes(15);

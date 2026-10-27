@@ -141,14 +141,14 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     [Fact]
-    public async Task A_mapping_error_stops_the_inbox_with_the_error_on_the_rows_to_fix()
+    public async Task A_mapping_error_pauses_the_inbox_with_the_error_on_the_rows_to_fix()
     {
         await AddAsync("ACC-1");
 
-        await RunAsync((_, _) => throw new StopInboxException(StopReason.MappingError, [("ACC-1", new SalesforceError(null, "INVALID_FIELD", "No such column 'X'"))]));
+        await RunAsync((_, _) => throw new PauseInboxException(PauseReason.MappingError, [("ACC-1", new SalesforceError(null, "INVALID_FIELD", "No such column 'X'"))]));
 
         var release = _inbox.Releases.Should().ContainSingle().Subject;
-        release.StopInbox.Should().BeTrue();
+        release.PauseInbox.Should().BeTrue();
         release.Delay.Should().Be(new SyncOptions().MappingErrorHold);
         release.Error.Should().StartWith("MAPPING_ERROR");
         release.RowErrors.Should().ContainSingle().Which.Should().Match<FailedEvent>(e => e.EntityId == "ACC-1" && e.Error.Contains("INVALID_FIELD"));
@@ -156,16 +156,16 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     [Fact]
-    public async Task Full_data_storage_stops_the_inbox_for_the_hold_without_spending_attempts()
+    public async Task Full_data_storage_pauses_the_inbox_for_the_hold_without_spending_attempts()
     {
         await AddAsync("ACC-1");
         await AddAsync("ACC-2", second: 2);
 
-        await RunAsync((_, _) => throw new StopInboxException(StopReason.StorageFull,
+        await RunAsync((_, _) => throw new PauseInboxException(PauseReason.StorageFull,
             [("ACC-1", new SalesforceError(null, "STORAGE_LIMIT_EXCEEDED", "storage limit exceeded"))]));
 
         var release = _inbox.Releases.Should().ContainSingle().Subject;
-        release.StopInbox.Should().BeTrue("every create fails until space is freed");
+        release.PauseInbox.Should().BeTrue("every create fails until space is freed");
         release.Delay.Should().Be(new SyncOptions().StorageFullHold);
         release.Error.Should().StartWith("STORAGE_LIMIT_EXCEEDED");
         _inbox.Dead.Should().BeEmpty("full storage dead-letters nothing");

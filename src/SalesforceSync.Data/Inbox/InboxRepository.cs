@@ -141,7 +141,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
 
     /// <summary>
     /// Gives the batch back to be tried again after <see cref="Release.Delay"/>, without counting it as a failed try
-    /// (for example when Salesforce asked us to slow down). <see cref="Release.StopInbox"/> also holds back every other
+    /// (for example when Salesforce asked us to slow down). <see cref="Release.PauseInbox"/> also holds back every other
     /// row of this table.
     /// </summary>
     public Task ReleaseAsync(InboxClaim claim, Release release, CancellationToken ct)
@@ -166,7 +166,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
                 delay = release.Delay
             });
 
-            if (release.StopInbox)
+            if (release.PauseInbox)
             {
                 var stopRest = $"""
                     UPDATE {Table}

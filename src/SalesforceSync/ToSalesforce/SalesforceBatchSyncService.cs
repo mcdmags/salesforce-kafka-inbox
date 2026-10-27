@@ -17,7 +17,7 @@ namespace SalesforceSync.ToSalesforce;
 /// <item><b>Send</b>: type's step. Outside any DB transaction (Salesforce can't join one); abandoned before lease ends,
 /// so no other worker takes an entity while this one can still write it.</item>
 /// <item><b>Record</b> each outcome in inbox: done, retried later, or dead. Whole step fails → all claimed entities
-/// held (write outcome unknown), deferred (rate limited), stopped (mapping error) or retried.</item>
+/// held (write outcome unknown), deferred (rate limited), paused (mapping error) or retried.</item>
 /// </list>
 /// </summary>
 public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, IOptions<SyncOptions> options, ILogger<SalesforceBatchSyncService> log)
@@ -78,21 +78,21 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
             ct.ThrowIfCancellationRequested();
             return claim.Events.Count;
         }
-        catch (StopInboxException ex)
+        catch (PauseInboxException ex)
         {
-            // Wrong for every entity of the type: inbox stops (every due row waits), error on the rows. Nothing
-            // dead-lettered, no attempt spent; a claim after the hold tries again (and stops it again if not fixed)
+            // Wrong for every entity of the type: inbox pauses (every due row waits), error on the rows. Nothing
+            // dead-lettered, no attempt spent; a claim after the hold tries again (and pauses it again if not fixed)
             var (hold, code, cause, fix) = ex.Reason switch
             {
-                StopReason.StorageFull => (_opt.StorageFullHold, SalesforceErrors.StorageLimitExceeded, "full data storage",
+                PauseReason.StorageFull => (_opt.StorageFullHold, SalesforceErrors.StorageLimitExceeded, "full data storage",
                     "free space in the org (empty the Recycle Bin, delete test data)"),
                 _ => (_opt.MappingErrorHold, "MAPPING_ERROR", "a mapping error", "fix the mapping or add the field")
             };
-            log.LogError(ex, "{Type} inbox stopped for {Hold} by {Cause}, {Fix}: {Errors}", reader.EntityType, hold, cause, fix,
+            log.LogError(ex, "{Type} inbox paused for {Hold} by {Cause}, {Fix}: {Errors}", reader.EntityType, hold, cause, fix,
                 string.Join("; ", ex.Errors.Select(e => $"{e.Key}: {e.Error.Code} {e.Error.Message}")));
-            await inbox.ReleaseAsync(claim, new Release(hold, $"{code}: the {reader.EntityType} inbox is stopped by {cause} ({ex.Message})",
+            await inbox.ReleaseAsync(claim, new Release(hold, $"{code}: the {reader.EntityType} inbox is paused by {cause} ({ex.Message})",
                 [.. ex.Errors.GroupBy(e => e.Key).Select(g => new FailedEvent(g.Key, string.Join("; ", g.Select(e => $"{e.Error.Code}: {e.Error.Message}"))))],
-                StopInbox: true), ct);
+                PauseInbox: true), ct);
             return claim.Events.Count;
         }
         catch (RateLimitedException ex)
