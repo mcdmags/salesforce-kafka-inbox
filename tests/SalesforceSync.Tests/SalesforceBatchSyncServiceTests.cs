@@ -19,7 +19,7 @@ public sealed class SalesforceBatchSyncServiceTests
 
     private SalesforceBatchSyncService Flow => SalesforceStep.Flow();
 
-    private Task<int> RunAsync(SendStep<AccountEvent>? send = null)
+    private Task<int> RunAsync(Func<IReadOnlyList<ReadEvent<AccountEvent>>, CancellationToken, Task<Failures>>? send = null)
     {
         return Flow.SyncBatchAsync(AccountEvent.Reader, _inbox, send ?? Done, Ct);
     }

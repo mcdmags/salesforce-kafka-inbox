@@ -6,15 +6,8 @@ using SalesforceSync.Sync;
 namespace SalesforceSync.ToSalesforce;
 
 /// <summary>
-/// A type's handling of a batch's events: send them to Salesforce however it needs (usually through
-/// <see cref="SalesforceCalls"/>).
-/// </summary>
-/// <returns>The entities that failed, and why. Any other entity is done.</returns>
-public delegate Task<Failures> SendStep<TEvent>(IReadOnlyList<ReadEvent<TEvent>> events, CancellationToken ct);
-
-/// <summary>
 /// Flow of one batch of one entity type, inbox → Salesforce → back; same for every type. Only flow here; event handling
-/// (mapping, reads, writes, reading answers) is the type's, passed as <see cref="SendStep{TEvent}"/>.
+/// (mapping, reads, writes, reading answers) is the type's, passed as the <c>send</c> function.
 /// <list type="number">
 /// <item><b>Claim</b> ≤ <see cref="SyncOptions.BatchSize"/> due entities from inbox table, leased to this worker: no
 /// other worker (any pod) takes them until lease ends. One row per entity = its newest event.</item>
@@ -38,9 +31,14 @@ public sealed class SalesforceBatchSyncService(IOptions<SyncOptions> options, IL
 
     private readonly SyncOptions _opt = options.Value;
 
+    /// <summary>
+    /// Syncs one batch of the type. <c>send</c> is the type's handling of the batch's events: it sends them to Salesforce
+    /// however it needs (usually through <see cref="SalesforceCalls"/>) and returns the entities that failed, and why;
+    /// any other entity is done.
+    /// </summary>
     /// <returns>Inbox rows processed (0 = nothing to do or no capacity).</returns>
-    public async Task<int> SyncBatchAsync<TEvent, TRow>(EventReader<TEvent> reader, IRepository<TRow> inbox, SendStep<TEvent> send,
-        CancellationToken ct)
+    public async Task<int> SyncBatchAsync<TEvent, TRow>(EventReader<TEvent> reader, IRepository<TRow> inbox,
+        Func<IReadOnlyList<ReadEvent<TEvent>>, CancellationToken, Task<Failures>> send, CancellationToken ct)
         where TRow : InboxRow
     {
         // Started before claim: margin measured from lease start
