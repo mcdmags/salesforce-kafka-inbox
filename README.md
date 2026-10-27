@@ -41,7 +41,7 @@ account, is deleted in Salesforce. Several things make this harder than "consume
 | Late or replayed older events | **Never stored**: the entity's row is overwritten only by an event newer than the one it holds, or as new while that one is not `done` yet (`InboxRepository.AddAsync`, by `event_time`). An older event, or a redelivery of an event already in Salesforce, changes nothing and is never claimed, so it can't be written. Nothing is stored in Salesforce for this. |
 | Expired leases | The Salesforce call is cancelled at 80% of the lease (measured from the claim), so a slow worker gives up before another worker can claim the entity. A worker whose lease did expire records nothing once another worker has claimed the entity: every outcome needs the row still under its claim's lease end (see [Why there is no lock token](docs/inbox/README.md#why-there-is-no-lock-token)). |
 | Mapping errors | A field the code sends that Salesforce doesn't have (`INVALID_FIELD`) or won't let us set (`INVALID_FIELD_FOR_INSERT_UPDATE`) is wrong for every event of that kind, so it **stops the inbox** instead of dead-lettering one entity at a time. Salesforce itself finds it: `INVALID_FIELD` on the read (the read selects every field the code sends, so a field missing in the org shows before anything is written) or `INVALID_FIELD_FOR_INSERT_UPDATE` / `INVALID_FIELD` in a write's answer (the other entities of that write are saved already and are read as unchanged next time). The batch's rows and every other due row of that inbox are then held (`MAPPING_ERROR`) for `Sync:MappingErrorHold` (5 minutes), with the error on the row (`last_error`: the field and the object) and an ERROR in the log. Nothing is dead-lettered and no attempt is spent, so after the fix is deployed (or the field added) the rows go on with no replay. The rows named are those whose records send the column Salesforce names (all of the object's when it names none). Nothing is cached about the org's fields, so a field that was only just added is found at once. |
-| Org storage full | `STORAGE_LIMIT_EXCEEDED` in a write's answer means the org's data storage is full: every create fails the same way until an admin frees space (deleted records keep counting until the Recycle Bin is emptied). Like a mapping error, it **stops the inbox** (a circuit breaker whose state is the rows' `next_attempt_at`, so every pod sees it): the batch's rows and every other due row of that inbox are held (`STORAGE_LIMIT_EXCEEDED`, the error on the rows) for a fixed `Sync:StorageFullHold` (15 minutes), with an ERROR in the log. No attempt is spent and nothing is dead-lettered. When the hold ends, the next claim tries again: still full stops the inbox for another hold; otherwise syncing goes on. The other records of that write are saved and read as unchanged next time. Mapping errors and full storage take one path: `SalesforceCalls.InboxStoppers` lists the error codes that stop an inbox, each with its reason (`StopReason`), and the batch service holds the inbox for that reason's setting. Another org-wide error is one more line there. |
+| Org storage full | `STORAGE_LIMIT_EXCEEDED` in a write's answer means the org's data storage is full: every create fails the same way until an admin frees space (deleted records keep counting until the Recycle Bin is emptied; [`bulk-delete`](#7-clean-up-hard-delete-records-in-bulk) frees it at once). Like a mapping error, it **stops the inbox** (a circuit breaker whose state is the rows' `next_attempt_at`, so every pod sees it): the batch's rows and every other due row of that inbox are held (`STORAGE_LIMIT_EXCEEDED`, the error on the rows) for a fixed `Sync:StorageFullHold` (15 minutes), with an ERROR in the log. No attempt is spent and nothing is dead-lettered. When the hold ends, the next claim tries again: still full stops the inbox for another hold; otherwise syncing goes on. The other records of that write are saved and read as unchanged next time. Mapping errors and full storage take one path: `SalesforceCalls.InboxStoppers` lists the error codes that stop an inbox, each with its reason (`StopReason`), and the batch service holds the inbox for that reason's setting. Another org-wide error is one more line there. |
 | Writes whose outcome is unknown | A write that timed out, was cancelled or lost its connection may still be applied by Salesforce later. Its entities are **held** (`UNKNOWN_OUTCOME`) for `Sync:UnknownOutcomeHold` (10 minutes) before anyone may write them again, so a late write can't overwrite newer data. See [Unknown outcomes](docs/inbox/README.md#unknown-outcomes). |
 | Records that belong together | Written in the same batch, **parents first**: the Accounts' **upsert** is one call, then the Profiles' is another. The org's foreign keys are **Text fields holding the parent's external id** (`Profile__c.AccountId__c` = the account key), written as the text, never resolved to an Id, never a reference. A parent of another inbox (a relationship's or a contact's Account) must already be in Salesforce: the read checks, and a missing one makes the entity wait (`DEPENDENCY_NOT_SYNCED`) with nothing sent. Each record is saved or rejected on its own (`allOrNone: false`); the entity is done only when all of its records are in. An entity that failed in one call is not sent in the next: its outcome is already decided. See [Writing to Salesforce](#writing-to-salesforce). |
 | Create or update | Decided by the read alone: a record Salesforce has is updated with what differs, one it doesn't have is created. `inserted` and `updated` are the same to the sync. |
@@ -1462,6 +1462,32 @@ passes the connection string.
     version;
   - the sObject Collections upsert (`PATCH /composite/sobjects/{SObject}/ExternalId__c`): each result has `created`,
     and records in one call may carry different fields.
+
+### 7. Clean up: hard-delete records in bulk
+
+`bulk-delete` hard-deletes any number of records of one object with one
+[Bulk API 2.0](https://developer.salesforce.com/docs/atlas.en-us.api_asynch.meta/api_asynch/bulk_api_2_0.htm) job, then
+exits (`src/SalesforceSync/Hosting/BulkDeleteCommand.cs`). A hard delete skips the Recycle Bin, so the records' storage
+is freed at once (the cure for `STORAGE_LIMIT_EXCEEDED`, [Org storage full](#how-its-solved)),
+and **they can't be restored**.
+
+```bash
+# ids.txt: one Id per line (15 or 18 characters). An "Id" header, blank lines and # comments are skipped,
+# so a CSV exported from a query (SELECT Id FROM Account WHERE ExternalId__c LIKE 'ACC-%') works as is.
+dotnet run --project src/SalesforceSync -- bulk-delete Account ids.txt
+```
+
+- It uses the worker's Salesforce settings (`Salesforce:InstanceUrl`, `ClientId`, `ClientSecret`, from user secrets or
+  `Salesforce__…` environment variables), and the same rate limiting.
+- It asks for `yes` before deleting. `--yes` skips the question; without a terminal (a script, CI) `--yes` is required.
+- The run user needs **Delete** on the object and the **Bulk API Hard Delete** system permission (Permission Sets →
+  System Permissions). Without it the job fails as a whole.
+- It prints the job Id, how many records were deleted and each Id that wasn't, with Salesforce's error (e.g.
+  `INVALID_CROSS_REFERENCE_KEY` for an Id that doesn't exist or is of another object). Children are deleted as with any
+  delete (cascading relationships).
+- Exit code: `0` every record deleted, `1` some failed, the job failed or the run was cancelled, `2` bad arguments or a
+  line that isn't an Id (nothing is sent).
+- Ctrl+C stops waiting, not the job: a job already uploaded keeps running in Salesforce (Setup → Bulk Data Load Jobs).
 
 ## Status
 

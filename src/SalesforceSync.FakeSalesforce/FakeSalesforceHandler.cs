@@ -87,6 +87,8 @@ public sealed class FakeSalesforceHandler(FakeSalesforceStore store) : HttpMessa
                     ? Json(request, HttpStatusCode.OK, store.Delete(uri))
                     : request.Method == HttpMethod.Get && FakeSalesforceStore.IsQuery(path)
                     ? Json(request, HttpStatusCode.OK, store.Query(uri))
+                    : FakeSalesforceStore.IngestPath(path) is var (jobId, part)
+                    ? await IngestAsync(request, jobId, part, ct)
                     : Json(request, HttpStatusCode.NotFound,
                     FakeJson.Errors("NOT_FOUND", $"Fake does not support {request.Method} {path}"));
             }
@@ -100,6 +102,34 @@ public sealed class FakeSalesforceHandler(FakeSalesforceStore store) : HttpMessa
         return res;
     }
 
+    /// <summary>Bulk API 2.0 ingest calls: create, upload (CSV), close or abort, state, failed records (CSV).</summary>
+    private async Task<HttpResponseMessage> IngestAsync(HttpRequestMessage request, string? jobId, string? part, CancellationToken ct)
+    {
+        var method = request.Method;
+        if (jobId is not null && part == "batches" && method == HttpMethod.Put)
+        {
+            store.UploadIngestJob(jobId, await ReadTextAsync(request, ct));
+            return new HttpResponseMessage(HttpStatusCode.Created) { RequestMessage = request };
+        }
+
+        return jobId is null
+            ? method == HttpMethod.Post ? Json(request, HttpStatusCode.OK, store.CreateIngestJob(await ReadJsonAsync(request, ct))) : NotSupported(request)
+            : part == "failedResults" && method == HttpMethod.Get
+            ? new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                RequestMessage = request,
+                Content = new StringContent(store.IngestJobFailedResults(jobId), Encoding.UTF8, "text/csv")
+            }
+            : part is null && method == HttpMethod.Patch ? Json(request, HttpStatusCode.OK, store.UpdateIngestJob(jobId, await ReadJsonAsync(request, ct)))
+            : part is null && method == HttpMethod.Get ? Json(request, HttpStatusCode.OK, store.IngestJob(jobId))
+            : NotSupported(request);
+    }
+
+    private static HttpResponseMessage NotSupported(HttpRequestMessage request)
+    {
+        return Json(request, HttpStatusCode.NotFound, FakeJson.Errors("NOT_FOUND", $"Fake does not support {request.Method} {request.RequestUri!.AbsolutePath}"));
+    }
+
     /// <summary>The request's URI (path and query) and its headers as sent: "Name: value" and a line break each.</summary>
     private static int UriAndHeadersBytes(HttpRequestMessage request)
     {
@@ -111,6 +141,18 @@ public sealed class FakeSalesforceHandler(FakeSalesforceStore store) : HttpMessa
     /// <summary>Request body as JSON; gzip bodies (Content-Encoding: gzip) are decompressed like Salesforce does.</summary>
     private static async Task<JsonObject> ReadJsonAsync(HttpRequestMessage request, CancellationToken ct)
     {
+        using var buffer = await ReadBodyAsync(request, ct);
+        return JsonNode.Parse(buffer)?.AsObject() ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Empty body");
+    }
+
+    private static async Task<string> ReadTextAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        using var buffer = await ReadBodyAsync(request, ct);
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    private static async Task<MemoryStream> ReadBodyAsync(HttpRequestMessage request, CancellationToken ct)
+    {
         if (request.Content is null)
         {
             throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Empty body");
@@ -120,10 +162,10 @@ public sealed class FakeSalesforceHandler(FakeSalesforceStore store) : HttpMessa
         await using var body = request.Content.Headers.ContentEncoding.Contains("gzip")
             ? new GZipStream(stream, CompressionMode.Decompress)
             : stream;
-        using var buffer = new MemoryStream();
+        var buffer = new MemoryStream();
         await body.CopyToAsync(buffer, ct); // the server's request stream only allows async reads
         buffer.Position = 0;
-        return JsonNode.Parse(buffer)?.AsObject() ?? throw new FakeSalesforceException(400, "JSON_PARSER_ERROR", "Empty body");
+        return buffer;
     }
 
     private static bool IsTokenRequest(HttpRequestMessage request)
