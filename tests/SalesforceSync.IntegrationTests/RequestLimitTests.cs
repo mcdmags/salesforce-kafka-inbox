@@ -6,7 +6,7 @@ namespace SalesforceSync.IntegrationTests;
 /// <summary>
 /// The mock org allows only 2 concurrent long-running requests (calls of 200 ms+ count as long-running here,
 /// 20 s in Salesforce) while 3 pods x 4 workers send 250 ms calls. Nothing caps them across pods, so the org
-/// rejects some, each rejected pod pauses briefly, and its batch is handed back.
+/// rejects some (REQUEST_LIMIT_EXCEEDED), and each rejected batch stops its inbox briefly (Sync:RequestLimitHold).
 /// </summary>
 public sealed class ConcurrentLimitFixture : SyncFixture
 {
@@ -15,8 +15,7 @@ public sealed class ConcurrentLimitFixture : SyncFixture
         WorkerSettings["Sync:Workers"] = "4";
         WorkerSettings["Sync:BatchSize"] = "2";
         WorkerSettings["Sync:IdleDelay"] = "00:00:00.050";
-        WorkerSettings["RateLimit:ConcurrentLimitPause"] = "00:00:00.500";
-        WorkerSettings["RateLimit:DailyHardPause"] = "00:30:00"; // would stall the test if misclassified
+        WorkerSettings["Sync:RequestLimitHold"] = "00:00:00.500";
 
         FakeOrgSettings["FakeSalesforce:Latency"] = "00:00:00.250";
         FakeOrgSettings["FakeSalesforce:LongRunningThreshold"] = "00:00:00.200";
@@ -34,7 +33,7 @@ public sealed class ConcurrentLimitCollection : ICollectionFixture<ConcurrentLim
 public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutputHelper output)
 {
     [Fact]
-    public async Task Concurrent_long_running_limit_pauses_briefly_and_everything_still_syncs()
+    public async Task Concurrent_long_running_limit_stops_the_inbox_briefly_and_everything_still_syncs()
     {
         var ids = Enumerable.Range(0, 40).Select(_ => SyncFixture.NewAccountId()).ToArray();
         foreach (var id in ids)
@@ -44,7 +43,6 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
 
         app.Flush();
 
-        // Short pause per rejection (ConcurrentPerOrgLongTxn), not the 30-minute daily pause, so everything lands
         await Eventually.ValueAsync(DoneAsync, done => done == ids.Length,
             "all events to sync despite REQUEST_LIMIT_EXCEEDED", TimeSpan.FromMinutes(2));
 
@@ -54,11 +52,11 @@ public sealed class ConcurrentLimitTests(ConcurrentLimitFixture app, ITestOutput
             "Salesforce should reject some requests for exceeding the concurrent long-running limit");
         stats.GetProperty("recordsFailed").GetInt64().Should().Be(0);
 
-        // Rate-limited attempts are handed back without spending a retry
+        // Rejected batches are handed back without spending a retry
         await using var conn = await app.Db.OpenConnectionAsync();
         var maxRetry = await conn.QuerySingleAsync<int>(
             $"SELECT max(attempt_count) FROM {SyncFixture.InboxTable()} WHERE entity_id = ANY(@ids)", new { ids });
-        maxRetry.Should().Be(0, "rate-limited attempts are handed back without spending a retry");
+        maxRetry.Should().Be(0, "a request limit stops the inbox without spending a retry");
 
         async Task<long> DoneAsync()
         {

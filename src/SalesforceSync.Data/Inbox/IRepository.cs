@@ -28,10 +28,10 @@ public interface IRepository<TRow> where TRow : InboxRow
 
 /// <summary>How a claim is handed back (<see cref="IRepository{TRow}.ReleaseAsync"/>).</summary>
 /// <param name="Delay">How long the entities wait.</param>
-/// <param name="Error">Error left on every row; null leaves the row's error alone (rate limited is not an error).</param>
-/// <param name="OwnErrors">Rows with their own error, which replaces <paramref name="Error"/>.</param>
+/// <param name="Error">Error left on every row; null leaves the row's error alone.</param>
+/// <param name="RowErrors">Rows with their own error, which replaces <paramref name="Error"/>.</param>
 /// <param name="StopInbox">Every other due row waits too: a mapping error is wrong for all of them.</param>
-public sealed record Release(TimeSpan Delay, string? Error = null, IReadOnlyList<FailedEvent>? OwnErrors = null, bool StopInbox = false);
+public sealed record Release(TimeSpan Delay, string? Error = null, IReadOnlyList<FailedEvent>? RowErrors = null, bool StopInbox = false);
 
 /// <summary>The rows leased to this worker, one per entity.</summary>
 public sealed record InboxClaim(IReadOnlyList<InboxEvent> Events)
@@ -43,7 +43,7 @@ public sealed record InboxClaim(IReadOnlyList<InboxEvent> Events)
     public DateTimeOffset[] LeaseEnds => [.. Events.Select(e => e.LeaseEnd)];
 
     /// <summary>The claimed rows of <paramref name="entityIds"/>, in their order.</summary>
-    public InboxEvent[] Of(IEnumerable<string> entityIds)
+    public InboxEvent[] RowsOf(IEnumerable<string> entityIds)
     {
         var rows = Events.ToDictionary(e => e.EntityId);
         return [.. entityIds.Select(id => rows[id])];

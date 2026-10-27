@@ -34,6 +34,21 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     /// </summary>
     public const string StorageLimitExceeded = "STORAGE_LIMIT_EXCEEDED";
 
+    /// <summary>Salesforce's code when a call is over the org's API limits (daily allocation, concurrent long requests).</summary>
+    public const string RequestLimitExceeded = "REQUEST_LIMIT_EXCEEDED";
+
+    /// <summary>
+    /// Salesforce asks us to back off, for every call alike: over the org's API limits (403
+    /// <see cref="RequestLimitExceeded"/>), 429, or 503 (down for maintenance or overloaded). Stops the inbox for a
+    /// while instead of failing entities.
+    /// </summary>
+    public static bool IsRequestLimit(Exception ex)
+    {
+        return ex is SalesforceResponseException { StatusCode: { } status } r
+               && (status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable
+                   || (status == HttpStatusCode.Forbidden && r.Body.Contains(RequestLimitExceeded, StringComparison.Ordinal)));
+    }
+
     /// <summary>Errors in the data or the org's configuration: retrying the same data fails the same way.</summary>
     public static readonly IReadOnlyList<string> DefaultPermanentCodes =
     [

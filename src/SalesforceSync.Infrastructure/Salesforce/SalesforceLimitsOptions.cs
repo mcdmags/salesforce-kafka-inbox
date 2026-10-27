@@ -1,4 +1,4 @@
-namespace SalesforceSync.Infrastructure.RateLimiting;
+namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
 /// The org's Platform API limits, from "API Request Limits and Allocations" in the Salesforce Developer Limits and
@@ -12,17 +12,13 @@ public sealed class SalesforceLimitsOptions
     public static readonly TimeSpan MaxApiTimeout = TimeSpan.FromMinutes(10);
 
     /// <summary>
-    /// The org's max concurrent inbound requests lasting <see cref="LongRunningThreshold"/> or longer: 25 for
-    /// production orgs and sandboxes (the default), 5 for Developer Edition and trial orgs. Must be positive.
+    /// The org's max concurrent inbound requests lasting 20 seconds or longer: 25 for production orgs and sandboxes (the
+    /// default), 5 for Developer Edition and trial orgs. Must be positive; <c>Sync:Workers</c> must not exceed it.
     /// </summary>
     public int ConcurrentLongRunningLimit { get; set; } = 25;
 
-    /// <summary>Requests at least this long count toward <see cref="ConcurrentLongRunningLimit"/>.</summary>
-    public TimeSpan LongRunningThreshold { get; set; } = TimeSpan.FromSeconds(20);
-
     /// <summary>
-    /// Client timeout per Salesforce call, including the wait for a pause. Salesforce stops REST calls
-    /// after 10 minutes, so this must not exceed that.
+    /// Client timeout per Salesforce call. Salesforce stops REST calls after 10 minutes, so this must not exceed that.
     /// </summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(90);
 }

@@ -12,12 +12,12 @@ namespace SalesforceSync.Tests;
 /// </summary>
 internal sealed class SyncHarness
 {
-    public SyncHarness(FakeSalesforceStore org, SalesforceStep.NotPaused? limiter = null)
+    public SyncHarness(FakeSalesforceStore org)
     {
         Org = org;
         var http = SalesforceStep.Http(new FakeSalesforceHandler(org));
         Calls = SalesforceStep.Calls(http, Options.Create(new SalesforceOptions()));
-        var flow = SalesforceStep.Flow(limiter);
+        var flow = SalesforceStep.Flow();
         Account = new AccountSync(flow, Calls, Accounts);
         Relationship = new AccountRelationshipSync(flow, Calls, Relationships);
         Contact = new ContactSync(flow, Calls, Contacts);

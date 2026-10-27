@@ -92,7 +92,8 @@ public sealed class SalesforceAuthHandler(SalesforceTokenProvider tokens) : Dele
 
     /// <summary>
     /// A failure to get a token is not a failed API request: either nothing was sent yet, or what was sent came back
-    /// 401 (not applied). Marked so a write is not held as "outcome unknown" because of it.
+    /// 401 (not applied). Its own type, so a write is not held as "outcome unknown" because of it. A cancellation stays
+    /// one (shutdown must look like shutdown).
     /// </summary>
     private async Task<string> TokenAsync(string? rejected, CancellationToken ct)
     {
@@ -100,10 +101,13 @@ public sealed class SalesforceAuthHandler(SalesforceTokenProvider tokens) : Dele
         {
             return await tokens.GetTokenAsync(rejected, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            SalesforceRestClient.MarkNotSent(ex);
-            throw;
+            throw new SalesforceAuthException(ex);
         }
     }
 }
+
+/// <summary>No access token: the API request it was for was not sent, or came back 401 (not applied).</summary>
+public sealed class SalesforceAuthException(Exception inner)
+    : Exception($"Salesforce access token not obtained: {inner.Message}", inner);

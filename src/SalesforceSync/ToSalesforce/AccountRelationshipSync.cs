@@ -30,11 +30,11 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
         var accounts = await salesforce.ReadAsync(AccountSync.AccountObject, [], upserts.SelectMany(AccountsOf), ct);
         upserts = SalesforceCalls.WithParentsInSalesforce(upserts, AccountsOf, accounts, failures);
 
-        var wanted = upserts.Select(Wanted).ToList();
-        var now = await salesforce.ReadCurrentAsync(RelationshipObject, wanted, events.Select(e => e.EntityId), ct);
+        var desired = upserts.Select(Desired).ToList();
+        var current = await salesforce.ReadCurrentAsync(RelationshipObject, desired, events.Select(e => e.EntityId), ct);
 
-        await salesforce.UpsertAsync(RelationshipObject, SalesforceCalls.Changed(wanted, now), failures, ct);
-        await salesforce.DeleteAsync(SalesforceCalls.Existing(deletes, now), failures, ct);
+        await salesforce.UpsertAsync(RelationshipObject, SalesforceCalls.ChangedRecords(desired, current), failures, ct);
+        await salesforce.DeleteAsync(SalesforceCalls.RecordsToDelete(deletes, current), failures, ct);
 
         return failures;
     }
@@ -50,10 +50,10 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
         return [e.Event.AccountRelationship!.AccountExternalId!, e.Event.AccountRelationship.RelatedAccountExternalId!];
     }
 
-    private static WantedRecord Wanted(ReadEvent<AccountRelationshipEvent> e)
+    private static DesiredRecord Desired(ReadEvent<AccountRelationshipEvent> e)
     {
         var r = e.Event.AccountRelationship!;
-        return new WantedRecord(e.EntityId, e.EntityId, SalesforceFields.Of(new AccountRelationshipRecord
+        return new DesiredRecord(e.EntityId, e.EntityId, SalesforceFields.Of(new AccountRelationshipRecord
         {
             Name = r.Name,
             AccountId = r.AccountExternalId,

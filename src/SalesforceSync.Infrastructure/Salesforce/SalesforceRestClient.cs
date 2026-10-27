@@ -29,32 +29,6 @@ public sealed partial class SalesforceRestClient : ISalesforceRestClient
 
     public string DataPath { get; }
 
-    private const string NotSentKey = "SalesforceSync.NotSent";
-
-    /// <summary>
-    /// Marks a failure in the client's own pipeline before the request left (waiting for a rate-limit token, fetching
-    /// the OAuth token), so it is never taken for a write that may have been applied. The exception keeps its type;
-    /// rethrow it.
-    /// </summary>
-    public static void MarkNotSent(Exception ex)
-    {
-        ex.Data[NotSentKey] = true;
-    }
-
-    /// <summary>Whether <see cref="MarkNotSent"/> marked the failure or one it wraps.</summary>
-    public static bool WasNotSent(Exception? ex)
-    {
-        for (; ex is not null; ex = ex.InnerException)
-        {
-            if (ex.Data.Contains(NotSentKey))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     // Limits below are Salesforce's call-saving ceilings: callers pack calls up to them; client refuses anything over
     // before sending (rejected call still counts).
 
@@ -92,7 +66,7 @@ public sealed partial class SalesforceRestClient : ISalesforceRestClient
     public async Task<List<TRow>> SelectAsync<TRow>(string soql, CancellationToken ct)
     {
         // Checked before sending: Salesforce rejects over-long URL (414/431) but the call still counts against allocation
-        var page = await GetPageAsync<TRow>(EnsureFits(QueryUrl(soql)), ct);
+        var page = await GetPageAsync<TRow>(EnsureFitsUrlLimit(QueryUrl(soql)), ct);
         var rows = page.Records;
 
         // Unique external id lookups → ≤ 1 row per id, far below page size (2,000): loop normally never makes a second
@@ -100,7 +74,7 @@ public sealed partial class SalesforceRestClient : ISalesforceRestClient
         // would look missing → duplicate)
         for (var next = page.NextRecordsUrl; next is not null;)
         {
-            var more = await GetPageAsync<TRow>(EnsureFits(next), ct);
+            var more = await GetPageAsync<TRow>(EnsureFitsUrlLimit(next), ct);
             rows.AddRange(more.Records);
             next = more.NextRecordsUrl;
         }
@@ -126,7 +100,7 @@ public sealed partial class SalesforceRestClient : ISalesforceRestClient
         CancellationToken ct)
     {
         EnsureRecordCount(records.Count);
-        var request = new HttpRequestMessage(HttpMethod.Patch, EnsureFits($"{DataPath}/composite/sobjects/{sobject}/{externalIdFieldName}"))
+        var request = new HttpRequestMessage(HttpMethod.Patch, EnsureFitsUrlLimit($"{DataPath}/composite/sobjects/{sobject}/{externalIdFieldName}"))
         {
             Content = JsonContent.Create(new { allOrNone = false, records }, options: Json)
         };
@@ -143,7 +117,7 @@ public sealed partial class SalesforceRestClient : ISalesforceRestClient
     {
         EnsureRecordCount(ids.Count);
         var url = $"{DataPath}/composite/sobjects?ids={string.Join(",", ids.Select(Uri.EscapeDataString))}&allOrNone=false";
-        return SendAsync(new HttpRequestMessage(HttpMethod.Delete, EnsureFits(url)), ct);
+        return SendAsync(new HttpRequestMessage(HttpMethod.Delete, EnsureFitsUrlLimit(url)), ct);
     }
 
     private async Task<IReadOnlyList<RecordResult>> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -187,7 +161,7 @@ public sealed partial class SalesforceRestClient : ISalesforceRestClient
         return Encoding.UTF8.GetByteCount(url) <= MaxUrlBytes;
     }
 
-    private static string EnsureFits(string url)
+    private static string EnsureFitsUrlLimit(string url)
     {
         return FitsUrlLimit(url)
             ? url

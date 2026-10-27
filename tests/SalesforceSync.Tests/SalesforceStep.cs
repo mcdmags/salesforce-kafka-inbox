@@ -7,7 +7,6 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.FakeSalesforce;
-using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.ToSalesforce;
 
@@ -35,10 +34,10 @@ internal static class SalesforceStep
         return new(Client(http), RecordTypes(http), new SalesforceErrors(options));
     }
 
-    /// <summary>Batch flow, rate limiter never paused unless told.</summary>
-    public static SalesforceBatchSyncService Flow(ISalesforceRateLimiter? limiter = null, SyncOptions? options = null)
+    /// <summary>Batch flow.</summary>
+    public static SalesforceBatchSyncService Flow(SyncOptions? options = null)
     {
-        return new(limiter ?? new NotPaused(), Options.Create(options ?? new SyncOptions()), NullLogger<SalesforceBatchSyncService>.Instance);
+        return new(Options.Create(options ?? new SyncOptions()), NullLogger<SalesforceBatchSyncService>.Instance);
     }
 
     /// <summary>Record type cache reading through <paramref name="http"/>; with <paramref name="shared"/>, a pod sharing that cache with others.</summary>
@@ -60,24 +59,5 @@ internal static class SalesforceStep
         var http = new HttpClient(handler) { BaseAddress = new Uri(OrgUrl) };
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FakeSalesforceStore.FirstAccessToken);
         return http;
-    }
-
-    /// <summary>Limiter never paused, never asked for a token: Salesforce step calls it through the client only.</summary>
-    public sealed class NotPaused : ISalesforceRateLimiter
-    {
-        public bool IsPaused { get; set; }
-
-        public Task AcquireAsync(CancellationToken ct)
-        {
-            return Task.CompletedTask;
-        }
-
-        public void Pause(TimeSpan duration)
-        {
-        }
-
-        public void ReportLimits(SalesforceLimitInfo info)
-        {
-        }
     }
 }

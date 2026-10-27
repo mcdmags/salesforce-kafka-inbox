@@ -2,7 +2,6 @@ using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.Hosting;
-using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Tests;
@@ -24,18 +23,18 @@ public sealed class OptionsValidatorTests
     [Fact]
     public void The_defaults_pass()
     {
-        Validate(new RateLimitOptionsValidator(), new RateLimitOptions()).Succeeded.Should().BeTrue();
         Validate(new PostgresRetryOptionsValidator(), new PostgresRetryOptions()).Succeeded.Should().BeTrue();
         Validate(new SalesforceOptionsValidator(), ValidSalesforce).Succeeded.Should().BeTrue();
     }
 
     [Fact]
-    public void The_storage_full_hold_must_be_positive()
+    public void The_inbox_stop_holds_must_be_positive()
     {
         var sync = new FluentOptionsValidator<SyncOptions>(new SyncOptionsValidator());
 
         sync.Validate(null, new SyncOptions()).Succeeded.Should().BeTrue();
         sync.Validate(null, new SyncOptions { StorageFullHold = TimeSpan.Zero }).FailureMessage.Should().Contain("Sync:StorageFullHold");
+        sync.Validate(null, new SyncOptions { RequestLimitHold = TimeSpan.Zero }).FailureMessage.Should().Contain("Sync:RequestLimitHold");
     }
 
     [Fact]
@@ -46,22 +45,6 @@ public sealed class OptionsValidatorTests
         result.Failures.Should().HaveCount(4).And.Contain(f => f.Contains("Salesforce:InstanceUrl"))
             .And.Contain(f => f.Contains("Salesforce:TokenUrl")).And.Contain(f => f.Contains("Salesforce:BaseApiPath"))
             .And.Contain(f => f.Contains("Salesforce:ApiVersion"));
-    }
-
-    [Theory]
-    [InlineData(0.0, "DailyHardRatio")]
-    [InlineData(-1.0, "DailyHardRatio")]
-    public void A_daily_ratio_of_zero_or_less_is_refused(double ratio, string setting)
-    {
-        Validate(new RateLimitOptionsValidator(), new RateLimitOptions { DailyHardRatio = ratio }).FailureMessage.Should().Contain($"RateLimit:{setting}");
-    }
-
-    [Fact]
-    public void Pauses_must_be_positive()
-    {
-        var result = Validate(new RateLimitOptionsValidator(), new RateLimitOptions { ConcurrentLimitPause = TimeSpan.Zero, DailyHardPause = TimeSpan.Zero });
-
-        result.Failures.Should().HaveCount(2);
     }
 
     [Fact]

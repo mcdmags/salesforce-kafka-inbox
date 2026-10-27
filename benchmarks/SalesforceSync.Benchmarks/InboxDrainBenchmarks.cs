@@ -22,9 +22,9 @@ namespace SalesforceSync.Benchmarks;
 /// End-to-end: N account aggregates (<see cref="AggregateWorkload"/>: Account changes, relationships/contacts added,
 /// changed, removed, re-added, a few accounts deleted), split by the types' ingests into per-entity events as the
 /// consumer stores them, into real Postgres inboxes, drained by P "pods" x W parallel worker loops. Pod wired exactly
-/// like the worker (<see cref="SyncServiceCollectionExtensions"/>, rate limiter included); its loops run the worker's
+/// like the worker (<see cref="SyncServiceCollectionExtensions"/>); its loops run the worker's
 /// own pass (<see cref="InboxWorkerService.SyncOnceAsync"/>) over every registered entity type. Only the Salesforce
-/// HTTP endpoint is fake. Pod = independent service provider (own connection pool, rate limiter, HTTP client), like a
+/// HTTP endpoint is fake. Pod = independent service provider (own connection pool, HTTP client), like a
 /// separate process. Pods share the Postgres inbox and one Salesforce org.
 /// <para>
 /// Each iteration also verifies correctness. Org rejects no out-of-order write, so a race would land. Checks: every
@@ -275,7 +275,6 @@ public abstract class DrainBenchmarkBase
             o.MaxRetries = 50;
         });
         services.AddSalesforceClient()
-            .AddSalesforceRateLimiting()
             .ConfigurePrimaryHttpMessageHandler(sp => new FakeSalesforceHandler(sp.GetRequiredService<FakeSalesforceStore>()));
         services.AddInboxSync();
         return services.BuildServiceProvider();

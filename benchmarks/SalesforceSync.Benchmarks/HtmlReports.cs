@@ -33,8 +33,8 @@ public static class HtmlReports
     private static readonly Dictionary<string, string> Columns = new()
     {
         ["Method"] = "The benchmark: what one operation is (see What this benchmark measures).",
-        ["Pods"] = "Worker processes sharing the inbox, like Kubernetes replicas: each has its own connection pool, " +
-            "rate limiter and HTTP client. They run in one benchmark process here.",
+        ["Pods"] = "Worker processes sharing the inbox, like Kubernetes replicas: each has its own connection pool " +
+            "and HTTP client. They run in one benchmark process here.",
         ["Workers"] = "Worker loops per pod, each claiming and sending its own batches.",
         ["Events"] = "Account change events (Kafka messages). Each is split into account, relationship and contact " +
             "events, so the inbox gets more rows than this.",
@@ -153,7 +153,7 @@ public static class HtmlReports
               relationship and contact that changed, and stores each in its inbox table in Postgres: one row per entity, a
               newer event overwriting an older one not yet sent.</li>
             <li><b>Claimed.</b> Each worker loop claims a batch of due rows (a lease: other workers skip them).</li>
-            <li><b>Sent to Salesforce.</b> Through the real Salesforce client (rate limiter, HTTP client): read the
+            <li><b>Sent to Salesforce.</b> Through the real Salesforce client (HTTP client): read the
               records' current values, then create, update or delete what changed. Only the org at the end of the HTTP
               call is a mock, which waits LatencyMs per request.</li>
             <li><b>Outcome recorded.</b> Rows sent are marked done; failures are retried later (a relationship or

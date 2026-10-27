@@ -1,7 +1,7 @@
 # Benchmarks
 
 Measurements of the Postgres inbox (claim and outcome SQL) and of the whole sync path (Postgres inbox, workers,
-Salesforce client and rate limiter real; only the Salesforce HTTP endpoint mocked). How to run them is in the
+Salesforce client real; only the Salesforce HTTP endpoint mocked; the runs below up to now also had the rate limiter). How to run them is in the
 [main README](../../README.md#benchmarks).
 
 These numbers come from the claim and outcome tuning merged in PR #13, re-measured after the move to EF Core

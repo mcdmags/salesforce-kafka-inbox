@@ -1,7 +1,6 @@
 using System.Text.Json;
 using BenchmarkDotNet.Attributes;
 using SalesforceSync.Data.Inbox;
-using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.LoadGenerator;
 using SalesforceSync.Sync;
@@ -15,7 +14,6 @@ namespace SalesforceSync.Benchmarks;
 [MemoryDiagnoser]
 public class MicroBenchmarks
 {
-    private const string LimitHeader = "api-usage=10018/100000; api-bursts=1/750; per-app-api-usage=17/250(appName=sync)";
 
     private List<InboxEvent> _tenEvents = default!;
     private AccountRecord _accountRecord = default!;
@@ -60,12 +58,6 @@ public class MicroBenchmarks
 
         _number = JsonDocument.Parse("87.50").RootElement.Clone();
         _datetime = JsonDocument.Parse("\"2026-10-12T01:02:03.000+0000\"").RootElement.Clone();
-    }
-
-    [Benchmark]
-    public SalesforceLimitInfo? ParseLimitHeader()
-    {
-        return SalesforceLimitInfo.Parse(LimitHeader);
     }
 
     /// <summary>Consumer per message: typed read + validation (entity id, event time).</summary>

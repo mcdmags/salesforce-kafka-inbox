@@ -1,7 +1,7 @@
 using FluentValidation;
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data.Inbox;
-using SalesforceSync.Infrastructure.RateLimiting;
+using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Hosting;
 
@@ -10,10 +10,9 @@ public sealed class SalesforceLimitsValidator : AbstractValidator<SalesforceLimi
 {
     private const string Section = SalesforceLimitsOptions.Section;
 
-    public SalesforceLimitsValidator(IOptions<SyncOptions> syncOptions, IOptions<RateLimitOptions> rateOptions)
+    public SalesforceLimitsValidator(IOptions<SyncOptions> syncOptions)
     {
         var sync = syncOptions.Value;
-        var rate = rateOptions.Value;
 
         RuleFor(o => o.ConcurrentLongRunningLimit)
             .GreaterThan(0)
@@ -33,9 +32,5 @@ public sealed class SalesforceLimitsValidator : AbstractValidator<SalesforceLimi
             .LessThan(sync.Lease)
             .WithMessage(o => $"{SyncOptions.Section}:Lease ({sync.Lease}) must be longer than {Section}:RequestTimeout " +
                               $"({o.RequestTimeout}), so a call that is merely slow can't outlive the lease on the entities it writes.");
-        RuleFor(o => o.RequestTimeout)
-            .GreaterThan(rate.MaxWait)
-            .WithMessage(o => $"{Section}:RequestTimeout ({o.RequestTimeout}) must be longer than {RateLimitOptions.Section}:MaxWait " +
-                              $"({rate.MaxWait}), which it includes.");
     }
 }

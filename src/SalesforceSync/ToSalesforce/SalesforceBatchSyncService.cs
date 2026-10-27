@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data.Inbox;
-using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
@@ -27,10 +26,10 @@ public delegate Task<Dictionary<string, List<Failure>>> SendStep<TEvent>(IReadOn
 /// <item><b>Send</b>: type's step. Outside any DB transaction (Salesforce can't join one); abandoned before lease ends,
 /// so no other worker takes an entity while this one can still write it.</item>
 /// <item><b>Record</b> each outcome in inbox: done, retried later, or dead. Whole step fails → all claimed entities
-/// held (write outcome unknown), deferred (rate limited), stopped (mapping error) or retried.</item>
+/// held (write outcome unknown), stopped (mapping error, full storage, API limits) or retried.</item>
 /// </list>
 /// </summary>
-public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, IOptions<SyncOptions> options, ILogger<SalesforceBatchSyncService> log)
+public sealed class SalesforceBatchSyncService(IOptions<SyncOptions> options, ILogger<SalesforceBatchSyncService> log)
 {
     /// <summary>
     /// Share of lease a batch may use before its Salesforce call is cancelled; rest = margin to record outcome. Write
@@ -48,11 +47,6 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
         CancellationToken ct)
         where TRow : InboxRow
     {
-        if (limiter.IsPaused)
-        {
-            return 0;
-        }
-
         // Started before claim: margin measured from lease start
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
@@ -82,26 +76,13 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
         }
         catch (StopInboxException ex)
         {
-            // Wrong for every entity of the type: inbox stops (every due row waits), error on the rows. Nothing
-            // dead-lettered, no attempt spent; a claim after the hold tries again (and stops it again if not fixed)
-            var (hold, code, cause, fix) = ex.Reason switch
-            {
-                StopReason.StorageFull => (_opt.StorageFullHold, SalesforceErrors.StorageLimitExceeded, "full data storage",
-                    "free space in the org (empty the Recycle Bin, delete test data)"),
-                _ => (_opt.MappingErrorHold, "MAPPING_ERROR", "a mapping error", "fix the mapping or add the field")
-            };
-            log.LogError(ex, "{Type} inbox stopped for {Hold} by {Cause}, {Fix}: {Errors}", reader.EntityType, hold, cause, fix,
-                string.Join("; ", ex.Errors.Select(e => $"{e.Key}: {e.Error.Code} {e.Error.Message}")));
-            await inbox.ReleaseAsync(claim, new Release(hold, $"{code}: the {reader.EntityType} inbox is stopped by {cause} ({ex.Message})",
-                [.. ex.Errors.GroupBy(e => e.Key).Select(g => new FailedEvent(g.Key, string.Join("; ", g.Select(e => $"{e.Error.Code}: {e.Error.Message}"))))],
-                StopInbox: true), ct);
+            await StopInboxAsync(reader.EntityType, inbox, claim, ex.Reason, ex, ex.Errors, ct);
             return claim.Events.Count;
         }
-        catch (RateLimitedException ex)
+        catch (Exception ex) when (SalesforceErrors.IsRequestLimit(ex))
         {
-            log.LogInformation("Rate limited; deferring {Count} {Type} events for {Delay}", claim.Events.Count, reader.EntityType, ex.RetryAfter);
-            await inbox.ReleaseAsync(claim, new Release(ex.RetryAfter), ct);
-            return 0;
+            await StopInboxAsync(reader.EntityType, inbox, claim, StopReason.RequestLimit, ex, [], ct);
+            return claim.Events.Count;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -116,6 +97,30 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
         await inbox.MarkDoneAsync(claim, done, ct);
         await inbox.MarkFailedAsync(claim, failed, ct);
         return claim.Events.Count;
+    }
+
+    /// <summary>
+    /// An error wrong for every entity of the type: the inbox stops (every due row waits) for the reason's hold, the
+    /// error on the rows. Nothing dead-lettered, no attempt spent; a claim after the hold tries again (and stops it
+    /// again if the cause is still there).
+    /// </summary>
+    private async Task StopInboxAsync<TRow>(string type, IRepository<TRow> inbox, InboxClaim claim, StopReason reason, Exception ex,
+        IReadOnlyList<(string Key, SalesforceError Error)> errors, CancellationToken ct)
+        where TRow : InboxRow
+    {
+        var (hold, code, cause, fix) = reason switch
+        {
+            StopReason.StorageFull => (_opt.StorageFullHold, SalesforceErrors.StorageLimitExceeded, "full data storage",
+                "free space in the org (empty the Recycle Bin, delete test data)"),
+            StopReason.RequestLimit => (_opt.RequestLimitHold, SalesforceErrors.RequestLimitExceeded, "Salesforce's API limits",
+                "wait, or lower Sync:Workers or the pod count"),
+            _ => (_opt.MappingErrorHold, "MAPPING_ERROR", "a mapping error", "fix the mapping or add the field")
+        };
+        log.LogError(ex, "{Type} inbox stopped for {Hold} by {Cause}, {Fix}: {Errors}", type, hold, cause, fix,
+            string.Join("; ", errors.Select(e => $"{e.Key}: {e.Error.Code} {e.Error.Message}")));
+        await inbox.ReleaseAsync(claim, new Release(hold, $"{code}: the {type} inbox is stopped by {cause} ({ex.Message})",
+            [.. errors.GroupBy(e => e.Key).Select(g => new FailedEvent(g.Key, string.Join("; ", g.Select(e => $"{e.Error.Code}: {e.Error.Message}"))))],
+            StopInbox: true), ct);
     }
 
     /// <summary>

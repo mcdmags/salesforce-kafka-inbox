@@ -96,7 +96,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
             WHERE {StillClaimed}
             RETURNING i.entity_id
             """;
-        var rows = claim.Of(entityIds);
+        var rows = claim.RowsOf(entityIds);
         return WithLeasesEndedAsync(rows, TimeSpan.Zero, (db, t) => db.Database.QueryAsync<string>(sql, t, new
         {
             entityIds = entityIds.ToArray(),
@@ -125,7 +125,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
             WHERE {StillClaimed}
             RETURNING i.entity_id
             """;
-        var rows = claim.Of(failures.Select(f => f.EntityId));
+        var rows = claim.RowsOf(failures.Select(f => f.EntityId));
         return WithLeasesEndedAsync(rows, TimeSpan.Zero, (db, t) => db.Database.QueryAsync<string>(sql, t, new
         {
             entityIds = rows.Select(r => r.EntityId).ToArray(),
@@ -161,7 +161,7 @@ public sealed class InboxRepository<TRow>(IDbContextFactory<SyncDbContext> conte
                 entityIds = claim.EntityIds,
                 times = claim.EventTimes,
                 leaseEnds = claim.LeaseEnds,
-                errors = ErrorsJson(release.OwnErrors ?? []),
+                errors = ErrorsJson(release.RowErrors ?? []),
                 error = release.Error,
                 delay = release.Delay
             });

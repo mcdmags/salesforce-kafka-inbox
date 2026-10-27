@@ -1,5 +1,5 @@
+using System.Net;
 using SalesforceSync.Data.Inbox;
-using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 using SalesforceSync.ToSalesforce;
@@ -7,7 +7,7 @@ using SalesforceSync.ToSalesforce;
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// Batch flow (pause, claim, parse, send, record) and what it does when the type's send step fails as a whole.
+/// Batch flow (claim, parse, send, record) and what it does when the type's send step fails as a whole.
 /// Send step is a stand-in: what types do is tested with them.
 /// </summary>
 public sealed class SalesforceBatchSyncServiceTests
@@ -15,10 +15,9 @@ public sealed class SalesforceBatchSyncServiceTests
     private static readonly CancellationToken Ct = CancellationToken.None;
 
     private readonly InMemoryInbox<AccountInboxRow> _inbox = new();
-    private readonly SalesforceStep.NotPaused _limiter = new();
     private readonly List<string> _sent = [];
 
-    private SalesforceBatchSyncService Flow => SalesforceStep.Flow(_limiter);
+    private SalesforceBatchSyncService Flow => SalesforceStep.Flow();
 
     private Task<int> RunAsync(SendStep<AccountEvent>? send = null)
     {
@@ -38,18 +37,6 @@ public sealed class SalesforceBatchSyncServiceTests
     }
 
     // ---------- Before Salesforce ----------
-
-    [Fact]
-    public async Task Nothing_is_claimed_while_the_process_is_paused()
-    {
-        _limiter.IsPaused = true;
-        await AddAsync("ACC-1");
-
-        (await RunAsync()).Should().Be(0);
-
-        _inbox.Claims.Should().Be(0);
-        _sent.Should().BeEmpty();
-    }
 
     [Fact]
     public async Task Nothing_due_is_nothing_to_do()
@@ -148,7 +135,7 @@ public sealed class SalesforceBatchSyncServiceTests
         release.StopInbox.Should().BeTrue();
         release.Delay.Should().Be(new SyncOptions().MappingErrorHold);
         release.Error.Should().StartWith("MAPPING_ERROR");
-        release.OwnErrors.Should().ContainSingle().Which.Should().Match<FailedEvent>(e => e.EntityId == "ACC-1" && e.Error.Contains("INVALID_FIELD"));
+        release.RowErrors.Should().ContainSingle().Which.Should().Match<FailedEvent>(e => e.EntityId == "ACC-1" && e.Error.Contains("INVALID_FIELD"));
         _inbox.Dead.Should().BeEmpty("a wrong mapping dead-letters nothing");
     }
 
@@ -169,14 +156,34 @@ public sealed class SalesforceBatchSyncServiceTests
         _inbox.Pending.Should().BeEquivalentTo("ACC-1", "ACC-2");
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden, /*lang=json,strict*/ """[{"message":"TotalRequests Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")]
+    [InlineData(HttpStatusCode.Forbidden, /*lang=json,strict*/ """[{"message":"ConcurrentPerOrgLongTxn Limit exceeded.","errorCode":"REQUEST_LIMIT_EXCEEDED"}]""")]
+    [InlineData(HttpStatusCode.TooManyRequests, "")]
+    [InlineData(HttpStatusCode.ServiceUnavailable, /*lang=json,strict*/ """[{"errorCode":"SERVER_UNAVAILABLE","message":"down for maintenance"}]""")]
+    public async Task Salesforce_asking_to_back_off_stops_the_inbox_without_spending_an_attempt(HttpStatusCode status, string body)
+    {
+        await AddAsync("ACC-1");
+        await AddAsync("ACC-2", second: 2);
+
+        (await RunAsync((_, _) => throw new SalesforceResponseException(status, body))).Should().Be(2);
+
+        var release = _inbox.Releases.Should().ContainSingle().Subject;
+        release.StopInbox.Should().BeTrue("every call is refused alike until the limit clears");
+        release.Delay.Should().Be(new SyncOptions().RequestLimitHold);
+        release.Error.Should().StartWith("REQUEST_LIMIT_EXCEEDED");
+        _inbox.Failed.Should().BeEmpty("no attempt is spent");
+    }
+
     [Fact]
-    public async Task A_rate_limited_batch_is_handed_back_to_be_claimed_after_the_wait_and_counts_as_no_work()
+    public async Task A_403_that_is_not_a_request_limit_retries_every_claimed_entity()
     {
         await AddAsync("ACC-1");
 
-        (await RunAsync((_, _) => throw new RateLimitedException(TimeSpan.FromSeconds(7)))).Should().Be(0);
+        await RunAsync((_, _) => throw new SalesforceResponseException(HttpStatusCode.Forbidden, /*lang=json,strict*/ """[{"errorCode":"INSUFFICIENT_ACCESS","message":"no"}]"""));
 
-        _inbox.Releases.Should().ContainSingle().Which.Should().Match<Release>(r => r.Delay == TimeSpan.FromSeconds(7) && r.Error == null);
+        _inbox.Releases.Should().BeEmpty();
+        _inbox.Failed.Should().ContainSingle();
     }
 
     [Fact]
@@ -195,7 +202,7 @@ public sealed class SalesforceBatchSyncServiceTests
     {
         await AddAsync("ACC-1");
         var givenUp = false;
-        var flow = SalesforceStep.Flow(_limiter, new SyncOptions { Lease = TimeSpan.FromMilliseconds(500) });
+        var flow = SalesforceStep.Flow(new SyncOptions { Lease = TimeSpan.FromMilliseconds(500) });
 
         await flow.SyncBatchAsync(AccountEvent.Reader, _inbox, async (_, ct) =>
         {

@@ -7,9 +7,7 @@ using SalesforceSync.Data;
 using SalesforceSync.Data.Inbox;
 using SalesforceSync.Hosting;
 using SalesforceSync.Inbox;
-using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
-using SalesforceSync.RateLimiting;
 using SalesforceSync.Persistence;
 using SalesforceSync.Sync;
 using SalesforceSync.ToSalesforce;
@@ -19,14 +17,14 @@ namespace SalesforceSync;
 /// <summary>
 /// Sync's service registrations. <see cref="AddSalesforceSyncWorker"/> = whole worker (Program.cs and integration
 /// tests' in-process pods use it: identical wiring). <see cref="AddSalesforceClient"/>,
-/// <see cref="AddSalesforceRateLimiting"/>, <see cref="AddInboxSync"/> = the pipeline itself; benchmarks reuse it with
+/// <see cref="AddInboxSync"/> = the pipeline itself; benchmarks reuse it with
 /// own options, data source, primary HTTP handler.
 /// </summary>
 public static class SyncServiceCollectionExtensions
 {
     /// <summary>
     /// The worker: options (validated at startup), Postgres data source (<c>ConnectionStrings:inboxdb</c>),
-    /// rate-limited Salesforce client (OAuth + REST over HTTP to <c>Salesforce:InstanceUrl</c>, real or mock org) with
+    /// Salesforce client (OAuth + REST over HTTP to <c>Salesforce:InstanceUrl</c>, real or mock org) with
     /// record type cache shared via Redis (if <c>ConnectionStrings:redis</c> set), Kafka consumer (if
     /// <c>ConnectionStrings:kafka</c> set), worker loops.
     /// </summary>
@@ -61,13 +59,12 @@ public static class SyncServiceCollectionExtensions
 
     /// <summary>
     /// The settings (validated at startup) and the Salesforce client for the org at <c>Salesforce:InstanceUrl</c>:
-    /// OAuth, rate limited in memory (pause per process). The worker's, and one-off commands' (<c>bulk-delete</c>).
-    /// Handler order: rate limiter (outermost: every attempt waits for a pause) -> gzip -> auth.
+    /// OAuth. The worker's, and one-off commands' (<c>bulk-delete</c>). Handler order: gzip -> auth.
     /// </summary>
     public static IHostApplicationBuilder AddSalesforceOrgClient(this IHostApplicationBuilder builder)
     {
         AddWorkerOptions(builder.Services, builder.Configuration);
-        UseSalesforceOrg(builder.Services.AddSalesforceClient().AddSalesforceRateLimiting());
+        UseSalesforceOrg(builder.Services.AddSalesforceClient());
         return builder;
     }
 
@@ -99,7 +96,6 @@ public static class SyncServiceCollectionExtensions
             });
         AddValidatedOptions<SyncOptions, SyncOptionsValidator>(services, config.GetSection(SyncOptions.Section));
         AddValidatedOptions<SalesforceLimitsOptions, SalesforceLimitsValidator>(services, config.GetSection(SalesforceLimitsOptions.Section));
-        AddValidatedOptions<RateLimitOptions, RateLimitOptionsValidator>(services, config.GetSection(RateLimitOptions.Section));
         AddValidatedOptions<PostgresRetryOptions, PostgresRetryOptionsValidator>(services, config.GetSection(PostgresRetryOptions.Section));
     }
 
@@ -147,8 +143,8 @@ public static class SyncServiceCollectionExtensions
     /// Salesforce REST client + what the send steps need (record type cache, error classification). Cache's
     /// shared layer = registered <see cref="Microsoft.Extensions.Caching.Distributed.IDistributedCache"/>, else
     /// in-memory (this process only).
-    /// Handler order: gzip -> (auth + primary handler, added by caller); <see cref="AddSalesforceRateLimiting"/>
-    /// puts rate limiter in front.
+    /// Handler order: gzip -> (auth + primary handler, added by caller). Timeout per call:
+    /// <c>SalesforceLimits:RequestTimeout</c>.
     /// </summary>
     public static IHttpClientBuilder AddSalesforceClient(this IServiceCollection services)
     {
@@ -163,31 +159,12 @@ public static class SyncServiceCollectionExtensions
             {
                 var o = sp.GetRequiredService<IOptions<SalesforceOptions>>().Value;
                 c.BaseAddress = new Uri(o.InstanceUrl);
+                c.Timeout = sp.GetRequiredService<IOptions<SalesforceLimitsOptions>>().Value.RequestTimeout;
                 // Identifies pod/process in Salesforce API logs (and mock org's per-client counters)
                 c.DefaultRequestHeaders.UserAgent.ParseAdd(
                     $"SalesforceSync/1.0 ({o.UserAgentInstance ?? $"{Environment.MachineName}; pid {Environment.ProcessId}"})");
             })
             .AddHttpMessageHandler<GzipRequestHandler>();
-    }
-
-    /// <summary>
-    /// In-memory rate limiting for the <see cref="AddSalesforceClient"/> client: process pause from Sforce-Limit-Info
-    /// and limit errors (<see cref="SalesforceRateLimiter"/>), and <see cref="SalesforceRateLimitHandler"/>, inserted
-    /// outermost whatever else is added, so every attempt waits for a pause: rate limiter -> gzip -> auth.
-    /// <see cref="SalesforceBatchSyncService"/> needs it.
-    /// </summary>
-    public static IHttpClientBuilder AddSalesforceRateLimiting(this IHttpClientBuilder salesforce)
-    {
-        var services = salesforce.Services;
-        services.AddSingleton<SalesforceRateLimiter>();
-        services.AddSingleton<ISalesforceRateLimiter>(sp => sp.GetRequiredService<SalesforceRateLimiter>());
-        services.AddTransient<SalesforceRateLimitHandler>();
-
-        return salesforce
-            // Call may first wait for a pause to end (RateLimit:MaxWait): timeout covers both
-            .ConfigureHttpClient((sp, c) => c.Timeout = sp.GetRequiredService<IOptions<SalesforceLimitsOptions>>().Value.RequestTimeout)
-            .ConfigureAdditionalHttpMessageHandlers((handlers, sp) =>
-                handlers.Insert(0, sp.GetRequiredService<SalesforceRateLimitHandler>()));
     }
 
     /// <summary>

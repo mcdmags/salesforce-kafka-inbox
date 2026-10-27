@@ -226,7 +226,7 @@ connection), so the receipt is how a statement tells a row that is still its own
 | **Claim** (`ClaimAsync`) | Leases the longest-waiting due rows: `next_attempt_at = now() + Sync:Lease`, one statement. | `FOR UPDATE SKIP LOCKED` lets workers claim side by side without waiting for each other; under READ COMMITTED a row another claim leased after this one's snapshot is re-checked and dropped, so no row gets two leases (`ClaimRaceTests`). The ids are collected into an array, not a CTE joined back, so the planner can't turn it into a scan. A lost commit leaves its rows leased until the lease expires. |
 | **Done** (`MarkDoneAsync`) | `next_attempt_at` null, error cleared. | Only on rows matching the receipt: a row a newer event overwrote is not marked done unsent. |
 | **Failed** (`MarkFailedAsync`) | One more attempt: due again after an exponential backoff, or dead-lettered (idle, with the error) at the `MaxRetries`-th failure, or at once if the failure is permanent. | One statement for the whole batch: the errors go as one JSON object of id → error, read by a scalar subquery so it is parsed once (as a CTE it was re-read for every row: 230 ms for 5,000). |
-| **Release** (`ReleaseAsync`) | Due again after a delay, no attempt spent: a rate limit, a write whose outcome is unknown (held until Salesforce has surely applied or dropped it; a newer event waits too, since the store keeps the due time), or a mapping error. A mapping error (`StopInbox`) also delays every other due row of that inbox. | A mapping error fails every event of the type: waiting loses nothing, retrying would dead-letter them all. |
+| **Release** (`ReleaseAsync`) | Due again after a delay, no attempt spent: a write whose outcome is unknown (held until Salesforce has surely applied or dropped it; a newer event waits too, since the store keeps the due time), or an inbox stop (a mapping error, full storage, Salesforce's API limits), which (`StopInbox`) also delays every other due row of that inbox. | An inbox stop fails every event of the type alike: waiting loses nothing, retrying would dead-letter them all. |
 | **End leases** (`EndLeasesAsync`) | After each outcome, the claimed rows it did not touch are made due (now, or after the release delay). | These are rows a newer event overwrote, whose lease would otherwise run to its end. Matched by lease end only, not `event_time`, because the event changed but the lease is still this claim's; a row another worker has claimed since has another lease end and is left alone. The rows left are told apart by what the outcome returned, not by `last_updated`: a store in the same microsecond would look recorded, and its row would stay leased until expiry. |
 
 ## Why there is no `processing_timeout` column
@@ -320,7 +320,7 @@ with exponential backoff of the entity: `Sync:RetryBaseDelay` (30 s) doubling pe
 `attempt_count`, which only a failure increments) up to `Sync:MaxRetryDelay` (1 h); an event is dead-lettered once
 it failed `Sync:MaxRetries` (8) times (`attempt_count`; a newer event of the entity starts again at 0). With the defaults the attempts come about 30 s, 1 min, 2 min,
 4 min, 8 min, 16 min and 32 min apart: roughly an hour from the first failure to the dead letter. Permanent errors
-are dead-lettered at once. The error that caused it stays in `last_error`, naming the code (query by cause with `last_error LIKE '%CODE%'`). Rate limits, rows left without an outcome
+are dead-lettered at once. The error that caused it stays in `last_error`, naming the code (query by cause with `last_error LIKE '%CODE%'`). Inbox stops, rows left without an outcome
 (a newer event overwrote them meanwhile) and unknown outcomes don't spend an attempt.
 
 **A relationship that arrives before its Accounts** waits this way: the read doesn't find the Account, the event
@@ -364,7 +364,7 @@ the entity were released and a newer event synced in the meantime, the late writ
   503 that is not Salesforce's own, or a response that can't be read.
 - **What does not**: anything Salesforce itself answered (4xx including 429, `REQUEST_LIMIT_EXCEEDED`, per-record
   errors, a 5xx with a Salesforce error body), a connection that was never established (refused, DNS, TLS), and
-  failures before the request left (waiting for a rate-limit token, getting the OAuth token). Failures of the
+  failures before the request left (getting the OAuth token: `SalesforceAuthException`). Failures of the
   record type query or the read are never unknown: nothing was written. These follow the normal rules at once.
 - **What happens**: every entity of that batch is held: its row gets `next_attempt_at = now() +
   Sync:UnknownOutcomeHold` and loses its lease; it stays
@@ -412,7 +412,7 @@ than the row when it arrived, leaves no trace in Postgres; Kafka, within its ret
 `SyncDbContext.OnModelCreating` defines every table: the inboxes (one `ConfigureInbox` call per inbox row type),
 the claim audit table, with the column names in snake_case, the partial indexes (`HasFilter`) and the autovacuum
 settings (`HasStorageParameter`). EF migrations in `src/SalesforceSync.Data/Migrations` create them. Queries stay raw SQL
-(in `InboxRepository`) where LINQ can't express them. Rate limiting has no tables: it is in memory.
+(in `InboxRepository`) where LINQ can't express them. There is no rate limiting.
 
 `InitialSchema` creates the inboxes (one row per entity, with its due time and lease); later migrations add and then
 drop the rate-limit tables (`DropApiUsageAndBudget`, `DropRateLimitTables`). The earlier history (a chain of migrations that evolved the first

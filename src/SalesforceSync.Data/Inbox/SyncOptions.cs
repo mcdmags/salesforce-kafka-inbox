@@ -7,8 +7,8 @@ public sealed class SyncOptions
     /// <summary>
     /// Parallel worker loops in this process. Each has one Salesforce call in flight, so the org sees at most this
     /// many times the pod count: keep that under the org's concurrent long-running request limit
-    /// (<c>SalesforceLimits:ConcurrentLongRunningLimit</c>, 25); nothing caps it across pods. A pod that meets the
-    /// limit pauses itself and defers its batch without spending an attempt.
+    /// (<c>SalesforceLimits:ConcurrentLongRunningLimit</c>, 25); nothing caps it across pods. A batch that meets the
+    /// limit stops its inbox for <see cref="RequestLimitHold"/> without spending an attempt.
     /// </summary>
     public int Workers { get; set; } = 4;
 
@@ -56,6 +56,13 @@ public sealed class SyncOptions
     /// full. No attempt is spent and nothing is dead-lettered meanwhile.
     /// </summary>
     public TimeSpan StorageFullHold { get; set; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// How long an inbox stops when Salesforce asks us to back off: over the org's API limits (REQUEST_LIMIT_EXCEEDED:
+    /// the daily allocation or too many concurrent long requests), 429, or 503. Due rows wait this long, then a claim
+    /// tries again. No attempt is spent and nothing is dead-lettered meanwhile.
+    /// </summary>
+    public TimeSpan RequestLimitHold { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
     /// Transient failures of an entity's event (its row's attempt_count, reset by each newer event) at which it is

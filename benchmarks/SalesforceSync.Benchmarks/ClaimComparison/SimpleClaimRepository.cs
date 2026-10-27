@@ -69,7 +69,7 @@ public sealed class SimpleClaimRepository(IDbContextFactory<SyncDbContext> conte
 
     public async Task MarkDoneAsync(InboxClaim claim, IReadOnlyList<string> entityIds, CancellationToken ct)
     {
-        foreach (var e in claim.Of(entityIds))
+        foreach (var e in claim.RowsOf(entityIds))
         {
             await NoMatchCountedAsync(() => MarkJobComplete(e.EntityId, e.EventTime, ct));
         }
@@ -77,7 +77,7 @@ public sealed class SimpleClaimRepository(IDbContextFactory<SyncDbContext> conte
 
     public async Task MarkFailedAsync(InboxClaim claim, IReadOnlyList<FailedEvent> failures, CancellationToken ct)
     {
-        foreach (var e in claim.Of(failures.Select(f => f.EntityId)))
+        foreach (var e in claim.RowsOf(failures.Select(f => f.EntityId)))
         {
             await NoMatchCountedAsync(() => MarkJobFailed(e.EntityId, e.EventTime, ct));
         }
