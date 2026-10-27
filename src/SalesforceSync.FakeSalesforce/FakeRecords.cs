@@ -117,6 +117,12 @@ internal sealed class FakeRecords
         _deleted.Add(id);
     }
 
+    /// <summary>Takes a deleted record out of the Recycle Bin for good (a hard delete): its Id is no longer known.</summary>
+    public void Purge(string id)
+    {
+        _deleted.Remove(id);
+    }
+
     public bool IsDeleted(string id)
     {
         return _deleted.Contains(id);

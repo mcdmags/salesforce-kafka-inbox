@@ -110,6 +110,7 @@ public sealed partial class FakeSalesforceStore
             _faults.Clear();
             _recordedWrites.Clear();
             _queryLocators.Clear();
+            _jobs.Clear();
             _counters.Reset();
             AccessToken = FirstAccessToken;
         }

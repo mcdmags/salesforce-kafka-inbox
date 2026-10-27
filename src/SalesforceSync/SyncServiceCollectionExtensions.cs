@@ -35,8 +35,6 @@ public static class SyncServiceCollectionExtensions
         var services = builder.Services;
         var config = builder.Configuration;
 
-        AddWorkerOptions(services, config);
-
         // Postgres (ConnectionStrings:inboxdb from Aspire, appsettings or tests)
         builder.AddNpgsqlDataSource("inboxdb");
 
@@ -47,11 +45,7 @@ public static class SyncServiceCollectionExtensions
             builder.AddRedisDistributedCache("redis");
         }
 
-        // Salesforce client, rate limited in memory (pause per process).
-        // Handler order: rate limiter (outermost: every attempt waits for a pause) -> gzip -> auth.
-        var salesforce = services.AddSalesforceClient()
-            .AddSalesforceRateLimiting();
-        UseSalesforceOrg(salesforce);
+        builder.AddSalesforceOrgClient();
 
         // Kafka -> inbox (only if Kafka connection string set)
         if (!string.IsNullOrWhiteSpace(config.GetConnectionString("kafka")))
@@ -62,6 +56,18 @@ public static class SyncServiceCollectionExtensions
         services.AddInboxSync();
         services.AddHostedService<InboxWorkerService>();
 
+        return builder;
+    }
+
+    /// <summary>
+    /// The settings (validated at startup) and the Salesforce client for the org at <c>Salesforce:InstanceUrl</c>:
+    /// OAuth, rate limited in memory (pause per process). The worker's, and one-off commands' (<c>bulk-delete</c>).
+    /// Handler order: rate limiter (outermost: every attempt waits for a pause) -> gzip -> auth.
+    /// </summary>
+    public static IHostApplicationBuilder AddSalesforceOrgClient(this IHostApplicationBuilder builder)
+    {
+        AddWorkerOptions(builder.Services, builder.Configuration);
+        UseSalesforceOrg(builder.Services.AddSalesforceClient().AddSalesforceRateLimiting());
         return builder;
     }
 
