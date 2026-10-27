@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.Json;
+using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.Sync;
 
@@ -27,9 +28,13 @@ public sealed record SalesforceObject(string Name, string ExternalIdField)
 public sealed record WantedRecord(string EntityId, string ExternalId, Dictionary<string, object?> Fields);
 
 /// <summary>
-/// Salesforce calls the types' send steps are made of: each one API call (a few for big batches), no decisions about
-/// what to write (type's job). Record failures go in its entity's <c>failures</c> as <see cref="Failure"/>s.
+/// Reads, diffs and writes records in Salesforce for the syncs: read what Salesforce has, keep only the fields that
+/// differ (<see cref="Changes"/>), upsert or delete those.
 /// </summary>
+/// <remarks>
+/// Each method is one API call (a few for big batches) and decides nothing about what to write: that is each sync's
+/// job. A record's failure goes in its entity's <c>failures</c> as a <see cref="Failure"/>.
+/// </remarks>
 public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordTypeCache recordTypes, SalesforceErrors errors)
 {
     /// <summary>Id of an object's active record type by developer name (Salesforce takes an Id). Null if org has none.</summary>
@@ -89,8 +94,8 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     }
 
     /// <summary>
-    /// What to send: new record → non-empty fields; existing → only differing fields. Empty = nothing to send. Values
-    /// normalized to Salesforce's form.
+    /// The diff: the fields to send. For a new record, every field with a value; for an existing one, only the fields
+    /// that differ. Empty means nothing to send.
     /// </summary>
     /// <param name="wanted">Fields by API name; null clears the field.</param>
     /// <param name="current">Record in Salesforce, null if absent.</param>
@@ -258,10 +263,39 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
         {
             return await write();
         }
-        catch (Exception ex) when (WriteOutcome.IsUnknown(ex))
+        catch (Exception ex) when (IsUnknownOutcome(ex))
         {
             throw new UnknownOutcomeException(ex);
         }
+    }
+
+    /// <summary>
+    /// Whether a failed write may still have been applied. False only when the failure proves it wasn't; anything
+    /// else is unknown, the safe default.
+    /// <list type="bullet">
+    /// <item>Not applied: a failure before the request left (<see cref="SalesforceRestClient.MarkNotSent"/>), Salesforce's
+    /// own rejection (any 4xx, or a 5xx carrying a Salesforce error body), a rate limit (no token before sending, 429,
+    /// REQUEST_LIMIT_EXCEEDED, a 503 from Salesforce), or a connection that was never established (refused, DNS, TLS
+    /// handshake).</item>
+    /// <item>Unknown: a cancellation or timeout (the lease cutoff, the HTTP timeout, shutdown), a connection lost once
+    /// the request may have left, 502/503/504 from something in front of Salesforce, or a response that can't be read.</item>
+    /// </list>
+    /// </summary>
+    internal static bool IsUnknownOutcome(Exception ex)
+    {
+        return !SalesforceRestClient.WasNotSent(ex) && ex switch
+        {
+            RateLimitedException limited => limited.MayHaveBeenProcessed,
+            SalesforceResponseException r => (int)r.StatusCode! >= 500 && !r.IsSalesforceError,
+            HttpRequestException { StatusCode: { } status } => (int)status >= 500,
+            HttpRequestException
+            {
+                HttpRequestError: HttpRequestError.ConnectionError or HttpRequestError.NameResolutionError
+                    or HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError
+            } => false,
+            ArgumentException => false, // refused by the client before anything was sent (too many collections or records)
+            _ => true
+        };
     }
 
     /// <summary>

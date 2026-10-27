@@ -359,7 +359,7 @@ letter's error is gone with the old event).
 A write to Salesforce whose result never arrives may still be applied, possibly after the worker has given up. If
 the entity were released and a newer event synced in the meantime, the late write would overwrite newer data.
 
-- **What counts as unknown** (`WriteOutcome.IsUnknown`): a cancellation or timeout (the lease cutoff, the HTTP
+- **What counts as unknown** (`SalesforceCalls.IsUnknownOutcome`): a cancellation or timeout (the lease cutoff, the HTTP
   timeout, shutdown while the request is in flight), a connection lost once the request may have left, a 502/504, a
   503 that is not Salesforce's own, or a response that can't be read.
 - **What does not**: anything Salesforce itself answered (4xx including 429, `REQUEST_LIMIT_EXCEEDED`, per-record

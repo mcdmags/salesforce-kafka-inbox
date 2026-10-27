@@ -36,7 +36,7 @@ public sealed class SalesforceRateLimitHandler(
         {
             // Nothing has been sent yet: a pause outlasting MaxWait or a cancelled wait is not a write whose outcome
             // is unknown
-            WriteOutcome.MarkNotSent(ex);
+            SalesforceRestClient.MarkNotSent(ex);
             throw;
         }
         var started = Stopwatch.GetTimestamp();
