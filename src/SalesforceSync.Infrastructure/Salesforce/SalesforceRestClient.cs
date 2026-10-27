@@ -29,6 +29,32 @@ public sealed partial class SalesforceRestClient : ISalesforceRestClient
 
     public string DataPath { get; }
 
+    private const string NotSentKey = "SalesforceSync.NotSent";
+
+    /// <summary>
+    /// Marks a failure in the client's own pipeline before the request left (waiting for a rate-limit token, fetching
+    /// the OAuth token), so it is never taken for a write that may have been applied. The exception keeps its type;
+    /// rethrow it.
+    /// </summary>
+    public static void MarkNotSent(Exception ex)
+    {
+        ex.Data[NotSentKey] = true;
+    }
+
+    /// <summary>Whether <see cref="MarkNotSent"/> marked the failure or one it wraps.</summary>
+    public static bool WasNotSent(Exception? ex)
+    {
+        for (; ex is not null; ex = ex.InnerException)
+        {
+            if (ex.Data.Contains(NotSentKey))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // Limits below are Salesforce's call-saving ceilings: callers pack calls up to them; client refuses anything over
     // before sending (rejected call still counts).
 

@@ -47,7 +47,7 @@ public sealed class WriteOutcomeTests
     [Theory, MemberData(nameof(Failures))]
     public void A_failed_write_is_unknown_unless_the_failure_proves_it_was_not_applied(string what, Exception failure, bool unknown)
     {
-        WriteOutcome.IsUnknown(failure).Should().Be(unknown, what);
+        SalesforceCalls.IsUnknownOutcome(failure).Should().Be(unknown, what);
     }
 
     [Theory]

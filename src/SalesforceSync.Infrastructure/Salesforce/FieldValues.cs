@@ -4,12 +4,14 @@ using System.Text.Json;
 namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
-/// Field values handled by .NET type; no org metadata is read. A desired value is first put in canonical form (numbers
-/// as decimal, date/time to the second, empty text as null, ...); the diff compares that with what Salesforce returned,
-/// and the canonical form is what gets sent. What the org stores differently from what is sent (a number rounded to
-/// the field's scale, text cut by a field's length) can't be known here: such a field looks changed until the values
-/// agree, which costs a write, never a wrong one. A value Salesforce refuses is that record's own error.
+/// Tells whether a value we want equals what Salesforce has, and gives the form to send it in.
 /// </summary>
+/// <remarks>
+/// Works by the value's .NET type; no org metadata is read. A value is first put in one form (numbers as decimal,
+/// date/time to the second, empty text as null, ...); that form is what is compared and what is sent. What the org
+/// stores differently (a number rounded to the field's scale, text cut to its length) can't be known here: such a
+/// field looks changed until the values agree, which costs a write, never a wrong one.
+/// </remarks>
 public static class FieldValues
 {
     /// <summary>The canonical form of <paramref name="value"/>: what <see cref="AreEqual"/> compares and <see cref="ToWire"/> sends.</summary>

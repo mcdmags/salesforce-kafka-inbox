@@ -102,7 +102,7 @@ public sealed class SalesforceAuthHandler(SalesforceTokenProvider tokens) : Dele
         }
         catch (Exception ex)
         {
-            WriteOutcome.MarkNotSent(ex);
+            SalesforceRestClient.MarkNotSent(ex);
             throw;
         }
     }
