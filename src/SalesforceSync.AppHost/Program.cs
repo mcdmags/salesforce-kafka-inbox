@@ -131,15 +131,15 @@ if (!testMode)
     // Hard-delete records the sync made (README: 7. Clean up). "list-delete-ids" ▶ writes bulk-delete/<object>.json
     // with the Ids of every record that has an external id; "Delete Ids from a JSON file" on "bulk-delete" picks one
     // (edited to keep some records, if wanted), asks, then hard-deletes them; its ▶ deletes the last file picked again.
-    // Arguments: the commands of SalesforceSync (BulkDeleteCommand, ListDeleteIdsCommand)
+    // Both run SalesforceSync.BulkTools, the dev-only bulk utilities (BulkDeleteCommand, ListDeleteIdsCommand)
     var deleteFolder = Directory.CreateDirectory(Path.Combine(builder.AppHostDirectory, "..", "..", "bulk-delete")).FullName;
     var pickedFile = Path.Combine(deleteFolder, "picked.json");
     // At most this many records per object in each file, the first by external id
     const string ListedPerObject = "100";
-    var listIds = WithSalesforceOrg(builder.AddProject<Projects.SalesforceSync>("list-delete-ids"))
+    var listIds = WithSalesforceOrg(builder.AddProject<Projects.SalesforceSync_BulkTools>("list-delete-ids"))
         .WithArgs("bulk-delete-ids", deleteFolder, "--limit", ListedPerObject)
         .WithExplicitStart();
-    var bulkDelete = WithSalesforceOrg(builder.AddProject<Projects.SalesforceSync>("bulk-delete"))
+    var bulkDelete = WithSalesforceOrg(builder.AddProject<Projects.SalesforceSync_BulkTools>("bulk-delete"))
         .WithArgs("bulk-delete", pickedFile, "--yes")
         .WithExplicitStart()
         .WithParentRelationship(listIds);

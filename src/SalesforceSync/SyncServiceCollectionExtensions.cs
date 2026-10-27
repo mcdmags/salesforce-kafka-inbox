@@ -59,7 +59,7 @@ public static class SyncServiceCollectionExtensions
 
     /// <summary>
     /// The settings (validated at startup) and the Salesforce client for the org at <c>Salesforce:InstanceUrl</c>:
-    /// OAuth. The worker's, and one-off commands' (<c>bulk-delete</c>). Handler order: gzip -> auth.
+    /// OAuth. The worker's, and the dev bulk tools' (SalesforceSync.BulkTools). Handler order: gzip -> auth.
     /// </summary>
     public static IHostApplicationBuilder AddSalesforceOrgClient(this IHostApplicationBuilder builder)
     {

@@ -1,21 +1,23 @@
 using SalesforceSync.FakeSalesforce;
-using SalesforceSync.Hosting;
+using SalesforceSync.BulkTools;
 using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Tests;
 
 /// <summary>
-/// Hard delete with one Bulk API 2.0 job (<see cref="SalesforceRestClient.HardDeleteAsync"/>) against the mock org, and
+/// Hard delete with one Bulk API 2.0 job (<see cref="BulkApiClient.HardDeleteAsync"/>) against the mock org, and
 /// the Ids file the bulk-delete command reads.
 /// </summary>
 public sealed class BulkDeleteTests
 {
     private readonly FakeSalesforceStore _org = new(new FakeSalesforceOptions { EnforceDailyLimit = false });
     private readonly SalesforceRestClient _client;
+    private readonly BulkApiClient _bulk;
 
     public BulkDeleteTests()
     {
         _client = SalesforceStep.Client(SalesforceStep.Http(new FakeSalesforceHandler(_org)));
+        _bulk = new BulkApiClient(SalesforceStep.Http(new FakeSalesforceHandler(_org)), _client.DataPath);
     }
 
     [Fact]
@@ -23,7 +25,7 @@ public sealed class BulkDeleteTests
     {
         var ids = await UpsertAsync("Account", "A1", "A2", "A3");
 
-        var result = await _client.HardDeleteAsync("Account", ids, CancellationToken.None);
+        var result = await _bulk.HardDeleteAsync("Account", ids, CancellationToken.None);
 
         (result.Processed, result.Succeeded, result.Failures.Count).Should().Be((3, 3, 0));
         _org.All("Account").Should().BeEmpty();
@@ -39,7 +41,7 @@ public sealed class BulkDeleteTests
         var contact = (await UpsertAsync("Contact", "C1")).Single();
         var unknown = FakeRecords.Id18("001FAKE99999999");
 
-        var result = await _client.HardDeleteAsync("Account", [accounts[0], unknown, contact, accounts[1]], CancellationToken.None);
+        var result = await _bulk.HardDeleteAsync("Account", [accounts[0], unknown, contact, accounts[1]], CancellationToken.None);
 
         (result.Processed, result.Succeeded).Should().Be((4, 2));
         result.Failures.Select(f => f.Id).Should().BeEquivalentTo([unknown, contact]);
@@ -53,7 +55,7 @@ public sealed class BulkDeleteTests
     {
         var ids = await UpsertAsync("Account", "A1");
 
-        var delete = () => _client.HardDeleteAsync("Nope__c", ids, CancellationToken.None);
+        var delete = () => _bulk.HardDeleteAsync("Nope__c", ids, CancellationToken.None);
 
         (await delete.Should().ThrowAsync<SalesforceBulkJobException>()).Which.Message.Should().Contain("Failed").And.Contain("Nope__c");
         _org.All("Account").Should().ContainSingle();

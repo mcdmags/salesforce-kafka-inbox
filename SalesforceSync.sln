@@ -29,6 +29,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SalesforceSync.Data", "src\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SalesforceSync.Infrastructure", "src\SalesforceSync.Infrastructure\SalesforceSync.Infrastructure.csproj", "{C0087223-E924-4E59-85EB-7800176150B6}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SalesforceSync.BulkTools", "src\SalesforceSync.BulkTools\SalesforceSync.BulkTools.csproj", "{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -159,6 +161,18 @@ Global
 		{C0087223-E924-4E59-85EB-7800176150B6}.Release|x64.Build.0 = Release|Any CPU
 		{C0087223-E924-4E59-85EB-7800176150B6}.Release|x86.ActiveCfg = Release|Any CPU
 		{C0087223-E924-4E59-85EB-7800176150B6}.Release|x86.Build.0 = Release|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Debug|x64.Build.0 = Debug|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Debug|x86.Build.0 = Debug|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Release|x64.ActiveCfg = Release|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Release|x64.Build.0 = Release|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Release|x86.ActiveCfg = Release|Any CPU
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -174,5 +188,6 @@ Global
 		{1C0307A0-45D8-4DF7-A9FB-DA347084B0E6} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{43133D6B-5A8E-4A35-BEBE-C989E09E6A5B} = {CD207D42-C188-4CA3-8CFE-EBBB44525FF1}
 		{C0087223-E924-4E59-85EB-7800176150B6} = {CD207D42-C188-4CA3-8CFE-EBBB44525FF1}
+		{6A4B61C7-DDD2-495A-893A-A334F06AB1BD} = {CD207D42-C188-4CA3-8CFE-EBBB44525FF1}
 	EndGlobalSection
 EndGlobal

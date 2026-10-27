@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SalesforceSync\SalesforceSync.csproj" />
+    <ProjectReference Include="..\..\src\SalesforceSync.BulkTools\SalesforceSync.BulkTools.csproj" />
     <ProjectReference Include="..\..\src\SalesforceSync.FakeSalesforce\SalesforceSync.FakeSalesforce.csproj" />
   </ItemGroup>
 

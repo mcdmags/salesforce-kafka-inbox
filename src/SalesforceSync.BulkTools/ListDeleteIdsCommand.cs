@@ -1,10 +1,10 @@
 using SalesforceSync.Infrastructure.Salesforce;
 using SalesforceSync.ToSalesforce;
 
-namespace SalesforceSync.Hosting;
+namespace SalesforceSync.BulkTools;
 
 /// <summary>
-/// <c>SalesforceSync bulk-delete-ids &lt;folder&gt; [--limit N]</c>: for each object the sync writes, lists the records
+/// <c>SalesforceSync.BulkTools bulk-delete-ids &lt;folder&gt; [--limit N]</c>: for each object the sync writes, lists the records
 /// that have an external id (the ones the sync made), or with <c>--limit</c> the first N by external id, and writes them
 /// to <c>&lt;folder&gt;/&lt;object&gt;.json</c> (<see cref="DeleteIdsFile"/>), ready for <see cref="BulkDeleteCommand"/>.
 /// Reads only; deletes nothing.
@@ -34,7 +34,7 @@ public static class ListDeleteIdsCommand
         };
         if (folder is null)
         {
-            Console.Error.WriteLine($"Usage: SalesforceSync {Name} <folder to write the JSON files to> [--limit <records per object>]");
+            Console.Error.WriteLine($"Usage: SalesforceSync.BulkTools {Name} <folder to write the JSON files to> [--limit <records per object>]");
             return 2;
         }
 

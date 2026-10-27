@@ -2,10 +2,10 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using SalesforceSync.Infrastructure.Salesforce;
 
-namespace SalesforceSync.Hosting;
+namespace SalesforceSync.BulkTools;
 
 /// <summary>
-/// <c>SalesforceSync bulk-delete &lt;file.json&gt; [--yes]</c> (a <see cref="DeleteIdsFile"/>, which names the object) or
+/// <c>SalesforceSync.BulkTools bulk-delete &lt;file.json&gt; [--yes]</c> (a <see cref="DeleteIdsFile"/>, which names the object) or
 /// <c>bulk-delete &lt;object&gt; &lt;ids file&gt; [--yes]</c> (one Id per line; an <c>Id</c> header, blank lines and
 /// <c>#</c> comments are skipped): hard-deletes the records with those Ids with one Bulk API 2.0 job. They
 /// skip the Recycle Bin, so their storage is freed at once, and can't be restored. Uses the worker's Salesforce
@@ -15,7 +15,7 @@ public static partial class BulkDeleteCommand
 {
     public const string Name = "bulk-delete";
 
-    private const string Usage = "Usage: SalesforceSync bulk-delete <file.json> [--yes]  or  bulk-delete <object> <file of Ids, one per line> [--yes]";
+    private const string Usage = "Usage: SalesforceSync.BulkTools bulk-delete <file.json> [--yes]  or  bulk-delete <object> <file of Ids, one per line> [--yes]";
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -81,7 +81,7 @@ public static partial class BulkDeleteCommand
         using var cancel = OrgCommand.CancelKey();
         try
         {
-            var result = await host.Client().HardDeleteAsync(sobject, ids, cancel.Token);
+            var result = await host.BulkClient().HardDeleteAsync(sobject, ids, cancel.Token);
             Console.WriteLine($"Job {result.JobId}: {result.Succeeded:N0} of {ids.Count:N0} {sobject} records hard-deleted, {result.Failures.Count:N0} failed.");
             foreach (var failure in result.Failures)
             {

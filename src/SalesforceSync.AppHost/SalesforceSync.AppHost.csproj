@@ -26,6 +26,7 @@
     <ProjectReference Include="..\SalesforceSync\SalesforceSync.csproj" />
     <ProjectReference Include="..\SalesforceSync.FakeSalesforce.Server\SalesforceSync.FakeSalesforce.Server.csproj" />
     <ProjectReference Include="..\SalesforceSync.LoadGenerator\SalesforceSync.LoadGenerator.csproj" />
+    <ProjectReference Include="..\SalesforceSync.BulkTools\SalesforceSync.BulkTools.csproj" />
     <ProjectReference Include="..\..\benchmarks\SalesforceSync.Benchmarks\SalesforceSync.Benchmarks.csproj" />
   </ItemGroup>
 

@@ -39,12 +39,4 @@ public interface ISalesforceRestClient
 
     /// <summary>Deletes up to 200 records, of any objects, by their Salesforce Ids: one result per record, in order.</summary>
     Task<IReadOnlyList<RecordResult>> DeleteAsync(IReadOnlyList<string> ids, CancellationToken ct);
-
-    /// <summary>
-    /// Hard-deletes any number of records of one object by their Ids with one Bulk API 2.0 job: they skip the Recycle
-    /// Bin, so their storage is freed at once (needs the "Bulk API Hard Delete" permission). A few calls whatever the
-    /// count (create, upload, close, status checks, failures); returns when Salesforce has processed the job.
-    /// </summary>
-    /// <exception cref="SalesforceBulkJobException">The job failed or was aborted as a whole.</exception>
-    Task<BulkJobResult> HardDeleteAsync(string sobject, IReadOnlyList<string> ids, CancellationToken ct);
 }
