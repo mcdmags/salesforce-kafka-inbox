@@ -134,8 +134,10 @@ if (!testMode)
     // Arguments: the commands of SalesforceSync (BulkDeleteCommand, ListDeleteIdsCommand)
     var deleteFolder = Directory.CreateDirectory(Path.Combine(builder.AppHostDirectory, "..", "..", "bulk-delete")).FullName;
     var pickedFile = Path.Combine(deleteFolder, "picked.json");
+    // At most this many records per object in each file, the first by external id
+    const string ListedPerObject = "100";
     var listIds = WithSalesforceOrg(builder.AddProject<Projects.SalesforceSync>("list-delete-ids"))
-        .WithArgs("bulk-delete-ids", deleteFolder)
+        .WithArgs("bulk-delete-ids", deleteFolder, "--limit", ListedPerObject)
         .WithExplicitStart();
     var bulkDelete = WithSalesforceOrg(builder.AddProject<Projects.SalesforceSync>("bulk-delete"))
         .WithArgs("bulk-delete", pickedFile, "--yes")

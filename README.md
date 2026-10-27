@@ -1407,8 +1407,10 @@ and **they can't be restored**.
 **From the Aspire dashboard** (against the org the AppHost uses: the mock org, or the sandbox of step 5):
 
 1. **list-delete-ids → ▶ Start.** For each object the sync writes (Contact, Account_Relationship__c, Profile__c,
-   Account) it runs `SELECT Id, ExternalId__c FROM <object> WHERE ExternalId__c != null` (every record the sync made)
-   and writes `bulk-delete/<object>.json` at the repo root (gitignored). It deletes nothing. Its log lists the files.
+   Account) it runs `SELECT Id, ExternalId__c FROM <object> WHERE ExternalId__c != null ORDER BY ExternalId__c LIMIT 100`
+   (records the sync made, the first 100 by external id) and writes `bulk-delete/<object>.json` at the repo root
+   (gitignored). It deletes nothing. Its log lists the files. Run it again after a delete for the next 100; the
+   number is `ListedPerObject` in the AppHost.
 2. Optionally edit a file: remove the records to keep. Each has its external id, to tell them apart.
 3. **bulk-delete → Delete Ids from a JSON file.** Pick the file; the dashboard asks "Hard-delete N Account records?",
    then runs the job. The job's result is in bulk-delete's log. **▶ Start** on bulk-delete deletes the last file
@@ -1434,7 +1436,8 @@ An Ids file (example: [`src/SalesforceSync.AppHost/bulk-delete.example.json`](sr
 ```bash
 # The JSON files above: list, then delete one (the file names its object). dotnet run runs in the project's folder,
 # so give full paths ($PWD)
-dotnet run --project src/SalesforceSync -- bulk-delete-ids "$PWD/bulk-delete"
+dotnet run --project src/SalesforceSync -- bulk-delete-ids "$PWD/bulk-delete"               # every record the sync made
+dotnet run --project src/SalesforceSync -- bulk-delete-ids "$PWD/bulk-delete" --limit 100   # the first 100 per object
 dotnet run --project src/SalesforceSync -- bulk-delete "$PWD/bulk-delete/Account.json"
 
 # Or a text file: one Id per line (15 or 18 characters). An "Id" header, blank lines and # comments are skipped,
