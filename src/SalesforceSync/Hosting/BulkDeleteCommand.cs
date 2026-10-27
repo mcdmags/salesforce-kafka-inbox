@@ -1,11 +1,13 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using SalesforceSync.Infrastructure.Salesforce;
 
 namespace SalesforceSync.Hosting;
 
 /// <summary>
-/// <c>SalesforceSync bulk-delete &lt;object&gt; &lt;ids file&gt; [--yes]</c>: hard-deletes the records with those Ids
-/// (one per line; an <c>Id</c> header, blank lines and <c>#</c> comments are skipped) with one Bulk API 2.0 job. They
+/// <c>SalesforceSync bulk-delete &lt;file.json&gt; [--yes]</c> (a <see cref="DeleteIdsFile"/>, which names the object) or
+/// <c>bulk-delete &lt;object&gt; &lt;ids file&gt; [--yes]</c> (one Id per line; an <c>Id</c> header, blank lines and
+/// <c>#</c> comments are skipped): hard-deletes the records with those Ids with one Bulk API 2.0 job. They
 /// skip the Recycle Bin, so their storage is freed at once, and can't be restored. Uses the worker's Salesforce
 /// settings; asks before deleting unless <c>--yes</c>. Exit code: 0 all deleted, 1 some failed or cancelled, 2 bad input.
 /// </summary>
@@ -13,11 +15,19 @@ public static partial class BulkDeleteCommand
 {
     public const string Name = "bulk-delete";
 
-    private const string Usage = "Usage: SalesforceSync bulk-delete <object> <file of Ids, one per line> [--yes]";
+    private const string Usage = "Usage: SalesforceSync bulk-delete <file.json> [--yes]  or  bulk-delete <object> <file of Ids, one per line> [--yes]";
 
     public static async Task<int> RunAsync(string[] args)
     {
-        if (args is not [var sobject, var file, .. var rest] || rest.Any(a => a != "--yes"))
+        // <file.json> names its object; a text file needs it before
+        var json = args is [var first, ..] && first.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+        var (sobject, file, rest) = args switch
+        {
+            [var f, .. var r] when json => ("", f, r),
+            [var o, var f, .. var r] when !json => (o, f, r),
+            _ => ("", "", new[] { "?" })
+        };
+        if (rest.Any(a => a != "--yes"))
         {
             Console.Error.WriteLine(Usage);
             return 2;
@@ -29,7 +39,26 @@ public static partial class BulkDeleteCommand
             return 2;
         }
 
-        var (ids, invalid) = ReadIds(File.ReadLines(file));
+        IEnumerable<string> lines;
+        if (json)
+        {
+            try
+            {
+                var idsFile = DeleteIdsFile.Read(file);
+                (sobject, lines) = (idsFile.Object, idsFile.Records.Select(r => r.Id));
+            }
+            catch (JsonException ex)
+            {
+                Console.Error.WriteLine($"Not an Ids file ({{ \"object\": ..., \"records\": [{{ \"id\": ... }}] }}): {ex.Message}");
+                return 2;
+            }
+        }
+        else
+        {
+            lines = File.ReadLines(file);
+        }
+
+        var (ids, invalid) = ReadIds(lines);
         if (invalid.Count > 0)
         {
             Console.Error.WriteLine($"{invalid.Count} line(s) are not Salesforce Ids (15 or 18 letters and digits), e.g.: {string.Join(", ", invalid.Take(5))}");
@@ -48,19 +77,11 @@ public static partial class BulkDeleteCommand
             return 1;
         }
 
-        var builder = Host.CreateApplicationBuilder();
-        builder.AddSalesforceOrgClient();
-        using var host = builder.Build();
-        using var cancel = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) =>
-        {
-            e.Cancel = true;
-            cancel.Cancel();
-        };
-
+        using var host = OrgCommand.Host();
+        using var cancel = OrgCommand.CancelKey();
         try
         {
-            var result = await host.Services.GetRequiredService<ISalesforceRestClient>().HardDeleteAsync(sobject, ids, cancel.Token);
+            var result = await host.Client().HardDeleteAsync(sobject, ids, cancel.Token);
             Console.WriteLine($"Job {result.JobId}: {result.Succeeded:N0} of {ids.Count:N0} {sobject} records hard-deleted, {result.Failures.Count:N0} failed.");
             foreach (var failure in result.Failures)
             {
@@ -69,7 +90,7 @@ public static partial class BulkDeleteCommand
 
             return result.Failures.Count == 0 ? 0 : 1;
         }
-        catch (SalesforceBulkJobException ex)
+        catch (Exception ex) when (ex is SalesforceBulkJobException or SalesforceResponseException)
         {
             Console.Error.WriteLine(ex.Message);
             return 1;

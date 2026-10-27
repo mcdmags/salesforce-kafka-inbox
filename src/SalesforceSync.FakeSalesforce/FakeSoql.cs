@@ -2,10 +2,13 @@ using System.Text.RegularExpressions;
 
 namespace SalesforceSync.FakeSalesforce;
 
-/// <summary>The one kind of query the mock org understands: <c>SELECT a, b FROM Obj WHERE field IN ('x', 'y')</c>.</summary>
-internal sealed partial record FakeSoql(string[] Fields, string SObject, string WhereField, HashSet<string> Values)
+/// <summary>
+/// The two kinds of query the mock org understands: <c>SELECT a, b FROM Obj WHERE field IN ('x', 'y')</c>, and
+/// <c>... WHERE field != null</c> (<see cref="Values"/> null: any value).
+/// </summary>
+internal sealed partial record FakeSoql(string[] Fields, string SObject, string WhereField, HashSet<string>? Values)
 {
-    [GeneratedRegex(@"^\s*SELECT\s+(?<fields>.+?)\s+FROM\s+(?<obj>\w+)\s+WHERE\s+(?<field>\w+)\s+IN\s*\((?<values>.*)\)\s*$",
+    [GeneratedRegex(@"^\s*SELECT\s+(?<fields>.+?)\s+FROM\s+(?<obj>\w+)\s+WHERE\s+(?<field>\w+)\s+(?:IN\s*\((?<values>.*)\)|(?<notNull>!=\s*null))\s*$",
         RegexOptions.IgnoreCase | RegexOptions.Singleline)]
     private static partial Regex Select();
 
@@ -18,7 +21,7 @@ internal sealed partial record FakeSoql(string[] Fields, string SObject, string 
         var m = Select().Match(soql);
         if (!m.Success)
         {
-            throw new FakeSalesforceException(400, "MALFORMED_QUERY", $"Fake only supports SELECT ... WHERE x IN (...): {soql}");
+            throw new FakeSalesforceException(400, "MALFORMED_QUERY", $"Fake only supports SELECT ... WHERE x IN (...) or x != null: {soql}");
         }
 
         var fields = m.Groups["fields"].Value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
@@ -36,6 +39,11 @@ internal sealed partial record FakeSoql(string[] Fields, string SObject, string 
             {
                 throw new FakeSalesforceException(400, "INVALID_FIELD", $"No such column '{f}' on entity '{sobject}'.");
             }
+        }
+
+        if (m.Groups["notNull"].Success)
+        {
+            return new FakeSoql(fields, sobject, whereField, null);
         }
 
         var values = QuotedValue().Matches(m.Groups["values"].Value)
