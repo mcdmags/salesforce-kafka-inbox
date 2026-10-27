@@ -248,7 +248,7 @@ public sealed partial class FakeSalesforceStore
                          : _records.Table(query.SObject).Values)
             {
                 var key = Str(record[query.WhereField]);
-                if (key is null || !query.Values.Contains(key))
+                if (key is null || query.Values?.Contains(key) == false)
                 {
                     continue;
                 }

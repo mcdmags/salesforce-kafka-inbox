@@ -70,6 +70,37 @@ public sealed class BulkDeleteTests
         invalid.Should().Equal("not-an-id", "0010000000000");
     }
 
+    [Fact]
+    public async Task The_query_that_lists_Ids_to_delete_returns_every_record_with_an_external_id()
+    {
+        var ids = await UpsertAsync("Account", "A1", "A2");
+
+        var rows = await _client.SelectAsync("SELECT Id, ExternalId__c FROM Account WHERE ExternalId__c != null", CancellationToken.None);
+
+        rows.Select(r => r.GetProperty("Id").GetString()).Should().BeEquivalentTo(ids);
+    }
+
+    [Fact]
+    public void An_Ids_file_written_as_JSON_reads_back_the_same_and_one_without_an_object_is_refused()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.json");
+        try
+        {
+            var written = new DeleteIdsFile("Account", "SELECT Id FROM Account", [new("001000000000001AAA", "A1")]);
+            written.Write(path);
+
+            var read = DeleteIdsFile.Read(path);
+
+            (read.Object, read.Query, read.Records.Single()).Should().Be((written.Object, written.Query, written.Records.Single()));
+            File.WriteAllText(path, /*lang=json,strict*/ """{"records":[]}""");
+            ((Action)(() => DeleteIdsFile.Read(path))).Should().Throw<System.Text.Json.JsonException>();
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private async Task<List<string>> UpsertAsync(string sobject, params string[] keys)
     {
         var records = keys.Select(k => sobject == "Contact"

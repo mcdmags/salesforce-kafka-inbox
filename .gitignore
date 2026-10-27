@@ -5,6 +5,8 @@ obj/
 .idea/
 .DS_Store
 BenchmarkDotNet.Artifacts/
+# Ids files of the AppHost's bulk-delete tools
+bulk-delete/
 
 # Local editor settings
 .editorconfig

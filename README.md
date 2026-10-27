@@ -1471,11 +1471,38 @@ exits (`src/SalesforceSync/Hosting/BulkDeleteCommand.cs`). A hard delete skips t
 is freed at once (the cure for `STORAGE_LIMIT_EXCEEDED`, [Org storage full](#how-its-solved)),
 and **they can't be restored**.
 
-```bash
-# ids.txt: one Id per line (15 or 18 characters). An "Id" header, blank lines and # comments are skipped,
-# so a CSV exported from a query (SELECT Id FROM Account WHERE ExternalId__c LIKE 'ACC-%') works as is.
-dotnet run --project src/SalesforceSync -- bulk-delete Account ids.txt
+**From the Aspire dashboard** (against the org the AppHost uses: the mock org, or the sandbox of step 5):
+
+1. **list-delete-ids → ▶ Start.** For each object the sync writes (Contact, Account_Relationship__c, Profile__c,
+   Account) it runs `SELECT Id, ExternalId__c FROM <object> WHERE ExternalId__c != null` (every record the sync made)
+   and writes `bulk-delete/<object>.json` at the repo root (gitignored). It deletes nothing. Its log lists the files.
+2. Optionally edit a file: remove the records to keep. Each has its external id, to tell them apart.
+3. **bulk-delete → Delete Ids from a JSON file.** Pick the file; the dashboard asks "Hard-delete N Account records?",
+   then runs the job. The job's result is in bulk-delete's log. **▶ Start** on bulk-delete deletes the last file
+   picked again (harmless: already deleted Ids just fail).
+
+```json
+{
+  "object": "Account",
+  "query": "SELECT Id, ExternalId__c FROM Account WHERE ExternalId__c != null",
+  "records": [ { "id": "001...", "externalId": "ACC-1" } ]
+}
 ```
+
+**From the command line:**
+
+```bash
+# The JSON files above: list, then delete one (the file names its object). dotnet run runs in the project's folder,
+# so give full paths ($PWD)
+dotnet run --project src/SalesforceSync -- bulk-delete-ids "$PWD/bulk-delete"
+dotnet run --project src/SalesforceSync -- bulk-delete "$PWD/bulk-delete/Account.json"
+
+# Or a text file: one Id per line (15 or 18 characters). An "Id" header, blank lines and # comments are skipped,
+# so a CSV exported from a query (SELECT Id FROM Account WHERE ExternalId__c LIKE 'ACC-%') works as is.
+dotnet run --project src/SalesforceSync -- bulk-delete Account "$PWD/ids.txt"
+```
+
+Delete children before their Accounts when an org refuses deleting an Account that Text keys still name.
 
 - It uses the worker's Salesforce settings (`Salesforce:InstanceUrl`, `ClientId`, `ClientSecret`, from user secrets or
   `Salesforce__…` environment variables), and the same rate limiting.
