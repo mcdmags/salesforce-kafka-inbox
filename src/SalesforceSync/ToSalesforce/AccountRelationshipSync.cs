@@ -21,9 +21,9 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
         return batch.SyncBatchAsync(AccountRelationshipEvent.Reader, inbox, Send, ct);
     }
 
-    private async Task<Dictionary<string, List<Failure>>> Send(IReadOnlyList<ReadEvent<AccountRelationshipEvent>> events, CancellationToken ct)
+    private async Task<Failures> Send(IReadOnlyList<ReadEvent<AccountRelationshipEvent>> events, CancellationToken ct)
     {
-        var failures = new Dictionary<string, List<Failure>>();
+        var failures = new Failures();
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = SalesforceCalls.KeepValid(events.Except(deletes), HasBothAccounts, "accountExternalId and relatedAccountExternalId are required", failures);
 
@@ -31,9 +31,9 @@ public sealed class AccountRelationshipSync(SalesforceBatchSyncService batch, Sa
         upserts = SalesforceCalls.WithParentsInSalesforce(upserts, AccountsOf, accounts, failures);
 
         var desired = upserts.Select(Desired).ToList();
-        var current = await salesforce.ReadCurrentAsync(RelationshipObject, desired, events.Select(e => e.EntityId), ct);
+        var current = await salesforce.ReadAsync(RelationshipObject, desired.FieldNames(), events.Select(e => e.EntityId), ct);
 
-        await salesforce.UpsertAsync(RelationshipObject, SalesforceCalls.ChangedRecords(desired, current), failures, ct);
+        await salesforce.UpsertChangedAsync(RelationshipObject, desired, current, failures, ct);
         await salesforce.DeleteAsync(SalesforceCalls.RecordsToDelete(deletes, current), failures, ct);
 
         return failures;

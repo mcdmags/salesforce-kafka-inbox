@@ -20,9 +20,9 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
         return batch.SyncBatchAsync(ContactEvent.Reader, inbox, Send, ct);
     }
 
-    private async Task<Dictionary<string, List<Failure>>> Send(IReadOnlyList<ReadEvent<ContactEvent>> events, CancellationToken ct)
+    private async Task<Failures> Send(IReadOnlyList<ReadEvent<ContactEvent>> events, CancellationToken ct)
     {
-        var failures = new Dictionary<string, List<Failure>>();
+        var failures = new Failures();
         var deletes = events.Where(e => e.Event.Meta?.IsDelete() == true).ToList();
         var upserts = SalesforceCalls.KeepValid(events.Except(deletes), HasAccount, "accountExternalId is required", failures);
 
@@ -30,9 +30,9 @@ public sealed class ContactSync(SalesforceBatchSyncService batch, SalesforceCall
         upserts = SalesforceCalls.WithParentsInSalesforce(upserts, AccountOf, accounts, failures);
 
         var desired = upserts.Select(Desired).ToList();
-        var current = await salesforce.ReadCurrentAsync(ContactObject, desired, events.Select(e => e.EntityId), ct);
+        var current = await salesforce.ReadAsync(ContactObject, desired.FieldNames(), events.Select(e => e.EntityId), ct);
 
-        await salesforce.UpsertAsync(ContactObject, SalesforceCalls.ChangedRecords(desired, current), failures, ct);
+        await salesforce.UpsertChangedAsync(ContactObject, desired, current, failures, ct);
         await salesforce.DeleteAsync(SalesforceCalls.RecordsToDelete(deletes, current), failures, ct);
 
         return failures;

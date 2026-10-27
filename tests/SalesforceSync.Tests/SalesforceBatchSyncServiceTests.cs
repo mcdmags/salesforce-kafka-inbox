@@ -25,10 +25,10 @@ public sealed class SalesforceBatchSyncServiceTests
         return Flow.SyncBatchAsync(AccountEvent.Reader, _inbox, send ?? Done, Ct);
     }
 
-    private Task<Dictionary<string, List<Failure>>> Done(IReadOnlyList<ReadEvent<AccountEvent>> events, CancellationToken ct)
+    private Task<Failures> Done(IReadOnlyList<ReadEvent<AccountEvent>> events, CancellationToken ct)
     {
         _sent.AddRange(events.Select(e => e.EntityId));
-        return Task.FromResult(new Dictionary<string, List<Failure>>());
+        return Task.FromResult(new Failures());
     }
 
     private Task AddAsync(string key, int second = 1, string? json = null)
@@ -107,11 +107,14 @@ public sealed class SalesforceBatchSyncServiceTests
         await AddAsync("ACC-RETRY", second: 2);
         await AddAsync("ACC-DEAD", second: 3);
 
-        await RunAsync((events, _) => Task.FromResult(new Dictionary<string, List<Failure>>
+        var failures = new Failures
         {
-            ["ACC-RETRY"] = [new Failure("UNABLE_TO_LOCK_ROW: locked", false)],
-            ["ACC-DEAD"] = [new Failure("UNABLE_TO_LOCK_ROW: locked", false), new Failure("STRING_TOO_LONG: long", true)]
-        }));
+            { "ACC-RETRY", "UNABLE_TO_LOCK_ROW", "locked" },
+            { "ACC-DEAD", "UNABLE_TO_LOCK_ROW", "locked" },
+            { "ACC-DEAD", "STRING_TOO_LONG", "long", true }
+        };
+
+        await RunAsync((_, _) => Task.FromResult(failures));
 
         _inbox.Synced.Should().Equal("ACC-OK");
         _inbox.Failed.Should().ContainSingle().Which.EntityId.Should().Be("ACC-RETRY");
@@ -224,7 +227,7 @@ public sealed class SalesforceBatchSyncServiceTests
         {
             cts.Cancel();
             ct.ThrowIfCancellationRequested();
-            return Task.FromResult(new Dictionary<string, List<Failure>>());
+            return Task.FromResult(new Failures());
         }, cts.Token);
 
         await run.Should().ThrowAsync<OperationCanceledException>();
