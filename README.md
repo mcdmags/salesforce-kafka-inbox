@@ -1414,11 +1414,18 @@ and **they can't be restored**.
    then runs the job. The job's result is in bulk-delete's log. **▶ Start** on bulk-delete deletes the last file
    picked again (harmless: already deleted Ids just fail).
 
+An Ids file (example: [`src/SalesforceSync.AppHost/bulk-delete.example.json`](src/SalesforceSync.AppHost/bulk-delete.example.json)).
+`object` is the object to delete from and each record's `id` its Salesforce Id (15 or 18 characters); `query` and
+`externalId` are there to tell which records they are, and are not read:
+
 ```json
 {
   "object": "Account",
   "query": "SELECT Id, ExternalId__c FROM Account WHERE ExternalId__c != null",
-  "records": [ { "id": "001...", "externalId": "ACC-1" } ]
+  "records": [
+    { "id": "001000000000001AAA", "externalId": "ACC-0001" },
+    { "id": "001000000000002AAA", "externalId": "ACC-0002" }
+  ]
 }
 ```
 

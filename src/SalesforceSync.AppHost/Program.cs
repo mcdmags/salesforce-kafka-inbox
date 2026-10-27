@@ -152,7 +152,7 @@ if (!testMode)
             InputType = InputType.File,
             FileFilter = ".json",
             Required = true,
-            Description = $"A file list-delete-ids wrote to {deleteFolder}: {{ \"object\": ..., \"records\": [{{ \"id\": ... }}] }}"
+            Description = $"A file list-delete-ids wrote to {deleteFolder}, or one shaped like src/SalesforceSync.AppHost/bulk-delete.example.json"
         };
         var picked = await prompts.PromptInputAsync("Hard-delete records", "Pick the JSON file of Ids to hard-delete.", input,
             cancellationToken: c.CancellationToken);
