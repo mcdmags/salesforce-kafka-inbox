@@ -28,6 +28,12 @@ public sealed class SalesforceErrors(IOptions<SalesforceOptions> options)
     /// </summary>
     public const string AccountKindMismatch = "ACCOUNT_KIND_MISMATCH";
 
+    /// <summary>
+    /// Salesforce's code when the org's data storage is full: every create fails until an admin frees space (deleted
+    /// records count until the Recycle Bin is emptied). Stops the inbox for a while instead of failing entities.
+    /// </summary>
+    public const string StorageLimitExceeded = "STORAGE_LIMIT_EXCEEDED";
+
     /// <summary>Errors in the data or the org's configuration: retrying the same data fails the same way.</summary>
     public static readonly IReadOnlyList<string> DefaultPermanentCodes =
     [

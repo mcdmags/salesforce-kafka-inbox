@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using SalesforceSync.Data;
+using SalesforceSync.Data.Inbox;
 using SalesforceSync.Hosting;
 using SalesforceSync.Infrastructure.RateLimiting;
 using SalesforceSync.Infrastructure.Salesforce;
@@ -26,6 +27,15 @@ public sealed class OptionsValidatorTests
         Validate(new RateLimitOptionsValidator(), new RateLimitOptions()).Succeeded.Should().BeTrue();
         Validate(new PostgresRetryOptionsValidator(), new PostgresRetryOptions()).Succeeded.Should().BeTrue();
         Validate(new SalesforceOptionsValidator(), ValidSalesforce).Succeeded.Should().BeTrue();
+    }
+
+    [Fact]
+    public void The_storage_full_hold_must_be_positive()
+    {
+        var sync = new FluentOptionsValidator<SyncOptions>(new SyncOptionsValidator());
+
+        sync.Validate(null, new SyncOptions()).Succeeded.Should().BeTrue();
+        sync.Validate(null, new SyncOptions { StorageFullHold = TimeSpan.Zero }).FailureMessage.Should().Contain("Sync:StorageFullHold");
     }
 
     [Fact]

@@ -42,7 +42,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// Current Salesforce records for these external ids: fields, Id (deletes need it), external id. Missing record =
     /// absent from result.
     /// </summary>
-    /// <exception cref="MappingErrorException">Org lacks such a field on the object.</exception>
+    /// <exception cref="StopInboxException">Org lacks such a field on the object (a mapping error).</exception>
     public async Task<Dictionary<string, JsonElement>> ReadAsync(SalesforceObject sobject, IEnumerable<string> fields, IEnumerable<string> externalIds,
         CancellationToken ct)
     {
@@ -60,7 +60,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
             catch (SalesforceResponseException ex) when (ex.ErrorCode == "INVALID_FIELD")
             {
                 // Org lacks field: mapping wrong for every entity of the type
-                throw new MappingErrorException([.. ids.Select(id => (id, new SalesforceError(null, "INVALID_FIELD", ex.Message)))]);
+                throw new StopInboxException(StopReason.MappingError, [.. ids.Select(id => (id, new SalesforceError(null, "INVALID_FIELD", ex.Message)))]);
             }
         }
 
@@ -193,7 +193,8 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     /// <param name="failures">Where record failures go, by entity.</param>
     /// <param name="ct">Cancels calls; shutdown or lease deadline, not a failure.</param>
     /// <exception cref="UnknownOutcomeException">Call failed without proof Salesforce didn't apply it.</exception>
-    /// <exception cref="MappingErrorException">Salesforce refused a field: not in org, or not settable.</exception>
+    /// <exception cref="StopInboxException">An error wrong for every entity of the type: a field the org lacks or won't let
+    /// us set, or full data storage.</exception>
     public async Task UpsertAsync(SalesforceObject sobject, IEnumerable<(string Key, string ExternalId, Dictionary<string, object?> Fields)> items,
         Dictionary<string, List<Failure>> failures, CancellationToken ct)
     {
@@ -223,7 +224,7 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
             await recordTypes.InvalidateAsync(sobject.Name, ct);
         }
 
-        ThrowIfMappingErrors(failures);
+        ThrowIfInboxStops(failures);
     }
 
     /// <summary>One call deletes records by Salesforce Id (≤ 200 per call). Already gone = success.</summary>
@@ -293,23 +294,47 @@ public sealed class SalesforceCalls(ISalesforceRestClient salesforce, RecordType
     }
 
     /// <summary>
-    /// Field we send that Salesforce lacks or won't let us set: mapping wrong for every event of that kind; only code
-    /// change or org field fixes it. Caller stops inbox rather than burn each entity's attempts.
+    /// Errors wrong for every entity of the type, not one: only a code change or an org change fixes them. The caller
+    /// stops the inbox rather than burn each entity's attempts. First match wins.
     /// </summary>
-    private static void ThrowIfMappingErrors(Dictionary<string, List<Failure>> failures)
+    private static readonly (string Code, StopReason Reason)[] InboxStoppers =
+    [
+        ("INVALID_FIELD", StopReason.MappingError), // and INVALID_FIELD_FOR_INSERT_UPDATE: a field the org lacks or won't let us set
+        (SalesforceErrors.StorageLimitExceeded, StopReason.StorageFull)
+    ];
+
+    private static void ThrowIfInboxStops(Dictionary<string, List<Failure>> failures)
     {
-        var found = failures.SelectMany(f => f.Value.Where(v => v.Error.StartsWith("INVALID_FIELD", StringComparison.Ordinal))
-            .Select(v => (f.Key, new SalesforceError(null, "INVALID_FIELD", v.Error)))).ToList();
-        if (found.Count > 0)
+        foreach (var (code, reason) in InboxStoppers)
         {
-            throw new MappingErrorException(found);
+            var found = failures.SelectMany(f => f.Value.Where(v => v.Error.StartsWith(code, StringComparison.Ordinal))
+                .Select(v => (f.Key, new SalesforceError(null, code, v.Error)))).ToList();
+            if (found.Count > 0)
+            {
+                throw new StopInboxException(reason, found);
+            }
         }
     }
 }
 
-/// <summary>Entities whose fields Salesforce rejects. Stops the type's inbox until the mapping or org is fixed.</summary>
-public sealed class MappingErrorException(IReadOnlyList<(string Key, SalesforceError Error)> errors)
-    : Exception($"{errors.Count} mapping error(s), e.g. {errors[0].Error.Code}: {errors[0].Error.Message}")
+/// <summary>Why an inbox stops (<see cref="StopInboxException"/>).</summary>
+public enum StopReason
 {
+    /// <summary>A field the code sends that the org lacks or won't let us set: fixed by a deploy or an org field.</summary>
+    MappingError,
+
+    /// <summary>The org's data storage is full (STORAGE_LIMIT_EXCEEDED): fixed by freeing space.</summary>
+    StorageFull
+}
+
+/// <summary>
+/// An error wrong for every entity of the type, not one (<see cref="StopReason"/>): stops the type's inbox for a hold,
+/// no attempt spent, nothing dead-lettered, until the cause is fixed.
+/// </summary>
+public sealed class StopInboxException(StopReason reason, IReadOnlyList<(string Key, SalesforceError Error)> errors)
+    : Exception($"{errors.Count} error(s), e.g. {errors[0].Error.Code}: {errors[0].Error.Message}")
+{
+    public StopReason Reason => reason;
+
     public IReadOnlyList<(string Key, SalesforceError Error)> Errors => errors;
 }

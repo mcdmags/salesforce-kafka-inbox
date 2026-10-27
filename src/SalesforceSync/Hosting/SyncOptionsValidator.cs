@@ -21,6 +21,7 @@ public sealed class SyncOptionsValidator : AbstractValidator<SyncOptions>
         RuleFor(o => o.Lease).GreaterThan(TimeSpan.Zero).WithMessage($"{Section}:Lease must be positive.");
         RuleFor(o => o.UnknownOutcomeHold).GreaterThan(TimeSpan.Zero).WithMessage($"{Section}:UnknownOutcomeHold must be positive.");
         RuleFor(o => o.MappingErrorHold).GreaterThan(TimeSpan.Zero).WithMessage($"{Section}:MappingErrorHold must be positive.");
+        RuleFor(o => o.StorageFullHold).GreaterThan(TimeSpan.Zero).WithMessage($"{Section}:StorageFullHold must be positive.");
         RuleFor(o => o.MaxRetries).GreaterThanOrEqualTo(1).WithMessage($"{Section}:MaxRetries must be at least 1.");
         RuleFor(o => o.RetryBaseDelay)
             .Must((o, delay) => delay >= TimeSpan.Zero && delay <= o.MaxRetryDelay)

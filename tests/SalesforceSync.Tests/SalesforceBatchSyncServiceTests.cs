@@ -142,7 +142,7 @@ public sealed class SalesforceBatchSyncServiceTests
     {
         await AddAsync("ACC-1");
 
-        await RunAsync((_, _) => throw new MappingErrorException([("ACC-1", new SalesforceError(null, "INVALID_FIELD", "No such column 'X'"))]));
+        await RunAsync((_, _) => throw new StopInboxException(StopReason.MappingError, [("ACC-1", new SalesforceError(null, "INVALID_FIELD", "No such column 'X'"))]));
 
         var release = _inbox.Releases.Should().ContainSingle().Subject;
         release.StopInbox.Should().BeTrue();
@@ -150,6 +150,23 @@ public sealed class SalesforceBatchSyncServiceTests
         release.Error.Should().StartWith("MAPPING_ERROR");
         release.OwnErrors.Should().ContainSingle().Which.Should().Match<FailedEvent>(e => e.EntityId == "ACC-1" && e.Error.Contains("INVALID_FIELD"));
         _inbox.Dead.Should().BeEmpty("a wrong mapping dead-letters nothing");
+    }
+
+    [Fact]
+    public async Task Full_data_storage_stops_the_inbox_for_the_hold_without_spending_attempts()
+    {
+        await AddAsync("ACC-1");
+        await AddAsync("ACC-2", second: 2);
+
+        await RunAsync((_, _) => throw new StopInboxException(StopReason.StorageFull,
+            [("ACC-1", new SalesforceError(null, "STORAGE_LIMIT_EXCEEDED", "storage limit exceeded"))]));
+
+        var release = _inbox.Releases.Should().ContainSingle().Subject;
+        release.StopInbox.Should().BeTrue("every create fails until space is freed");
+        release.Delay.Should().Be(new SyncOptions().StorageFullHold);
+        release.Error.Should().StartWith("STORAGE_LIMIT_EXCEEDED");
+        _inbox.Dead.Should().BeEmpty("full storage dead-letters nothing");
+        _inbox.Pending.Should().BeEquivalentTo("ACC-1", "ACC-2");
     }
 
     [Fact]
