@@ -23,12 +23,15 @@ namespace SalesforceSync.ToSalesforce;
 public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, IOptions<SyncOptions> options, ILogger<SalesforceBatchSyncService> log)
 {
     /// <summary>
-    /// Share of lease a batch may use before its Salesforce call is cancelled; rest = margin to record outcome. Write
-    /// cancelled this way = unknown outcome → entities on hold.
+    /// Salesforce calls stop at 80% of the lease, so a slow worker can't write after another worker has claimed the same
+    /// entities (Salesforce can't reject a late, older write). The last 20% is left to record the outcome.
     /// </summary>
     private const double LeaseUsableFraction = 0.8;
 
-    /// <summary>Hold recording must survive the cancellation that caused it (shutdown), without hanging.</summary>
+    /// <summary>
+    /// How long recording a hold may take. It gets its own timeout, not the batch's token: on shutdown that token is
+    /// already cancelled, yet the hold must still be saved, without delaying shutdown for long.
+    /// </summary>
     private static readonly TimeSpan HoldRecordingTimeout = TimeSpan.FromSeconds(10);
 
     private readonly SyncOptions _opt = options.Value;
@@ -48,7 +51,7 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
             return 0;
         }
 
-        // Started before claim: margin measured from lease start
+        // Stop calling Salesforce before the lease ends; started before the claim, so it counts from the lease start
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         leaseCts.CancelAfter(_opt.Lease * LeaseUsableFraction);
 
@@ -67,8 +70,8 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
         }
         catch (UnknownOutcomeException ex)
         {
-            // Salesforce may still apply the write → no rewrite for a while. Caught on shutdown too. Hold not recorded
-            // (or process killed first) → lease still protects them
+            // Salesforce may still apply the write, so the entities wait before being written again. Also happens on
+            // shutdown. If the hold can't be saved, the lease still keeps other workers off them until it ends
             log.LogWarning(ex, "{Type} batch: holding {Count} events for {Hold}", reader.EntityType, claim.Events.Count, _opt.UnknownOutcomeHold);
             using var recording = new CancellationTokenSource(HoldRecordingTimeout);
             await inbox.ReleaseAsync(claim, new Release(_opt.UnknownOutcomeHold, $"UNKNOWN_OUTCOME: {ex.Message}"), recording.Token);
