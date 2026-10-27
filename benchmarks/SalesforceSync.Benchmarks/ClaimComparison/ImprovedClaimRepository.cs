@@ -166,7 +166,7 @@ public sealed class ImprovedClaimAdapter(ImprovedClaimRepository repository, Tim
 
     public async Task MarkDoneAsync(InboxClaim claim, IReadOnlyList<string> entityIds, CancellationToken ct)
     {
-        foreach (var e in claim.Of(entityIds))
+        foreach (var e in claim.RowsOf(entityIds))
         {
             await NoMatchCountedAsync(() => repository.MarkJobComplete(e.EntityId, e.EventTime, ct));
         }
@@ -175,7 +175,7 @@ public sealed class ImprovedClaimAdapter(ImprovedClaimRepository repository, Tim
     public async Task MarkFailedAsync(InboxClaim claim, IReadOnlyList<FailedEvent> failures, CancellationToken ct)
     {
         var errors = failures.ToDictionary(f => f.EntityId, f => f.Error);
-        foreach (var e in claim.Of(failures.Select(f => f.EntityId)))
+        foreach (var e in claim.RowsOf(failures.Select(f => f.EntityId)))
         {
             await NoMatchCountedAsync(() => repository.MarkJobFailed(e.EntityId, e.EventTime, errors[e.EntityId], ct));
         }
