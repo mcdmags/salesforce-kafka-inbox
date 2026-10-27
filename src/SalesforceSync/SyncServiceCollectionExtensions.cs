@@ -61,7 +61,7 @@ public static class SyncServiceCollectionExtensions
 
     /// <summary>
     /// The settings (validated at startup) and the Salesforce client for the org at <c>Salesforce:InstanceUrl</c>:
-    /// OAuth, rate limited in memory (pause per process). The worker's, and one-off commands' (<c>bulk-delete</c>).
+    /// OAuth, rate limited in memory (pause per process). The worker's, and the dev bulk tools' (SalesforceSync.BulkTools).
     /// Handler order: rate limiter (outermost: every attempt waits for a pause) -> gzip -> auth.
     /// </summary>
     public static IHostApplicationBuilder AddSalesforceOrgClient(this IHostApplicationBuilder builder)

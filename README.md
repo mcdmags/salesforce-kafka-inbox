@@ -756,9 +756,12 @@ src/
                                   FakeFaults and FakeCounters are its parts
   SalesforceSync.FakeSalesforce.Server/  The in-memory org as an HTTP service (+ /__fake inspection API); the worker
                                   never references the fake: it reaches it, like a real org, at Salesforce:InstanceUrl
+  SalesforceSync.BulkTools/       Dev-only bulk utilities, never deployed: bulk-delete-ids lists the records the sync made
+                                  into JSON files, bulk-delete hard-deletes a file's Ids with one Bulk API 2.0 job
+                                  (BulkApiClient)
   SalesforceSync.LoadGenerator/   Produces account aggregates (before and after, with bursts; children added, changed
                                   and removed) to Kafka
-  SalesforceSync.AppHost/         Aspire: Postgres + pgAdmin, Kafka + Kafka UI, mock Salesforce, worker, generator, benchmarks
+  SalesforceSync.AppHost/         Aspire: Postgres + pgAdmin, Kafka + Kafka UI, mock Salesforce, worker, generator, benchmarks, bulk tools
 tests/
   SalesforceSync.Tests/           Unit tests: the flow (with a stand-in inbox), the Salesforce calls and the three syncs
                                   against the in-memory org, the ingests and the aggregate, type normalization, error
@@ -1467,7 +1470,8 @@ passes the connection string.
 
 `bulk-delete` hard-deletes any number of records of one object with one
 [Bulk API 2.0](https://developer.salesforce.com/docs/atlas.en-us.api_asynch.meta/api_asynch/bulk_api_2_0.htm) job, then
-exits (`src/SalesforceSync/Hosting/BulkDeleteCommand.cs`). A hard delete skips the Recycle Bin, so the records' storage
+exits. It and `bulk-delete-ids` are dev-only tools in their own project, `src/SalesforceSync.BulkTools`; the worker
+has no bulk code. A hard delete skips the Recycle Bin, so the records' storage
 is freed at once (the cure for `STORAGE_LIMIT_EXCEEDED`, [Org storage full](#how-its-solved)),
 and **they can't be restored**.
 
@@ -1503,19 +1507,20 @@ An Ids file (example: [`src/SalesforceSync.AppHost/bulk-delete.example.json`](sr
 ```bash
 # The JSON files above: list, then delete one (the file names its object). dotnet run runs in the project's folder,
 # so give full paths ($PWD)
-dotnet run --project src/SalesforceSync -- bulk-delete-ids "$PWD/bulk-delete"               # every record the sync made
-dotnet run --project src/SalesforceSync -- bulk-delete-ids "$PWD/bulk-delete" --limit 100   # the first 100 per object
-dotnet run --project src/SalesforceSync -- bulk-delete "$PWD/bulk-delete/Account.json"
+dotnet run --project src/SalesforceSync.BulkTools -- bulk-delete-ids "$PWD/bulk-delete"               # every record the sync made
+dotnet run --project src/SalesforceSync.BulkTools -- bulk-delete-ids "$PWD/bulk-delete" --limit 100   # the first 100 per object
+dotnet run --project src/SalesforceSync.BulkTools -- bulk-delete "$PWD/bulk-delete/Account.json"
 
 # Or a text file: one Id per line (15 or 18 characters). An "Id" header, blank lines and # comments are skipped,
 # so a CSV exported from a query (SELECT Id FROM Account WHERE ExternalId__c LIKE 'ACC-%') works as is.
-dotnet run --project src/SalesforceSync -- bulk-delete Account "$PWD/ids.txt"
+dotnet run --project src/SalesforceSync.BulkTools -- bulk-delete Account "$PWD/ids.txt"
 ```
 
 Delete children before their Accounts when an org refuses deleting an Account that Text keys still name.
 
 - It uses the worker's Salesforce settings (`Salesforce:InstanceUrl`, `ClientId`, `ClientSecret`, from user secrets or
-  `Salesforce__…` environment variables), and the same rate limiting.
+  `Salesforce__…` environment variables). The listing goes through the worker's client and its rate limiting; the
+  bulk job's few calls use the same sign-in.
 - It asks for `yes` before deleting. `--yes` skips the question; without a terminal (a script, CI) `--yes` is required.
 - The run user needs **Delete** on the object and the **Bulk API Hard Delete** system permission (Permission Sets →
   System Permissions). Without it the job fails as a whole.

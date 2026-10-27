@@ -1,18 +1,29 @@
 using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json;
+using SalesforceSync.Infrastructure.Salesforce;
 
-namespace SalesforceSync.Infrastructure.Salesforce;
+namespace SalesforceSync.BulkTools;
 
 /// <summary>
-/// Bulk API 2.0 ingest jobs: one job takes any number of records of one object as CSV and Salesforce processes it in
-/// the background, so a few calls do what Collections would do 200 records per call. Bulk API 2.0 and Bulk API Developer
+/// Bulk API 2.0 hard delete: one job takes any number of records of one object as CSV and Salesforce processes it in the
+/// background, so a few calls do what Collections would do 200 records per call. Bulk API 2.0 and Bulk API Developer
 /// Guide, "Ingest Jobs" (https://developer.salesforce.com/docs/atlas.en-us.api_asynch.meta/api_asynch/bulk_api_2_0.htm).
 /// </summary>
-public sealed partial class SalesforceRestClient
+/// <param name="http">Authenticated client of the org (base address: its instance URL).</param>
+/// <param name="dataPath">The REST path prefix, e.g. <c>/services/data/v62.0</c>.</param>
+public sealed class BulkApiClient(HttpClient http, string dataPath)
 {
     /// <summary>How often a job's state is checked while Salesforce processes it.</summary>
-    public static readonly TimeSpan BulkPollInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
 
+    private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
+
+    /// <summary>
+    /// Hard-deletes the records with these Ids: they skip the Recycle Bin, so their storage is freed at once. Needs the
+    /// "Bulk API Hard Delete" permission.
+    /// </summary>
+    /// <exception cref="SalesforceBulkJobException">The job failed or was aborted as a whole.</exception>
     public async Task<BulkJobResult> HardDeleteAsync(string sobject, IReadOnlyList<string> ids, CancellationToken ct)
     {
         if (ids.Count == 0)
@@ -20,7 +31,7 @@ public sealed partial class SalesforceRestClient
             throw new ArgumentException("No Ids to delete", nameof(ids));
         }
 
-        var jobs = $"{DataPath}/jobs/ingest";
+        var jobs = $"{dataPath}/jobs/ingest";
         var job = await SendJobAsync(HttpMethod.Post, jobs, new { @object = sobject, operation = "hardDelete", contentType = "CSV", lineEnding = "LF" }, ct);
         try
         {
@@ -42,7 +53,7 @@ public sealed partial class SalesforceRestClient
 
         while (job.State is not ("JobComplete" or "Failed" or "Aborted"))
         {
-            await Task.Delay(BulkPollInterval, ct);
+            await Task.Delay(PollInterval, ct);
             job = await SendJobAsync(HttpMethod.Get, $"{jobs}/{job.Id}", null, ct);
         }
 
@@ -101,6 +112,14 @@ public sealed partial class SalesforceRestClient
         return [.. rows.Skip(1).Select(r => new BulkFailure(r[id], r[error]))];
     }
 
+    private static async Task EnsureSuccessAsync(HttpResponseMessage res, CancellationToken ct)
+    {
+        if (!res.IsSuccessStatusCode)
+        {
+            throw new SalesforceResponseException(res.StatusCode, await res.Content.ReadAsStringAsync(ct));
+        }
+    }
+
     private sealed record BulkJob(string Id, string State, int NumberRecordsProcessed, int NumberRecordsFailed, string? ErrorMessage);
 }
 
@@ -122,7 +141,7 @@ public sealed class SalesforceBulkJobException(string jobId, string state, strin
 }
 
 /// <summary>RFC 4180 CSV, as Bulk API writes it: quoted fields may hold commas, line breaks and doubled quotes.</summary>
-internal static class Csv
+public static class Csv
 {
     public static List<List<string>> Parse(string text)
     {

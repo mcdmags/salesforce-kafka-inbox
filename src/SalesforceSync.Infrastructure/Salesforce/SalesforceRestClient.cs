@@ -15,7 +15,7 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 /// one by one = 200 calls vs 1 for <see cref="UpsertAsync"/>.
 /// </para>
 /// </summary>
-public sealed partial class SalesforceRestClient : ISalesforceRestClient
+public sealed class SalesforceRestClient : ISalesforceRestClient
 {
     private readonly HttpClient http;
 
