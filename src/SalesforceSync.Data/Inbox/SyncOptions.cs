@@ -51,6 +51,13 @@ public sealed class SyncOptions
     public TimeSpan MappingErrorHold { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
+    /// How long an inbox stops when Salesforce's data storage is full (STORAGE_LIMIT_EXCEEDED): time for an admin to
+    /// free space. Due rows wait this long, then a claim tries again and stops the inbox again if storage is still
+    /// full. No attempt is spent and nothing is dead-lettered meanwhile.
+    /// </summary>
+    public TimeSpan StorageFullHold { get; set; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>
     /// Transient failures of an entity's event (its row's attempt_count, reset by each newer event) at which it is
     /// dead-lettered (permanent errors: immediately).
     /// </summary>

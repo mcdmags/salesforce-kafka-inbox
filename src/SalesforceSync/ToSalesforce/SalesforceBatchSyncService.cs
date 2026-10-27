@@ -80,15 +80,19 @@ public sealed class SalesforceBatchSyncService(ISalesforceRateLimiter limiter, I
             ct.ThrowIfCancellationRequested();
             return claim.Events.Count;
         }
-        catch (MappingErrorException ex)
+        catch (StopInboxException ex)
         {
-            // Inbox stops (every due row waits), error on rows to fix. Nothing dead-lettered; rows resume after deploy,
-            // no replay
-            log.LogError(ex, "{Type} inbox stopped for {Hold} by {Count} mapping error(s), fix the mapping or add the field: {Errors}",
-                reader.EntityType, _opt.MappingErrorHold, ex.Errors.Count,
+            // Wrong for every entity of the type: inbox stops (every due row waits), error on the rows. Nothing
+            // dead-lettered, no attempt spent; a claim after the hold tries again (and stops it again if not fixed)
+            var (hold, code, cause, fix) = ex.Reason switch
+            {
+                StopReason.StorageFull => (_opt.StorageFullHold, SalesforceErrors.StorageLimitExceeded, "full data storage",
+                    "free space in the org (empty the Recycle Bin, delete test data)"),
+                _ => (_opt.MappingErrorHold, "MAPPING_ERROR", "a mapping error", "fix the mapping or add the field")
+            };
+            log.LogError(ex, "{Type} inbox stopped for {Hold} by {Cause}, {Fix}: {Errors}", reader.EntityType, hold, cause, fix,
                 string.Join("; ", ex.Errors.Select(e => $"{e.Key}: {e.Error.Code} {e.Error.Message}")));
-            await inbox.ReleaseAsync(claim, new Release(_opt.MappingErrorHold,
-                $"MAPPING_ERROR: the {reader.EntityType} inbox is stopped by a mapping error ({ex.Message})",
+            await inbox.ReleaseAsync(claim, new Release(hold, $"{code}: the {reader.EntityType} inbox is stopped by {cause} ({ex.Message})",
                 [.. ex.Errors.GroupBy(e => e.Key).Select(g => new FailedEvent(g.Key, string.Join("; ", g.Select(e => $"{e.Error.Code}: {e.Error.Message}"))))],
                 StopInbox: true), ct);
             return claim.Events.Count;
