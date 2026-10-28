@@ -55,9 +55,9 @@ public sealed class AccountAggregate
 
     private static string? ProblemWith(EventMeta? meta, AccountSnapshot? before, AccountSnapshot? after)
     {
-        if (meta?.Timestamp() is null)
+        if (meta?.Time is null)
         {
-            return "The event time must be an ISO-8601 time with an offset or Z, e.g. 2026-10-14T01:02:03.456Z";
+            return "The event needs its time (meta.time), e.g. 2026-10-14T01:02:03.456Z";
         }
 
         if (!meta.IsInsertOrUpdate() && !meta.IsDelete())

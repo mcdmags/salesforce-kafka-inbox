@@ -29,11 +29,12 @@ public class MicroBenchmarks
         {
             var key = $"ACC-{v:D6}";
             AccountPayload account = factory.Account(key, key, v, [], []);
-            var meta = EventMeta.Of(v == 1 ? EventType.Inserted : EventType.Updated, $"2026-10-14T01:02:03.{v:D3}Z");
+            var time = new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero);
+            var meta = EventMeta.Of(v == 1 ? EventType.Inserted : EventType.Updated, time);
             return new InboxEvent(
                 EntityId: key,
                 Payload: JsonSerializer.Serialize(new AccountEvent(meta, account), EventJson.Options),
-                EventTime: new DateTimeOffset(2026, 10, 14, 1, 2, 3, v, TimeSpan.Zero),
+                EventTime: time,
                 LeaseEnd: DateTimeOffset.MaxValue);
         })];
 

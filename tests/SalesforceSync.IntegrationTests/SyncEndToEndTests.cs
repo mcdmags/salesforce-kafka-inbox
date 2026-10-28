@@ -270,17 +270,17 @@ public sealed class SyncEndToEndTests(SyncFixture app)
     }
 
     [Fact]
-    public async Task Aggregate_without_a_time_offset_or_a_valid_type_or_an_account_is_skipped_at_ingest()
+    public async Task Aggregate_without_a_valid_time_or_type_or_an_account_is_skipped_at_ingest()
     {
         var acct = SyncFixture.NewAccountId();
         var name = Any.String("Acme ");
         var valid = SyncFixture.AsAggregate(SyncFixture.AccountEvent(acct, 2, new JsonObject { ["name"] = name }, []));
-        var noOffset = SyncFixture.AsAggregate(SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "never stored" }, []));
-        noOffset["meta"]!["time"] = ((string)noOffset["meta"]!["time"]!).TrimEnd('Z');
+        var badTime = SyncFixture.AsAggregate(SyncFixture.AccountEvent(acct, 1, new JsonObject { ["name"] = "never stored" }, []));
+        badTime["meta"]!["time"] = "now";
         var noAccount = new JsonObject { ["meta"] = SyncFixture.Meta(1), ["before"] = null, ["after"] = null };
 
         // All under one key, so one partition: by the time the valid event is stored, the others have been handled
-        await app.PublishRawAsync(acct, noOffset.ToJsonString());   // no explicit offset
+        await app.PublishRawAsync(acct, badTime.ToJsonString());    // not a date-time
         await app.PublishRawAsync(acct, noAccount.ToJsonString());  // neither before nor after
         await app.PublishRawAsync(acct, "not json");
         await app.PublishRawAsync(acct, WithType(valid, null).ToJsonString());      // no meta.type

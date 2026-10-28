@@ -1,3 +1,4 @@
+using System.Globalization;
 using SalesforceSync.Sync;
 using System.Text.Json.Nodes;
 
@@ -20,7 +21,8 @@ public sealed class AccountAggregateTests
             ("account", "inserted", "ACC-1"), ("accountRelationship", "inserted", "R1"), ("contact", "inserted", "C1"));
         Payload(events[1])["accountExternalId"]!.GetValue<string>().Should().Be("ACC-1", "the aggregate's Account is the relationship's");
         Payload(events[2])["accountExternalId"]!.GetValue<string>().Should().Be("ACC-1");
-        events.Select(e => JsonNode.Parse(e.Json)!["meta"]!["time"]!.GetValue<string>()).Should().AllBe(Time, "every event has the aggregate's time");
+        events.Select(e => JsonNode.Parse(e.Json)!["meta"]!["time"]!.GetValue<DateTimeOffset>()).Should().OnlyContain(t => t == DateTimeOffset.Parse(Time, CultureInfo.InvariantCulture),
+            "every event has the aggregate's time");
         Payload(events[0]).ContainsKey("contacts").Should().BeFalse("the account's event is the Account and its Profile only");
     }
 
@@ -104,8 +106,8 @@ public sealed class AccountAggregateTests
     [InlineData("not json", "Not a valid account aggregate")]
     [InlineData("[1]", "Not a valid account aggregate")]
     [InlineData("null", "not a JSON object")]
-    [InlineData(/*lang=json,strict*/ """{ "after": { "externalId": "ACC-1" } }""", "event time")]
-    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03", "type": "updated" }, "after": { "externalId": "ACC-1" } }""", "event time")]
+    [InlineData(/*lang=json,strict*/ """{ "after": { "externalId": "ACC-1" } }""", "meta.time")]
+    [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "now", "type": "updated" }, "after": { "externalId": "ACC-1" } }""", "$.meta.time")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "upsert" }, "after": { "externalId": "ACC-1" } }""", "event type")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" } }""", "before or after")]
     [InlineData(/*lang=json,strict*/ """{ "meta": { "time": "2026-10-14T01:02:03Z", "type": "updated" }, "after": [1] }""", "Not a valid account aggregate")]

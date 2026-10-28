@@ -32,7 +32,7 @@ public abstract class InboxRow
     public DateTimeOffset? NextAttemptAt { get; set; }
 
     /// <summary>
-    /// Whole microseconds, UTC. Postgres keeps microseconds but meta.time may have 9 fraction digits; cutting here,
+    /// Whole microseconds, UTC. Postgres keeps microseconds but a DateTimeOffset has 100 ns ticks; cutting here,
     /// not rounding in Postgres, keeps "same event time" (Kafka redelivery) exact.
     /// </summary>
     public static DateTimeOffset ToWholeMicroseconds(DateTimeOffset time)

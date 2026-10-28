@@ -221,7 +221,8 @@ The per-entity events are what the inboxes store and the syncs read. Each is one
   inbox table and its own worker pass.
 - **Entity id**: `<object>.externalId`, the record's Salesforce external id (`ExternalId__c`). It is read from the
   deserialized event (`EventReader`) and stored in the inbox row's `entity_id` column.
-- **Order**: `meta.time`, an ISO-8601 time with an offset or `Z`. **The Kafka message key is not used, and neither is
+- **Order**: `meta.time`, an ISO-8601 time with an offset or `Z` (read as a `DateTimeOffset`; the source always sends
+  the offset). **The Kafka message key is not used, and neither is
   arrival order**: an entity's events may come over any partition, through any consumer, in any order. The event with
   the newest `meta.time` wins; an event that is not newer than what was already synced is not stored. This relies on
   the source's clock. Two events of an entity with the same time: the one stored later overwrites the other's row,
@@ -874,7 +875,7 @@ bursts coalesced to the newest full record, stale versions never written (left o
 skip the write, exactly 4 API calls per batch of new Accounts and Profiles (a read of each, then the
 Accounts' upsert and the Profiles'), a redelivered event of a synced entity changing nothing and not written, an older event stored after a newer one changing
 nothing, A → B → A ending at A, one account's events under different or no Kafka keys
-ending at the newest `meta.time`, invalid aggregates (no time offset, no or an unknown `meta.type`, no account, not
+ending at the newest `meta.time`, invalid aggregates (no valid time, no or an unknown `meta.type`, no account, not
 JSON) skipped at ingest, an event waiting for its entity's lease, a newer event overwriting the row whatever its
 status and an older one leaving it as it is (`OneRowPerEntityTests`), an outcome for a claimed event never recorded on
 the newer event that overwrote it meanwhile, an
