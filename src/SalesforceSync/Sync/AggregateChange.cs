@@ -20,6 +20,6 @@ public sealed class AggregateChange(EventMeta meta, AccountSnapshot? before, Acc
 
     public EventMeta MetaOf(EventType kind)
     {
-        return EventMeta.Of(kind, Meta.Time!);
+        return EventMeta.Of(kind, Meta.Time!.Value);
     }
 }

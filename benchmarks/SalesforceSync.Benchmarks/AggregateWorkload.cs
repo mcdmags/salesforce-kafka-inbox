@@ -111,7 +111,7 @@ public sealed class AggregateWorkload
     private void Publish(EventType kind, AccountSnapshot? before, AccountSnapshot? after)
     {
         var time = BaseTime.AddMilliseconds(Aggregates.Count + 1);
-        var meta = EventMeta.Of(kind, time.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture));
+        var meta = EventMeta.Of(kind, time);
         Aggregates.Add(JsonSerializer.Serialize(new AccountAggregateEvent(meta, before, after), EventJson.Options));
     }
 

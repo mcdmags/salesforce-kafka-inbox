@@ -19,8 +19,8 @@ one worker while it talks to Salesforce, and why it works this way. Back to the 
 
 **Ingest.** `KafkaInboxConsumer` splits each message ([Event format](../../README.md#event-format)) and reads each event it gets
 with the typed event of its entity type (`EventReader.TryRead`, the same read the flow uses), storing it only if
-it is valid: valid JSON for that type, the entity object with a non-empty id, a `meta.time` with an explicit offset,
-and a `meta.type` of `inserted`, `updated` or `deleted`. A message that is no aggregate (no time with an offset, no
+it is valid: valid JSON for that type, the entity object with a non-empty id, a `meta.time` that is a date-time,
+and a `meta.type` of `inserted`, `updated` or `deleted`. A message that is no aggregate (no valid time, no
 valid type, neither snapshot, no account `externalId`, `before` and `after` of different accounts), or an event that
 is invalid, is logged with its topic, partition and offset and skipped. A row gets `entity_id` = the id from its
 event, `event_time` = its `meta.time` and `payload` = the event the split made. The message's offset is stored only

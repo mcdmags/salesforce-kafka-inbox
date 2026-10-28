@@ -11,7 +11,7 @@ namespace SalesforceSync.Sync;
 /// <typeparam name="TEvent">Inbox payload (whole event envelope).</typeparam>
 /// <param name="EntityType">Type name, e.g. "account": object name of its events; used in logs.</param>
 /// <param name="EntityId">Id of entity event is about (e.g. account.externalId), null if none.</param>
-/// <param name="Meta">Event meta, null if none: when (meta.time, explicit offset required) + what (meta.type:
+/// <param name="Meta">Event meta, null if none: when (meta.time) + what (meta.type:
 /// inserted, updated, deleted).</param>
 public sealed record EventReader<TEvent>(
     string EntityType,
@@ -41,9 +41,9 @@ public sealed record EventReader<TEvent>(
         {
             problem = $"A {EntityType} event needs its entity object with a non-empty id";
         }
-        else if (Meta(e)?.Timestamp() is not { } time)
+        else if (Meta(e)?.Time is not { } time)
         {
-            problem = "The event time must be an ISO-8601 time with an offset or Z, e.g. 2026-10-14T01:02:03.456Z";
+            problem = "The event needs its time (meta.time), e.g. 2026-10-14T01:02:03.456Z";
         }
         else if (Meta(e) is { } meta && !meta.IsInsertOrUpdate() && !meta.IsDelete())
         {

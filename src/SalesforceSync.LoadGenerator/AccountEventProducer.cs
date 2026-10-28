@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.Text.Json;
 using Confluent.Kafka;
 using Microsoft.Extensions.Options;
@@ -159,6 +158,6 @@ public sealed class AccountEventProducer(
         ticks -= ticks % TimeSpan.TicksPerMicrosecond;
         _lastTimeTicks = ticks;
         // An account's first event is its insert, every later one an update
-        return EventMeta.Of(kind, new DateTimeOffset(ticks, TimeSpan.Zero).ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture));
+        return EventMeta.Of(kind, new DateTimeOffset(ticks, TimeSpan.Zero));
     }
 }
