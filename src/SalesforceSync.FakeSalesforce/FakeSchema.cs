@@ -28,7 +28,7 @@ public sealed record FakeField(
         : null;
 }
 
-/// <summary>A record type of the mock org.</summary>
+/// <summary>A record type of the mock org; <c>Namespace</c>: a managed package's, else the org's own.</summary>
 public sealed record FakeRecordType(
     string DeveloperName,
     string Name,
@@ -37,7 +37,8 @@ public sealed record FakeRecordType(
     bool Available = true,
     bool Master = false,
     bool Default = false,
-    bool PersonType = false);
+    bool PersonType = false,
+    string? Namespace = null);
 
 /// <summary>
 /// The mock org's metadata and how it stores values, as Salesforce does: unknown and read-only fields are rejected,
@@ -156,6 +157,9 @@ public static class FakeSchema
             ["Account"] =
             [
                 Master,
+                // A package's record type with the same developer name, listed first and not available to the run user,
+                // as a managed package (nCino, FSC) adds: the sync must take the org's own
+                new("Business", "Business", FakeRecords.Id18("012FAKE00000006"), Available: false, Namespace: "pkg"),
                 new("Business", "Business", FakeRecords.Id18("012FAKE00000001"), Default: true),
                 new("PersonAccount", "Person Account", FakeRecords.Id18("012FAKE00000005"), PersonType: true)
             ],
@@ -188,7 +192,7 @@ public static class FakeSchema
     /// <summary>The object the sync reads the record types' Ids from (a SOQL query, the way a real org answers it).</summary>
     public const string RecordTypeObject = "RecordType";
 
-    public static readonly string[] RecordTypeFields = ["Id", "DeveloperName", "Name", "SobjectType", "IsActive"];
+    public static readonly string[] RecordTypeFields = ["Id", "DeveloperName", "NamespacePrefix", "Name", "SobjectType", "IsActive"];
 
     /// <summary>The org's RecordType rows (the Master record type is not one: it has no row).</summary>
     public static IEnumerable<JsonObject> RecordTypeRows()
@@ -197,16 +201,17 @@ public static class FakeSchema
         {
             ["Id"] = r.Id,
             ["DeveloperName"] = r.DeveloperName,
+            ["NamespacePrefix"] = r.Namespace,
             ["Name"] = r.Name,
             ["SobjectType"] = o.Key,
             ["IsActive"] = r.Active
         }));
     }
 
-    /// <summary>The 18-character Id of the object's record type with this developer name.</summary>
+    /// <summary>The 18-character Id of the object's own (not a package's) record type with this developer name.</summary>
     public static string RecordTypeIdOf(string sobject, string developerName)
     {
-        return RecordTypes[sobject].Single(r => r.DeveloperName == developerName).Id;
+        return RecordTypes[sobject].Single(r => r.DeveloperName == developerName && r.Namespace is null).Id;
     }
 
     /// <summary>Whether this (15- or 18-character) Id is one of the object's person account record types.</summary>

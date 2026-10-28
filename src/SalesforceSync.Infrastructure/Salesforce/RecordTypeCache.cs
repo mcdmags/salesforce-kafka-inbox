@@ -5,7 +5,8 @@ namespace SalesforceSync.Infrastructure.Salesforce;
 
 /// <summary>
 /// Ids of the active record types of each object, by developer name: Salesforce takes a record type as its Id, which
-/// differs between orgs. One SOQL query on RecordType per object, cached in a <see cref="HybridCache"/> for
+/// differs between orgs. A managed package's record type is named with its namespace (<c>ns__Individual</c>), as
+/// Salesforce does, so it never stands in for the org's own of the same developer name. One SOQL query on RecordType per object, cached in a <see cref="HybridCache"/> for
 /// <see cref="SalesforceOptions.RecordTypeRefreshInterval"/>: in process, and shared by all pods through the registered
 /// <see cref="Microsoft.Extensions.Caching.Distributed.IDistributedCache"/> (Redis, or memory when none is configured),
 /// so the org is asked once per interval in total and a new pod starts warm. Concurrent callers share one query per
@@ -22,6 +23,15 @@ public sealed class RecordTypeCache(HybridCache cache, ISalesforceRestClient sal
         public required string Id { get; init; }
         public required string DeveloperName { get; init; }
         public required bool IsActive { get; init; }
+
+        /// <summary>The managed package's namespace, or null for the org's own record type.</summary>
+        public string? NamespacePrefix { get; init; }
+
+        /// <summary>The developer name, with the package's namespace if any: <c>Individual</c>, <c>ns__Individual</c>.</summary>
+        public string QualifiedName()
+        {
+            return NamespacePrefix is null ? DeveloperName : $"{NamespacePrefix}__{DeveloperName}";
+        }
     }
 
     private readonly HybridCacheEntryOptions _entry = new()
@@ -35,11 +45,14 @@ public sealed class RecordTypeCache(HybridCache cache, ISalesforceRestClient sal
     /// </summary>
     private readonly string _keyPrefix = KeyPrefix(options.Value.InstanceUrl, options.Value.ApiVersion);
 
-    /// <summary>The Id of the object's active record type with this developer name, or null if the org has none.</summary>
+    /// <summary>
+    /// The Id of the object's active record type with this developer name, or null if the org has none. The org's own
+    /// by its developer name; a package's by <c>namespace__name</c>.
+    /// </summary>
     public async Task<string?> IdOfAsync(string sobject, string developerName, CancellationToken ct)
     {
         var recordTypes = await cache.GetOrCreateAsync(Key(sobject), token => ReadAsync(sobject, token), _entry, cancellationToken: ct);
-        return recordTypes.FirstOrDefault(r => r.DeveloperName.Equals(developerName, StringComparison.OrdinalIgnoreCase))?.Id;
+        return recordTypes.FirstOrDefault(r => r.QualifiedName().Equals(developerName, StringComparison.OrdinalIgnoreCase))?.Id;
     }
 
     /// <summary>The object's record types are read from the org again next time (one was missing or refused), by every pod.</summary>
@@ -51,9 +64,8 @@ public sealed class RecordTypeCache(HybridCache cache, ISalesforceRestClient sal
     private async ValueTask<RecordTypeRow[]> ReadAsync(string sobject, CancellationToken ct)
     {
         var rows = await salesforce.SelectAsync<RecordTypeRow>(
-            SalesforceRestClient.Soql("RecordType", ["Id", "DeveloperName", "IsActive"], "SobjectType", [sobject]), ct);
-        // Developer names are unique per namespace only: of two with the same name, the first is kept
-        return [.. rows.Where(r => r.IsActive).DistinctBy(r => r.DeveloperName, StringComparer.OrdinalIgnoreCase)];
+            SalesforceRestClient.Soql("RecordType", ["Id", "DeveloperName", "NamespacePrefix", "IsActive"], "SobjectType", [sobject]), ct);
+        return [.. rows.Where(r => r.IsActive)];
     }
 
     private string Key(string sobject)

@@ -154,6 +154,14 @@ public sealed class SalesforceCallsTests
         (await _calls.RecordTypeIdAsync(AccountSync.AccountObject, "Nonexistent", Ct)).Should().BeNull();
     }
 
+    [Fact]
+    public async Task A_package_s_record_type_with_the_same_developer_name_is_found_only_by_its_namespace()
+    {
+        (await _calls.RecordTypeIdAsync(AccountSync.AccountObject, "Business", Ct)).Should().Be(FakeSchema.RecordTypeIdOf("Account", "Business"),
+            "the org's own, though the package's comes first in the answer");
+        (await _calls.RecordTypeIdAsync(AccountSync.AccountObject, "pkg__Business", Ct)).Should().Be(FakeRecords.Id18("012FAKE00000006"));
+    }
+
     // ---------- Read ----------
 
     [Fact]
